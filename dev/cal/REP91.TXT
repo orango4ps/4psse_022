@@ -1,0 +1,576 @@
+OBJECT Report 91 Export Consolidation
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.00;
+  }
+  PROPERTIES
+  {
+    CaptionML=[DEU=Konsolidierung exportieren;
+               ENU=Export Consolidation;
+               NLD=Consolidatie - Export;
+               NOR=Eksporter konsolidering];
+    ApplicationArea=#Suite;
+    ProcessingOnly=Yes;
+    OnInitReport=BEGIN
+                   TransferPerDay := TRUE;
+                 END;
+
+    OnPreReport=VAR
+                  FileMgt@1000 : Codeunit 419;
+                BEGIN
+                  DimSelectionBuf.CompareDimText(3,REPORT::"Export Consolidation",'',ColumnDim,Text007);
+                  ServerFileName := FileMgt.ServerTempFileName('xml');
+                  IsWebClient;
+                END;
+
+    OnPostReport=VAR
+                   FileManagement@1000 : Codeunit 419;
+                 BEGIN
+                   IF IsWebClient THEN BEGIN
+                     IF FileFormat = FileFormat::"Version 4.00 or Later (.xml)" THEN
+                       ClientFileName := ClientFileName + '.xml'
+                     ELSE
+                       ClientFileName := ClientFileName + '.txt';
+
+                     FileManagement.DownloadHandler(ServerFileName,'','','',ClientFileName);
+                   END ELSE
+                     FileManagement.DownloadToFile(ServerFileName,ClientFileName);
+                 END;
+
+    UsageCategory=Tasks;
+  }
+  DATASET
+  {
+    { 6710;    ;DataItem;                    ;
+               DataItemTable=Table15;
+               DataItemTableView=SORTING(No.)
+                                 WHERE(Account Type=CONST(Posting));
+               OnPreDataItem=BEGIN
+                               IF ServerFileName = '' THEN
+                                 ERROR(Text000);
+                               IF ConsolidStartDate = 0D THEN
+                                 ERROR(Text001);
+                               IF ConsolidEndDate = 0D THEN
+                                 ERROR(Text002);
+
+                               CheckClosingDates(ConsolidStartDate,ConsolidEndDate,TransferPerDay);
+
+                               IF NORMALDATE(ConsolidEndDate) - NORMALDATE(ConsolidStartDate) + 1 > 500 THEN
+                                 ERROR(Text003);
+
+                               IF Dim.FIND('-') THEN BEGIN
+                                 REPEAT
+                                   TempDim.INIT;
+                                   TempDim := Dim;
+                                   TempDim.INSERT;
+                                 UNTIL Dim.NEXT = 0;
+                               END;
+                               IF DimVal.FIND('-') THEN BEGIN
+                                 REPEAT
+                                   TempDimVal.INIT;
+                                   TempDimVal := DimVal;
+                                   TempDimVal.INSERT;
+                                 UNTIL DimVal.NEXT = 0;
+                               END;
+
+                               SelectedDim.SETRANGE("User ID",USERID);
+                               SelectedDim.SETRANGE("Object Type",3);
+                               SelectedDim.SETRANGE("Object ID",REPORT::"Export Consolidation");
+                               IF SelectedDim.FIND('-') THEN BEGIN
+                                 REPEAT
+                                   TempSelectedDim.INIT;
+                                   TempSelectedDim := SelectedDim;
+                                   TempDim.SETRANGE("Consolidation Code",SelectedDim."Dimension Code");
+                                   IF TempDim.FINDFIRST THEN
+                                     TempSelectedDim."Dimension Code" := TempDim.Code;
+                                   TempSelectedDim.INSERT;
+                                 UNTIL SelectedDim.NEXT = 0;
+                               END;
+                               TempDim.RESET;
+
+                               IF FileFormat = FileFormat::"Version 3.70 or Earlier (.txt)" THEN BEGIN
+                                 CLEAR(GLEntryFile);
+                                 GLEntryFile.TEXTMODE := TRUE;
+                                 GLEntryFile.WRITEMODE := TRUE;
+                                 GLEntryFile.CREATE(ServerFileName);
+                                 GLEntryFile.WRITE(
+                                   STRSUBSTNO(
+                                     '<01>#1############################ #2####### #3####### #4#',
+                                     COMPANYNAME,ConsolidStartDate,ConsolidEndDate,FORMAT(TransferPerDay,0,2)));
+                               END;
+
+                               Window.OPEN(
+                                 Text004 +
+                                 Text005 +
+                                 Text006);
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  Window.UPDATE(1,"No.");
+                                  Window.UPDATE(2,'');
+                                  IF FileFormat = FileFormat::"Version 4.00 or Later (.xml)" THEN
+                                    Consolidate.InsertGLAccount("G/L Account");
+                                END;
+
+               OnPostDataItem=BEGIN
+                                IF FileFormat = FileFormat::"Version 3.70 or Earlier (.txt)" THEN
+                                  GLEntryFile.CLOSE;
+                              END;
+                               }
+
+    { 7069;1   ;DataItem;                    ;
+               DataItemTable=Table17;
+               DataItemTableView=SORTING(G/L Account No.,Posting Date);
+               OnPreDataItem=BEGIN
+                               SETRANGE("Posting Date",ConsolidStartDate,ConsolidEndDate);
+
+                               TempDimBufIn.SETRANGE("Table ID",DATABASE::"G/L Entry");
+                               TempDimBufOut.SETRANGE("Table ID",DATABASE::"G/L Entry");
+
+                               IF ConsolidStartDate = NORMALDATE(ConsolidStartDate) THEN
+                                 CheckClosingPostings("G/L Account"."No.",ConsolidStartDate,ConsolidEndDate);
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  Window.UPDATE(2,"Posting Date");
+                                  SETRANGE("Posting Date","Posting Date");
+                                  OnBeforeGLEntryOnAfterGetRecord("G/L Entry",TempSelectedDim);
+
+                                  IF NOT TempSelectedDim.FINDFIRST THEN BEGIN
+                                    CALCSUMS(
+                                      Amount,"Debit Amount","Credit Amount",
+                                      "Add.-Currency Debit Amount","Add.-Currency Credit Amount");
+                                    IF (Amount <> 0) OR ("Debit Amount" <> 0) OR ("Credit Amount" <> 0) THEN BEGIN
+                                      TempGLEntry.RESET;
+                                      TempGLEntry.DELETEALL;
+                                      TempDimBufOut.RESET;
+                                      TempDimBufOut.DELETEALL;
+                                      TempGLEntry := "G/L Entry";
+                                      TempGLEntry.INSERT;
+                                      IF FileFormat = FileFormat::"Version 4.00 or Later (.xml)" THEN
+                                        Consolidate.InsertGLEntry(TempGLEntry)
+                                      ELSE BEGIN
+                                        UpdateExportedInfo(TempGLEntry);
+                                        WriteFile(TempGLEntry,TempDimBufOut);
+                                      END;
+                                    END;
+                                    FIND('+');
+                                  END ELSE BEGIN
+                                    TempGLEntry.RESET;
+                                    TempGLEntry.DELETEALL;
+                                    DimBufMgt.DeleteAllDimensions;
+                                    REPEAT
+                                      TempDimBufIn.RESET;
+                                      TempDimBufIn.DELETEALL;
+                                      DimSetEntry.RESET;
+                                      DimSetEntry.SETRANGE("Dimension Set ID","Dimension Set ID");
+                                      IF DimSetEntry.FINDSET THEN BEGIN
+                                        REPEAT
+                                          IF TempSelectedDim.GET(USERID,3,REPORT::"Export Consolidation",'',DimSetEntry."Dimension Code") THEN BEGIN
+                                            TempDimBufIn.INIT;
+                                            TempDimBufIn."Table ID" := DATABASE::"G/L Entry";
+                                            TempDimBufIn."Entry No." := "Entry No.";
+                                            IF TempDim.GET(DimSetEntry."Dimension Code") THEN
+                                              IF TempDim."Consolidation Code" <> '' THEN
+                                                TempDimBufIn."Dimension Code" := TempDim."Consolidation Code"
+                                              ELSE
+                                                TempDimBufIn."Dimension Code" := TempDim.Code
+                                            ELSE
+                                              TempDimBufIn."Dimension Code" := DimSetEntry."Dimension Code";
+                                            IF TempDimVal.GET(DimSetEntry."Dimension Code",DimSetEntry."Dimension Value Code") THEN
+                                              IF TempDimVal."Consolidation Code" <> '' THEN
+                                                TempDimBufIn."Dimension Value Code" := TempDimVal."Consolidation Code"
+                                              ELSE
+                                                TempDimBufIn."Dimension Value Code" := TempDimVal.Code
+                                            ELSE
+                                              TempDimBufIn."Dimension Value Code" := DimSetEntry."Dimension Value Code";
+                                            TempDimBufIn.INSERT;
+                                          END;
+                                        UNTIL DimSetEntry.NEXT = 0;
+                                      END;
+                                      UpdateTempGLEntry(TempDimBufIn);
+                                    UNTIL NEXT = 0;
+
+                                    TempGLEntry.RESET;
+                                    IF TempGLEntry.FINDSET THEN BEGIN
+                                      REPEAT
+                                        TempDimBufOut.RESET;
+                                        TempDimBufOut.DELETEALL;
+                                        DimBufMgt.GetDimensions(TempGLEntry."Entry No.",TempDimBufOut);
+                                        TempDimBufOut.SETRANGE("Entry No.",TempGLEntry."Entry No.");
+                                        IF FileFormat = FileFormat::"Version 4.00 or Later (.xml)" THEN BEGIN
+                                          IF (TempGLEntry."Debit Amount" <> 0) OR (TempGLEntry."Credit Amount" <> 0) THEN
+                                            WriteFile(TempGLEntry,TempDimBufOut);
+                                        END ELSE BEGIN
+                                          UpdateExportedInfo(TempGLEntry);
+                                          IF TempGLEntry.Amount <> 0 THEN
+                                            WriteFile(TempGLEntry,TempDimBufOut);
+                                        END;
+                                      UNTIL TempGLEntry.NEXT = 0;
+                                    END;
+                                  END;
+
+                                  SETRANGE("Posting Date",ConsolidStartDate,ConsolidEndDate);
+
+                                  OnAfterGLEntryOnAfterGetRecord("G/L Entry",TempSelectedDim);
+                                END;
+
+               DataItemLink=G/L Account No.=FIELD(No.) }
+
+    { 8685;    ;DataItem;                    ;
+               DataItemTable=Table330;
+               DataItemTableView=SORTING(Currency Code,Starting Date);
+               OnPreDataItem=BEGIN
+                               IF FileFormat = FileFormat::"Version 3.70 or Earlier (.txt)" THEN
+                                 CurrReport.BREAK;
+                               GLSetup.GET;
+                               IF GLSetup."Additional Reporting Currency" = '' THEN
+                                 SETRANGE("Currency Code",ParentCurrencyCode)
+                               ELSE
+                                 SETFILTER("Currency Code",'%1|%2',ParentCurrencyCode,GLSetup."Additional Reporting Currency");
+                               SETRANGE("Starting Date",0D,ConsolidEndDate);
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  Consolidate.InsertExchRate("Currency Exchange Rate");
+                                END;
+
+               OnPostDataItem=BEGIN
+                                IF FileFormat = FileFormat::"Version 4.00 or Later (.xml)" THEN BEGIN
+                                  Consolidate.SetGlobals(
+                                    ProductVersion,FormatVersion,COMPANYNAME,
+                                    GLSetup."LCY Code",GLSetup."Additional Reporting Currency",ParentCurrencyCode,
+                                    0,ConsolidStartDate,ConsolidEndDate);
+                                  Consolidate.SetGlobals(
+                                    ProductVersion,FormatVersion,COMPANYNAME,
+                                    GLSetup."LCY Code",GLSetup."Additional Reporting Currency",ParentCurrencyCode,
+                                    Consolidate.CalcCheckSum,ConsolidStartDate,ConsolidEndDate);
+                                  Consolidate.ExportToXML(ServerFileName);
+                                END;
+                              END;
+                               }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      SaveValues=Yes;
+    }
+    CONTROLS
+    {
+      { 1900000001;0;Container;
+                  ContainerType=ContentArea }
+
+      { 1900000002;1;Group  ;
+                  CaptionML=[DEU=Optionen;
+                             ENU=Options;
+                             NLD=Opties;
+                             NOR=Alternativer;
+                             SVE=Alternativ] }
+
+      { 9   ;2   ;Field     ;
+                  Name=FileFormat;
+                  CaptionML=[DEU=Dateiformat;
+                             ENU=File Format;
+                             NLD=Bestandsindeling;
+                             NOR=Filformat;
+                             SVE=Filformat];
+                  ToolTipML=[DEU=Gibt das Dateiformat an, das fÅr die Konsolidierung verwendet werden soll. Falls die Muttergesellschaft, die die Konsolidierung durchfÅhrt, auch mit Dynamics NAV 4.0 oder hîheren Versionen arbeitet, wÑhlen Sie das XML-Format. Anderenfalls wÑhlen Sie das TXT-Format.;
+                             ENU=Specifies the file format that you want to use for the consolidation. If the parent company that will perform the consolidation also has Dynamics NAV 4.0 or later versions, select the .xml format. Otherwise, select the .txt format.;
+                             NLD=Hiermee wordt de bestandsindeling opgegeven die u wilt gebruiken voor de consolidatie. Als het moederbedrijf dat de consolidatie uitvoert ook over Dynamics NAV 4.0 of hoger beschikt, selecteert u de XML-indeling. Als dit niet het geval is, selecteert u de tekstindeling.;
+                             NOR=Angir filformatet du vil bruke til konsolideringen. Hvis moderselskapet som skal utfõre konsolideringen, ogsÜ har Dynamics NAV 4.0 eller nyere, velger du XML-formatet. Ellers velger du TXT-formatet.];
+                  OptionCaptionML=[DEU=Version 4.00 oder hîher (.xml),Version 3.70 oder frÅher (.txt);
+                                   ENU=Version 4.00 or Later (.xml),Version 3.70 or Earlier (.txt);
+                                   NLD=Versie 4.00 of hoger (.xml),Versie 3.70 of lager (.txt);
+                                   NOR=Versjon 4.00 eller senere (*.xml),Versjon 3.70 eller tidligere (*.txt);
+                                   SVE=Version 4.00 eller senare (.xml),Version 3.70 eller tidigare (.txt)];
+                  ApplicationArea=#Suite;
+                  SourceExpr=FileFormat }
+
+      { 1   ;2   ;Field     ;
+                  Name=ClientFileNameControl;
+                  CaptionML=[DEU=Dateiname;
+                             ENU=File Name;
+                             NLD=Bestandsnaam;
+                             NOR=Filnavn;
+                             SVE=Filnamn];
+                  ToolTipML=[DEU=Gibt den Namen der aus einem Konzernmandanten in einen Konsolidierungsmandanten zu exportierenden Daten an.;
+                             ENU=Specifies the name of the file to be exported from a business unit to a consolidated company.;
+                             NLD=Hiermee wordt de naam opgegeven van het bestand dat moet worden geâxporteerd van een bedrijfsunit naar een geconsolideerd bedrijf.;
+                             NOR=Angir navnet pÜ filen som skal eksporteres fra et konsern til et konsolidert selskap.];
+                  ApplicationArea=#Suite;
+                  SourceExpr=ClientFileName;
+                  OnAssistEdit=VAR
+                                 FileManagement@1000 : Codeunit 419;
+                               BEGIN
+                                 IF NOT IsWebClient THEN BEGIN
+                                   IF FileFormat = FileFormat::"Version 4.00 or Later (.xml)" THEN
+                                     ClientFileName := FileManagement.SaveFileDialog(Text011,ClientFileName,FileManagement.GetToFilterText('','.xml'))
+                                   ELSE
+                                     ClientFileName := FileManagement.SaveFileDialog(Text008,ClientFileName,FileManagement.GetToFilterText('','.txt'));
+                                 END ELSE
+                                   ERROR(EnterFileNameErr);
+                               END;
+                                }
+
+      { 22  ;2   ;Group     ;
+                  CaptionML=[DEU=Konsolidierungsperiode;
+                             ENU=Consolidation Period;
+                             NLD=Te consolideren periode;
+                             NOR=Konsolideringsperiode] }
+
+      { 2   ;3   ;Field     ;
+                  Name=StartDate;
+                  CaptionML=[DEU=Startdatum;
+                             ENU=Starting Date;
+                             NLD=Begindatum;
+                             NOR=Startdato;
+                             SVE=Startdatum];
+                  ToolTipML=[DEU=Gibt das erste Datum in der Periode an, ab dem Posten exportiert werden sollen. Bei einem Ultimodatum mÅssen Startdatum und Enddatum identisch sein.;
+                             ENU=Specifies the first date in the period from which entries will be exported. If you use a closing date, the starting date and ending date must be the same.;
+                             NLD=Hiermee wordt de eerste datum opgegeven in de periode waarvoor u de posten wilt exporteren. Als u een ultimodatum gebruikt, moeten de begin- en einddatum gelijk zijn.;
+                             NOR=Angir den fõrste datoen i perioden da det skal eksporteres poster. Hvis du bruker en avslutningsdato, mÜ startdatoen og sluttdatoen vëre den samme.];
+                  ApplicationArea=#Suite;
+                  ClosingDates=Yes;
+                  SourceExpr=ConsolidStartDate }
+
+      { 3   ;3   ;Field     ;
+                  Name=EndDate;
+                  CaptionML=[DEU=Enddatum;
+                             ENU=Ending Date;
+                             NLD=Einddatum;
+                             NOR=Sluttdato;
+                             SVE=Slutdatum];
+                  ToolTipML=[DEU=Gibt das letzte Datum in der Periode an, bis zu dem die Posten exportiert werden sollen.;
+                             ENU=Specifies the last date in the period from which entries will be exported.;
+                             NLD=Hiermee wordt de laatste datum opgegeven in de periode waaruit posten worden geâxporteerd.;
+                             NOR=Angir siste dato i perioden som det skal eksporteres poster for.];
+                  ApplicationArea=#Suite;
+                  ClosingDates=Yes;
+                  SourceExpr=ConsolidEndDate }
+
+      { 7   ;2   ;Group     ;
+                  CaptionML=[DEU=Feldinhalt kopieren;
+                             ENU=Copy Field Contents;
+                             NLD=Kopiâren per;
+                             NOR=Overfõr feltinnhold] }
+
+      { 5   ;3   ;Field     ;
+                  CaptionML=[DEU=Dimensionen kopieren;
+                             ENU=Copy Dimensions;
+                             NLD=Dimensies kopiâren;
+                             NOR=Kopier dimensjoner;
+                             SVE=Kopierar dimensioner];
+                  ToolTipML=[DEU=Gibt an, ob die Posten beim Transfer nach Dimensionen klassifiziert werden sollen.;
+                             ENU=Specifies if you want the entries to be classified by dimensions when they are transferred.;
+                             NLD=Hiermee wordt opgegeven of u wilt dat de posten op dimensie worden geclassificeerd wanneer deze worden overgedragen.;
+                             NOR=Angir om du vil klassifisere postene etter dimensjoner nÜr de overfõres.];
+                  ApplicationArea=#Dimensions;
+                  SourceExpr=ColumnDim;
+                  Editable=FALSE;
+                  OnAssistEdit=BEGIN
+                                 DimSelectionBuf.SetDimSelectionMultiple(3,REPORT::"Export Consolidation",ColumnDim);
+                               END;
+                                }
+
+      { 4   ;2   ;Field     ;
+                  CaptionML=[DEU=öbergeordneter WÑhrungscode;
+                             ENU=Parent Currency Code;
+                             NLD=Hoofdvalutacode;
+                             NOR=Overordnet valutakode];
+                  ToolTipML=[DEU=Gibt den WÑhrungscode der Firma an, die die Konsolidierung durchfÅhrt.;
+                             ENU=Specifies the currency code of the company that will perform the consolidation.;
+                             NLD=Hiermee wordt de valutacode opgegeven van het bedrijf dat de consolidatie uitvoert.;
+                             NOR=Angir valutakoden for selskapet som skal utfõre konsolideringen.];
+                  ApplicationArea=#Suite;
+                  SourceExpr=ParentCurrencyCode;
+                  TableRelation=Currency }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      ProductVersion@1036 : TextConst 'DEU=4.00;ENU=4.00;NLD=4.00;NOR=4.00;SVE=4.00';
+      FormatVersion@1037 : TextConst 'DEU=1.00;ENU=1.00;NLD=1.00;NOR=1.00;SVE=1.00';
+      Text000@1000 : TextConst 'DEU=Geben Sie den Dateinamen ein.;ENU=Enter the file name.;NLD=Geef een bestandsnaam op.;NOR=Angi filnavn.;SVE=Ange filnamnet.';
+      Text001@1001 : TextConst 'DEU=Geben Sie das Startdatum fÅr die Konsolidierungsperiode ein.;ENU=Enter the starting date for the consolidation period.;NLD=Vul de begindatum van de te consolideren periode in.;NOR=Angi startdato for konsolideringsperioden.';
+      Text002@1002 : TextConst 'DEU=Geben Sie das Enddatum fÅr die Konsolidierungsperiode ein.;ENU=Enter the ending date for the consolidation period.;NLD=Vul de einddatum van de te consolideren periode in.;NOR=Angi sluttdato for konsolideringsperioden.';
+      Text003@1003 : TextConst 'DEU=Es kînnen maximal 500 Tage exportiert werden.;ENU=The export can include a maximum of 500 days.;NLD=U kunt maximaal een periode van 500 dagen exporteren.;NOR=Eksporten kan inkludere opptil 500 dager.';
+      Text004@1004 : TextConst 'DEU=Kontenplan wird verarbeitet...\\;ENU=Processing the chart of accounts...\\;NLD=Verwerken rekeningen...\\;NOR=Behandler kontoplanen...\\';
+      Text005@1005 : TextConst 'DEU=Nr.             #1##########\;ENU=No.             #1##########\;NLD=Nr.             #1##########\;NOR=Nr.             #1##########\';
+      Text006@1006 : TextConst 'DEU=Datum           #2######;ENU=Date            #2######;NLD=Datum           #2######;NOR=Dato            #2######';
+      Text007@1007 : TextConst 'DEU=Dimensionen kopieren;ENU=Copy Dimensions;NLD=Dimensies kopiâren;NOR=Kopier dimensjoner;SVE=Kopierar dimensioner';
+      Text008@1008 : TextConst 'DEU=In Textdatei exportieren;ENU=Export to Text File;NLD=Exporteren naar tekstbestand;NOR=Eksporter til tekstfil';
+      Text009@1009 : TextConst 'DEU="Ein Sachposten mit Buchungsdatum an einem Ultimodatum (%1) wurde beim Exportieren von Nicht-Ultimoposten gefunden. Sachkontonr. = %2.";ENU="A G/L Entry with posting date on a closing date (%1) was found while exporting nonclosing entries. G/L Account No. = %2.";NLD="Er werd een GB-post met boekingdatum op een ultimodatum (%1) gevonden bij het exporteren van niet-afsluitingsposten. Grootboekrekeningnr. = %2.";NOR="Det ble funnet en finanspost med bokfõringsdato pÜ en avslutningsdato (%1) i forbindelse med eksport av ikke-avslutningsposter. Finanskontonummer = %2."';
+      Text010@1010 : TextConst 'DEU=Bei der Verwendung von Ultimodaten mÅssen Start- und Enddatum gleich sein.;ENU=When using closing dates, the starting and ending dates must be the same.;NLD=Als u ultimodatums gebruikt, moeten de begin- en einddatum gelijk zijn.;NOR=NÜr du bruker avslutningsdatoer, mÜ start- og sluttdatoene vëre de samme.;SVE=NÑr avslutsdatum anvÑnds mÜste start- och slutdatum vara lika.';
+      TempGLEntry@1011 : TEMPORARY Record 17;
+      DimSetEntry@1012 : Record 480;
+      Dim@1013 : Record 348;
+      DimVal@1014 : Record 349;
+      TempDim@1015 : TEMPORARY Record 348;
+      TempDimVal@1016 : TEMPORARY Record 349;
+      SelectedDim@1017 : Record 369;
+      TempSelectedDim@1018 : TEMPORARY Record 369;
+      TempDimBufIn@1019 : TEMPORARY Record 360;
+      TempDimBufOut@1020 : TEMPORARY Record 360;
+      DimSelectionBuf@1021 : Record 368;
+      GLSetup@1038 : Record 98;
+      DimBufMgt@1022 : Codeunit 411;
+      Consolidate@1035 : Codeunit 432;
+      FileManagement@1039 : Codeunit 419;
+      Window@1023 : Dialog;
+      GLEntryFile@1024 : File;
+      ServerFileName@1025 : Text;
+      FileFormat@1031 : 'Version 4.00 or Later (.xml),Version 3.70 or Earlier (.txt)';
+      ConsolidStartDate@1026 : Date;
+      ConsolidEndDate@1027 : Date;
+      TransferPerDay@1028 : Boolean;
+      TransferPerDayReq@1029 : Boolean;
+      ColumnDim@1030 : Text[250];
+      ParentCurrencyCode@1032 : Code[10];
+      Text011@1033 : TextConst 'DEU=In XML-Datei exportieren;ENU=Export to XML File;NLD=Exporteren naar XML-bestand;NOR=Eksporter til XML-fil';
+      ClientFileName@1040 : Text;
+      EnterFileNameErr@1034 : TextConst 'DEU=Geben Sie einen Dateinamen ein.;ENU=Enter a file name.;NLD=Voer een bestandsnaam in.;NOR=Angi et filnavn.';
+
+    LOCAL PROCEDURE WriteFile@1(VAR GLEntry2@1000 : Record 17;VAR DimBuf@1001 : Record 360);
+    VAR
+      GLEntryNo@1002 : Integer;
+    BEGIN
+      IF FileFormat = FileFormat::"Version 4.00 or Later (.xml)" THEN
+        GLEntryNo := Consolidate.InsertGLEntry(GLEntry2)
+      ELSE
+        GLEntryFile.WRITE(
+          STRSUBSTNO(
+            '<02>#1################## #2####### #3####################',
+            GLEntry2."G/L Account No.",
+            GLEntry2."Posting Date",
+            GLEntry2.Amount));
+
+      IF DimBuf.FIND('-') THEN BEGIN
+        REPEAT
+          IF FileFormat = FileFormat::"Version 4.00 or Later (.xml)" THEN
+            Consolidate.InsertEntryDim(DimBuf,GLEntryNo)
+          ELSE
+            GLEntryFile.WRITE(
+              STRSUBSTNO(
+                '<03>#1################## #2##################',
+                DimBuf."Dimension Code",
+                DimBuf."Dimension Value Code"));
+        UNTIL DimBuf.NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateTempGLEntry@6(VAR TempDimBuf@1002 : TEMPORARY Record 360);
+    VAR
+      DimEntryNo@1000 : Integer;
+    BEGIN
+      DimEntryNo := DimBufMgt.FindDimensions(TempDimBuf);
+      IF (NOT TempDimBuf.ISEMPTY) AND (DimEntryNo = 0) THEN BEGIN
+        TempGLEntry := "G/L Entry";
+        TempGLEntry."Entry No." := DimBufMgt.InsertDimensions(TempDimBuf);
+        TempGLEntry.INSERT;
+      END ELSE
+        IF TempGLEntry.GET(DimEntryNo) THEN BEGIN
+          TempGLEntry.Amount := TempGLEntry.Amount + "G/L Entry".Amount;
+          TempGLEntry."Debit Amount" := TempGLEntry."Debit Amount" + "G/L Entry"."Debit Amount";
+          TempGLEntry."Credit Amount" := TempGLEntry."Credit Amount" + "G/L Entry"."Credit Amount";
+          TempGLEntry."Additional-Currency Amount" :=
+            TempGLEntry."Additional-Currency Amount" + "G/L Entry"."Additional-Currency Amount";
+          TempGLEntry."Add.-Currency Debit Amount" :=
+            TempGLEntry."Add.-Currency Debit Amount" + "G/L Entry"."Add.-Currency Debit Amount";
+          TempGLEntry."Add.-Currency Credit Amount" :=
+            TempGLEntry."Add.-Currency Credit Amount" + "G/L Entry"."Add.-Currency Credit Amount";
+          TempGLEntry.MODIFY;
+        END ELSE BEGIN
+          TempGLEntry := "G/L Entry";
+          TempGLEntry."Entry No." := DimEntryNo;
+          TempGLEntry.INSERT;
+        END;
+    END;
+
+    LOCAL PROCEDURE UpdateExportedInfo@2(VAR GLEntry3@1000 : Record 17);
+    BEGIN
+      WITH GLEntry3 DO BEGIN
+        IF Amount < 0 THEN BEGIN
+          "G/L Account".TESTFIELD("Consol. Credit Acc.");
+          "G/L Account No." := "G/L Account"."Consol. Credit Acc.";
+        END ELSE BEGIN
+          "G/L Account".TESTFIELD("Consol. Debit Acc.");
+          "G/L Account No." := "G/L Account"."Consol. Debit Acc.";
+        END;
+        MODIFY;
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckClosingPostings@5(GLAccNo@1000 : Code[20];StartDate@1001 : Date;EndDate@1002 : Date);
+    VAR
+      GLEntry@1003 : Record 17;
+      AccountingPeriod@1004 : Record 50;
+    BEGIN
+      AccountingPeriod.SETCURRENTKEY("New Fiscal Year","Date Locked");
+      AccountingPeriod.SETRANGE("New Fiscal Year",TRUE);
+      AccountingPeriod.SETRANGE("Date Locked",TRUE);
+      AccountingPeriod.SETRANGE("Starting Date",StartDate + 1,EndDate);
+      IF AccountingPeriod.FIND('-') THEN BEGIN
+        GLEntry.SETRANGE("G/L Account No.",GLAccNo);
+        REPEAT
+          GLEntry.SETRANGE("Posting Date",CLOSINGDATE(AccountingPeriod."Starting Date" - 1));
+          IF NOT GLEntry.ISEMPTY THEN
+            ERROR(
+              Text009,
+              GLEntry.GETFILTER("Posting Date"),
+              GLAccNo);
+        UNTIL AccountingPeriod.NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckClosingDates@20(StartDate@1000 : Date;EndDate@1001 : Date;VAR TransferPerDay@1002 : Boolean);
+    BEGIN
+      IF (StartDate = CLOSINGDATE(StartDate)) OR
+         (EndDate = CLOSINGDATE(EndDate))
+      THEN BEGIN
+        IF StartDate <> EndDate THEN
+          ERROR(Text010);
+        TransferPerDay := FALSE;
+      END ELSE
+        TransferPerDay := TransferPerDayReq;
+    END;
+
+    [External]
+    PROCEDURE InitializeRequest@3(NewFileFormat@1000 : Option;NewFileName@1001 : Text);
+    BEGIN
+      FileFormat := NewFileFormat;
+      ClientFileName := NewFileName;
+    END;
+
+    LOCAL PROCEDURE IsWebClient@4() : Boolean;
+    BEGIN
+      EXIT(FileManagement.IsWebClient);
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterGLEntryOnAfterGetRecord@8(VAR GLEntry@1000 : Record 17;VAR TempSelectedDim@1001 : TEMPORARY Record 369);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeGLEntryOnAfterGetRecord@7(VAR GLEntry@1000 : Record 17;VAR TempSelectedDim@1001 : TEMPORARY Record 369);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

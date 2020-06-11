@@ -1,0 +1,927 @@
+OBJECT Codeunit 81647 Svefaktura Mgmt Imtech
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PSSE;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData 112=rm,
+                TableData 114=rm,
+                TableData 304=rm;
+    OnRun=BEGIN
+            NASRunExportAll;  // IME271
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      gFromNAS@1100285100 : Boolean;
+      gSvefakturaNOR@1100285101 : XMLport 81687;
+      gSvefakturaSVE@1100285102 : XMLport 81647;
+      gGLSetup@1100285103 : Record 98;
+
+    LOCAL PROCEDURE NASRunExportAll@1100285504();
+    VAR
+      SalesRecSetup@1100285100 : Record 311;
+      SalesInvoiceHeader@1100285102 : Record 112;
+      SalesCrMemoHeader@1100285101 : Record 114;
+      IssuedFinChargeMemoHdr@1100285103 : Record 304;
+    BEGIN
+      // *** IME271 ****
+      // Runs export of invoices and marks "Invoice exported by xml" to TRUE when physically exported.
+      SELECTLATESTVERSION;
+      CLEARALL;
+      SalesRecSetup.GET;
+      IF NOT SalesRecSetup."Svefaktura Background Export" THEN
+        EXIT;
+      gFromNAS := TRUE;
+
+      // ******************* Sales Invoices ***************************
+      SalesInvoiceHeader.SETRANGE("Invoice Exported by XML", FALSE);
+      SalesInvoiceHeader.SETRANGE("Electronic Invoice Created", TRUE);
+      SalesInvoiceHeader.SETRANGE("Electronic Invoicing", SalesInvoiceHeader."Electronic Invoicing"::"Svefaktura (XML)");
+      IF NOT SalesInvoiceHeader.ISEMPTY THEN BEGIN
+        HandleInvoicesFromNAS(SalesInvoiceHeader);
+      END;
+
+      // ******************* Sales Cr. Memo ***************************
+      SalesCrMemoHeader.SETRANGE("Invoice Exported by XML", FALSE);
+      SalesCrMemoHeader.SETRANGE("Electronic Credit Memo Created", TRUE);
+      SalesCrMemoHeader.SETRANGE("Electronic Invoicing", SalesCrMemoHeader."Electronic Invoicing"::"Svefaktura (XML)");
+      IF NOT SalesCrMemoHeader.ISEMPTY THEN BEGIN
+        HandleCrMemosFromNAS(SalesCrMemoHeader);
+      END;
+
+      // ******************* Fin. Charge Memo ***************************
+      //>> 160126 ITERO.AC RFC035 Do not send as XML File (PDF Only)
+      // IssuedFinChargeMemoHdr.SETRANGE("Invoice Exported by XML", FALSE);
+      // IssuedFinChargeMemoHdr.SETRANGE("Elec. Fin. Charge Memo Created", TRUE);
+      // IF NOT (IssuedFinChargeMemoHdr.ISEMPTY) THEN BEGIN
+      //   CreateFinChargeMemo(IssuedFinChargeMemoHdr);
+      //   IssuedFinChargeMemoHdr.MODIFYALL("Invoice Exported by XML", TRUE, FALSE);
+      // END;
+      //>> 160126 ITERO.AC RFC035
+    END;
+
+    LOCAL PROCEDURE GenerateSveDocument@1100285500(VAR pSalesInvoiceHeader@1100285500 : Record 112;VAR pSalesInvoiceLine@1100285503 : Record 113;pCredit@1100285502 : Boolean;pHideItem@1100285001 : Boolean;pShowDiscount@1100285002 : Boolean);
+    VAR
+      FileName@1100285108 : Text;
+      Svefaktura@1100285100 : XMLport 81647;
+      xmldoc@1100285103 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      SalesRecSetup@1100285107 : Record 311;
+    BEGIN
+      //140602
+      SalesRecSetup.GET;
+      SalesRecSetup.TESTFIELD("Export Path Svefaktura");
+      SalesRecSetup.TESTFIELD(SalesRecSetup."External Doc. No. as Pmt. Ref", TRUE); // 141007
+
+      IF SalesRecSetup."Svefaktura Background Export" AND (NOT gFromNAS) THEN
+        EXIT; // IME271 Skip file creation if not from NAS - 151118 Moved up
+      gGLSetup.GET;
+
+      InitAndSetXMLPort(pSalesInvoiceHeader, pSalesInvoiceLine, pCredit, pShowDiscount, pHideItem, SalesRecSetup);
+
+      ExportPortMoveToDoc(xmldoc);
+
+      FileName := SalesRecSetup."Export Path Svefaktura" + '\' + 'Inv_';
+      IF pCredit THEN
+         FileName := SalesRecSetup."Export Path Svefaktura" + '\' + 'CrM_' ;
+      // Filename += pSalesInvoiceHeader."No." + '_' + FORMAT(WORKDATE,0,'<year4><month,2><day,2>') + '_' +FORMAT(TIME,0,'<Standard format,2>') + '.xml';
+      FileName += pSalesInvoiceHeader."No." + '_' + FORMAT(CURRENTDATETIME,0,'<year4><month,2><day,2>_<Hours24,2><Filler Character,0><Minutes,2><Seconds,2><Second dec.><Comma,.>T') + '.xml';
+
+      SaveFile(xmldoc, FileName);
+    END;
+
+    LOCAL PROCEDURE InitAndSetXMLPort@1100285100(VAR pSalesInvoiceHeader@1100285101 : Record 112;VAR pSalesInvoiceLine@1100285102 : Record 113;pCredit@1100285103 : Boolean;pShowDiscount@1100285104 : Boolean;pHideItem@1100285105 : Boolean;SalesRecSetup@1100285106 : Record 311);
+    BEGIN
+      CLEAR(gSvefakturaSVE);
+      CLEAR(gSvefakturaNOR);
+      //gSvefaktura.SetSalesInvoice(pSalesInvoiceHeader, pSalesInvoiceLine); // 160920 ITERO.AC IME484 Moved
+
+      IF gGLSetup."Norwegian Localization Active" THEN BEGIN
+        IF pCredit THEN
+          gSvefakturaNOR.SetCredit;
+        gSvefakturaNOR.SetSalesInvoice(pSalesInvoiceHeader, pSalesInvoiceLine); // 160920 ITERO.AC IME484 Moved (XML Port must know if Credit when SetSalesInvoice is executed)
+        IF pShowDiscount THEN
+          gSvefakturaNOR.SetDiscount;
+        IF pHideItem THEN
+          gSvefakturaNOR.SetHideItemNo;
+        IF SalesRecSetup."Svefaktura Background Export" AND (NOT gFromNAS) THEN
+          gSvefakturaNOR.SetDontMoveFiles; // IME271 Skip file move if not from NAS
+        EXIT;
+      END;
+
+      IF pCredit THEN
+        gSvefakturaSVE.SetCredit;
+      gSvefakturaSVE.SetSalesInvoice(pSalesInvoiceHeader, pSalesInvoiceLine); // 160920 ITERO.AC IME484 Moved (XML Port must know if Credit when SetSalesInvoice is executed)
+      IF pShowDiscount THEN
+        gSvefakturaSVE.SetDiscount;
+      IF pHideItem THEN
+        gSvefakturaSVE.SetHideItemNo;
+
+      IF SalesRecSetup."Svefaktura Background Export" AND (NOT gFromNAS) THEN
+        gSvefakturaSVE.SetDontMoveFiles; // IME271 Skip file move if not from NAS
+    END;
+
+    LOCAL PROCEDURE ExportPortMoveToDoc@1100285101(VAR xmldoc@1100285101 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument");
+    VAR
+      blobTemp@1100285100 : TEMPORARY Record 99008535;
+      Outstreamobj@1100285103 : OutStream;
+      Instreamobj@1100285102 : InStream;
+      element@1100285104 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlElement";
+    BEGIN
+      xmldoc := xmldoc.XmlDocument;
+      blobTemp.Blob.CREATEOUTSTREAM(Outstreamobj);
+
+      IF gGLSetup."Norwegian Localization Active" THEN BEGIN
+        gSvefakturaNOR.SETDESTINATION(Outstreamobj);
+        gSvefakturaNOR.EXPORT;
+      END ELSE BEGIN
+        gSvefakturaSVE.SETDESTINATION(Outstreamobj);
+        gSvefakturaSVE.EXPORT;
+      END;
+
+      blobTemp.Blob.CREATEINSTREAM(Instreamobj);
+      xmldoc.Load(Instreamobj);
+      CLEAR(blobTemp.Blob);
+
+      element := xmldoc.SelectSingleNode('Invoice');
+      element.SetAttribute('xmlns', 'urn:sfti:documents:BasicInvoice:1:0');
+      //xmldoc.AppendChild(element);
+    END;
+
+    LOCAL PROCEDURE SaveFile@1100285103(VAR xmldoc@1100285100 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";pFilename@1100285104 : Text);
+    VAR
+      blobTemp@1100285103 : TEMPORARY Record 99008535;
+      Outstreamobj@1100285102 : OutStream;
+      Instreamobj@1100285101 : InStream;
+      FileMgmt@1100285107 : Codeunit 419;
+      oFile@1100285106 : File;
+    BEGIN
+      IF GUIALLOWED THEN BEGIN
+         // Manual run
+         blobTemp.Blob.CREATEOUTSTREAM(Outstreamobj);
+         xmldoc.Save(Outstreamobj);
+
+         FileMgmt.BLOBExport4PS(blobTemp, pFilename, FALSE, FALSE);
+         CLEAR(blobTemp.Blob);
+      END ELSE BEGIN
+          // NAS-run
+         oFile.CREATE(pFilename);
+         oFile.CREATEOUTSTREAM(Outstreamobj);
+         xmldoc.Save(Outstreamobj);
+         oFile.CLOSE;
+         CLEAR(oFile);
+      END;
+    END;
+
+    PROCEDURE CreateFinChargeMemo@1100285000(VAR pIssuedFinChargeMemoHeader@1100285000 : Record 304);
+    VAR
+      IssuedFinChargeMemoLine@1100285001 : Record 305;
+      SalesRecSetup@1100285100 : Record 311;
+      SalesInvoiceHeaderTEMP@1100285104 : TEMPORARY Record 112;
+      SalesInvoiceLineTEMP@1100285103 : TEMPORARY Record 113;
+    BEGIN
+      // ITERO.MH ENH042 140909 ******************
+      SalesRecSetup.GET;
+
+      IF (pIssuedFinChargeMemoHeader.FINDSET(TRUE)) THEN REPEAT
+         SalesInvoiceHeaderTEMP.DELETEALL;
+         SalesInvoiceHeaderTEMP.INIT;
+
+         SalesInvoiceHeaderTEMP."No." := pIssuedFinChargeMemoHeader."No.";
+         SalesInvoiceHeaderTEMP."Sell-to Customer No." := pIssuedFinChargeMemoHeader."Customer No.";
+         SalesInvoiceHeaderTEMP."Bill-to Customer No." := pIssuedFinChargeMemoHeader."Customer No.";
+         SalesInvoiceHeaderTEMP."Bill-to Name" := pIssuedFinChargeMemoHeader.Name;
+         SalesInvoiceHeaderTEMP."Bill-to Name 2" := pIssuedFinChargeMemoHeader."Name 2";
+         SalesInvoiceHeaderTEMP."Bill-to Address" := pIssuedFinChargeMemoHeader.Address;
+         SalesInvoiceHeaderTEMP."Bill-to Address 2" := pIssuedFinChargeMemoHeader."Address 2";
+         SalesInvoiceHeaderTEMP."Bill-to City"      := pIssuedFinChargeMemoHeader.City;
+         SalesInvoiceHeaderTEMP."Bill-to Post Code" := pIssuedFinChargeMemoHeader."Post Code";
+         SalesInvoiceHeaderTEMP."Bill-to County" := pIssuedFinChargeMemoHeader.County;
+         SalesInvoiceHeaderTEMP."Bill-to Country/Region Code" := pIssuedFinChargeMemoHeader."Country/Region Code";
+         SalesInvoiceHeaderTEMP."Currency Code" := pIssuedFinChargeMemoHeader."Currency Code";
+         SalesInvoiceHeaderTEMP."Language Code" :=  pIssuedFinChargeMemoHeader."Language Code";
+         SalesInvoiceHeaderTEMP."Bill-to Contact" := pIssuedFinChargeMemoHeader.Contact;
+         SalesInvoiceHeaderTEMP."Your Reference" := pIssuedFinChargeMemoHeader."Your Reference";
+         SalesInvoiceHeaderTEMP."Shortcut Dimension 1 Code" := pIssuedFinChargeMemoHeader."Shortcut Dimension 1 Code";
+         SalesInvoiceHeaderTEMP."Shortcut Dimension 2 Code" := pIssuedFinChargeMemoHeader."Shortcut Dimension 2 Code";
+         SalesInvoiceHeaderTEMP."VAT Registration No." := pIssuedFinChargeMemoHeader."VAT Registration No.";
+         SalesInvoiceHeaderTEMP."Posting Date" := pIssuedFinChargeMemoHeader."Posting Date";
+         SalesInvoiceHeaderTEMP."Due Date" := pIssuedFinChargeMemoHeader."Due Date";
+
+         SalesInvoiceHeaderTEMP.INSERT;
+
+         SalesInvoiceLineTEMP.DELETEALL;
+         IssuedFinChargeMemoLine.SETRANGE("Finance Charge Memo No.", pIssuedFinChargeMemoHeader."No.");
+
+         SalesInvoiceLineTEMP.INIT;
+         SalesInvoiceLineTEMP."Line No." := 10;
+         SalesInvoiceLineTEMP.Description := 'R„ntekostnad';
+         SalesInvoiceLineTEMP.INSERT;
+
+         IF IssuedFinChargeMemoLine.FINDSET(FALSE) THEN REPEAT
+            IF (IssuedFinChargeMemoLine.Description <> '') OR (IssuedFinChargeMemoLine.Type <> 0) OR (IssuedFinChargeMemoLine."No." <> '') THEN BEGIN
+
+               SalesInvoiceLineTEMP.INIT;
+
+               SalesInvoiceLineTEMP."Line No." := IssuedFinChargeMemoLine."Line No.";
+               SalesInvoiceLineTEMP.Description := IssuedFinChargeMemoLine.Description;
+               SalesInvoiceLineTEMP."Posting Date" := IssuedFinChargeMemoLine."Posting Date";
+               SalesInvoiceLineTEMP."Posting Date" := IssuedFinChargeMemoLine."Document Date";
+               SalesInvoiceLineTEMP."VAT %" := IssuedFinChargeMemoLine."VAT %";
+               SalesInvoiceLineTEMP."VAT Calculation Type" := IssuedFinChargeMemoLine."VAT Calculation Type";
+               SalesInvoiceLineTEMP."VAT Base Amount" := IssuedFinChargeMemoLine."VAT Amount";
+               SalesInvoiceLineTEMP.Amount := IssuedFinChargeMemoLine.Amount;
+               SalesInvoiceLineTEMP."Line Amount" := IssuedFinChargeMemoLine.Amount;
+               SalesInvoiceLineTEMP."Unit Price" := IssuedFinChargeMemoLine.Amount;
+               SalesInvoiceLineTEMP."Amount Including VAT" := IssuedFinChargeMemoLine.Amount;
+               SalesInvoiceLineTEMP.Quantity := 1;
+
+               SalesInvoiceLineTEMP."No." := IssuedFinChargeMemoLine."Document No.";
+
+               SalesInvoiceLineTEMP.INSERT;
+            END;
+         UNTIL IssuedFinChargeMemoLine.NEXT = 0;
+
+         GenerateSveDocument(SalesInvoiceHeaderTEMP, SalesInvoiceLineTEMP, FALSE, TRUE, FALSE);
+
+         pIssuedFinChargeMemoHeader."Elec. Fin. Charge Memo Created" := TRUE;
+         IF (gFromNAS) OR (SalesRecSetup."Svefaktura Background Export" = FALSE) THEN
+            pIssuedFinChargeMemoHeader."Invoice Exported by XML" := TRUE
+         ELSE
+            pIssuedFinChargeMemoHeader."Invoice Exported by XML" := FALSE;
+         pIssuedFinChargeMemoHeader.MODIFY;
+      UNTIL pIssuedFinChargeMemoHeader.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE HandleInvoicesFromNAS@1100285004(VAR pSalesInvHeader@1100285000 : Record 112);
+    VAR
+      HideItemNo@1100285001 : Boolean;
+      ShowDiscount@1100285002 : Boolean;
+      SalesInvoiceHeaderTEMP@1100285100 : TEMPORARY Record 112;
+    BEGIN
+      // 151124 RFC001 ITERO.MH: Changed "CreateSalesInvoiceHeader" to use TEMP-rec and be called inside loop
+      //                         Added commit for faster database release.
+      // 160121 ITERO.AC IME445 Added column E-Invoice Layout Code and send as VAR parameter to GetSettingsFromLayoutCode()
+
+      IF pSalesInvHeader.FINDSET(TRUE) THEN REPEAT
+        GetSettingsFromLayoutCode(pSalesInvHeader."Invoice Layout Code", pSalesInvHeader."E-Invoice Layout Code", HideItemNo, ShowDiscount);   // 160121 ITERO.AC IME445 New parameter
+        pSalesInvHeader.MODIFY;
+        COMMIT;
+
+        SalesInvoiceHeaderTEMP.DELETEALL;
+        SalesInvoiceHeaderTEMP.COPY(pSalesInvHeader);
+        SalesInvoiceHeaderTEMP.INSERT;
+        CreateSalesInvoice(SalesInvoiceHeaderTEMP, 0, HideItemNo, ShowDiscount);
+
+        pSalesInvHeader."Invoice Exported by XML" := TRUE;
+        pSalesInvHeader.MODIFY;
+        COMMIT;
+      UNTIL pSalesInvHeader.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE HandleCrMemosFromNAS@1100285001(VAR pSalesCrMemoHeader@1100285000 : Record 114);
+    VAR
+      HideItemNo@1100285001 : Boolean;
+      ShowDiscount@1100285002 : Boolean;
+      SalesCrMemoHeaderTEMP@1100285100 : TEMPORARY Record 114;
+    BEGIN
+      // 151124 RFC001 ITERO.MH: Changed "CreateSalesCreditMemo" to use TEMP-rec and be called inside loop
+      //                         Added commit for faster database release.
+      // 160121 ITERO.AC IME445 Added column E-Invoice Layout Code and send as VAR parameter to GetSettingsFromLayoutCode()
+
+      IF pSalesCrMemoHeader.FINDSET(TRUE) THEN REPEAT
+        GetSettingsFromLayoutCode(pSalesCrMemoHeader."Invoice Layout Code", pSalesCrMemoHeader."E-Invoice Layout Code", HideItemNo, ShowDiscount);  // 160121 ITERO.AC IME445 New parameter
+        pSalesCrMemoHeader.MODIFY;
+        COMMIT;
+
+        SalesCrMemoHeaderTEMP.DELETEALL;
+        SalesCrMemoHeaderTEMP.COPY(pSalesCrMemoHeader);
+        SalesCrMemoHeaderTEMP.INSERT;
+        CreateSalesCreditMemo(SalesCrMemoHeaderTEMP, 0, HideItemNo, ShowDiscount);
+
+        pSalesCrMemoHeader."Invoice Exported by XML" := TRUE;
+        pSalesCrMemoHeader.MODIFY;
+        COMMIT;
+      UNTIL pSalesCrMemoHeader.NEXT = 0;
+    END;
+
+    PROCEDURE CreateSalesInvoice@1100285002(VAR pSalesInvHeader@1100285500 : Record 112;LayoutCode@1100285000 : Integer;HideItemNo@1100285001 : Boolean;ShowDiscount@1100285002 : Boolean);
+    VAR
+      SalesReportTextManagement@1100285100 : Codeunit 11012369;
+      SalesRecSetup@1100285101 : Record 311;
+      SalesInvoiceLine@1100285102 : Record 113;
+      GenericSalesHeaderTEMP@1100285104 : TEMPORARY Record 11071888;
+      GenericSalesLineTEMP@1100285103 : TEMPORARY Record 11071889;
+      SalesInvoiceHeaderTEMP@1100285106 : TEMPORARY Record 112;
+      SalesInvoiceLineTEMP@1100285105 : TEMPORARY Record 113;
+      lvSalesReportTextLineRec@1000000000 : Record 11071912;
+      lvCustomerRec@1000000002 : Record 18;
+      lvStrippedView@1000000003 : Boolean;
+      lvDescription@1000000004 : Text[100];
+      lvExtensionContract@1000000005 : Code[10];
+      lvExtensionContractCount@1000000006 : Integer;
+      lvSalesReportTextCondition@111285100 : Record 11071891;
+      lvStringLen@1100285108 : Integer;
+      lvInvoiceText@1100285109 : Text[250];
+      lvInvoiceLineNo@1100285110 : Integer;
+    BEGIN
+      // 141001 Changed creation of Invoice to go via Generic Sales Line and Generic Sales Header first.
+      SalesRecSetup.GET;
+      //>> 160919 ITERO.AC IME484 Check if stripped invoice should be used.
+      //   Now we are adding group headers and group footers as invoice lines for non-stripped invoices
+      IF gFromNAS THEN BEGIN
+        gGLSetup.GET;
+        IF lvCustomerRec.GET(pSalesInvHeader."Sell-to Customer No.") THEN;
+        IF lvCustomerRec."Stripped E-Invoice" AND NOT gGLSetup."Norwegian Localization Active" THEN
+          lvStrippedView := TRUE;
+      END;
+      //<< 160919 ITERO.AC IME484
+
+      IF pSalesInvHeader.FINDSET(TRUE) THEN REPEAT
+        GenericSalesHeaderTEMP.DELETEALL;
+        GenericSalesLineTEMP.DELETEALL;
+        SalesInvoiceHeaderTEMP.DELETEALL;
+        SalesInvoiceHeaderTEMP.INIT;
+
+        GenericSalesHeaderTEMP.InsertSalesInvoiceHeader(pSalesInvHeader);
+        IF NOT GenericSalesHeaderTEMP.HasTextLines THEN BEGIN
+          pSalesInvHeader."Invoice Layout Code" := FORMAT(LayoutCode);
+          pSalesInvHeader.MODIFY(FALSE);
+          SalesReportTextManagement.CreateTextLinesForPostedInvoice(pSalesInvHeader);
+          //>> 160919 ITERO.AC IME484 Bugfix if the invoice has no Invoice Layout Code (if the invoice is printed before RFC-001)
+          GenericSalesHeaderTEMP."Invoice Layout Code" := pSalesInvHeader."Invoice Layout Code";
+        END ELSE BEGIN
+          IF pSalesInvHeader."Invoice Layout Code" = '' THEN BEGIN
+            pSalesInvHeader."Invoice Layout Code" := FORMAT(LayoutCode);
+            pSalesInvHeader.MODIFY(FALSE);
+            GenericSalesHeaderTEMP."Invoice Layout Code" := pSalesInvHeader."Invoice Layout Code";
+          END;
+        //<< 160919 ITERO.AC IME484 Bugfix
+        END;
+
+        SalesInvoiceHeaderTEMP.TRANSFERFIELDS(GenericSalesHeaderTEMP);
+        SalesInvoiceHeaderTEMP.INSERT;
+        //140602
+        SalesInvoiceLineTEMP.DELETEALL;
+        SalesInvoiceLine.SETRANGE("Document No.", pSalesInvHeader."No.");
+        IF SalesInvoiceLine.FINDSET(FALSE) THEN REPEAT
+          //>> 161024 ITERO.AC IME484-2 Count number of Extension contracts
+          IF SalesInvoiceLine."Extension Contract" <> '' THEN BEGIN
+            IF lvExtensionContract <> SalesInvoiceLine."Extension Contract" THEN BEGIN
+              lvExtensionContractCount += 1;
+              lvExtensionContract := SalesInvoiceLine."Extension Contract";
+            END;
+          END;
+          //<< 161024 ITERO.AC IME484-2
+          IF (SalesInvoiceHeaderTEMP."Invoice Layout Code" IN ['1', '2', '3', '4']) THEN //190529 ORANGO.FH RFC1153
+              GenericSalesLineTEMP.InsertSalesInvoiceLine(SalesInvoiceLine)
+          ELSE
+            GenericSalesLineTEMP.InsertSalesInvoiceLineGroup(SalesInvoiceLine);
+        UNTIL SalesInvoiceLine.NEXT = 0;
+
+        IF GenericSalesLineTEMP.FINDSET(FALSE) THEN
+        //>>IME1072
+        BEGIN
+          IF gFromNAS AND (NOT lvStrippedView) AND (lvExtensionContractCount = 1) THEN BEGIN
+            SalesInvoiceLineTEMP.INIT;
+            lvSalesReportTextCondition.RESET;
+            lvSalesReportTextCondition.SETRANGE("Document Type",lvSalesReportTextCondition."Document Type"::"Posted Invoice");
+            lvSalesReportTextCondition.SETRANGE("Text Line Type", lvSalesReportTextCondition."Text Line Type"::"Before Detail");
+            lvSalesReportTextCondition.SETRANGE("Function Name",'EXTENSIONINVOICE2');
+            IF lvSalesReportTextCondition.FINDFIRST THEN BEGIN
+              lvSalesReportTextLineRec.SETRANGE("Document Type", lvSalesReportTextLineRec."Document Type"::"Posted Invoice");
+              lvSalesReportTextLineRec.SETRANGE("Document No.", pSalesInvHeader."No.");
+              lvSalesReportTextLineRec.SETRANGE("Document Line No.",GenericSalesLineTEMP."Line No.");
+              lvSalesReportTextLineRec.SETRANGE("Text Line Type", lvSalesReportTextLineRec."Text Line Type"::"Before Detail");
+              lvSalesReportTextLineRec.SETFILTER(Text, '<>%1', '');
+              lvSalesReportTextLineRec.SETRANGE("Line No.",lvSalesReportTextCondition."Text Line No.");
+              IF lvSalesReportTextLineRec.FINDFIRST THEN BEGIN
+                IF CheckGroupHeader(lvSalesReportTextLineRec, lvExtensionContractCount, SalesInvoiceHeaderTEMP."Invoice Layout Code") THEN BEGIN  // 161024 ITERO.AC IME484-2 Adjustment, added parameters
+                  SalesInvoiceLineTEMP.TRANSFERFIELDS(GenericSalesLineTEMP);
+
+                  //180913 always top of print regardless of "Invoice Layout Code"
+                  SalesInvoiceLineTEMP."Cost Type Cost Plus Line" := 0;
+                  SalesInvoiceLineTEMP."Job No." := '';
+                  SalesInvoiceLineTEMP."Extension Contract":='';
+
+                  SalesInvoiceLineTEMP."Document No." := GenericSalesLineTEMP."Document No.";
+                  SalesInvoiceLineTEMP."Line No." := GenericSalesLineTEMP."Line No." -20;
+                  lvDescription := COPYSTR(DeleteHTML(lvSalesReportTextLineRec.Text), 1, 100);
+                  SalesInvoiceLineTEMP.Description := COPYSTR(lvDescription, 1, 50);
+                  IF STRLEN(lvDescription) > 50 THEN
+                    SalesInvoiceLineTEMP."Description 2" := COPYSTR(lvDescription, 51, 50);
+                  BlankInvoiceLineFieldsForGroupHeader(SalesInvoiceLineTEMP);
+                  SalesInvoiceLineTEMP.MARK(TRUE);      // XML Port checks the MARK flag to determine if the line is an extra text line or not!
+                  SalesInvoiceLineTEMP.INSERT(FALSE);
+                  SalesInvoiceLineTEMP.INIT;
+                END;
+              END;
+              lvSalesReportTextLineRec.SETRANGE("Line No.");
+              lvExtensionContractCount := 0; //don't double print the extension line
+            END;
+          END;
+          //<<IME1072
+          REPEAT
+            SalesInvoiceLineTEMP.INIT;
+            //>> 160919 ITERO.AC IME484 Add extra text lines here, not in the XML port)
+            IF gFromNAS AND NOT lvStrippedView THEN BEGIN
+              // Add Line before current invoice line if exists in Sales Report Text Line
+              lvSalesReportTextLineRec.SETRANGE("Document Type", lvSalesReportTextLineRec."Document Type"::"Posted Invoice");
+              lvSalesReportTextLineRec.SETRANGE("Document No.", pSalesInvHeader."No.");
+              lvSalesReportTextLineRec.SETRANGE("Document Line No.",GenericSalesLineTEMP."Line No.");
+              lvSalesReportTextLineRec.SETRANGE("Text Line Type", lvSalesReportTextLineRec."Text Line Type"::"Before Detail");
+              lvSalesReportTextLineRec.SETFILTER(Text, '<>%1', '');
+              // Very important to fetch last row, Otherwise we will get the first invoice header text row, in the first group header!!!
+              IF lvSalesReportTextLineRec.FINDLAST THEN BEGIN
+                IF CheckGroupHeader(lvSalesReportTextLineRec, lvExtensionContractCount, SalesInvoiceHeaderTEMP."Invoice Layout Code") THEN BEGIN  // 161024 ITERO.AC IME484-2 Adjustment, added parameters
+                  SalesInvoiceLineTEMP.TRANSFERFIELDS(GenericSalesLineTEMP);
+                  SalesInvoiceLineTEMP."Document No." := GenericSalesLineTEMP."Document No.";
+                  SalesInvoiceLineTEMP."Line No." := GenericSalesLineTEMP."Line No." -10;
+                  //>> 161014 ITERO.AC IME484 Bugfix. Job Queue Entry will stop if text exceeds 50 characters - Handle the first 100, split into 2 fields if more than 50
+                  //SalesInvoiceLineTEMP.Description := '* ' + DeleteHTML(lvSalesReportTextLineRec.Text);
+                  lvDescription := COPYSTR('* ' + DeleteHTML(lvSalesReportTextLineRec.Text), 1, 100);
+                  SalesInvoiceLineTEMP.Description := COPYSTR(lvDescription, 1, 50);
+                  IF STRLEN(lvDescription) > 50 THEN
+                    SalesInvoiceLineTEMP."Description 2" := COPYSTR(lvDescription, 51, 50);
+                  //<< 161014 ITERO.AC IME484 Bugfix
+                  BlankInvoiceLineFieldsForGroupHeader(SalesInvoiceLineTEMP);
+                  SalesInvoiceLineTEMP.MARK(TRUE);      // XML Port checks the MARK flag to determine if the line is an extra text line or not!
+                  SalesInvoiceLineTEMP.INSERT(FALSE);
+                  SalesInvoiceLineTEMP.INIT;
+                END;
+              END;
+            END;
+
+            IF gFromNAS AND (NOT lvStrippedView) THEN BEGIN //>>190219 RFC1150
+              IF GenericSalesLineTEMP."Text Block" AND (GenericSalesLineTEMP."Extension Contract" = '') THEN BEGIN
+                lvInvoiceText   := GenericSalesLineTEMP.Text;
+                lvInvoiceLineNo := GenericSalesLineTEMP."Line No." - 30 ;
+                REPEAT
+                  lvStringLen   := STRLEN(lvInvoiceText);
+                  IF lvStringLen > 50 THEN
+                    lvStringLen := GetLastSpacePos(COPYSTR(lvInvoiceText,1,50));
+                  SalesInvoiceLineTEMP.INIT;
+                  SalesInvoiceLineTEMP."Document No."  := GenericSalesLineTEMP."Document No.";
+                  SalesInvoiceLineTEMP."Line No."      := lvInvoiceLineNo;
+                  SalesInvoiceLineTEMP.Description     := COPYSTR(lvInvoiceText,1,lvStringLen);
+                  SalesInvoiceLineTEMP.MARK(TRUE);
+                  SalesInvoiceLineTEMP.INSERT(FALSE);
+                  lvInvoiceText := DELSTR(lvInvoiceText,1,lvStringLen);
+                  lvInvoiceLineNo += 1;
+                UNTIL STRLEN(lvInvoiceText) = 0;
+              END;
+            END;  //<<190219 RFC1150
+
+            // Add the "real" Invoice Line
+            // Use same filter as in Report 81666 - Generic Sales Document Imtech (Skip "hidden" rows even if we use them to find group headers)
+            IF (((GenericSalesLineTEMP."System-Created Entry" = FALSE) AND (GenericSalesLineTEMP.Description <> '') AND (GenericSalesLineTEMP.Type = GenericSalesLineTEMP.Type::" "))
+                OR (GenericSalesLineTEMP.Amount <> 0) OR (GenericSalesLineTEMP."Amount Including VAT" <> 0)     // 161018 ITERO.AC IME493 Added "Amount Including VAT" <> 0)
+                OR ((GenericSalesLineTEMP.Type = GenericSalesLineTEMP.Type::"G/L Account") AND (lvStrippedView = FALSE)) ) THEN BEGIN   // 161029 ITERO.AC IME484-3 Inlude text lines from project cost plus entries
+              SalesInvoiceLineTEMP.TRANSFERFIELDS(GenericSalesLineTEMP);
+              SalesInvoiceLineTEMP.INSERT(FALSE);   // 160919 ITERO.AC RFC484 Do not run trigger on temporary records !!
+            END;
+            IF gFromNAS AND NOT lvStrippedView THEN BEGIN
+              // Add Line after the current invoice line if exists in Sales Report Text Line
+              lvSalesReportTextLineRec.SETRANGE("Text Line Type", lvSalesReportTextLineRec."Text Line Type"::"After Detail");
+              IF lvSalesReportTextLineRec.FINDFIRST THEN BEGIN
+                IF CheckGroupFooter(lvSalesReportTextLineRec) THEN BEGIN
+                  SalesInvoiceLineTEMP.TRANSFERFIELDS(GenericSalesLineTEMP);
+                  SalesInvoiceLineTEMP."Document No." := GenericSalesLineTEMP."Document No.";
+                  SalesInvoiceLineTEMP."Line No." := GenericSalesLineTEMP."Line No." +10;
+                  //>> 161014 ITERO.AC IME484 Bugfix. Job Queue Entry will stop if text exceeds 50 characters - Handle the first 100, split into 2 fields if more than 50
+                  //SalesInvoiceLineTEMP.Description := '** ' + DeleteHTML(lvSalesReportTextLineRec.Text);
+                  lvDescription := COPYSTR('** ' + DeleteHTML(lvSalesReportTextLineRec.Text), 1, 100);
+                  SalesInvoiceLineTEMP.Description := COPYSTR(lvDescription, 1, 50);
+                  IF STRLEN(lvDescription) > 50 THEN
+                    SalesInvoiceLineTEMP."Description 2" := COPYSTR(lvDescription, 51, 50);
+                  //<< 161014 ITERO.AC IME484 Bugfix
+                  BlankInvoiceLineFieldsForGroupHeader(SalesInvoiceLineTEMP);
+                  SalesInvoiceLineTEMP.MARK(TRUE);      // XML Port checks the MARK flag to determine if the line is an extra text line or not !
+                  SalesInvoiceLineTEMP.INSERT(FALSE);
+                  SalesInvoiceLineTEMP.INIT;
+                END;
+              END;
+            END;
+            //<< 160919 ITERO.AC IME484
+          UNTIL GenericSalesLineTEMP.NEXT = 0;
+
+        END;  //IME1072
+        GenerateSveDocument(SalesInvoiceHeaderTEMP, SalesInvoiceLineTEMP, FALSE, HideItemNo, ShowDiscount);
+        pSalesInvHeader."Electronic Invoice Created" := TRUE;
+        IF gFromNAS OR (NOT SalesRecSetup."Svefaktura Background Export") THEN BEGIN
+          pSalesInvHeader."Invoice Exported by XML" := TRUE;
+        END ELSE BEGIN
+          IF STRPOS(pSalesInvHeader."Invoice Layout Code", ',') = 0 THEN // 151124: Only populate if not yet set
+            //>> 160121 ITERO.AC IME 445 New Field "E-Invoice Layout Code" handled
+            // SetSettingsToLayoutCode(pSalesInvHeader."Invoice Layout Code", HideItemNo, ShowDiscount);
+            SetSettingsToEInvoiceLayoutCode(pSalesInvHeader."Invoice Layout Code", pSalesInvHeader."E-Invoice Layout Code", HideItemNo, ShowDiscount);
+            //<< 160121 ITERO.AC IME 445
+          pSalesInvHeader."Invoice Exported by XML" := FALSE;
+        END;
+        pSalesInvHeader.MODIFY;
+
+      UNTIL pSalesInvHeader.NEXT = 0;
+    END;
+
+    PROCEDURE CreateSalesCreditMemo@1100285003(VAR pSalesCrMemoHeader@1100285500 : Record 114;LayoutCode@1100285002 : Integer;HideItemNo@1100285001 : Boolean;ShowDiscount@1100285000 : Boolean);
+    VAR
+      SalesReportTextManagement@1100285100 : Codeunit 11012369;
+      SalesRecSetup@1100285101 : Record 311;
+      SalesCrMemoLine@1100285103 : Record 115;
+      GenericSalesHeaderTEMP@1100285106 : TEMPORARY Record 11071888;
+      GenericSalesLineTEMP@1100285105 : TEMPORARY Record 11071889;
+      SalesInvoiceHeaderTEMP@1100285104 : TEMPORARY Record 112;
+      SalesInvoiceLineTEMP@1100285102 : TEMPORARY Record 113;
+      lvSalesReportTextLineRec@1000000000 : Record 11071912;
+      lvGLSetupRec@1000000001 : Record 98;
+      lvCustomerRec@1000000002 : Record 18;
+      lvStrippedView@1000000003 : Boolean;
+      lvDescription@1000000004 : Text[100];
+      lvExtensionContract@1000000006 : Code[10];
+      lvExtensionContractCount@1000000005 : Integer;
+      lvSalesReportTextCondition@111285100 : Record 11071891;
+    BEGIN
+      // 141001 Changed creation of Credit Memo to go via Generic Sales Line and Generic Sales Header first.
+      SalesRecSetup.GET;
+      //>> 160919 ITERO.AC IME484 Check if stripped invoice should be used.
+      //   Now we are adding group headers and group footers as invoice lines for non-stripped invoices
+      IF gFromNAS THEN BEGIN
+        gGLSetup.GET;
+        IF lvCustomerRec.GET(pSalesCrMemoHeader."Sell-to Customer No.") THEN;
+        IF lvCustomerRec."Stripped E-Invoice" AND NOT gGLSetup."Norwegian Localization Active" THEN
+          lvStrippedView := TRUE;
+      END;
+      //<< 160919 ITERO.AC IME484
+
+      IF pSalesCrMemoHeader.FINDSET(TRUE) THEN REPEAT
+
+        GenericSalesHeaderTEMP.DELETEALL; // 150319
+        GenericSalesLineTEMP.DELETEALL;   // 150319
+        SalesInvoiceHeaderTEMP.DELETEALL;
+        SalesInvoiceHeaderTEMP.INIT;
+
+        GenericSalesHeaderTEMP.InsertSalesCrMemoHeader(pSalesCrMemoHeader);
+        IF NOT GenericSalesHeaderTEMP.HasTextLines THEN BEGIN
+          pSalesCrMemoHeader."Invoice Layout Code" := FORMAT(LayoutCode);
+          pSalesCrMemoHeader.MODIFY(FALSE);
+          SalesReportTextManagement.CreateTextLinesForPostedCrMemo(pSalesCrMemoHeader);
+        //>> 160919 ITERO.AC IME484 Bugfix if the invoice has no Invoice Layout Code (if the invoice is printed before RFC-001)
+          GenericSalesHeaderTEMP."Invoice Layout Code" := pSalesCrMemoHeader."Invoice Layout Code";
+        END ELSE BEGIN
+          IF pSalesCrMemoHeader."Invoice Layout Code" = '' THEN BEGIN
+            pSalesCrMemoHeader."Invoice Layout Code" := FORMAT(LayoutCode);
+            pSalesCrMemoHeader.MODIFY(FALSE);
+            GenericSalesHeaderTEMP."Invoice Layout Code" := pSalesCrMemoHeader."Invoice Layout Code";
+          END;
+        //<< 160919 ITERO.AC IME484 Bugfix
+        END;
+
+        SalesInvoiceHeaderTEMP.TRANSFERFIELDS(GenericSalesHeaderTEMP);
+        SalesInvoiceHeaderTEMP.INSERT;
+
+        SalesInvoiceLineTEMP.DELETEALL;
+        SalesCrMemoLine.SETRANGE("Document No.", pSalesCrMemoHeader."No.");
+
+        IF SalesCrMemoLine.FINDSET THEN REPEAT
+          //>> 161024 ITERO.AC IME484-2 Count number of Extension contracts
+          IF SalesCrMemoLine."Extension Contract" <> '' THEN BEGIN
+            IF lvExtensionContract <> SalesCrMemoLine."Extension Contract" THEN BEGIN
+              lvExtensionContractCount += 1;
+              lvExtensionContract := SalesCrMemoLine."Extension Contract";
+            END;
+          END;
+          //<< 161024 ITERO.AC IME484-2
+          IF (SalesInvoiceHeaderTEMP."Invoice Layout Code" IN ['1', '2', '3', '4']) THEN //190529 ORANGO.FH RFC1153
+              GenericSalesLineTEMP.InsertSalesCrMemoLine(SalesCrMemoLine)
+          ELSE
+              GenericSalesLineTEMP.InsertSalesCrMemoLineGroup(SalesCrMemoLine);
+        UNTIL SalesCrMemoLine.NEXT = 0;
+
+        IF (GenericSalesLineTEMP.FINDSET(FALSE)) THEN
+          //>>IME1072
+          BEGIN
+          IF gFromNAS AND (NOT lvStrippedView) AND (lvExtensionContractCount = 1) THEN BEGIN
+            SalesInvoiceLineTEMP.INIT;
+            lvSalesReportTextCondition.RESET;
+            lvSalesReportTextCondition.SETRANGE("Document Type",lvSalesReportTextCondition."Document Type"::"Posted Invoice");
+            lvSalesReportTextCondition.SETRANGE("Text Line Type", lvSalesReportTextCondition."Text Line Type"::"Before Detail");
+            lvSalesReportTextCondition.SETRANGE("Function Name",'EXTENSIONINVOICE2');
+            IF lvSalesReportTextCondition.FINDFIRST THEN BEGIN
+              lvSalesReportTextLineRec.SETRANGE("Document Type", lvSalesReportTextLineRec."Document Type"::"Posted Invoice");
+              lvSalesReportTextLineRec.SETRANGE("Document No.", pSalesCrMemoHeader."No.");
+              lvSalesReportTextLineRec.SETRANGE("Document Line No.",GenericSalesLineTEMP."Line No.");
+              lvSalesReportTextLineRec.SETRANGE("Text Line Type", lvSalesReportTextLineRec."Text Line Type"::"Before Detail");
+              lvSalesReportTextLineRec.SETFILTER(Text, '<>%1', '');
+              lvSalesReportTextLineRec.SETRANGE("Line No.",lvSalesReportTextCondition."Text Line No.");
+              IF lvSalesReportTextLineRec.FINDFIRST THEN BEGIN
+                IF CheckGroupHeader(lvSalesReportTextLineRec, lvExtensionContractCount, SalesInvoiceHeaderTEMP."Invoice Layout Code") THEN BEGIN  // 161024 ITERO.AC IME484-2 Adjustment, added parameters
+                  SalesInvoiceLineTEMP.TRANSFERFIELDS(GenericSalesLineTEMP);
+                  SalesInvoiceLineTEMP."Document No." := GenericSalesLineTEMP."Document No.";
+                  SalesInvoiceLineTEMP."Line No." := GenericSalesLineTEMP."Line No." -20;
+                  lvDescription := COPYSTR(DeleteHTML(lvSalesReportTextLineRec.Text), 1, 100);
+                  SalesInvoiceLineTEMP.Description := COPYSTR(lvDescription, 1, 50);
+                  IF STRLEN(lvDescription) > 50 THEN
+                    SalesInvoiceLineTEMP."Description 2" := COPYSTR(lvDescription, 51, 50);
+                  BlankInvoiceLineFieldsForGroupHeader(SalesInvoiceLineTEMP);
+                  SalesInvoiceLineTEMP.MARK(TRUE);      // XML Port checks the MARK flag to determine if the line is an extra text line or not!
+                  SalesInvoiceLineTEMP.INSERT(FALSE);
+                  SalesInvoiceLineTEMP.INIT;
+                END;
+              END;
+              lvSalesReportTextLineRec.SETRANGE("Line No.");
+              lvExtensionContractCount := 0; //don't double print the extension line
+            END;
+          END;
+          //<<IME1072
+          REPEAT
+            SalesInvoiceLineTEMP.INIT;
+            //>> 160919 ITERO.AC IME484 Add extra text lines here, not in the XML port)
+            IF gFromNAS AND NOT lvStrippedView THEN BEGIN
+              // Add Line before current invoice line if exists in Sales Report Text Line
+              lvSalesReportTextLineRec.SETRANGE("Document Type", lvSalesReportTextLineRec."Document Type"::"Posted Credit Memo");
+              lvSalesReportTextLineRec.SETRANGE("Document No.", pSalesCrMemoHeader."No.");
+              lvSalesReportTextLineRec.SETRANGE("Document Line No.",GenericSalesLineTEMP."Line No.");
+              lvSalesReportTextLineRec.SETRANGE("Text Line Type", lvSalesReportTextLineRec."Text Line Type"::"Before Detail");
+              lvSalesReportTextLineRec.SETFILTER(Text, '<>%1', '');
+              // Very important to fetch last row, Otherwise we will get the first invoice header text row, in the first group header!!!
+              IF lvSalesReportTextLineRec.FINDLAST THEN BEGIN
+                IF CheckGroupHeader(lvSalesReportTextLineRec, lvExtensionContractCount, GenericSalesHeaderTEMP."Invoice Layout Code") THEN BEGIN  // 161024 ITERO.AC IME484-2 Adjustment, added parameters
+                  SalesInvoiceLineTEMP.TRANSFERFIELDS(GenericSalesLineTEMP);
+                  SalesInvoiceLineTEMP."Document No." := GenericSalesLineTEMP."Document No.";
+                  SalesInvoiceLineTEMP."Line No." := GenericSalesLineTEMP."Line No." -10;
+                  //>> 161014 ITERO.AC IME484 Bugfix. Job Queue Entry will stop if text exceeds 50 characters - Handle the first 100, split into 2 fields if more than 50
+                  //SalesInvoiceLineTEMP.Description := '* ' + DeleteHTML(lvSalesReportTextLineRec.Text);
+                  lvDescription := COPYSTR('* ' + DeleteHTML(lvSalesReportTextLineRec.Text), 1, 100);
+                  SalesInvoiceLineTEMP.Description := COPYSTR(lvDescription, 1, 50);
+                  IF STRLEN(lvDescription) > 50 THEN
+                    SalesInvoiceLineTEMP."Description 2" := COPYSTR(lvDescription, 51, 50);
+                  //<< 161014 ITERO.AC IME484 Bugfix
+                  BlankInvoiceLineFieldsForGroupHeader(SalesInvoiceLineTEMP);
+                  SalesInvoiceLineTEMP.MARK(TRUE);      // XML Port checks the MARK flag to determine if the line is an extra text line or not!
+                  SalesInvoiceLineTEMP.INSERT(FALSE);
+                  SalesInvoiceLineTEMP.INIT;
+                END;
+              END;
+            END;
+            // Add the "real" Invoice Line
+            // Use same filter as in Report 81666 - Generic Sales Document Imtech (Skip "hidden" rows even if we use them to find group headers)
+            IF (((GenericSalesLineTEMP."System-Created Entry" = FALSE) AND (GenericSalesLineTEMP.Description <> '') AND (GenericSalesLineTEMP.Type = GenericSalesLineTEMP.Type::" "))
+                OR (GenericSalesLineTEMP.Amount <> 0) OR (GenericSalesLineTEMP."Amount Including VAT" <> 0)     // 161018 ITERO.AC IME493 Added "Amount Including VAT" <> 0)
+                OR ((GenericSalesLineTEMP.Type = GenericSalesLineTEMP.Type::"G/L Account") AND (lvStrippedView = FALSE)) ) THEN BEGIN   // 161029 ITERO.AC IME484-3 Inlude text lines from project cost plus entries
+              SalesInvoiceLineTEMP.TRANSFERFIELDS(GenericSalesLineTEMP);
+              SalesInvoiceLineTEMP.INSERT(FALSE);   // 160919 ITERO.AC RFC484 Do not run trigger on temporary records !!
+            END;
+            IF gFromNAS AND NOT lvStrippedView THEN BEGIN
+              // Add Line after the current invoice line if exists in Sales Report Text Line
+              lvSalesReportTextLineRec.SETRANGE("Text Line Type", lvSalesReportTextLineRec."Text Line Type"::"After Detail");
+              IF lvSalesReportTextLineRec.FINDFIRST THEN BEGIN
+                IF CheckGroupFooter(lvSalesReportTextLineRec) THEN BEGIN
+                  SalesInvoiceLineTEMP.TRANSFERFIELDS(GenericSalesLineTEMP);
+                  SalesInvoiceLineTEMP."Document No." := GenericSalesLineTEMP."Document No.";
+                  SalesInvoiceLineTEMP."Line No." := GenericSalesLineTEMP."Line No." +10;
+                  //>> 161014 ITERO.AC IME484 Bugfix. Job Queue Entry will stop if text exceeds 50 characters - Handle the first 100, split into 2 fields if more than 50
+                  //SalesInvoiceLineTEMP.Description := '** ' + DeleteHTML(lvSalesReportTextLineRec.Text);
+                  lvDescription := COPYSTR('** ' + DeleteHTML(lvSalesReportTextLineRec.Text), 1, 100);
+                  SalesInvoiceLineTEMP.Description := COPYSTR(lvDescription, 1, 50);
+                  IF STRLEN(lvDescription) > 50 THEN
+                    SalesInvoiceLineTEMP."Description 2" := COPYSTR(lvDescription, 51, 50);
+                  //<< 161014 ITERO.AC IME484 Bugfix
+                  BlankInvoiceLineFieldsForGroupHeader(SalesInvoiceLineTEMP);
+                  SalesInvoiceLineTEMP.MARK(TRUE);      // XML Port checks the MARK flag to determine if the line is an extra text line or not !
+                  SalesInvoiceLineTEMP.INSERT(FALSE);
+                  SalesInvoiceLineTEMP.INIT;
+                END;
+              END;
+            END;
+            //<< 160919 ITERO.AC IME484
+          UNTIL GenericSalesLineTEMP.NEXT = 0;
+        END;  //IME1072
+
+        //140602
+        GenerateSveDocument(SalesInvoiceHeaderTEMP, SalesInvoiceLineTEMP, TRUE, TRUE, FALSE);
+
+        pSalesCrMemoHeader."Electronic Credit Memo Created":= TRUE;
+        IF gFromNAS OR (NOT SalesRecSetup."Svefaktura Background Export") THEN
+          pSalesCrMemoHeader."Invoice Exported by XML" := TRUE
+        ELSE BEGIN
+          IF (STRPOS(pSalesCrMemoHeader."Invoice Layout Code", ',') = 0) THEN // 151124: Only populate if not yet set
+              //>> 160121 ITERO.AC IME 445 New Field "E-Invoice Layout Code" handled
+              // SetSettingsToLayoutCode(pSalesCrMemoHeader."Invoice Layout Code", HideItemNo, ShowDiscount);
+              SetSettingsToEInvoiceLayoutCode(pSalesCrMemoHeader."Invoice Layout Code", pSalesCrMemoHeader."E-Invoice Layout Code", HideItemNo, ShowDiscount);
+              //<< 160121 ITERO.AC IME 445
+          pSalesCrMemoHeader."Invoice Exported by XML" := FALSE;
+        END;
+        pSalesCrMemoHeader.MODIFY;
+      UNTIL pSalesCrMemoHeader.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE GetSettingsFromLayoutCode@1100285005(VAR LayoutCode@1100285000 : Code[20];VAR EInvoiceLayoutCode@1100285004 : Code[10];VAR HideItemNo@1100285001 : Boolean;VAR ShowDiscount@1100285002 : Boolean);
+    VAR
+      TextTemp@1100285003 : Code[10];
+    BEGIN
+      //>> 160121 ITERO.AC IME445 Handle new column "E-Invoice Layout Code"
+      // If Eletronic Invoice Code Exist (Either set by printout or by previous export)
+      IF STRPOS(EInvoiceLayoutCode, ',') <> 0 THEN BEGIN
+         TextTemp := EInvoiceLayoutCode;
+         LayoutCode := SELECTSTR(1, TextTemp);
+         EVALUATE(HideItemNo, SELECTSTR(2, TextTemp));
+         EVALUATE(ShowDiscount, SELECTSTR(3, TextTemp));
+      END ELSE BEGIN
+      //>> 160121 ITERO.AC IME445
+        TextTemp := LayoutCode;
+        IF STRPOS(LayoutCode, ',') <> 0 THEN BEGIN
+          LayoutCode := SELECTSTR(1, TextTemp);
+          EVALUATE(HideItemNo, SELECTSTR(2, TextTemp));
+          EVALUATE(ShowDiscount, SELECTSTR(3, TextTemp));
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE SetSettingsToLayoutCode@1100285006(VAR LayoutCode@1100285000 : Code[20];VAR HideItemNo@1100285001 : Boolean;VAR ShowDiscount@1100285002 : Boolean);
+    VAR
+      int@1100285003 : Integer;
+    BEGIN
+      CASE HideItemNo OF
+         TRUE: int := 1;
+         FALSE: int := 0;
+      END;
+      LayoutCode := LayoutCode + ',' + FORMAT(int);
+
+      CASE ShowDiscount OF
+         TRUE: int := 1;
+         FALSE: int := 0;
+      END;
+      LayoutCode := LayoutCode + ',' + FORMAT(int);
+    END;
+
+    PROCEDURE SetSettingsToEInvoiceLayoutCode@1100285007(LayoutCode@1100285002 : Code[20];VAR EInvoiceLayoutCode@1100285003 : Code[20];VAR HideItemNo@1100285001 : Boolean;VAR ShowDiscount@1100285000 : Boolean);
+    VAR
+      int@1100285004 : Integer;
+    BEGIN
+      // 160121 ITERO.AC IME445 New Function used to calculate E-Invoice Layout Code
+      IF (EInvoiceLayoutCode = '') OR (STRPOS(EInvoiceLayoutCode, ',') < 1 ) THEN BEGIN
+        EInvoiceLayoutCode := SELECTSTR(1, LayoutCode);
+        CASE HideItemNo OF
+          TRUE: int := 1;
+          FALSE: int := 0;
+        END;
+
+        EInvoiceLayoutCode := EInvoiceLayoutCode + ',' + FORMAT(int);
+
+        CASE ShowDiscount OF
+          TRUE: int := 1;
+          FALSE: int := 0;
+        END;
+        EInvoiceLayoutCode := EInvoiceLayoutCode + ',' + FORMAT(int);
+
+      END;
+    END;
+
+    LOCAL PROCEDURE DeleteHTML@1100285018(IncomingHTML@1100285000 : Text) : Text;
+    VAR
+      StartPos@1100285001 : Integer;
+      EndPos@1100285002 : Integer;
+      Maxtry@1100285100 : Integer;
+    BEGIN
+      // 160919 ITERO.AC IME484 New Function used to remove HTML tags in text
+      // Is is a copy of the same function from XML Port 81647 - Imtech Svefaktura
+      Maxtry := 0;
+      IF STRPOS(IncomingHTML, '<') <> 0 THEN REPEAT
+         Maxtry += 1;
+         StartPos := STRPOS(IncomingHTML, '<');
+         EndPos := STRPOS(IncomingHTML, '>');
+         IF (StartPos > 1) THEN
+            IncomingHTML := COPYSTR(IncomingHTML, 1, StartPos - 1) + COPYSTR(IncomingHTML, EndPos + 1)
+         ELSE IF (StartPos = 1) THEN
+            IncomingHTML := COPYSTR(IncomingHTML, EndPos + 1);
+      UNTIL (STRPOS(IncomingHTML, '<') = 0) OR (EndPos = 0) OR (Maxtry > 250);
+
+      IncomingHTML := CONVERTSTR(IncomingHTML, ';', ' ');
+
+      EXIT(IncomingHTML);
+    END;
+
+    PROCEDURE BlankInvoiceLineFieldsForGroupHeader@1000000008(VAR SalesInvoiceLineTEMP@1000000000 : Record 113);
+    BEGIN
+      // 160919 ITERO.AC IME484 Help function
+      // We are now using Invoice Lines for group headers and some fields must be
+      // blank or zero in order to avoid export of field data.
+
+      // SalesInvoiceLineTEMP."Unit of Measure" := '';
+      // SalesInvoiceLineTEMP."Unit of Measure Code" := '';
+      SalesInvoiceLineTEMP.Quantity :=0;
+      SalesInvoiceLineTEMP."Line Amount" :=0;
+      SalesInvoiceLineTEMP."Line Discount %" :=0;
+      SalesInvoiceLineTEMP.Amount :=0;
+      SalesInvoiceLineTEMP."Amount Including VAT" :=0;
+      SalesInvoiceLineTEMP."Unit Price" :=0;
+      SalesInvoiceLineTEMP."VAT Base Amount" := 0;
+      SalesInvoiceLineTEMP."Unit Cost" :=0;
+      SalesInvoiceLineTEMP."Unit Cost (LCY)" :=0;
+      SalesInvoiceLineTEMP."VAT Bus. Posting Group" := '';
+      SalesInvoiceLineTEMP."VAT Prod. Posting Group" := '';
+      SalesInvoiceLineTEMP."VAT %" :=0;
+      // SalesInvoiceLineTEMP."Surcharge %" :=0;
+      SalesInvoiceLineTEMP."Item No." := '';
+      SalesInvoiceLineTEMP."Basic Item" := '';
+      SalesInvoiceLineTEMP."Trade Item" := '';
+      SalesInvoiceLineTEMP.Manufacturer := '';
+      SalesInvoiceLineTEMP."Vendor (Trade Item)" := '';
+      // SalesInvoiceLineTEMP."VAT Calculation Type"
+      // SalesInvoiceLineTEMP."Job No."
+      // SalesInvoiceLineTEMP."Sell-to Customer No."
+      SalesInvoiceLineTEMP."Commission No." := '';
+      SalesInvoiceLineTEMP."Settl.Sheet No." := '';
+      SalesInvoiceLineTEMP."Cost Plus Line No." :=0;
+    END;
+
+    LOCAL PROCEDURE CheckGroupHeader@1000000002(VAR pSalesReportTextLineRec@1000000000 : Record 11071912;pExtensionContractCount@1000000002 : Integer;pInvLayoutCode@1000000003 : Code[10]) : Boolean;
+    VAR
+      lvSalesReportTextCondRec@1000000001 : Record 11071891;
+    BEGIN
+      // 160920 ITERO.AC IME484 New help function
+      // Used to determine if a line before detail should be added as a MARKED Invoice Line or not in Svefaktura XML Export
+
+      lvSalesReportTextCondRec.SETRANGE("Document Type", pSalesReportTextLineRec."Document Type");
+      lvSalesReportTextCondRec.SETRANGE("Text Line Type", pSalesReportTextLineRec."Text Line Type");
+      lvSalesReportTextCondRec.SETRANGE("Text Line No.", pSalesReportTextLineRec."Line No.");
+      lvSalesReportTextCondRec.SETFILTER("Function Name", 'ELEMENTINVOICE|EXTENSIONINVOICE|FirstLineOfType'); //190529 ORANGO.FH RFC1153
+      IF lvSalesReportTextCondRec.FINDSET(FALSE) THEN BEGIN
+        EXIT(TRUE);
+      END ELSE BEGIN
+        //>> 161024 ITERO.AC IME484-2 Adjustment
+        // Check if only one Extension contract, Write a header line if the invoice only contains one single extension contract
+        // Do not use this for invoices with Invoice Layout Code 3 (Sorted by Extension contract)
+        IF (pExtensionContractCount = 1) AND (pInvLayoutCode <> '3') THEN BEGIN
+          lvSalesReportTextCondRec.SETFILTER("Function Name", 'EXTENSIONINVOICE2');
+          IF lvSalesReportTextCondRec.FINDSET(FALSE) THEN BEGIN
+            EXIT(TRUE);
+          END;
+        END ELSE BEGIN
+          EXIT(FALSE);
+        //<< 161024 ITERO.AC IME484-2
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckGroupFooter@1000000018(VAR pSalesReportTextLineRec@1000000000 : Record 11071912) : Boolean;
+    VAR
+      lvSalesReportTextCondRec@1000000001 : Record 11071891;
+    BEGIN
+      // 160920 ITERO.AC IME484 New help function
+      // Used to determine if a line after detail should be added as a MARKED Invoice Line or not in Svefaktura XML Export
+      // A Group Footer as Installment Withheld Amount will result in FALSE because the XML port will add it
+
+      lvSalesReportTextCondRec.SETRANGE("Document Type", pSalesReportTextLineRec."Document Type");
+      lvSalesReportTextCondRec.SETRANGE("Text Line Type", pSalesReportTextLineRec."Text Line Type");
+      lvSalesReportTextCondRec.SETRANGE("Text Line No.", pSalesReportTextLineRec."Line No.");
+      lvSalesReportTextCondRec.SETFILTER("Function Name", 'InstallmentAmountHasValue');
+      IF lvSalesReportTextCondRec.FINDSET(FALSE) THEN BEGIN
+          EXIT(FALSE);
+      END ELSE BEGIN
+          EXIT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE GetLastSpacePos@1100285115(str@1100285100 : Text[50]) SpacePlace : Integer;
+    VAR
+      pos@1100285101 : Integer;
+      reverseStr@1100285102 : Text[50];
+    BEGIN
+      IF 1 = STRPOS(str, ' ') THEN
+        str := DELSTR(str,1,1);
+      pos := STRLEN(str);
+      REPEAT
+        reverseStr := reverseStr + COPYSTR(str,pos,1);
+        pos -= 1;
+      UNTIL pos = 0;
+      EXIT(STRLEN(str) - STRPOS(reverseStr,' '));
+    END;
+
+    BEGIN
+    {
+      150928 ITERO.MH RFC001  Imtech specific Svefaktura Mgmt functionality
+      151118 ITERO.MH RFC001 Removed call of xmlport for non-nas to fasten user interface
+      151124 ITERO.MH RFC001 Changed call from NAS: added commit for faster DB release and called export for each document instead of batch
+      160121 ITERO.AC IME445 Handle new column "E-Invoice Layout Code" in tables "Sales Invoice Header" and "Sales Cr.Memo Header"
+      160126 ITERO.AC RFC035 Do not send XML files for Fin. Charge Memos
+      160919 ITERO.AC IME484 Moved logic for Group Heades and Group Footers from the XML Port to this code unit in order to avoid non-pritable lines in XML
+      160920 ITERO.AC IME484 Bug fixes
+      161014 ITERO.AC IME484 Bugfix. Job Queue Entry will stop if text (From Sales Report Text Line) exceeds 50 characters - Handle the first 100, split into 2 fields if more than 50
+      161018 ITERO.AC IME493 Fix VAT Amount rounding error
+      161024 ITERO.AC IME484-2 Adjustment after an email from Assemblin AS (missing text for Extension contract)
+      161029 ITERO.AC IME484-3 Inlude text lines from project cost plus entries
+      180824 ORANGO.DL/FH IME1072 Extension text (ŽTA) is not printed as textline to the invoicefile to inExchange
+      190219 ORANGO.FH RFC1150 Invoice text from "Sales Invoice Header" is added to lines
+      190529 ORANGO.FH RFC1153 Added functionality to handle "Invoice Layout Code" = 4, Element
+    }
+    END.
+  }
+}
+

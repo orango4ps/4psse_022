@@ -1,0 +1,158 @@
+OBJECT Codeunit 11126065 Service Portal Rental Mgt.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+
+    PROCEDURE RebuildSLAvailableBlocks@1100528604(IServiceLocationNo@1100528603 : Code[20];IDiscipline@1100528609 : Code[10];IFromDate@1100528607 : Date;IToDate@1100528608 : Date;IBudgetHours@1100528606 : Decimal);
+    VAR
+      ServiceLocation@1100528604 : Record 11012801;
+      PlanningAgreement@1100528602 : Record 11071729;
+      ServiceAppointmentBlock@1100528600 : Record 11071965;
+      SeekDate@1100528601 : Date;
+    BEGIN
+      IF IFromDate < TODAY THEN
+        IFromDate := TODAY;
+      IF IToDate < IFromDate THEN
+        IToDate := IFromDate;
+      ServiceLocation.GET(IServiceLocationNo);
+
+      ServiceAppointmentBlock.SETRANGE(Type, ServiceAppointmentBlock.Type::"Service Location");
+      ServiceAppointmentBlock.SETRANGE(Code, IServiceLocationNo);
+      ServiceAppointmentBlock.DELETEALL(TRUE);
+
+      Rebuild(IServiceLocationNo, IDiscipline, IFromDate, IToDate);
+
+      FOR SeekDate := IFromDate TO IToDate DO BEGIN
+        PlanningAgreement.SETFILTER(Type, '%1|%2', PlanningAgreement.Type::"Appointment Letter", PlanningAgreement.Type::Both);
+        IF PlanningAgreement.FINDSET THEN
+          REPEAT
+            IF (SeekDate > TODAY) OR (PlanningAgreement."Starting Time" > TIME) THEN BEGIN
+              ServiceAppointmentBlock.INIT;
+              ServiceAppointmentBlock.Type := ServiceAppointmentBlock.Type::"Service Location";
+              ServiceAppointmentBlock.Code := IServiceLocationNo;
+              ServiceAppointmentBlock."Appointment Date" := SeekDate;
+              ServiceAppointmentBlock.VALIDATE("Planning Agreement Code", PlanningAgreement.Code);
+              ServiceAppointmentBlock.Available :=
+                IsBlockAvailable(IServiceLocationNo, IBudgetHours, SeekDate, PlanningAgreement."Starting Time", PlanningAgreement."Ending Time");
+              ServiceAppointmentBlock.INSERT(TRUE);
+
+              ServiceAppointmentBlock.VALIDATE("Planning Agreement Code", '');
+              IF NOT ServiceAppointmentBlock.INSERT(TRUE) THEN
+                IF ServiceAppointmentBlock.Available THEN
+                  ServiceAppointmentBlock.MODIFY(TRUE);
+            END;
+          UNTIL PlanningAgreement.NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE IsBlockAvailable@1100528600(IServiceLocationNo@1100528600 : Code[20];IBudgetHours@1100528601 : Decimal;ISeekDate@1100528602 : Date;IStartingTime@1100528603 : Time;IEndingTime@1100528604 : Time) : Boolean;
+    VAR
+      ServiceAvailableTimeBlock@1100528605 : Record 11071968;
+      AvailableHours@1100528606 : Decimal;
+    BEGIN
+      ServiceAvailableTimeBlock.SETRANGE(Type, ServiceAvailableTimeBlock.Type::"Service Location");
+      ServiceAvailableTimeBlock.SETRANGE(Code, IServiceLocationNo);
+      ServiceAvailableTimeBlock.SETRANGE("Source Type", ServiceAvailableTimeBlock."Source Type"::" ");
+      ServiceAvailableTimeBlock.SETRANGE("Available Date", ISeekDate);
+      ServiceAvailableTimeBlock.SETFILTER("Available Block Start", '<=%1', IEndingTime);
+      ServiceAvailableTimeBlock.SETFILTER("Available Block End", '>=%1', IStartingTime);
+      ServiceAvailableTimeBlock.SETFILTER("Available Hours", '>=%1', IBudgetHours);
+      IF ServiceAvailableTimeBlock.FINDSET THEN
+        REPEAT
+          AvailableHours := ServiceAvailableTimeBlock."Available Hours";
+          IF IStartingTime > ServiceAvailableTimeBlock."Available Block Start" THEN
+            AvailableHours -= (IStartingTime - ServiceAvailableTimeBlock."Available Block Start") / 1000 / 60 / 60;
+          IF IEndingTime < ServiceAvailableTimeBlock."Available Block End" THEN
+            AvailableHours -= (ServiceAvailableTimeBlock."Available Block End" - IEndingTime) / 1000 / 60 / 60;
+          IF IBudgetHours <= AvailableHours THEN
+            EXIT(TRUE);
+        UNTIL ServiceAvailableTimeBlock.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE Rebuild@1100528601(IServiceLocationNo@1100528600 : Code[20];IDiscipline@1100528603 : Code[10];IFromDate@1100528601 : Date;IToDate@1100528602 : Date);
+    VAR
+      SeekDate@1100528605 : Date;
+    BEGIN
+      FOR SeekDate := IFromDate TO IToDate DO
+        RebuildByDate(IServiceLocationNo, IDiscipline, SeekDate);
+    END;
+
+    LOCAL PROCEDURE RebuildByDate@1100528622(IServiceLocationNo@1100528605 : Code[20];IDiscipline@1100528602 : Code[10];ISeekDate@1100528600 : Date);
+    VAR
+      ServiceAvailableTimeBlock@1100528500 : Record 11071968;
+      ResourceWOP@1100528601 : Record 11229278;
+    BEGIN
+      IF IDiscipline <> '' THEN
+        ResourceWOP.GetResourceDSByDiscipline(IDiscipline, ResourceWOP);
+      ResourceWOP.SETRANGE(Type, ResourceWOP.Type::Employee);
+      IF ResourceWOP.FINDSET THEN
+        REPEAT
+          ServiceAvailableTimeBlock.SETRANGE(Type, ServiceAvailableTimeBlock.Type::"Service Location");
+          ServiceAvailableTimeBlock.SETRANGE(Code, IServiceLocationNo);
+          ServiceAvailableTimeBlock.SETRANGE("Resource No.", ResourceWOP."No.");
+          ServiceAvailableTimeBlock.SETRANGE("Available Date", ISeekDate);
+          ServiceAvailableTimeBlock.DELETEALL(TRUE);
+          IF MeetsPlanData(IServiceLocationNo, IDiscipline, ResourceWOP."No.", ISeekDate) THEN
+            RebuildByResource(IServiceLocationNo, ResourceWOP."No.", ISeekDate);
+        UNTIL ResourceWOP.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE RebuildByResource@1100528605(IServiceLocationNo@1100528600 : Code[20];IResourceNo@1100528606 : Code[20];ISeekDate@1100528607 : Date);
+    VAR
+      ServiceAvailableTimeBlock@1100528604 : Record 11071968;
+      TmpOccupiedTimeBuffer@1100528601 : TEMPORARY Record 11071809;
+      ExcludeServiceOrder@1100528603 : Record 11012823;
+      ServiceOrderPlanManagement@1100528602 : Codeunit 11012868;
+    BEGIN
+      ExcludeServiceOrder.SETRANGE("No.", '');
+      ServiceOrderPlanManagement.FillOccupiedTimeBuffer(ISeekDate, 0T, 0T, IResourceNo, ExcludeServiceOrder, 0, 0, FALSE, TmpOccupiedTimeBuffer);
+
+      TmpOccupiedTimeBuffer.SETFILTER("Unoccupied Hours", '>%1', 0);
+      IF TmpOccupiedTimeBuffer.FINDSET THEN
+        REPEAT
+          ServiceAvailableTimeBlock.INIT;
+          ServiceAvailableTimeBlock.Type := ServiceAvailableTimeBlock.Type::"Service Location";
+          ServiceAvailableTimeBlock.Code := IServiceLocationNo;
+          ServiceAvailableTimeBlock."Source Type" := ServiceAvailableTimeBlock."Source Type"::" ";
+          ServiceAvailableTimeBlock."Seq. No." := 0;
+          ServiceAvailableTimeBlock."Resource No." := IResourceNo;
+          ServiceAvailableTimeBlock."Available Date" := ISeekDate;
+          ServiceAvailableTimeBlock."Available Block Start" := TmpOccupiedTimeBuffer."Ending Time";
+          ServiceAvailableTimeBlock."Available Block End" :=
+            TmpOccupiedTimeBuffer."Ending Time" + ROUND(TmpOccupiedTimeBuffer."Unoccupied Hours" * 1000 * 60 * 60, 1);
+          ServiceAvailableTimeBlock."Available Hours" := TmpOccupiedTimeBuffer."Unoccupied Hours";
+          ServiceAvailableTimeBlock.INSERT(TRUE);
+        UNTIL TmpOccupiedTimeBuffer.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE MeetsPlanData@1100528500(IServiceLocationNo@1100528501 : Code[20];IDiscipline@1100528500 : Code[10];IResourceNo@1100528503 : Code[20];ISeekDate@1100528502 : Date) : Boolean;
+    VAR
+      ServiceOrder@1100528504 : TEMPORARY Record 11012823;
+      ServiceLocation@1100528506 : Record 11012801;
+      ServiceOrderPlanManagement@1100528505 : Codeunit 11012868;
+    BEGIN
+      ServiceLocation.GET(IServiceLocationNo);
+
+      ServiceOrder."Source Type" := ServiceOrder."Source Type"::Call;
+      ServiceOrder.Discipline := IDiscipline;
+      ServiceOrder."Territory Code" := ServiceLocation."Territory Code";
+      EXIT(ServiceOrderPlanManagement.ServiceOrderMeetsPlanData(ServiceOrder, IResourceNo, ISeekDate, ISeekDate, 1));
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

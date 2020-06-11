@@ -1,0 +1,920 @@
+OBJECT Codeunit 11012576 Planning and Future Deficit
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      PlantSetupRec@1210190000 : Record 11012550;
+      GlbLocationRec@1100485002 : Record 11012554;
+      TmpLocationRec@1100485001 : TEMPORARY Record 11012554;
+      TmpPlanRec@1100485003 : TEMPORARY Record 11012543;
+      TmpDep@1100525001 : TEMPORARY Record 348;
+      DepFilterActive@1100525002 : 'Init,NotUsed,No,Yes';
+      GlbLocPresent@1100485000 : Boolean;
+      gBuildTmpPlan@1100485005 : Boolean;
+      DayTotalQuantity@1210190001 : ARRAY [366] OF Decimal;
+      Text001@1210190002 : TextConst 'DEU=Von Werkzeugart %1 kann ab %2 Mangel entstehen.;ENU=There can be a deficit of Plant Type %1 from %2;NLD=Voor materieelsoort %1 kan vanaf %2  een tekort ontstaan;NOR=Det kan finnes et underskudd fra maskintype %1 fra %2;SVE=Det kan finnas ett underskott av Maskinstyp %1 fr†n %2';
+      DaysInPeriod@1210190003 : Integer;
+      MinDateInPast@1210190004 : Date;
+      NewExpectedEndDate@1100485006 : Date;
+      gPlLastInventoryPlantType@1210190005 : Code[20];
+      gPlLastInventoryQuantity@1210190006 : Decimal;
+      gPlLastDepotFilter@1100525000 : Text[250];
+      gCompany@1100485004 : Text[30];
+      PrevDepotFilterDep@1100525003 : Text;
+
+    PROCEDURE PlanningAvailable@1210190003(lvIDepotFilter@1210190007 : Text[250];lvICountNotPosted@1210190001 : Boolean;lvICountPlantNeed@1210190002 : Boolean;lvICountExpectedReturn@1210190003 : Boolean;lvIPlantType@1210190004 : Code[20];lvIPeriodStartDate@1210190005 : Date;lvIPeriodEndDate@1210190006 : Date;lvIUseTmpLoc@1100485000 : Boolean) : Decimal;
+    VAR
+      lvStockQuantity@1210190000 : Decimal;
+    BEGIN
+      DaysInPeriod := lvIPeriodEndDate - lvIPeriodStartDate + 1;
+      MinDateInPast := CALCDATE('<-1M>', TODAY);  //db, 15-03-11
+      IF (DaysInPeriod < 1) OR (DaysInPeriod > 366) OR (lvIPeriodEndDate < MinDateInPast) THEN
+        EXIT(0);
+
+
+      CLEAR(DayTotalQuantity);
+      lvStockQuantity := GetCurrentInventoryQuantity(lvIDepotFilter, lvIPlantType);
+
+      IF lvICountNotPosted THEN
+        FillDayTotalsNotPostPlantOrder(lvIPlantType, lvIPeriodStartDate, lvIPeriodEndDate, '', 0, lvIUseTmpLoc, lvIDepotFilter);
+      IF lvICountPlantNeed THEN
+        FillDayTotalsPlantNeed(lvIPlantType, lvIPeriodStartDate, lvIPeriodEndDate, lvIUseTmpLoc, lvIDepotFilter);
+      IF lvICountExpectedReturn THEN
+        FillDayTotalsExpectedReturn(lvIPlantType, lvIPeriodStartDate, lvIPeriodEndDate, lvIUseTmpLoc, lvIDepotFilter);
+
+      EXIT((lvStockQuantity + GetLowestDayTotal(lvIPeriodStartDate, lvIPeriodEndDate)));
+    END;
+
+    PROCEDURE PlanningPlantNeed@1100485002(lvIDepotFilter@1210190007 : Text[250];lvIPlantType@1210190004 : Code[20];lvIPeriodStartDate@1210190005 : Date;lvIPeriodEndDate@1210190006 : Date;lvIUseTmpLoc@1100485000 : Boolean) : Decimal;
+    BEGIN
+      DaysInPeriod := lvIPeriodEndDate - lvIPeriodStartDate + 1;
+      MinDateInPast := CALCDATE('<-1M>', TODAY);   //db, 15-03-11
+      IF (DaysInPeriod < 1) OR (DaysInPeriod > 366) OR (lvIPeriodEndDate < MinDateInPast) THEN
+        EXIT(0);
+
+      CLEAR(DayTotalQuantity);
+
+      FillDayTotalsPlantNeed(lvIPlantType, lvIPeriodStartDate, lvIPeriodEndDate, lvIUseTmpLoc, lvIDepotFilter);
+
+      //* Search lowest in 'DayTotalQuantity'. In here with negative quantity, so get highest (exit: -1*lowest)
+      EXIT((-GetLowestDayTotal(lvIPeriodStartDate, lvIPeriodEndDate)));
+    END;
+
+    PROCEDURE PlanningNotPostedPO@1100485005(lvIDepotFilter@1210190007 : Text[250];lvIPlantType@1210190004 : Code[20];lvIPeriodStartDate@1210190005 : Date;lvIPeriodEndDate@1210190006 : Date;lvIUseTmpLoc@1100485000 : Boolean) : Decimal;
+    BEGIN
+      DaysInPeriod := lvIPeriodEndDate - lvIPeriodStartDate + 1;
+      MinDateInPast := CALCDATE('<-1M>', TODAY);  //db, 15-03-11
+      IF (DaysInPeriod < 1) OR (DaysInPeriod > 366) OR (lvIPeriodEndDate < MinDateInPast) THEN
+        EXIT(0);
+
+      CLEAR(DayTotalQuantity);
+
+      FillDayTotalsNotPostPlantOrder(lvIPlantType, lvIPeriodStartDate, lvIPeriodEndDate, '', 0, lvIUseTmpLoc, lvIDepotFilter);
+
+      //* Search lowest in 'DayTotalQuantity'. In here with negative quantity, so get highest (exit: -1*lowest)
+      EXIT((-GetLowestDayTotal(lvIPeriodStartDate, lvIPeriodEndDate)));
+    END;
+
+    PROCEDURE PlantTypeAvailableOnPOLine@1100525000(PlantOrderLine@1210190007 : Record 11012557;FromDepotFilter@1100527700 : Boolean) : Decimal;
+    VAR
+      PlantOrder@1100525000 : Record 11012556;
+      PlantOrderLine2@1100409000 : Record 11012557;
+      PlantRequestLine@1100525001 : Record 11020521;
+      StockQuantity@1210190000 : Decimal;
+      QuantityReleasedAfterDate@1100409001 : Decimal;
+    BEGIN
+      IF NOT PlantOrder.GET(PlantOrderLine."Plant Order No.") THEN
+        EXIT(0);
+      IF (PlantOrder.Type <> PlantOrder.Type::Arrival) OR (PlantOrder."From Location" = '') OR
+         (PlantOrder."Transfer Date" = 0D) OR (PlantOrder.Posted) OR (PlantOrderLine."Plant Type" = '')
+      THEN
+        EXIT(0);
+
+      CLEAR(DayTotalQuantity);
+      StockQuantity :=
+        GetCurrentInventoryQuantity(PlantOrder."From Location", PlantOrderLine."Plant Type"); //From loc is depot on Arrival order
+
+      FillDayTotalsNotPostPlantOrder(
+        PlantOrderLine."Plant Type", PlantOrder."Transfer Date", PlantOrder."Transfer Date",
+        PlantOrderLine."Plant Order No.", 0, FALSE, PlantOrder."From Location");
+      //For the time being only not posted orders, so not FillDayTotalsExpectedReturn and FillDayTotalsPlantNeed
+
+      //C016497.sn  // Also count released (not posted) on arrival PO's after the transfer date
+      PlantOrderLine2.SETCURRENTKEY(Posted, "Plant Type");
+      PlantOrderLine2.SETRANGE(Posted, FALSE);
+      PlantOrderLine2.SETRANGE("Plant Type", PlantOrderLine."Plant Type");
+      PlantOrderLine2.SETRANGE("Plant Order Type", PlantOrderLine2."Plant Order Type"::Arrival);
+      PlantOrderLine2.SETRANGE("Plant Order Status", PlantOrderLine2."Plant Order Status"::Released);
+      IF FromDepotFilter THEN
+        PlantOrderLine2.SETRANGE("From Location",PlantOrderLine."From Location");
+      PlantOrderLine2.SETFILTER("Transfer Date", '>%1', PlantOrder."Transfer Date");
+      PlantOrderLine2.SETFILTER(Quantity, '>%1', 0);
+      PlantOrderLine2.SETFILTER("Plant Order No.", '<>%1', PlantOrderLine."Plant Order No.");
+      IF PlantOrderLine2.FINDSET THEN BEGIN
+        REPEAT
+          QuantityReleasedAfterDate := QuantityReleasedAfterDate + PlantOrderLine2.Quantity;
+        UNTIL PlantOrderLine2.NEXT = 0;
+      END;
+      //C016497.en
+
+      //DP01457.sn  // Also count requested on arrival PO's after the transfer date
+      PlantRequestLine.CALCFIELDS(Posted, "Plant Request Type", "Plant Request Status", "Transfer Date");
+      PlantRequestLine.SETRANGE(Posted, FALSE);
+      PlantRequestLine.SETRANGE("Plant Type", PlantOrderLine."Plant Type");
+      PlantRequestLine.SETRANGE("Plant Request Type", PlantRequestLine."Plant Request Type"::Arrival);
+      PlantRequestLine.SETRANGE("Plant Request Status", PlantRequestLine."Plant Request Status"::Requested);
+      IF FromDepotFilter THEN
+        PlantRequestLine.SETRANGE("From Location",PlantOrderLine."From Location");
+      PlantRequestLine.SETFILTER("Transfer Date", '>%1', PlantOrder."Transfer Date");
+      PlantRequestLine.SETFILTER(Quantity, '>%1', 0);
+      IF PlantRequestLine.FINDSET THEN BEGIN
+        REPEAT
+          QuantityReleasedAfterDate := QuantityReleasedAfterDate + PlantRequestLine.Quantity;
+        UNTIL PlantRequestLine.NEXT = 0;
+      END;
+      //DP01457.en
+
+      EXIT((StockQuantity + GetLowestDayTotal(PlantOrder."Transfer Date", PlantOrder."Transfer Date") - QuantityReleasedAfterDate));
+    END;
+
+    PROCEDURE PlantTypeAvailableOnRequestLine@1100525001(PlantRequestLine@1210190007 : Record 11020521) : Decimal;
+    VAR
+      PlantRequest@1100525000 : Record 11020520;
+      PlantRequestLine2@1100525001 : Record 11020521;
+      PlantOrderLine2@1100409000 : Record 11012557;
+      StockQuantity@1210190000 : Decimal;
+      QuantityReleasedAfterDate@1100409001 : Decimal;
+    BEGIN
+      //C021864 Copied from PlantTypeAvailableOnPOLine
+      IF NOT PlantRequest.GET(PlantRequestLine."Plant Request No.") THEN
+        EXIT(0);
+      IF (PlantRequest.Type <> PlantRequest.Type::Arrival) OR (PlantRequest."From Location" = '') OR
+         (PlantRequest."Transfer Date" = 0D) OR (PlantRequest.Posted) OR (PlantRequestLine."Plant Type" = '')
+      THEN
+        EXIT(0);
+
+      CLEAR(DayTotalQuantity);
+      StockQuantity :=
+        GetCurrentInventoryQuantity(PlantRequest."From Location", PlantRequestLine."Plant Type"); //From loc is depot on Arrival order
+
+      FillDayTotalsNotPostPlantOrder(
+        PlantRequestLine."Plant Type", PlantRequest."Transfer Date", PlantRequest."Transfer Date", '', 0, FALSE, PlantRequest."From Location");
+
+      PlantOrderLine2.SETCURRENTKEY(Posted, "Plant Type");
+      PlantOrderLine2.SETRANGE(Posted, FALSE);
+      PlantOrderLine2.SETRANGE("Plant Type", PlantRequestLine."Plant Type");
+      PlantOrderLine2.SETRANGE("Plant Order Type", PlantOrderLine2."Plant Order Type"::Arrival);
+      PlantOrderLine2.SETRANGE("Plant Order Status", PlantOrderLine2."Plant Order Status"::Released);
+      PlantOrderLine2.SETFILTER("Transfer Date", '>%1', PlantRequest."Transfer Date");
+      PlantOrderLine2.SETFILTER(Quantity, '>%1', 0);
+      IF PlantOrderLine2.FINDSET THEN BEGIN
+        REPEAT
+          QuantityReleasedAfterDate := QuantityReleasedAfterDate + PlantOrderLine2.Quantity;
+        UNTIL PlantOrderLine2.NEXT = 0;
+      END;
+
+      //DP01457.sn  // Also count requested on arrival PO's after the transfer date
+      PlantRequestLine.CALCFIELDS(Posted,"Plant Request Type", "Plant Request Status", "Transfer Date");
+      PlantRequestLine2.CALCFIELDS(Posted,"Plant Request Type", "Plant Request Status", "Transfer Date");
+      PlantRequestLine2.SETRANGE(Posted, FALSE);
+      PlantRequestLine2.SETRANGE("Plant Type", PlantRequestLine."Plant Type");
+      PlantRequestLine2.SETRANGE("Plant Request Type", PlantRequestLine."Plant Request Type"::Arrival);
+      PlantRequestLine2.SETRANGE("Plant Request Status", PlantRequestLine."Plant Request Status"::Requested);
+      PlantRequestLine2.SETFILTER("Transfer Date", '>%1', PlantRequestLine."Transfer Date");
+      PlantRequestLine2.SETFILTER(Quantity, '>%1', 0);
+      PlantRequestLine2.SETFILTER("Plant Request No.", '<>%1', PlantRequestLine."Plant Request No.");
+      IF PlantRequestLine2.FINDSET THEN BEGIN
+        REPEAT
+          QuantityReleasedAfterDate := QuantityReleasedAfterDate + PlantRequestLine2.Quantity;
+        UNTIL PlantRequestLine2.NEXT = 0;
+      END;
+      //DP01457.en
+
+      EXIT((StockQuantity + GetLowestDayTotal(PlantRequest."Transfer Date", PlantRequest."Transfer Date") - QuantityReleasedAfterDate));
+    END;
+
+    PROCEDURE BeforeDrilldownPlanning@1100485000(lvIDepotFilter@1210190007 : Text[250];lvICountNotPosted@1210190001 : Boolean;lvICountPlantNeed@1210190002 : Boolean;lvICountExpectedReturn@1210190003 : Boolean;lvIPlantType@1210190004 : Code[20];lvIPeriodStartDate@1210190005 : Date;lvIPeriodEndDate@1210190006 : Date;VAR OTmpPlanRec@1100485000 : TEMPORARY Record 11012543);
+    BEGIN
+      //* Opbouwen tmp-tabel (T11012543) tbv drilldown in de materieelplanning schermen.
+
+      OTmpPlanRec.RESET;
+      OTmpPlanRec.DELETEALL;
+      TmpPlanRec.RESET;
+      TmpPlanRec.DELETEALL;
+
+      TmpPlanRec."Line No." := 0;
+      gBuildTmpPlan := TRUE;
+      PlanningAvailable(lvIDepotFilter,
+        lvICountNotPosted, lvICountPlantNeed, lvICountExpectedReturn,
+        lvIPlantType, lvIPeriodStartDate, lvIPeriodEndDate, FALSE);
+      gBuildTmpPlan := FALSE;
+
+      TmpPlanRec.RESET;
+      IF TmpPlanRec.FINDSET(FALSE,FALSE) THEN BEGIN
+        REPEAT
+          OTmpPlanRec := TmpPlanRec;
+          OTmpPlanRec.INSERT;
+        UNTIL TmpPlanRec.NEXT = 0;
+        TmpPlanRec.DELETEALL;
+      END;
+    END;
+
+    PROCEDURE BeforeDrilldownPlannedReserved@1100485006(lvIDepotFilter@1210190007 : Text[250];lvICountNotPosted@1210190001 : Boolean;lvICountPlantNeed@1210190002 : Boolean;lvIPlantType@1210190004 : Code[20];lvIPeriodStartDate@1210190005 : Date;lvIPeriodEndDate@1210190006 : Date;VAR OTmpPlanRec@1100485000 : TEMPORARY Record 11012543);
+    BEGIN
+      //* Opbouwen tmp-tabel (T11012543) tbv drilldown in de materieelplanning schermen.
+
+      OTmpPlanRec.RESET;
+      OTmpPlanRec.DELETEALL;
+      TmpPlanRec.RESET;
+      TmpPlanRec.DELETEALL;
+
+      TmpPlanRec."Line No." := 0;
+      gBuildTmpPlan := TRUE;
+      IF lvICountPlantNeed THEN
+        PlanningPlantNeed(lvIDepotFilter, lvIPlantType, lvIPeriodStartDate, lvIPeriodEndDate, FALSE);
+      IF lvICountNotPosted THEN
+        PlanningNotPostedPO(lvIDepotFilter, lvIPlantType, lvIPeriodStartDate, lvIPeriodEndDate, FALSE);
+      gBuildTmpPlan := FALSE;
+
+      TmpPlanRec.RESET;
+      IF TmpPlanRec.FINDSET(FALSE,FALSE) THEN BEGIN
+        REPEAT
+          OTmpPlanRec := TmpPlanRec;
+          OTmpPlanRec.Quantity := -TmpPlanRec.Quantity;  //* With neg. quantity in tmp table, so -1*Quan
+          OTmpPlanRec.INSERT;
+        UNTIL TmpPlanRec.NEXT = 0;
+        TmpPlanRec.DELETEALL;
+      END;
+    END;
+
+    PROCEDURE FutureDeficitWarning@1210190000(lvIOrder@1210190007 : Code[20];lvIOrderLine@1210190011 : Integer;lvIPlantType@1210190000 : Code[20];lvIExpectedEndDate@1210190008 : Date;lvIRequiredQuantity@1210190003 : Decimal);
+    VAR
+      lvPlantOrderRec@1210190006 : Record 11012556;
+      lvLocationRec@1210190009 : Record 11012554;
+      lvStockQuantity@1210190002 : Decimal;
+      lvPeriodStartDate@1210190004 : Date;
+      lvPeriodEndDate@1210190005 : Date;
+      lvMaxEndDate@1210190010 : Date;
+      lvDepotFilter@1210190001 : Text[250];
+    BEGIN
+      IF (lvIOrder = '') OR (lvIPlantType = '') OR (lvIRequiredQuantity <= 0) THEN
+        EXIT;
+
+      IF (gCompany <> '') THEN BEGIN
+        lvPlantOrderRec.CHANGECOMPANY(gCompany);
+        lvLocationRec.CHANGECOMPANY(gCompany);
+        PlantSetupRec.SetPlantCompany(gCompany);
+      END;
+
+      PlantSetupRec.GET;
+      IF (NOT PlantSetupRec."Future Deficit Warning") OR (FORMAT(PlantSetupRec."Time Limit Future Deficit") = '') THEN
+        EXIT;
+
+      IF NOT lvPlantOrderRec.GET(lvIOrder) THEN
+        EXIT;
+
+      lvDepotFilter := '';
+      IF lvPlantOrderRec.Type = lvPlantOrderRec.Type::Arrival THEN BEGIN
+        lvDepotFilter := lvPlantOrderRec."From Location";
+      END;
+      IF lvPlantOrderRec.Type = lvPlantOrderRec.Type::"Other Transfers" THEN BEGIN
+        IF (NOT lvLocationRec.GET(lvPlantOrderRec."To Location")) OR (NOT lvLocationRec.Depot) THEN
+          EXIT;
+        IF lvLocationRec.GET(lvPlantOrderRec."From Location") AND (lvLocationRec.Depot) THEN
+          lvDepotFilter := lvPlantOrderRec."From Location"
+        ELSE
+          lvDepotFilter := PlantSetupRec.GetRentalDepot;
+      END;
+      IF lvDepotFilter = '' THEN
+        EXIT;
+
+      lvPeriodStartDate := lvPlantOrderRec."Transfer Date";
+      IF lvIExpectedEndDate = 0D THEN BEGIN
+        IF lvLocationRec.GET(lvPlantOrderRec."To Location") THEN
+          lvPeriodEndDate := lvLocationRec."Ending Date";
+      END ELSE
+        lvPeriodEndDate := lvIExpectedEndDate;
+      IF lvPeriodEndDate < lvPeriodStartDate THEN
+        lvPeriodEndDate := lvPeriodStartDate;
+      lvMaxEndDate := CALCDATE(PlantSetupRec."Time Limit Future Deficit", lvPeriodStartDate);
+      IF lvPeriodEndDate > lvMaxEndDate THEN
+        lvPeriodEndDate := lvMaxEndDate;
+      IF ((lvPeriodEndDate - lvPeriodStartDate + 1) > 366) THEN
+        lvPeriodEndDate := lvPeriodStartDate + 365;
+
+      CLEAR(DayTotalQuantity);
+      GlbLocationRec.Code := '';
+      lvStockQuantity := GetCurrentInventoryQuantity(lvDepotFilter,lvIPlantType);
+      FillDayTotalsExpectedReturn(lvIPlantType, lvPeriodStartDate, lvPeriodEndDate, FALSE, lvDepotFilter);
+      FillDayTotalsNotPostPlantOrder(lvIPlantType, lvPeriodStartDate, lvPeriodEndDate, lvIOrder, lvIOrderLine, FALSE, lvDepotFilter);
+      FillDayTotalsPlantNeed(lvIPlantType, lvPeriodStartDate, lvPeriodEndDate, FALSE, lvDepotFilter);
+      CheckFutureDeficit(lvIRequiredQuantity, lvStockQuantity, lvIPlantType, lvPeriodStartDate, lvPeriodEndDate)
+    END;
+
+    PROCEDURE GetCurrentInventoryQuantity@1210190001(lvIDepotFilter@1210190000 : Text[250];lvIPlantType@1210190001 : Code[20]) : Decimal;
+    VAR
+      lvInventoryRec@1210190002 : Record 11012555;
+    BEGIN
+      //IF lvIPlantType = gPlLastInventoryPlantType THEN  //18766
+      IF (lvIPlantType = gPlLastInventoryPlantType) AND (gPlLastDepotFilter = lvIDepotFilter) THEN
+        EXIT(gPlLastInventoryQuantity);
+
+      IF (gCompany <> '') THEN
+        lvInventoryRec.CHANGECOMPANY(gCompany);
+
+      lvInventoryRec.SETCURRENTKEY(Removed,Location,"Plant Type","Plant No.","Rate Code",Sold);
+      lvInventoryRec.SETRANGE(Removed,FALSE);
+      lvInventoryRec.SETFILTER(Location, lvIDepotFilter);
+      lvInventoryRec.SETRANGE("Plant Type", lvIPlantType);
+      lvInventoryRec.SETRANGE(Sold, FALSE);
+      //lvInventoryRec.SETFILTER(Quantity, '>0');  //19265
+      lvInventoryRec.CALCSUMS(Quantity);
+
+      IF gBuildTmpPlan THEN
+        InsertTmpPlanning(lvIPlantType, TmpPlanRec.Type::Inventory, '', 0D, 0D, lvInventoryRec.Quantity, '');
+
+      gPlLastInventoryPlantType := lvIPlantType;
+      gPlLastDepotFilter := lvIDepotFilter;
+      gPlLastInventoryQuantity := lvInventoryRec.Quantity;
+      EXIT(gPlLastInventoryQuantity);
+    END;
+
+    LOCAL PROCEDURE FillDayTotalsExpectedReturn@1210190002(lvIPlantType@1210190002 : Code[20];lvIPeriodStartDate@1210190006 : Date;lvIPeriodEndDate@1210190005 : Date;lvIUseTmpLoc@1100485000 : Boolean;DepotFilter@1100529000 : Text);
+    VAR
+      lvInventoryRec@1210190000 : Record 11012555;
+      lvExpectedReturnDate@1210190004 : Date;
+    BEGIN
+      IF (gCompany <> '') THEN
+        lvInventoryRec.CHANGECOMPANY(gCompany);
+
+      lvInventoryRec.SETCURRENTKEY(Removed,"Plant Type",Depot,Sold);
+      lvInventoryRec.SETRANGE(Removed,FALSE);
+      lvInventoryRec.SETRANGE("Plant Type", lvIPlantType);
+      lvInventoryRec.SETRANGE(Depot, FALSE);
+      lvInventoryRec.SETRANGE(Sold, FALSE);
+      lvInventoryRec.SETFILTER(Quantity, '>%1', 0);
+      IF DepotFilter <> '' THEN
+        lvInventoryRec.SETFILTER("Expected Return Depot", DepotFilter + '|''''');
+      IF lvInventoryRec.FINDSET THEN BEGIN
+        REPEAT
+          IF GetGlbLocationData(lvInventoryRec.Location, lvIUseTmpLoc) AND (NOT GlbLocationRec.Depot) THEN BEGIN
+            IF CheckDepotFilterForEmptyDepot(lvInventoryRec."Expected Return Depot", '', GlbLocationRec."Department Code", DepotFilter) THEN BEGIN
+              lvExpectedReturnDate := lvInventoryRec."Expected return on";
+              IF lvExpectedReturnDate = 0D THEN
+                lvExpectedReturnDate := GlbLocationRec."Ending Date";
+              IF lvExpectedReturnDate = 0D THEN
+                lvExpectedReturnDate := DMY2DATE(31, 12, 2999);
+              IF lvExpectedReturnDate < TODAY THEN
+                lvExpectedReturnDate := TODAY;
+              IF lvExpectedReturnDate < lvInventoryRec."Present from" THEN
+                lvExpectedReturnDate := lvInventoryRec."Present from";
+              FillDayTotals(
+                lvInventoryRec.Quantity,
+                lvIPeriodStartDate,
+                lvIPeriodEndDate,
+                (lvExpectedReturnDate + 1),
+                99991231D,
+                99991231D);
+              IF gBuildTmpPlan THEN BEGIN
+                IF (lvExpectedReturnDate < lvIPeriodEndDate) THEN
+                  InsertTmpPlanning(lvIPlantType, TmpPlanRec.Type::ExpectedReturn, lvInventoryRec.Location,
+                    lvInventoryRec."Present from", lvExpectedReturnDate, lvInventoryRec.Quantity, '');
+              END;
+            END;
+          END;
+        UNTIL lvInventoryRec.NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE FillDayTotalsNotPostPlantOrder@1210190004(PlantType@1210190006 : Code[20];PeriodStartDate@1210190005 : Date;PeriodEndDate@1210190004 : Date;OrderNo@1210190008 : Code[20];OrderLineNo@1210190007 : Integer;UseTmpLoc@1100485000 : Boolean;DepotFilter@1100525000 : Text);
+    VAR
+      PlantOrderLine@1210190001 : Record 11012557;
+      PlantOrderLine2@1100529001 : Record 11012557;
+      PlantOrder@1100529000 : Record 11012556;
+      SkipLine@1100529004 : Boolean;
+      DepotFilterFromOK@1100529002 : Boolean;
+      DepotFilterToOK@1100529003 : Boolean;
+    BEGIN
+      IF (gCompany <> '') THEN BEGIN
+        PlantOrder.CHANGECOMPANY(gCompany);
+        PlantOrderLine.CHANGECOMPANY(gCompany);
+        PlantOrderLine2.CHANGECOMPANY(gCompany);
+      END;
+      PlantOrderLine.SETCURRENTKEY(Posted, "Plant Type");
+      PlantOrderLine.SETRANGE(Posted, FALSE);
+      PlantOrderLine.SETRANGE("Plant Type", PlantType);
+      PlantOrderLine.SETFILTER("Transfer Date", '..%1&<>%2', PeriodEndDate, 0D);
+      PlantOrderLine.SETFILTER("From Location", '<>%1', '');
+      PlantOrderLine.SETFILTER(Quantity, '>=%1', 0);
+      IF (OrderNo <> '') AND (OrderLineNo = 0) THEN
+        PlantOrderLine.SETFILTER("Plant Order No.", '<>%1', OrderNo);
+      IF PlantOrderLine.FINDSET THEN BEGIN
+        REPEAT
+          SkipLine := FALSE;
+          IF (PlantOrderLine."Plant Order No." = OrderNo) AND (PlantOrderLine."Line No." = OrderLineNo) THEN
+            SkipLine := TRUE
+          ELSE BEGIN
+            IF NOT PlantOrder.GET(PlantOrderLine."Plant Order No.") THEN
+              SkipLine := TRUE;
+            IF (PlantOrder."To Location" = '') OR (NOT (PlantOrder.Type IN [PlantOrder.Type::Arrival,PlantOrder.Type::"Other Transfers"])) THEN
+              SkipLine := TRUE;
+          END;
+          IF NOT SkipLine THEN BEGIN
+            DepotFilterFromOK := TRUE;
+            DepotFilterToOK := TRUE;
+            IF DepotFilter <> '' THEN BEGIN
+              PlantOrderLine2.SETRANGE("Plant Order No.", PlantOrderLine."Plant Order No.");
+              PlantOrderLine2.SETRANGE("Line No.", PlantOrderLine."Line No.");
+              PlantOrderLine2.SETFILTER("From Location", DepotFilter);
+              DepotFilterFromOK := (NOT PlantOrderLine2.ISEMPTY);
+              IF PlantOrder.Type = PlantOrder.Type::"Other Transfers" THEN BEGIN
+                PlantOrder.SETRANGE("No.", PlantOrderLine."Plant Order No.");
+                PlantOrder.SETFILTER("To Location", DepotFilter);
+                DepotFilterToOK := (NOT PlantOrder.ISEMPTY);
+              END;
+            END;
+            IF (PlantOrder.Type = PlantOrder.Type::Arrival) AND DepotFilterFromOK THEN
+              FillDayTotalsNotPostPlantOrderArrival(PlantOrderLine, PlantOrder."To Location", PeriodStartDate, PeriodEndDate, UseTmpLoc);
+            IF (PlantOrder.Type = PlantOrder.Type::"Other Transfers") AND (DepotFilterFromOK OR DepotFilterToOK) THEN BEGIN
+              FillDayTotalsNotPostPlantOrderOtherTransferDepots(PlantOrderLine, PlantOrder."To Location", PlantOrderLine."From Location",
+                PeriodStartDate, PeriodEndDate, UseTmpLoc, DepotFilterFromOK, DepotFilterToOK);
+            END;
+          END;
+        UNTIL PlantOrderLine.NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE FillDayTotalsNotPostPlantOrderArrival@1100529003(PlantOrderLine@1100529000 : Record 11012557;PlantLocationCode@1100529002 : Code[20];PeriodStartDate@1100529004 : Date;PeriodEndDate@1100529003 : Date;UseTmpLoc@1100529005 : Boolean);
+    VAR
+      Quantity@1100529001 : Decimal;
+      ExpectedEndDate@1100529006 : Date;
+    BEGIN
+      IF (PlantOrderLine."Asked Quantity" > 0) AND (PlantOrderLine.Quantity = 0) THEN
+        Quantity := PlantOrderLine."Asked Quantity"
+      ELSE
+        Quantity := PlantOrderLine.Quantity;
+      IF Quantity <= 0 THEN
+        EXIT;
+      IF NOT GetGlbLocationData(PlantLocationCode, UseTmpLoc) OR GlbLocationRec.Depot THEN
+        EXIT;
+      FillDayTotals(
+        -Quantity, PeriodStartDate, PeriodEndDate, PlantOrderLine."Transfer Date",
+        PlantOrderLine."Expected return on", GlbLocationRec."Ending Date");
+      IF gBuildTmpPlan THEN BEGIN
+        IF (PlantOrderLine."Transfer Date" <= PeriodEndDate) AND (NewExpectedEndDate >= PeriodStartDate) THEN BEGIN
+          ExpectedEndDate := NewExpectedEndDate;
+          IF (PlantOrderLine."Expected return on" = 0D) AND (GlbLocationRec."Ending Date" = 0D) THEN
+            ExpectedEndDate := 0D;
+          InsertTmpPlanning(PlantOrderLine."Plant Type", TmpPlanRec.Type::NotPosted, PlantLocationCode,
+            PlantOrderLine."Transfer Date", ExpectedEndDate, -Quantity, PlantOrderLine."Plant Order No.");
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE FillDayTotalsNotPostPlantOrderOtherTransferDepots@1100529004(PlantOrderLine@1100529002 : Record 11012557;PlantLocationTo@1100529003 : Code[20];PlantLocationFrom@1100529005 : Code[20];PeriodStartDate@1100529001 : Date;PeriodEndDate@1100529000 : Date;UseTmpLoc@1100529004 : Boolean;DoLocFrom@1100529007 : Boolean;DoLocTo@1100529006 : Boolean);
+    BEGIN
+      // Only transfer from depot to depot
+      IF (PlantOrderLine.Quantity <= 0) OR (PlantLocationFrom = PlantLocationTo) THEN
+        EXIT;
+      IF NOT GetGlbLocationData(PlantLocationFrom, UseTmpLoc) OR (NOT GlbLocationRec.Depot) THEN
+        EXIT;
+      IF NOT GetGlbLocationData(PlantLocationTo, UseTmpLoc) OR (NOT GlbLocationRec.Depot) THEN
+        EXIT;
+      IF DoLocFrom THEN BEGIN
+        FillDayTotals(-PlantOrderLine.Quantity, PeriodStartDate, PeriodEndDate, PlantOrderLine."Transfer Date", 0D, 0D);
+        IF gBuildTmpPlan THEN BEGIN
+          IF (PlantOrderLine."Transfer Date" <= PeriodEndDate) AND (NewExpectedEndDate >= PeriodStartDate) THEN BEGIN
+            InsertTmpPlanning(PlantOrderLine."Plant Type", TmpPlanRec.Type::NotPosted, PlantLocationTo,
+              PlantOrderLine."Transfer Date", 0D, -PlantOrderLine.Quantity, PlantOrderLine."Plant Order No.");
+          END;
+        END;
+      END;
+      IF DoLocTo THEN BEGIN
+        FillDayTotals(PlantOrderLine.Quantity, PeriodStartDate, PeriodEndDate, PlantOrderLine."Transfer Date", 0D, 0D);
+        IF gBuildTmpPlan THEN BEGIN
+          IF (PlantOrderLine."Transfer Date" <= PeriodEndDate) AND (NewExpectedEndDate >= PeriodStartDate) THEN BEGIN
+            InsertTmpPlanning(PlantOrderLine."Plant Type", TmpPlanRec.Type::NotPosted, PlantLocationFrom,
+              PlantOrderLine."Transfer Date", 0D, PlantOrderLine.Quantity, PlantOrderLine."Plant Order No.");
+          END;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE FillDayTotalsPlantNeed@1210190005(lvIPlantType@1210190006 : Code[20];lvIPeriodStartDate@1210190005 : Date;lvIPeriodEndDate@1210190004 : Date;lvIUseTmpLoc@1100485000 : Boolean;DepotFilter@1100525000 : Text);
+    VAR
+      lvPlantNeedRec@1210190001 : Record 11012579;
+      lvQuantity@1210190000 : Decimal;
+      lvExpectedReturnDate@1100485001 : Date;
+    BEGIN
+      BuildTmpDepartmentTable(DepotFilter);
+      IF (gCompany <> '') THEN
+        lvPlantNeedRec.CHANGECOMPANY(gCompany);
+      lvPlantNeedRec.SETCURRENTKEY(Finished, "Plant Type", "Starting Date");
+      lvPlantNeedRec.SETRANGE(Finished, FALSE);
+      lvPlantNeedRec.SETRANGE(Type, lvPlantNeedRec.Type::Plant);
+      lvPlantNeedRec.SETRANGE("Plant Type", lvIPlantType);
+      lvPlantNeedRec.SETFILTER("Starting Date", '..%1', lvIPeriodEndDate);
+      IF DepotFilter <> '' THEN
+        lvPlantNeedRec.SETFILTER("From Depot", DepotFilter + '|''''');
+      IF lvPlantNeedRec.FINDSET THEN BEGIN
+        REPEAT
+          IF GetGlbLocationData(lvPlantNeedRec.Location, lvIUseTmpLoc) AND (NOT GlbLocationRec.Depot) THEN BEGIN
+            IF CheckLocationDepartmentFilter(GlbLocationRec."Department Code") THEN BEGIN
+              IF CheckDepotFilterForEmptyDepot(
+                lvPlantNeedRec."From Depot", GlbLocationRec."From Depot (Plant Need)", GlbLocationRec."Department Code", DepotFilter)
+              THEN BEGIN
+                IF lvPlantNeedRec."Delete Remainder" THEN
+                  lvQuantity := lvPlantNeedRec."Quantity To Copy"
+                ELSE BEGIN
+                  //lvPlantNeedRec.CALCFIELDS("Copied Quantity");
+                  lvQuantity := lvPlantNeedRec.Quantity - lvPlantNeedRec.QuantityCopiedLineTotal(gCompany);
+                END;
+                IF (lvQuantity > 0) AND (lvPlantNeedRec."Starting Date" <> 0D) THEN BEGIN
+                  lvExpectedReturnDate := lvPlantNeedRec."Ending Date";
+                  FillDayTotals(-lvQuantity,
+                                lvIPeriodStartDate,
+                                lvIPeriodEndDate,
+                                lvPlantNeedRec."Starting Date",
+                                lvExpectedReturnDate,
+                                GlbLocationRec."Ending Date");
+                  IF gBuildTmpPlan THEN BEGIN
+                    IF (lvPlantNeedRec."Starting Date" <= lvIPeriodEndDate) AND (NewExpectedEndDate >= lvIPeriodStartDate) THEN BEGIN
+                      InsertTmpPlanning(lvIPlantType, TmpPlanRec.Type::PlantNeed, lvPlantNeedRec.Location,
+                        lvPlantNeedRec."Starting Date", NewExpectedEndDate, -lvQuantity, '');
+                      IF (lvPlantNeedRec."Document No." <> '') AND
+                          (lvPlantNeedRec."Document Type" = lvPlantNeedRec."Document Type"::SalesQuote) THEN BEGIN
+                        TmpPlanRec."Rental Contract Type" := lvPlantNeedRec."Document Type" - 1;
+                        TmpPlanRec."Rental Contract Quote No." := lvPlantNeedRec."Document No.";
+                        TmpPlanRec.MODIFY;
+                      END;
+                    END;
+                  END;
+                END;
+              END;
+            END;
+          END;
+        UNTIL lvPlantNeedRec.NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE FillDayTotals@1210190006(lvIQuantity@1210190003 : Decimal;lvIPeriodStartDate@1210190004 : Date;lvIPeriodEndDate@1210190005 : Date;lvIStartDateLine@1210190002 : Date;lvIExpectedEndDateLine@1210190001 : Date;lvIExpectedEndDateLocation@1210190000 : Date);
+    VAR
+      lvExpectedEndDate@1210190011 : Date;
+      lvStartDate@1210190010 : Date;
+      lvEndDate@1210190009 : Date;
+      lvStartDayNo@1210190008 : Integer;
+      lvEndDayNo@1210190007 : Integer;
+      lvDayno@1210190006 : Integer;
+    BEGIN
+      lvExpectedEndDate := lvIExpectedEndDateLine;
+      IF lvExpectedEndDate = 0D THEN
+        lvExpectedEndDate := lvIExpectedEndDateLocation;
+      IF lvExpectedEndDate < lvIStartDateLine THEN
+        lvExpectedEndDate := lvIStartDateLine;
+      IF (lvIExpectedEndDateLine = 0D) AND (lvIExpectedEndDateLocation = 0D) THEN
+        lvExpectedEndDate := lvIPeriodEndDate;
+      NewExpectedEndDate := lvExpectedEndDate;  //* Tbv van TmpPlanRec
+
+      lvStartDate := lvIStartDateLine;
+      IF lvStartDate < lvIPeriodStartDate THEN
+        lvStartDate := lvIPeriodStartDate;
+
+      lvEndDate := lvExpectedEndDate;
+      IF lvEndDate > lvIPeriodEndDate THEN
+        lvEndDate := lvIPeriodEndDate;
+
+      IF lvEndDate >= lvStartDate THEN BEGIN
+        lvStartDayNo := 1;
+        IF lvStartDate > lvIPeriodStartDate THEN
+          lvStartDayNo := lvStartDate - lvIPeriodStartDate  + 1;
+        lvEndDayNo :=  lvIPeriodEndDate - lvIPeriodStartDate + 1;
+        IF lvEndDate < lvIPeriodEndDate THEN
+          lvEndDayNo := lvEndDate - lvIPeriodStartDate + 1;
+        FOR lvDayno := lvStartDayNo TO lvEndDayNo DO
+          DayTotalQuantity[lvDayno] := DayTotalQuantity[lvDayno] + lvIQuantity;
+      END;
+    END;
+
+    LOCAL PROCEDURE GetGlbLocationData@1100485004(ILocation@1100485000 : Code[20];IUseTmpLoc@1100485001 : Boolean) : Boolean;
+    BEGIN
+      IF ILocation = GlbLocationRec.Code THEN
+        EXIT(GlbLocPresent);
+
+      GlbLocPresent := TRUE;
+      IF NOT IUseTmpLoc THEN BEGIN
+        IF GlbLocationRec.GET(ILocation) THEN
+          EXIT(TRUE);
+      END ELSE BEGIN
+        IF TmpLocationRec.GET(ILocation) THEN BEGIN
+          GlbLocationRec := TmpLocationRec;
+          EXIT(TRUE);
+        END ELSE BEGIN
+          IF GlbLocationRec.GET(ILocation) THEN BEGIN
+            TmpLocationRec := GlbLocationRec;
+            TmpLocationRec.INSERT;
+            EXIT(TRUE);
+          END;
+        END;
+      END;
+
+      GlbLocPresent := FALSE;
+      GlbLocationRec.INIT;
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE GetLowestDayTotal@1210190007(lvIPeriodStartDate@1210190001 : Date;lvIPeriodEndDate@1210190000 : Date) : Decimal;
+    VAR
+      lvQuantity@1210190005 : Decimal;
+      lvStartDayNo@1210190004 : Integer;
+      lvDayNo@1210190002 : Integer;
+    BEGIN
+      lvQuantity := 0;
+      IF (lvIPeriodEndDate >= MinDateInPast) THEN BEGIN
+        lvStartDayNo := 1;
+        IF (lvIPeriodStartDate < MinDateInPast) THEN
+          lvStartDayNo := MinDateInPast - lvIPeriodStartDate + 1;
+        lvQuantity := DayTotalQuantity[lvStartDayNo];
+        FOR lvDayNo := lvStartDayNo TO DaysInPeriod DO BEGIN
+          IF DayTotalQuantity[lvDayNo] < lvQuantity THEN
+            lvQuantity := DayTotalQuantity[lvDayNo];
+        END;
+      END;
+      EXIT(lvQuantity);
+    END;
+
+    LOCAL PROCEDURE CheckFutureDeficit@1210190020(lvIRequiredQuantity@1210190000 : Decimal;lvIStockQuantity@1210190006 : Decimal;lvIPlantType@1210190005 : Code[20];lvIPeriodStartDate@1210190002 : Date;lvIPeriodEndDate@1210190001 : Date);
+    VAR
+      lvFirstDeficitDate@1210190003 : Date;
+      lvDayNo@1210190004 : Integer;
+    BEGIN
+      lvFirstDeficitDate := lvIPeriodStartDate;
+      FOR lvDayNo := 1 TO (lvIPeriodEndDate - lvIPeriodStartDate + 1) DO BEGIN
+        IF (lvIStockQuantity + DayTotalQuantity[lvDayNo]) < lvIRequiredQuantity THEN BEGIN
+            MESSAGE(Text001, lvIPlantType, lvFirstDeficitDate);
+            EXIT;
+        END;
+        lvFirstDeficitDate := lvFirstDeficitDate + 1;
+      END;
+    END;
+
+    LOCAL PROCEDURE InsertTmpPlanning@1100485007(IPlantType@1100485000 : Code[20];IType@1100485001 : Option;ILocation@1100485005 : Code[20];IStartDate@1100485002 : Date;IEndDate@1100485003 : Date;IQuantity@1100485004 : Decimal;IPlantOrderNo@1210190000 : Code[20]);
+    BEGIN
+      TmpPlanRec.INIT;
+      TmpPlanRec."Plant Type" := IPlantType;
+      TmpPlanRec."Line No." := TmpPlanRec."Line No." + 1;
+      TmpPlanRec.Type := IType;
+      TmpPlanRec.Location := ILocation;
+      TmpPlanRec."Starting Date" := IStartDate;
+      TmpPlanRec."Ending Date" := IEndDate;
+      TmpPlanRec.Quantity := IQuantity;
+      TmpPlanRec."Plant Order No." := IPlantOrderNo;  //*19268
+      TmpPlanRec.INSERT;
+    END;
+
+    PROCEDURE SetCompany@1100485001(ICompany@1100485000 : Text[30]);
+    BEGIN
+      IF (ICompany = '') OR (ICompany = COMPANYNAME) THEN
+        gCompany := ''
+      ELSE BEGIN
+        gCompany := ICompany;
+        PlantSetupRec.CHANGECOMPANY(gCompany);
+        GlbLocationRec.CHANGECOMPANY(gCompany);
+      END;
+    END;
+
+    LOCAL PROCEDURE BuildTmpDepartmentTable@1100525002(DepotFilter@1100525000 : Text);
+    VAR
+      PlantLocation@1100525001 : Record 11012554;
+    BEGIN
+      IF DepFilterActive = DepFilterActive::Init THEN BEGIN
+        DepFilterActive := DepFilterActive::No;
+        PlantSetupRec.GET;
+        IF NOT PlantSetupRec."Plant Need Based on Department" THEN
+          DepFilterActive := DepFilterActive::NotUsed;
+      END;
+      IF DepFilterActive = DepFilterActive::NotUsed THEN
+        EXIT;
+      IF DepotFilter <> PrevDepotFilterDep THEN BEGIN
+        TmpDep.RESET;
+        TmpDep.DELETEALL;
+        PrevDepotFilterDep := DepotFilter;
+        DepFilterActive := DepFilterActive::No;
+        IF DepotFilter <> '' THEN BEGIN
+          DepFilterActive := DepFilterActive::Yes;
+          IF gCompany <> '' THEN
+            PlantLocation.CHANGECOMPANY(gCompany);
+          PlantLocation.SETFILTER(Code, DepotFilter);
+          PlantLocation.SETRANGE(Depot, TRUE);
+          IF PlantLocation.FINDFIRST THEN BEGIN
+            REPEAT
+              PlantLocation.TESTFIELD("Department Code");
+              IF NOT TmpDep.GET(PlantLocation."Department Code") THEN BEGIN
+                TmpDep.Code := PlantLocation."Department Code";
+                TmpDep.INSERT;
+              END;
+            UNTIL PlantLocation.NEXT = 0;
+          END;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckLocationDepartmentFilter@1100525003(LocationDepartmentCode@1100525000 : Code[20]) : Boolean;
+    BEGIN
+      IF DepFilterActive <> DepFilterActive::Yes THEN
+        EXIT(TRUE);
+      IF TmpDep.GET(LocationDepartmentCode) THEN
+        EXIT(TRUE);
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE CheckDepotFilterForEmptyDepot@1100529000(CurrentDepot@1100529000 : Code[20];DefaultDepot@1100529001 : Code[20];DepartmentCode@1100529003 : Code[20];DepotFilter@1100529002 : Text) : Boolean;
+    VAR
+      PlantSetup@1100529004 : Record 11012550;
+      PlantLocation@1100529005 : Record 11012554;
+      TmpPlantLocation@1100529006 : TEMPORARY Record 11012554;
+    BEGIN
+      IF (CurrentDepot <> '') OR (DepotFilter = '') THEN
+        EXIT(TRUE);
+      IF DefaultDepot <> '' THEN BEGIN
+        IF PlantLocation.GET(DefaultDepot) THEN BEGIN
+          IF PlantLocation.Depot THEN
+            CurrentDepot := DefaultDepot;
+        END;
+      END;
+      IF CurrentDepot = '' THEN BEGIN
+        PlantSetup.GET;
+        DefaultDepot := PlantSetup.GetRentalDepotForDepartmentCode(DepartmentCode);
+        IF PlantLocation.GET(DefaultDepot) THEN BEGIN
+          IF PlantLocation.Depot THEN
+            CurrentDepot := DefaultDepot;
+        END;
+      END;
+      IF CurrentDepot <> '' THEN BEGIN
+        TmpPlantLocation := PlantLocation;
+        TmpPlantLocation.INSERT;
+        TmpPlantLocation.SETFILTER(Code, DepotFilter);
+        TmpPlantLocation.SETRANGE(Depot, TRUE);
+        IF NOT TmpPlantLocation.ISEMPTY THEN
+          EXIT(TRUE);
+      END;
+      EXIT(FALSE);
+    END;
+
+    PROCEDURE GetQtyPlantTypeOnPlantRequestByPlantOrderLine@1100525007(PlantOrderLine@1100525000 : Record 11012557) : Decimal;
+    BEGIN
+      IF (PlantOrderLine."Plant Order Type" <> PlantOrderLine."Plant Order Type"::Arrival) OR
+        (PlantOrderLine."Plant Type" = '') OR (PlantOrderLine."From Location" = '') THEN
+          EXIT(0);
+
+      EXIT(GetQtyPlantTypeOnPlantRequestByFromLocation(
+        PlantOrderLine."Plant Type",
+        PlantOrderLine."From Location"));
+    END;
+
+    PROCEDURE GetQtyPlantTypeOnPlantRequestByPlantRequestLine@1100525006(PlantRequestLine@1100525000 : Record 11020521) : Decimal;
+    BEGIN
+      PlantRequestLine.CALCFIELDS("From Location");
+      IF (PlantRequestLine."Plant Request Type" <> PlantRequestLine."Plant Request Type"::Arrival) OR
+        (PlantRequestLine."Plant Type" = '') OR (PlantRequestLine."From Location" = '') THEN
+          EXIT(0);
+
+      EXIT(GetQtyPlantTypeOnPlantRequestByFromLocation(
+        PlantRequestLine."Plant Type",
+        PlantRequestLine."From Location") - PlantRequestLine.Quantity);
+    END;
+
+    LOCAL PROCEDURE GetQtyPlantTypeOnPlantRequestByFromLocation@1100525005(IPlantType@1100525000 : Code[20];IFromLocation@1100525002 : Code[20]) : Decimal;
+    VAR
+      PlantRequestLine@1100525001 : Record 11020521;
+      Quantity@1100525003 : Decimal;
+    BEGIN
+      PlantRequestLine.CALCFIELDS("From Location", "Plant Request Type", Posted);
+      PlantRequestLine.SETRANGE("From Location", IFromLocation);
+      PlantRequestLine.SETRANGE("Plant Request Type", PlantRequestLine."Plant Request Type"::Arrival);
+      PlantRequestLine.SETRANGE(Posted, FALSE);
+      PlantRequestLine.SETRANGE("Plant Type", IPlantType);
+      IF PlantRequestLine.FINDSET THEN
+        REPEAT
+          Quantity += PlantRequestLine.Quantity;
+        UNTIL PlantRequestLine.NEXT = 0;
+      EXIT(Quantity);
+    END;
+
+    PROCEDURE GetQtyPlantTypeOnReturnDepot@1100525016(IFromLocation@1100525003 : Code[20];IType@1100525004 : 'Plant,Text,Item';IPlantType@1100525005 : Code[20]) : Decimal;
+    VAR
+      PlantInventory@1100525000 : Record 11012555;
+      Details@1100525001 : 'LedgerEntry,PlantType,PlantNo,RateCode';
+      ReturnDepot@1100525002 : Code[20];
+    BEGIN
+      ReturnDepot := GetReturnDepotByFromLocation(IFromLocation);
+      IF (IType = IType::Plant) AND (IPlantType <> '') AND (ReturnDepot <> '') AND (ReturnDepot <> IFromLocation) THEN BEGIN
+        PlantInventory.SETRANGE(Removed, FALSE);
+        PlantInventory.SETRANGE(Location, ReturnDepot);
+        PlantInventory.SETRANGE("Plant Type", IPlantType);
+        IF PlantInventory.FINDFIRST THEN
+          EXIT(PlantInventory.CompressedQuantity(Details::PlantType, FALSE));
+      END ELSE
+        EXIT(0);
+    END;
+
+    PROCEDURE GetReturnDepotByFromLocation@1100525014(IFromLocation@1100525003 : Code[20]) : Code[20];
+    VAR
+      PlantSetup@1100525001 : Record 11012550;
+      ReturnDepotsbyDepot@1100525002 : Record 11012668;
+    BEGIN
+      PlantSetup.GET;
+      CASE PlantSetup."Deviating Return Depot base on" OF
+        PlantSetup."Deviating Return Depot base on"::"One Depot":
+          BEGIN
+            EXIT(PlantSetup."Return Depot");
+          END;
+        PlantSetup."Deviating Return Depot base on"::"Multiple Depots":
+          BEGIN
+            ReturnDepotsbyDepot.SETRANGE(Depot, IFromLocation);
+            IF ReturnDepotsbyDepot.FINDFIRST THEN
+              EXIT(ReturnDepotsbyDepot."Return Depot");
+          END;
+      END;
+    END;
+
+    PROCEDURE GetQtyPlantTypeExpReturnByPlantOrderLine@1100525017(PlantOrderLine@1100525000 : Record 11012557) : Decimal;
+    BEGIN
+      IF (PlantOrderLine."From Location" = '') OR (PlantOrderLine."Plant Order Type" <> PlantOrderLine."Plant Order Type"::Arrival) THEN
+        EXIT;
+      EXIT(GetQtyPlantTypeExpReturnOnPlantOrder(
+             PlantOrderLine."From Location",
+             PlantOrderLine."Plant Type",
+             PlantOrderLine."Transfer Date") +
+           GetQtyPlantTypeExpReturnOnPlantRequest(
+             PlantOrderLine."From Location",
+             PlantOrderLine."Plant Type",
+             PlantOrderLine."Transfer Date"));
+    END;
+
+    PROCEDURE GetQtyPlantTypeExpReturnByPlantRequestLine@1100525004(PlantRequestLine@1100525000 : Record 11020521) : Decimal;
+    BEGIN
+      PlantRequestLine.CALCFIELDS("From Location", "Plant Request Type", "Transfer Date");
+      IF (PlantRequestLine."From Location" = '') OR (PlantRequestLine."Plant Request Type" <> PlantRequestLine."Plant Request Type"::Arrival) THEN
+        EXIT;
+      EXIT(GetQtyPlantTypeExpReturnOnPlantOrder(
+             PlantRequestLine."From Location",
+             PlantRequestLine."Plant Type",
+             PlantRequestLine."Transfer Date") +
+           GetQtyPlantTypeExpReturnOnPlantRequest(
+             PlantRequestLine."From Location",
+             PlantRequestLine."Plant Type",
+             PlantRequestLine."Transfer Date"));
+    END;
+
+    LOCAL PROCEDURE GetQtyPlantTypeExpReturnOnPlantOrder@1100525018(IFromLocation@1100525002 : Code[20];IPlantType@1100525003 : Code[20];ITransferDate@1100525004 : Date) : Decimal;
+    VAR
+      PlantOrderLine@1100525000 : Record 11012557;
+      QtyPlantType@1100525001 : Decimal;
+    BEGIN
+      PlantOrderLine.CALCFIELDS("Plant Order Type");
+      PlantOrderLine.SETRANGE(Posted, FALSE);
+      PlantOrderLine.SETRANGE("Plant Order Type", PlantOrderLine."Plant Order Type"::Removal);
+      PlantOrderLine.SETRANGE("Plant Type", IPlantType);
+      IF PlantOrderLine.FINDSET THEN
+        REPEAT
+          IF PlantOrderLine.GetToLocationCode = IFromLocation THEN
+            QtyPlantType += PlantOrderLine.Quantity;
+        UNTIL PlantOrderLine.NEXT = 0;
+      EXIT(QtyPlantType);
+    END;
+
+    LOCAL PROCEDURE GetQtyPlantTypeExpReturnOnPlantRequest@1100525019(IFromLocation@1100525002 : Code[20];IPlantType@1100525003 : Code[20];ITransferDate@1100525004 : Date) : Decimal;
+    VAR
+      PlantRequestLine@1100525000 : Record 11020521;
+      QtyPlantType@1100525001 : Decimal;
+    BEGIN
+      PlantRequestLine.CALCFIELDS("Plant Request Type", "To Location", Posted, "Transfer Date", "Plant Request Status");
+      PlantRequestLine.SETRANGE(Posted, FALSE);
+      PlantRequestLine.SETRANGE("Plant Request Type", PlantRequestLine."Plant Request Type"::Removal);
+      PlantRequestLine.SETRANGE("Plant Request Status", PlantRequestLine."Plant Request Status"::Requested);
+      PlantRequestLine.SETRANGE("To Location", IFromLocation);
+      PlantRequestLine.SETRANGE("Plant Type", IPlantType);
+      IF PlantRequestLine.FINDSET THEN
+        REPEAT
+          QtyPlantType += PlantRequestLine.Quantity;
+        UNTIL PlantRequestLine.NEXT = 0;
+      EXIT(QtyPlantType);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

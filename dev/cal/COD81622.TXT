@@ -1,0 +1,180 @@
+OBJECT Codeunit 81622 G/L Entry Allocation Mgmt
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=RFC-1198;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text001@1101285000 : TextConst 'ENU="Value is missing in field ""Value (txt)"" in table ""SE Setup"". Code 1 = %1, Code 2 = %2";NOR="Verdien mangler i feltet ""Verdi (txt)"" i tabellen ""Nordiske innstillinger"". Kode 1 = %1, Kode 2 = %2";SVE="V„rde saknas i f„ltet ""V„rde (txt)"" i tabellen ""Nordiska inst„llningar"". Kod 1 = %1, Kod 2 = %2"';
+      JournalTemplateName@1101285002 : Code[10];
+      JournalBatchName@1101285001 : Code[10];
+      Text002@1101285003 : TextConst 'ENU=Analysis View "%1" is missing dimension "%2".;NOR=Analysevisning "%1" mangler dimensjon "%2";SVE=Analysvy "%1" saknar dimension "%2", V„lj annan analysvy.';
+
+    PROCEDURE AllocateGLEntrys@1101285002(FromDate@1101285002 : Date;ToDate@1101285003 : Date;PostingDate@1101285004 : Date;FlipPostingDate@1101285005 : Date);
+    VAR
+      AllocationRegister@1101285000 : Record 81616;
+      Amount@1101285001 : Decimal;
+    BEGIN
+      JournalTemplateName := GetSetup('MALLNAMN');
+      JournalBatchName    := GetSetup('JOURNAMN');
+
+      ClearGenJnlLine;
+
+      WITH AllocationRegister DO BEGIN
+        IF FINDSET(FALSE) THEN REPEAT
+          Amount := GetAmount(AllocationRegister,FromDate, ToDate);
+          FillGenJournal(Description, "From Account", PostingDate, "From Cost Center", "From Function", Amount * -1);
+          FillGenJournal(Description, "To Account", PostingDate, "To Cost Center", "To Function", Amount);
+          IF FlipPostingDate <> 0D THEN BEGIN
+            FillGenJournal(Description, "From Account", FlipPostingDate, "From Cost Center", "From Function", Amount);
+            FillGenJournal(Description, "To Account", FlipPostingDate, "To Cost Center", "To Function", Amount * -1);
+          END;
+        UNTIL AllocationRegister.NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE GetAmount@1101285040(AllocationRegister@1101285000 : Record 81616;FromDate@1101285002 : Date;ToDate@1101285003 : Date) : Decimal;
+    VAR
+      AnalysisViewEntry@1101285001 : Record 365;
+    BEGIN
+
+      MatchFieldToDimFilter(AnalysisViewEntry, 'FUNKTION', AllocationRegister."Function Filter");
+      MatchFieldToDimFilter(AnalysisViewEntry, 'KOSTNADSSTŽLLE', AllocationRegister."Cost Center Filter");
+
+      AnalysisViewEntry.SETRANGE("Analysis View Code", GetSetup('ANALYSVY'));
+      AnalysisViewEntry.SETFILTER("Account No.", AllocationRegister."Account Filter");
+      AnalysisViewEntry.SETRANGE("Posting Date", FromDate, ToDate);
+      AnalysisViewEntry.CALCSUMS(Amount);
+      EXIT(AnalysisViewEntry.Amount * (AllocationRegister.Percent / 100));
+    END;
+
+    LOCAL PROCEDURE FillGenJournal@1101285067(lvDescription@1101285019 : Text[50];Account@1101285008 : Code[20];PostingDate@1101285005 : Date;CostCenter@1101285006 : Code[20];Function@1101285007 : Code[20];lvAmount@1101285000 : Decimal);
+    VAR
+      GenJnlLine@1101285001 : Record 81;
+      NextLineNo@1101285002 : Integer;
+      GenJnlBatch@1101285016 : Record 232;
+      NoSeriesMgt@1101285015 : Codeunit 396;
+      NoSeries@1101285017 : Code[10];
+      DocumentNo@1101285018 : Code[20];
+    BEGIN
+      IF lvAmount = 0 THEN
+        EXIT;
+
+      WITH GenJnlLine DO BEGIN
+
+        SETRANGE("Journal Template Name", JournalTemplateName);
+        SETRANGE("Journal Batch Name", JournalBatchName);
+        SETRANGE("Account No.", Account);
+        SETRANGE("Shortcut Dimension 1 Code", CostCenter);
+        SETRANGE("Posting Date", PostingDate);
+        SETRANGE("Dimension Set ID",  GetDimSetID(Account,CostCenter,"Function"));
+        IF FINDFIRST THEN BEGIN
+          VALIDATE(Amount, Amount + lvAmount);
+          MODIFY(TRUE);
+
+        END ELSE BEGIN
+
+          IF GenJnlBatch.GET(JournalTemplateName, JournalBatchName) THEN BEGIN
+            NoSeries := GenJnlBatch."No. Series";
+            COMMIT;
+            DocumentNo := NoSeriesMgt.TryGetNextNo(NoSeries, PostingDate);
+          END;
+
+          CLEAR(GenJnlLine);
+          SETRANGE("Journal Template Name", JournalTemplateName);
+          SETRANGE("Journal Batch Name", JournalBatchName);
+          IF FIND('+') THEN
+            NextLineNo := "Line No." + 10000
+          ELSE
+            NextLineNo := 10000;
+
+          INIT;
+          "Journal Template Name" := JournalTemplateName;
+          "Journal Batch Name" := JournalBatchName;
+          "Line No." := NextLineNo;
+          "Document No." := DocumentNo;
+          VALIDATE("Posting Date", PostingDate);
+          VALIDATE("Account Type", "Account Type"::"G/L Account");
+          VALIDATE("Account No.", Account);
+          VALIDATE("Shortcut Dimension 1 Code", CostCenter);
+          ValidateShortcutDimCode(3, "Function");
+          VALIDATE(Amount, lvAmount);
+          Description := lvDescription;
+          INSERT(TRUE);
+        END;
+      END;
+    END;
+
+    PROCEDURE GetSetup@1101285005("Code 2"@1101285000 : Code[10]) Name : Text[250];
+    VAR
+      SESetup@1101285003 : Record 11128004;
+    BEGIN
+      IF NOT SESetup.GET(SESetup."Line type"::Setup, 'F™RDELNING', "Code 2") THEN
+        ERROR(Text001, 'F™RDELNING', "Code 2");
+      EXIT(SESetup."Value (txt)");
+    END;
+
+    LOCAL PROCEDURE GetDimSetID@1101285012(Account@1101285003 : Code[10];CostCenter@1101285004 : Code[10];Function@1101285005 : Code[10]) : Integer;
+    VAR
+      TempGenJnlLine@1101285000 : TEMPORARY Record 81;
+    BEGIN
+      TempGenJnlLine.INIT;
+      TempGenJnlLine."Journal Template Name" := JournalTemplateName;
+      TempGenJnlLine."Journal Batch Name" := JournalBatchName;
+      TempGenJnlLine."Line No." := 10000;
+      TempGenJnlLine.VALIDATE("Posting Date", WORKDATE);
+      TempGenJnlLine.VALIDATE("Account Type", TempGenJnlLine."Account Type"::"G/L Account");
+      TempGenJnlLine.VALIDATE("Account No.", Account);
+      TempGenJnlLine.VALIDATE("Shortcut Dimension 1 Code", CostCenter);
+      TempGenJnlLine.ValidateShortcutDimCode(3, "Function");
+      TempGenJnlLine.VALIDATE(Amount, 100);
+      TempGenJnlLine.INSERT(TRUE);
+      EXIT(TempGenJnlLine."Dimension Set ID");
+    END;
+
+    LOCAL PROCEDURE ClearGenJnlLine@1101285045();
+    VAR
+      GenJnlLine@1101285000 : Record 81;
+    BEGIN
+      GenJnlLine.SETRANGE("Journal Template Name", JournalTemplateName);
+      GenJnlLine.SETRANGE("Journal Batch Name", JournalBatchName);
+      IF GenJnlLine.FINDSET(TRUE,TRUE) THEN
+        GenJnlLine.DELETEALL;
+    END;
+
+    LOCAL PROCEDURE MatchFieldToDimFilter@1101285000(VAR AnalysisViewEntry@1101285000 : Record 365;Dimension@1101285002 : Code[20];Filter@1101285003 : Code[20]) : Integer;
+    VAR
+      AnalysisView@1101285001 : Record 363;
+    BEGIN
+      WITH AnalysisView DO BEGIN
+        IF NOT GET(GetSetup('ANALYSVY')) THEN
+          EXIT;
+        CASE Dimension OF
+          "Dimension 1 Code": AnalysisViewEntry.SETFILTER("Dimension 1 Value Code", Filter);
+          "Dimension 2 Code": AnalysisViewEntry.SETFILTER("Dimension 2 Value Code", Filter);
+          "Dimension 3 Code": AnalysisViewEntry.SETFILTER("Dimension 3 Value Code", Filter);
+          "Dimension 4 Code": AnalysisViewEntry.SETFILTER("Dimension 4 Value Code", Filter);
+        ELSE
+          ERROR(Text002,GetSetup('ANALYSVY'), Dimension);
+        END;
+      END;
+    END;
+
+    BEGIN
+    {
+      190521 ORANGO.FH RFC1198
+    }
+    END.
+  }
+}
+

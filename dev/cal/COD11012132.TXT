@@ -1,0 +1,2069 @@
+OBJECT Codeunit 11012132 Consent Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00,4PSSE;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData 25=rm,
+                TableData 38=rm,
+                TableData 122=rm,
+                TableData 124=rm;
+    OnRun=VAR
+            Approver@1100485000 : Record 11012229;
+          BEGIN
+            IF FPSLicenseManagement.LicenseAndReadPermissionForTable(Approver) THEN
+              Approve(TRUE)
+            ELSE
+              MESSAGE(Text010);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1100485001 : TextConst 'ENU=You have %1 invoices waiting for consent. %2 of them are temporarily ignored.\View Invoices ?;NOR=%1 fakturaer venter p† godkjenning. %2 av dem er midlertidig ignorert.\Vise fakturaer?;SVE=%1 fakturor v„ntar p† godk„nnande. %2 har ignorerats tillf„lligt.\Visa fakturor?';
+      Text005@1100485008 : TextConst 'ENU=You are not the only Subsitute for User %1.;NOR=Du er ikke den eneste erstatteren for Bruker %1.;SVE=Du „r inte den enda ers„ttaren f”r anv„ndare %1.';
+      Text006@1100485007 : TextConst 'ENU=Substitute for USer %1 is not active.;NOR=Erstatter for Bruker %1 er ikke aktiv.;SVE=Ers„ttning f”r anv„ndaren %1 „r inte aktiv.';
+      Text007@1100485006 : TextConst 'ENU=No Consent Setup present for user %1.;NOR=Det finnes ingen Samtykke-innstillinger for Bruker %1.;SVE=Det finns inga godk„nnandeinst„llningar f”r anv„ndaren %1.';
+      Text010@1100485011 : TextConst 'ENU=You are not authorized to read consent tables.;NOR=Du har ikke tillatelse til † lese godkjenningstabeller.;SVE=Du har inte beh”righet att l„sa godk„nnandetabeller.';
+      DimensionManagement@1100528400 : Codeunit 408;
+      TempTableBuild@1100525002 : Boolean;
+      TempConsentRule@1100525001 : TEMPORARY Record 11012227;
+      PurchSetupRec@1100525003 : Record 312;
+      FPSLicenseManagement@1100527400 : Codeunit 11229289;
+      SkipCreateConsentLineForSuperApprover@1100527300 : Boolean;
+
+    PROCEDURE CalcPurchaseActionAmount@1100528420(ProjectPurchaseAction@1100528400 : Record 11012026) Amount : Decimal;
+    VAR
+      BudgetLine@1100528401 : Record 11012001;
+    BEGIN
+      BudgetLine.SETRANGE("Project No.", ProjectPurchaseAction."Project No.");
+      BudgetLine.SETRANGE("Purchase Action", ProjectPurchaseAction.Code);
+      IF BudgetLine.FINDSET THEN
+        REPEAT
+          Amount += BudgetLine."Amount (LCY)";
+        UNTIL BudgetLine.NEXT = 0;
+    END;
+
+    PROCEDURE HandlePurchaseLine@1100485004(WorkflowStepInstance@1100528400 : Record 1504;VAR PurchLineRec@1100485000 : Record 39;DocType@1100485005 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote';DocNo@1100485006 : Code[20];TempBln@1100485001 : Boolean;ApprovalCode@1100528200 : Code[20]);
+    VAR
+      RecRef@1100528401 : RecordRef;
+      DimArrayCde@1100525000 : ARRAY [8] OF Code[20];
+      ConsentProcess@1100525001 : 'Invoice,Invoice Approval,Advice Order,Purchase Order,Purchase Action,Purchase Quote,Credit Memo,Credit Memo Approval,Purchase Requisition,Not Posted Invoice,Not Posted Credit Memo';
+      AccountNo@1100528405 : Code[20];
+      FixedAssetNo@1100528404 : Code[20];
+    BEGIN
+      ConsentProcess := GetConsentProcessForPurchHeader(DocType);
+
+      WITH PurchLineRec DO BEGIN
+        DimensionManagement.UpdateGlobalDimFromDimSetID("Dimension Set ID", DimArrayCde[1], DimArrayCde[2]);
+        DimensionManagement.GetShortcutDimensions("Dimension Set ID", DimArrayCde);
+        CASE Type OF
+          Type::"G/L Account":
+            AccountNo := "No.";
+          Type::"Fixed Asset":
+            FixedAssetNo := "No.";
+        END;
+        // CreateConsentLines(
+        RecRef.GETTABLE(PurchLineRec);
+        CreateConsentLines(RecRef,WorkflowStepInstance,
+          DocType,ConsentProcess,1,DocNo,PurchLineRec."Line No.",DimArrayCde,"Job No.",Element,"Service Order No.",AccountNo,
+          FixedAssetNo,"Buy-from Vendor No.","Item No.","Plant Type","Location Code","Cost Component Plant","Receiving Company","Purchase Requisition No.",
+          "Amount (LCY)",0,0,TempBln,ApprovalCode);
+      END;
+    END;
+
+    PROCEDURE HandleApprovalLine@1100485003(WorkflowStepInstance@1100528403 : Record 1504;VAR ApprovalLineRec@1100485000 : Record 11012032;DocType@1100485006 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote';DocNo@1100485005 : Code[20];TempBln@1100485001 : Boolean);
+    VAR
+      DimensionManagement@1100528401 : Codeunit 408;
+      PurchInvHeader@1100485007 : Record 122;
+      CreditMemoHeader@1100485008 : Record 124;
+      RecRef@1100528404 : RecordRef;
+      ConsentProcess@1100528402 : 'Invoice,Invoice Approval,Advice Order,Purchase Order,Purchase Action,Purchase Quote,Credit Memo,Credit Memo Approval,Purchase Requisition,Not Posted Invoice,Not Posted Credit Memo';
+      lvVendorCode@1100485009 : Code[20];
+      DimArrayCde@1100525000 : ARRAY [8] OF Code[20];
+      AmountLCY@1100528400 : Decimal;
+      AccountNo@1100528405 : Code[20];
+      FixedAssetNo@1100528406 : Code[20];
+      ApprovalCode@1100528200 : Code[20];
+    BEGIN
+      WITH ApprovalLineRec DO BEGIN
+        CASE "Document Type" OF
+          "Document Type"::"Purchase Invoice":
+            BEGIN
+              PurchInvHeader.GET(ApprovalLineRec."Document No.");
+              lvVendorCode := PurchInvHeader."Buy-from Vendor No.";
+              ApprovalCode := PurchInvHeader."Approval Code";
+              AmountLCY := CalcAmountLCY(
+                ApprovalLineRec.Amount, PurchInvHeader."Currency Code", PurchInvHeader."Currency Factor",
+                ApprovalLineRec."Project No.", ApprovalLineRec."Posting Date");
+              ConsentProcess := ConsentProcess::"Invoice Approval";
+            END;
+          "Document Type"::"Credit Memo":
+            BEGIN
+              CreditMemoHeader.GET(ApprovalLineRec."Document No.");
+              lvVendorCode := CreditMemoHeader."Buy-from Vendor No.";
+              ApprovalCode := CreditMemoHeader."Approval Code";
+              AmountLCY := CalcAmountLCY(
+                ApprovalLineRec.Amount, CreditMemoHeader."Currency Code", CreditMemoHeader."Currency Factor",
+                ApprovalLineRec."Project No.", ApprovalLineRec."Posting Date");
+              ConsentProcess := ConsentProcess::"Credit Memo Approval"
+            END;
+        END;
+
+        DimensionManagement.UpdateGlobalDimFromDimSetID("Dimension Set ID", DimArrayCde[1], DimArrayCde[2]);
+        DimensionManagement.GetShortcutDimensions("Dimension Set ID", DimArrayCde);
+        CASE Type OF
+          Type::"G/L Account":
+            AccountNo := "Account No.";
+          Type::"Fixed Asset":
+            FixedAssetNo := "Account No.";
+        END;
+        //CreateConsentLines(
+        RecRef.GETTABLE(ApprovalLineRec);
+        CreateConsentLines(RecRef,WorkflowStepInstance,
+          DocType,ConsentProcess,1,DocNo,ApprovalLineRec."Line No.",DimArrayCde,"Project No.",Element,
+          "Service Order No.",AccountNo,FixedAssetNo,lvVendorCode,"Item No.","Plant Type",'',"Cost Component Plant","Receiving Company",'',
+          AmountLCY,0,0,TempBln,ApprovalCode);
+      END;
+    END;
+
+    PROCEDURE CheckUser@1100485007(lUserId@1100485001 : Code[50]);
+    VAR
+      Approver@1100485000 : Record 11012229;
+    BEGIN
+      IF lUserId <> UPPERCASE(USERID) THEN BEGIN
+        IF Approver.GET(USERID) THEN
+          IF Approver."Super Approver Purchase Orders" OR Approver."Sup. Approver Purch. Invoices" OR Approver."Super Approver Hours" THEN
+            EXIT;
+        IF Approver.GET(lUserId) THEN BEGIN
+          IF UPPERCASE(USERID) = Approver."Substitute Approver" THEN BEGIN
+            IF Approver."Substitution Active" = FALSE THEN
+              ERROR(STRSUBSTNO(Text006,lUserId));
+          END ELSE
+            ERROR(STRSUBSTNO(Text005,lUserId));
+        END ELSE
+          ERROR(STRSUBSTNO(Text007,lUserId));
+      END;
+    END;
+
+    LOCAL PROCEDURE FillGlobalDimsInDimArray@1100525002(DimValue1Cde@1100525000 : Code[20];DimValue2Cde@1100525001 : Code[20];VAR DimArrayCde@1100525008 : ARRAY [8] OF Code[20]);
+    BEGIN
+      IF DimValue1Cde <> '' THEN
+        DimArrayCde[1] := DimValue1Cde;
+
+      IF DimValue2Cde <> '' THEN
+        DimArrayCde[2] := DimValue2Cde;
+    END;
+
+    LOCAL PROCEDURE CreateConsentLines@1100525000(RecRef@1100528409 : RecordRef;WorkflowStepInstance@1100528410 : Record 1504;DocType@1100525014 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote,Purchase Requisition';ConsentProcess@1100525000 : 'Invoice,Invoice Approval,Advice Order,Purchase Order,Purchase Action,Purchase Quote,Credit Memo,Credit Memo Approval,Purchase Requisition';lvRecordTypeOpt@1100525001 : 'Header,Line';lvDocNoCde@1100525015 : Code[20];lvDocLineNoInt@1100525016 : Integer;lvDimValueCde@1100525003 : ARRAY [8] OF Code[20];lvProjCde@1100525004 : Code[20];ProjectElement@1100528401 : Code[20];lvServOrderCde@1100525012 : Code[20];AccountNo@1100525005 : Code[20];FixedAssetNo@1100528419 : Code[20];lvVendorCde@1100525006 : Code[20];ItemNo@1100528402 : Code[20];PlantTypeCode@1100528403 : Code[20];lvLocationCde@1100525022 : Code[10];lvCostComponentPlantCode@1100525002 : Code[10];ReceivingCompany@1100528405 : Text[30];PurchaseRequisitionCode@1100528200 : Code[20];lvAmountDec@1100525007 : Decimal;lvDifferDec@1100525008 : Decimal;lvPercentageDec@1100525009 : Decimal;lvRunTempBln@1100525017 : Boolean;lvApprovalCode@1100528201 : Code[20]);
+    VAR
+      lvReceiveLines@1100525011 : Record 121;
+      lvPurchLineRec@1100525018 : Record 39;
+      lvPurchHeadRec@1100525019 : Record 122;
+      lvApprovalLineRec@1100525020 : Record 11012032;
+      lvCreditMemoRec@1100525021 : Record 124;
+      PurchInvLine@1100525023 : Record 123;
+      PurchCrMemoLine@1100525024 : Record 125;
+      ReceiptNo@1100525025 : Code[20];
+      ReceiptLineNo@1100525026 : Integer;
+      Sign@1100525027 : Integer;
+      ReceiptLineFound@1100528400 : Boolean;
+      BudgetFound@1100528408 : Boolean;
+      ConsentRuleHasBeenFound@1100528404 : Boolean;
+      Type2@1100528407 : ' ,Project,Service Order';
+      TypeNo@1100528406 : Code[20];
+    BEGIN
+      IF NOT TempTableBuild THEN BEGIN
+        TempTableBuild := BuildTempConsentRuleTable;
+        IF NOT TempTableBuild THEN
+          EXIT;
+      END;
+
+      IF lvProjCde <> '' THEN BEGIN
+        Type2 := Type2::Project;
+        TypeNo := lvProjCde;
+      END ELSE
+        IF lvServOrderCde <> '' THEN BEGIN
+          Type2 := Type2::"Service Order";
+          TypeNo := lvServOrderCde;
+        END ELSE BEGIN
+          Type2 := Type2::" ";
+          TypeNo := '';
+        END;
+
+      WITH TempConsentRule DO BEGIN
+        IF lvRecordTypeOpt = lvRecordTypeOpt::Header THEN
+          SETRANGE(Level,Level::Header)
+        ELSE
+          SETRANGE(Level,Level::Line);
+        SETRANGE(Process, ConsentProcess);
+
+        IF FINDSET THEN BEGIN
+          REPEAT
+            IF DocType IN [
+              DocType::Order, DocType::"Purchase Quote"]
+            THEN
+              IF TempConsentRule."Budget Deviation Based On" = TempConsentRule."Budget Deviation Based On"::"Purchase Action Budget" THEN
+                CalculateDeviationFromBudget(
+                  DocType, lvRecordTypeOpt, lvDocNoCde, lvDocLineNoInt, lvAmountDec,
+                  lvDifferDec, lvPercentageDec, BudgetFound)
+              ELSE
+                CalculateDeviationFromPurchaseRequisition(
+                  DocType, lvRecordTypeOpt, lvDocNoCde, lvDocLineNoInt, lvAmountDec,
+                  lvDifferDec, lvPercentageDec, BudgetFound)
+            ELSE
+              IF Level = Level::Line THEN BEGIN
+                CASE Process OF
+                  Process::"Not Posted Invoice", Process::"Not Posted Credit Memo":
+                    BEGIN
+                      ReceiptNo := '';
+                      ReceiptLineNo := 0;
+                      ReceiptLineFound := FALSE;
+                      lvDifferDec := 0;
+                      lvPercentageDec := 0;
+                      Sign := 1;
+                      CASE DocType OF
+                        DocType::Invoice:
+                          BEGIN
+                            IF lvPurchLineRec.GET(lvPurchLineRec."Document Type"::Invoice,lvDocNoCde,lvDocLineNoInt) THEN;
+                            ReceiptNo := lvPurchLineRec."Receipt No.";
+                            ReceiptLineNo := lvPurchLineRec."Receipt Line No.";
+                          END;
+                        DocType::"Credit Memo":
+                          BEGIN
+                            IF lvPurchLineRec.GET(lvPurchLineRec."Document Type"::"Credit Memo",lvDocNoCde,lvDocLineNoInt) THEN;
+                            ReceiptNo := lvPurchLineRec."Receipt No.";
+                            ReceiptLineNo := lvPurchLineRec."Receipt Line No.";
+                            Sign := -1;
+                          END;
+                      END;
+                      IF lvReceiveLines.GET(ReceiptNo, ReceiptLineNo) THEN BEGIN
+                        ReceiptLineFound := TRUE;
+                        lvDifferDec := Sign * (lvAmountDec - (Sign * lvReceiveLines."Amount (LCY)"));
+                        IF (lvAmountDec <> 0) AND (lvReceiveLines."Amount (LCY)" <> 0) THEN BEGIN
+                         lvPercentageDec := Sign *
+                           ((lvAmountDec - (Sign * lvReceiveLines."Amount (LCY)")) /
+                            (Sign * lvReceiveLines."Amount (LCY)"));
+                          lvPercentageDec := lvPercentageDec * 100;
+                        END;
+                      END;
+                    END;
+                  Process::Invoice, Process::"Credit Memo":
+                    BEGIN
+                      ReceiptNo := '';
+                      ReceiptLineNo := 0;
+                      ReceiptLineFound := FALSE;
+                      lvDifferDec := 0;
+                      lvPercentageDec := 0;
+                      Sign := 1;
+                      CASE DocType OF
+                        DocType::Invoice:
+                          BEGIN
+                            IF lvPurchLineRec.GET(lvPurchLineRec."Document Type"::Invoice,lvDocNoCde,lvDocLineNoInt) THEN;
+                            ReceiptNo := lvPurchLineRec."Receipt No.";
+                            ReceiptLineNo := lvPurchLineRec."Receipt Line No.";
+                          END;
+                        DocType::"Posted Invoice":
+                          BEGIN
+                            IF PurchInvLine.GET(lvDocNoCde, lvDocLineNoInt) THEN;
+                            ReceiptNo := PurchInvLine."Receipt No.";
+                            ReceiptLineNo := PurchInvLine."Receipt Line No.";
+                          END;
+                        DocType::"Credit Memo":
+                          BEGIN
+                            IF lvPurchLineRec.GET(lvPurchLineRec."Document Type"::"Credit Memo",lvDocNoCde,lvDocLineNoInt) THEN;
+                            ReceiptNo := lvPurchLineRec."Receipt No.";
+                            ReceiptLineNo := lvPurchLineRec."Receipt Line No.";
+                            Sign := -1;
+                          END;
+                        DocType::"Posted Credit Memo":
+                          BEGIN
+                            IF PurchCrMemoLine.GET(lvDocNoCde, lvDocLineNoInt) THEN;
+                            ReceiptNo := PurchCrMemoLine."Receipt No.";
+                            ReceiptLineNo := PurchCrMemoLine."Receipt Line No.";
+                            Sign := -1;
+                          END;
+                      END;
+
+                      IF lvReceiveLines.GET(ReceiptNo, ReceiptLineNo) THEN BEGIN
+                        ReceiptLineFound := TRUE;
+                        lvDifferDec := Sign * (lvAmountDec - (Sign * lvReceiveLines."Amount (LCY)"));
+                        IF (lvAmountDec <> 0) AND (lvReceiveLines."Amount (LCY)" <> 0) THEN BEGIN
+                         lvPercentageDec := Sign *
+                           ((lvAmountDec - (Sign * lvReceiveLines."Amount (LCY)")) /
+                            (Sign * lvReceiveLines."Amount (LCY)"));
+                          lvPercentageDec := lvPercentageDec * 100;
+                        END;
+                      END;
+                    END;
+                  Process::"Invoice Approval", Process::"Credit Memo Approval":
+                    BEGIN
+                      ReceiptLineFound := FALSE;
+                      lvDifferDec := 0;
+                      lvPercentageDec := 0;
+                      Sign := 1;
+                      CASE DocType OF
+                        DocType::"Posted Invoice":
+                          BEGIN
+                            IF lvPurchHeadRec.GET(lvDocNoCde) THEN BEGIN
+                              IF lvApprovalLineRec.GET(lvPurchHeadRec."Journal Template",
+                                                       lvApprovalLineRec."Document Type"::"Purchase Invoice",
+                                                       lvDocNoCde,
+                                                       lvDocLineNoInt) THEN BEGIN
+                                IF lvReceiveLines.GET(lvApprovalLineRec."Receipt No.",lvApprovalLineRec."Receipt Line No.") THEN BEGIN
+                                  ReceiptLineFound := TRUE;
+                                  lvDifferDec := Sign * (lvAmountDec - (Sign * lvReceiveLines."Amount (LCY)"));
+                                  IF (lvAmountDec <> 0) AND (lvReceiveLines."Amount (LCY)" <> 0) THEN BEGIN
+                                    lvPercentageDec := Sign *
+                                      ((lvAmountDec - (Sign * lvReceiveLines."Amount (LCY)")) /
+                                       (Sign * lvReceiveLines."Amount (LCY)"));
+                                    lvPercentageDec := lvPercentageDec * 100;
+                                  END;
+                                END;
+                              END;
+                            END;
+                          END;
+                        DocType::"Posted Credit Memo":
+                          BEGIN
+                            Sign := -1;
+                            IF lvCreditMemoRec.GET(lvDocNoCde) THEN BEGIN
+                              IF lvApprovalLineRec.GET(lvCreditMemoRec."Journal Template",
+                                                       lvApprovalLineRec."Document Type"::"Credit Memo",
+                                                       lvDocNoCde,
+                                                       lvDocLineNoInt) THEN BEGIN
+                                IF lvReceiveLines.GET(lvApprovalLineRec."Receipt No.",lvApprovalLineRec."Receipt Line No.") THEN BEGIN
+                                  ReceiptLineFound := TRUE;
+                                  lvDifferDec := Sign * (lvAmountDec - (Sign * lvReceiveLines."Amount (LCY)"));
+                                  IF (lvAmountDec <> 0) AND (lvReceiveLines."Amount (LCY)" <> 0) THEN BEGIN
+                                    lvPercentageDec := Sign *
+                                      ((lvAmountDec - (Sign * lvReceiveLines."Amount (LCY)")) /
+                                       (Sign * lvReceiveLines."Amount (LCY)"));
+                                    lvPercentageDec := lvPercentageDec * 100;
+                                  END;
+                                END;
+                              END;
+                            END;
+                          END;
+                      END;
+                    END;
+                END;
+              END;
+
+            IF ConsentLineMustBeCreated(
+              TempConsentRule,ReceivingCompany,lvDimValueCde,lvProjCde,ProjectElement,lvServOrderCde,AccountNo,FixedAssetNo,lvVendorCde,
+              ItemNo,PlantTypeCode,lvLocationCde,lvCostComponentPlantCode,PurchaseRequisitionCode,lvAmountDec,BudgetFound,ReceiptLineFound,lvDifferDec,lvPercentageDec,
+              DocType,lvDocNoCde,lvApprovalCode,ConsentRuleHasBeenFound)
+            THEN BEGIN
+              TempConsentRule.Approver := DetermineApprover(
+                TempConsentRule, lvProjCde, lvServOrderCde, ReceivingCompany);
+              CreateConsentLine(RecRef,WorkflowStepInstance,
+                ConsentProcess,DocType,lvDocNoCde,lvDocLineNoInt,lvAmountDec,
+                lvVendorCde,Type2,TypeNo,TempConsentRule,lvRunTempBln);
+      //4PSSE.sn 190613
+            END ELSE
+            IF ConsentLineMustBeCreated2(
+              TempConsentRule,ReceivingCompany,lvDimValueCde,lvProjCde,ProjectElement,lvServOrderCde,AccountNo,FixedAssetNo,lvVendorCde,
+              ItemNo,PlantTypeCode,lvLocationCde,lvCostComponentPlantCode,PurchaseRequisitionCode,lvAmountDec,BudgetFound,ReceiptLineFound,lvDifferDec,lvPercentageDec,
+              DocType,lvDocNoCde,ConsentRuleHasBeenFound,Type,TypeNo)
+            THEN BEGIN
+              TempConsentRule.Approver := DetermineApprover(
+                TempConsentRule, lvProjCde, lvServOrderCde, ReceivingCompany);
+              CreateConsentLine(RecRef,WorkflowStepInstance,
+                ConsentProcess,DocType,lvDocNoCde,lvDocLineNoInt,lvAmountDec,
+                lvVendorCde,Type2,TypeNo,TempConsentRule,lvRunTempBln);
+      //4PSSE.sn 190613
+            END ELSE
+            IF ConsentLineMustBeCreated2(
+              TempConsentRule,ReceivingCompany,lvDimValueCde,lvProjCde,ProjectElement,lvServOrderCde,AccountNo,FixedAssetNo,lvVendorCde,
+              ItemNo,PlantTypeCode,lvLocationCde,lvCostComponentPlantCode,PurchaseRequisitionCode,lvAmountDec,BudgetFound,ReceiptLineFound,lvDifferDec,lvPercentageDec,
+              DocType,lvDocNoCde,ConsentRuleHasBeenFound,Type,TypeNo)
+            THEN BEGIN
+              TempConsentRule.Approver := DetermineApprover(
+                TempConsentRule, lvProjCde, lvServOrderCde, ReceivingCompany);
+              CreateConsentLine(RecRef,WorkflowStepInstance,
+                ConsentProcess,DocType,lvDocNoCde,lvDocLineNoInt,lvAmountDec,
+                lvVendorCde,Type2,TypeNo,TempConsentRule,lvRunTempBln);
+      //4PSSE.en 190613
+            END;
+          UNTIL NEXT = 0;
+        END;
+      END;
+
+      IF (NOT ConsentRuleHasBeenFound) AND (NOT SkipCreateConsentLineForSuperApprover) THEN
+        CreateConsentLineForSuperApproverDeniedLines(RecRef,WorkflowStepInstance,
+          ConsentProcess,DocType,lvDocNoCde,lvDocLineNoInt,
+          lvAmountDec,lvVendorCde,Type2,TypeNo,lvRunTempBln);
+
+      SkipCreateConsentLineForSuperApprover := FALSE;
+    END;
+
+    LOCAL PROCEDURE CalculateDeviationFromBudget@1100525005(DocType@1100525000 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote';Level@1100525006 : 'Header,Line';DocumentNo@1100525005 : Code[20];DocumentLineNo@1100525004 : Integer;Amount@1100525008 : Decimal;VAR Difference@1100525002 : Decimal;VAR Percentage@1100525001 : Decimal;VAR BudgetFound@1100525003 : Boolean);
+    VAR
+      BudgetLine@1100525007 : Record 11012001;
+      PurchaseHeader@1100525010 : Record 38;
+      BudgetAmount@1100528400 : Decimal;
+    BEGIN
+      Difference := 0;
+      Percentage := 0;
+      BudgetFound := FALSE;
+      CASE DocType OF
+        DocType::Order:
+          IF Level = Level::Header THEN
+            MarkBudgetLinesOfPurchaseHeader(
+              PurchaseHeader."Document Type"::Order, DocumentNo, BudgetLine)
+          ELSE
+            MarkBudgetLinesOfPurchaseLine(
+              PurchaseHeader."Document Type"::Order, DocumentNo, DocumentLineNo, BudgetLine);
+        DocType::"Purchase Quote":
+          IF Level = Level::Header THEN
+            MarkBudgetLinesOfPurchaseHeader(
+              PurchaseHeader."Document Type"::Quote, DocumentNo, BudgetLine)
+          ELSE
+            MarkBudgetLinesOfPurchaseLine(
+              PurchaseHeader."Document Type"::Quote, DocumentNo, DocumentLineNo, BudgetLine);
+      END;
+
+      BudgetLine.MARKEDONLY(TRUE);
+      IF BudgetLine.FINDSET THEN BEGIN
+        REPEAT
+          BudgetAmount := BudgetAmount + BudgetLine."Amount (LCY)";
+          BudgetFound := TRUE;
+        UNTIL BudgetLine.NEXT = 0;
+
+        Difference := Amount - BudgetAmount;
+        IF BudgetAmount <> 0 THEN BEGIN
+          Percentage := 100 * Difference / BudgetAmount;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE MarkBudgetLinesOfPurchaseHeader@1100528443(DocumentType@1100528400 : Integer;DocumentNo@1100528401 : Code[20];VAR BudgetLine@1100528402 : Record 11012001);
+    VAR
+      PurchaseHeader@1100528403 : Record 38;
+      PurchaseLine@1100528404 : Record 39;
+    BEGIN
+      IF NOT PurchaseHeader.GET(DocumentType, DocumentNo) THEN
+        EXIT;
+
+      PurchaseLine.SETRANGE("Document Type", DocumentType);
+      PurchaseLine.SETRANGE("Document No.", DocumentNo);
+      IF PurchaseLine.FINDSET THEN
+        REPEAT
+          MarkBudgetLinesOfPurchaseLine(
+            DocumentType, DocumentNo, PurchaseLine."Line No.", BudgetLine);
+        UNTIL PurchaseLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE MarkBudgetLinesOfPurchaseLine@1100528446(DocumentType@1100528402 : Integer;DocumentNo@1100528401 : Code[20];DocumentLineNo@1100528403 : Integer;VAR BudgetLine@1100528400 : Record 11012001);
+    VAR
+      PurchaseLine@1100528404 : Record 39;
+    BEGIN
+      IF NOT PurchaseLine.GET(DocumentType, DocumentNo, DocumentLineNo) THEN
+        EXIT;
+      IF PurchaseLine."Purchase Route Reference" = '' THEN
+        EXIT;
+
+      BudgetLine.SETCURRENTKEY("Purchase Route Reference");
+      BudgetLine.SETRANGE("Purchase Route Reference", PurchaseLine."Purchase Route Reference");
+      IF BudgetLine.FINDSET THEN
+        REPEAT
+          BudgetLine.MARK(TRUE);
+        UNTIL BudgetLine.NEXT = 0;
+      BudgetLine.SETRANGE("Purchase Route Reference");
+    END;
+
+    LOCAL PROCEDURE CalculateDeviationFromPurchaseRequisition@1100529604(DocType@1100525000 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote';Level@1100525006 : 'Header,Line';DocumentNo@1100525005 : Code[20];DocumentLineNo@1100525004 : Integer;Amount@1100525008 : Decimal;VAR Difference@1100525002 : Decimal;VAR Percentage@1100525001 : Decimal;VAR PurchaseRequisitionFound@1100525003 : Boolean);
+    VAR
+      PurchaseRequisition@1100529602 : Record 11229330;
+      PurchaseRequisitionLine@1100525007 : Record 11229331;
+      PurchaseHeader@1100525010 : Record 38;
+      PurchaseRequisitionAmount@1100528400 : Decimal;
+      PurchaseRequisitionAmountReleasedOrders@1100529601 : Decimal;
+      PurchaseHeaderDocType@1100529600 : Option;
+    BEGIN
+      Difference := 0;
+      Percentage := 0;
+      PurchaseRequisitionFound := FALSE;
+
+      CASE DocType OF
+        DocType::Order:
+          PurchaseHeaderDocType := PurchaseHeader."Document Type"::Order;
+        DocType::"Purchase Quote":
+          PurchaseHeaderDocType := PurchaseHeader."Document Type"::Quote;
+        ELSE
+          EXIT;
+      END;
+
+      IF Level = Level::Header THEN BEGIN
+        IF NOT PurchaseHeader.GET(PurchaseHeaderDocType, DocumentNo) THEN
+          EXIT;
+        IF PurchaseHeader."Purchase Requisition No." = '' THEN
+          EXIT;
+        IF NOT PurchaseRequisition.GET(PurchaseHeader."Purchase Requisition No.") THEN
+          EXIT;
+        PurchaseRequisitionFound := TRUE;
+        PurchaseRequisition.CALCFIELDS("Requisition Amount (LCY)");
+        PurchaseRequisitionAmount := PurchaseRequisition."Requisition Amount (LCY)";
+        PurchaseRequisitionAmountReleasedOrders := PurchaseRequisitionAmountReleasedOrderHeaders(
+                                                      PurchaseHeaderDocType, DocumentNo, PurchaseRequisition);
+      END ELSE BEGIN
+        MarkPurchaseRequisitionLinesOfPurchaseLine(PurchaseHeaderDocType, DocumentNo, DocumentLineNo, PurchaseRequisitionLine);
+        PurchaseRequisitionLine.MARKEDONLY(TRUE);
+        IF PurchaseRequisitionLine.FINDSET THEN BEGIN
+          PurchaseRequisitionFound := TRUE;
+          REPEAT
+            PurchaseRequisitionAmount += PurchaseRequisitionLine."Amount (LCY)";
+            PurchaseRequisitionAmountReleasedOrders += PurchaseRequisitionAmountReleasedOrderLines(
+                                                         PurchaseHeaderDocType, DocumentNo, PurchaseRequisitionLine);
+          UNTIL PurchaseRequisitionLine.NEXT = 0;
+        END;
+      END;
+
+      IF PurchaseRequisitionFound THEN BEGIN
+        Difference := Amount  + PurchaseRequisitionAmountReleasedOrders - PurchaseRequisitionAmount;
+        IF PurchaseRequisitionAmount <> 0 THEN
+          Percentage := 100 * Difference / PurchaseRequisitionAmount;
+      END;
+    END;
+
+    LOCAL PROCEDURE MarkPurchaseRequisitionLinesOfPurchaseLine@1100529602(DocumentType@1100528402 : Integer;DocumentNo@1100528401 : Code[20];DocumentLineNo@1100528403 : Integer;VAR PurchaseRequisitionLine@1100528400 : Record 11229331);
+    VAR
+      PurchaseLine@1100528404 : Record 39;
+    BEGIN
+      IF NOT PurchaseLine.GET(DocumentType, DocumentNo, DocumentLineNo) THEN
+        EXIT;
+      PurchaseLine.CALCFIELDS("Purchase Requisition No.");
+      IF (PurchaseLine."Purchase Requisition No." =  '') OR (PurchaseLine."Purchase Route Reference" = '') THEN
+        EXIT;
+
+      PurchaseRequisitionLine.SETRANGE("Purchase Requisition No.", PurchaseLine."Purchase Requisition No.");
+      PurchaseRequisitionLine.SETRANGE("Purchase Route Reference", PurchaseLine."Purchase Route Reference");
+      IF PurchaseRequisitionLine.FINDSET THEN
+        REPEAT
+          PurchaseRequisitionLine.MARK(TRUE);
+        UNTIL PurchaseRequisitionLine.NEXT = 0;
+      PurchaseRequisitionLine.SETRANGE("Purchase Requisition No.");
+      PurchaseRequisitionLine.SETRANGE("Purchase Route Reference");
+    END;
+
+    LOCAL PROCEDURE PurchaseRequisitionAmountReleasedOrderHeaders@1100529614(DocumentType@1100529603 : Integer;DocumentNo@1100529602 : Code[20];PurchaseRequisition@1100529600 : Record 11229330) ReleasedOrderAmount : Decimal;
+    VAR
+      PurchaseHeader@1100529601 : Record 38;
+      PurchaseLine@1100529604 : Record 39;
+    BEGIN
+      ReleasedOrderAmount := 0;
+      IF PurchaseRequisition."No." = '' THEN
+        EXIT;
+
+      PurchaseHeader.SETRANGE("Document Type", DocumentType);
+      PurchaseHeader.SETFILTER("No.", '<>%1', DocumentNo);
+      PurchaseHeader.SETRANGE("Purchase Requisition No.", PurchaseRequisition."No.");
+      PurchaseHeader.SETFILTER(Status, '>%1', PurchaseHeader.Status::Open);
+      IF PurchaseHeader.FINDSET THEN BEGIN
+        PurchaseLine.SETRANGE("Document Type", DocumentType);
+        REPEAT
+          PurchaseLine.SETRANGE("Document No.", PurchaseHeader."No.");
+          PurchaseLine.CALCSUMS("Amount (LCY)");
+          ReleasedOrderAmount += PurchaseLine."Amount (LCY)";
+        UNTIL PurchaseHeader.NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE PurchaseRequisitionAmountReleasedOrderLines@1100529607(DocumentType@1100529603 : Integer;DocumentNo@1100529602 : Code[20];PurchaseRequisitionLine@1100529600 : Record 11229331) ReleasedOrderAmount : Decimal;
+    VAR
+      PurchaseLine@1100529604 : Record 39;
+    BEGIN
+      ReleasedOrderAmount := 0;
+      IF PurchaseRequisitionLine."Purchase Route Reference" = '' THEN
+        EXIT;
+
+      PurchaseLine.SETRANGE("Document Type", DocumentType);
+      PurchaseLine.SETFILTER("Document No.", '<>%1', DocumentNo);
+      PurchaseLine.SETRANGE("Purchase Route Reference", PurchaseRequisitionLine."Purchase Route Reference");
+      IF PurchaseLine.ISEMPTY THEN
+        EXIT;
+      PurchaseLine.SETAUTOCALCFIELDS("Purchase Order Status", "Purchase Requisition No.");
+      PurchaseLine.FINDSET;
+      REPEAT
+        IF (PurchaseLine."Purchase Order Status" > PurchaseLine."Purchase Order Status"::Open) AND
+           (PurchaseLine."Purchase Requisition No." = PurchaseRequisitionLine."Purchase Requisition No.")
+        THEN
+          ReleasedOrderAmount += PurchaseLine."Amount (LCY)";
+      UNTIL PurchaseLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE BuildTempConsentRuleTable@1100525007() Present : Boolean;
+    VAR
+      ConsentRule@1100525001 : Record 11012227;
+    BEGIN
+      TempConsentRule.DELETEALL;
+      IF ConsentRule.FINDSET(FALSE,FALSE) THEN BEGIN
+        REPEAT
+          TempConsentRule := ConsentRule;
+          TempConsentRule.INSERT;
+        UNTIL ConsentRule.NEXT = 0;
+        TempConsentRule.SETCURRENTKEY("Consent Level");
+        EXIT(TRUE);
+      END ELSE
+        EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE ConsentLineMustBeCreated@1100525001(ConsentRule@1100525000 : Record 11012227;ReceivingCompany@1100528202 : Text[30];DimValueCodes@1100525007 : ARRAY [8] OF Code[20];JobNo@1100525011 : Code[20];ProjectElement@1100528401 : Code[20];ServiceOrderNo@1100525010 : Code[20];AccountNo@1100525005 : Code[20];FixedAssetNo@1100528406 : Code[20];VendorNo@1100525004 : Code[20];ItemNo@1100528402 : Code[20];PlantTypeCode@1100528403 : Code[20];LocationCode@1100525018 : Code[10];CostComponentPlantCode@1100525006 : Code[10];PurchaseRequisitionCode@1100528201 : Code[20];Amount@1100525003 : Decimal;BudgetFound@1100528405 : Boolean;ReceiptLineFound@1100528400 : Boolean;Difference@1100525002 : Decimal;Percentage@1100525001 : Decimal;DocumentType@1100528000 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote,Purchase Requisition';DocumentNo@1100528001 : Code[20];ApprovalCode@1100528203 : Code[20];VAR ConsentRuleHasBeenFound@1100528404 : Boolean) : Boolean;
+    VAR
+      FilterResult@1100528200 : 'NoFilter,InFilter,OutOfFilter';
+      TempApprovalCode4PS@1100528204 : TEMPORARY Record 11229388;
+    BEGIN
+      IF NOT ConsentIsNeededForAmount(
+        ConsentRule, Amount, BudgetFound, ReceiptLineFound, Difference, Percentage)
+      THEN
+        EXIT(FALSE);
+
+      IF (ConsentRule.Type IN [ConsentRule.Type::Service, ConsentRule.Type::Other]) AND
+         (JobNo <> '')
+      THEN
+        EXIT(FALSE);
+
+      IF ConsentRule.Type = ConsentRule.Type::Project THEN BEGIN
+        IF JobNo = '' THEN
+          EXIT(FALSE)
+      END;
+
+      IF (ConsentRule.Type IN [ConsentRule.Type::Project, ConsentRule.Type::Other]) AND
+         (ServiceOrderNo <> '')
+      THEN
+        EXIT(FALSE);
+
+      IF ConsentRule.Type = ConsentRule.Type::Service THEN
+        IF ServiceOrderNo = '' THEN
+          EXIT(FALSE);
+
+      IF (DELCHR(ApprovalCode) = '')  AND (DELCHR(ConsentRule."Approval Code Filter", '<>', ' ') <> '') THEN
+        EXIT(FALSE);
+      IF (DELCHR(ApprovalCode) <> '') AND (DELCHR(ConsentRule."Approval Code Filter", '<>', ' ') = '') THEN
+        EXIT(FALSE);
+      IF (DELCHR(ApprovalCode) <> '') AND (DELCHR(ConsentRule."Approval Code Filter", '<>', ' ') <> '') THEN BEGIN
+        TempApprovalCode4PS.DELETEALL;
+        TempApprovalCode4PS.Code := DELCHR(ApprovalCode);
+        TempApprovalCode4PS.INSERT;
+        TempApprovalCode4PS.SETFILTER(Code, UPPERCASE(DELCHR(ConsentRule."Approval Code Filter", '<>', ' ')));
+        IF NOT TempApprovalCode4PS.FINDFIRST THEN
+          EXIT(FALSE);
+      END;
+
+      FilterResult := RecordWithinConsentRuleFilters(
+        ConsentRule, ReceivingCompany, DimValueCodes, JobNo, ProjectElement, ServiceOrderNo,
+        AccountNo, FixedAssetNo, VendorNo, ItemNo, PlantTypeCode, LocationCode,CostComponentPlantCode,PurchaseRequisitionCode,
+        DocumentType, DocumentNo);
+      IF FilterResult = FilterResult::OutOfFilter THEN
+        EXIT(FALSE);
+
+      ConsentRuleHasBeenFound := TRUE;
+
+      IF ConsentRule."No Consent" THEN
+        EXIT(FALSE);
+
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE ConsentIsNeededForAmount@1100528403(ConsentRule@1100528403 : Record 11012227;Amount@1100528402 : Decimal;BudgetFound@1100528405 : Boolean;ReceiptLineFound@1100528404 : Boolean;Difference@1100528401 : Decimal;Percentage@1100528400 : Decimal) : Boolean;
+    BEGIN
+      IF (ConsentRule."Minimum Amount" <> 0) OR
+         (ConsentRule."Maximum Amount" <> 0)
+      THEN
+        IF (Amount >= ConsentRule."Minimum Amount") AND
+           (Amount <= ConsentRule."Maximum Amount")
+        THEN
+          EXIT(TRUE);
+
+      IF ConsentIsNeededForDeviation(
+        ConsentRule."Min. Deviation From Rcpt. %", Percentage,
+        ConsentRule."Min. Deviation From Rcpt.", Difference, Amount,
+        (ConsentRule."Consent Deviation if No Rcpt." AND NOT ReceiptLineFound), FALSE)
+      THEN
+        EXIT(TRUE);
+
+      IF ConsentIsNeededForDeviation(
+        ConsentRule."Min. Deviation From Budget %", Percentage,
+        ConsentRule."Min. Deviation From Budget", Difference, Amount,
+        (ConsentRule."Consent Deviation if No Budget" AND NOT BudgetFound), TRUE)
+      THEN
+        EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE ConsentIsNeededForDeviation@1100528444(MinDeviationPercentage@1100528400 : Decimal;DeviationPercentage@1100528403 : Decimal;MinDeviation@1100528401 : Decimal;Deviation@1100528404 : Decimal;Amount@1100528405 : Decimal;ConsiderAmountAsDeviation@1100528402 : Boolean;DeviationFromBudget@1100527300 : Boolean) : Boolean;
+    BEGIN
+      IF (MinDeviationPercentage <> 0) AND
+         (ABS(DeviationPercentage) >= MinDeviationPercentage)
+      THEN
+        EXIT(TRUE);
+
+      IF NOT DeviationFromBudget THEN
+        Deviation := ABS(Deviation);
+
+      IF (MinDeviation <> 0) AND (Deviation >= MinDeviation) THEN
+        EXIT(TRUE)
+      ELSE
+        IF DeviationFromBudget AND ((MinDeviationPercentage <> 0) OR (MinDeviation <> 0)) THEN
+          SkipCreateConsentLineForSuperApprover := TRUE;
+
+      IF ConsiderAmountAsDeviation THEN BEGIN
+        IF (MinDeviationPercentage <> 0) AND
+           (ABS(Amount) > 0)
+        THEN
+          EXIT(TRUE);
+
+        IF (MinDeviation <> 0) AND
+           (ABS(Amount) >= MinDeviation)
+        THEN
+          EXIT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE DetermineApprover@1100528414(ConsentRule@1100525000 : Record 11012227;JobNo@1100525011 : Code[20];ServiceOrderNo@1100525010 : Code[20];ReceivingCompany@1100528400 : Text[30]) ApproverUserID : Code[50];
+    BEGIN
+      IF ConsentRule."Approver Group Code" <> '' THEN
+        EXIT; //When Approver group code has been specified, Approver user id must be empty.
+
+      ApproverUserID := ConsentRule.Approver;
+      IF ApproverUserID <> '' THEN
+        EXIT;
+
+      //IF (ReceivingCompany = '') OR
+      //   (ReceivingCompany = COMPANYNAME)
+      //THEN BEGIN
+      CASE ConsentRule.Type OF
+        ConsentRule.Type::Project:
+          ApproverUserID := DetermineApproverForProject(ConsentRule, JobNo, ReceivingCompany);
+        ConsentRule.Type::Service:
+          ApproverUserID := DetermineApproverForServiceOrder(ConsentRule, ServiceOrderNo, ReceivingCompany);
+      END;
+      //END ELSE
+
+      IF ApproverUserID = '' THEN
+       ConsentRule.TESTFIELD(Approver);
+    END;
+
+    LOCAL PROCEDURE DetermineApproverForProject@1100528422(ConsentRule@1100525000 : Record 11012227;JobNo@1100525011 : Code[20];ReceivingCompany@1100528400 : Text[30]) ApproverUserID : Code[50];
+    VAR
+      Job@1100525014 : Record 11072003;
+    BEGIN
+      IF (ReceivingCompany <> '') AND (ReceivingCompany <> COMPANYNAME) THEN
+        Job.CHANGECOMPANY(ReceivingCompany);
+
+      IF Job.GET(JobNo) THEN
+        CASE ConsentRule."Project Role" OF
+          ConsentRule."Project Role"::"Project Manager":
+            IF Job."Project Manager" <> '' THEN
+              ApproverUserID := GetApproverBasedOnRole('', Job."Project Manager",ReceivingCompany)
+            ELSE
+              Job.TESTFIELD("Project Manager");
+          ConsentRule."Project Role"::"Project Engineer":
+            IF Job."Project Engineer" <> '' THEN
+              ApproverUserID := GetApproverBasedOnRole('', Job."Project Engineer",ReceivingCompany)
+            ELSE
+              Job.TESTFIELD("Project Engineer");
+          ConsentRule."Project Role"::Purchaser:
+            IF Job."Purchaser Code" <> '' THEN
+              ApproverUserID := GetApproverBasedOnRole(Job."Purchaser Code", '',ReceivingCompany)
+            ELSE
+              Job.TESTFIELD("Purchaser Code");
+          ConsentRule."Project Role"::"Site Manager":
+            IF Job."Site Manager" <> '' THEN
+              ApproverUserID := GetApproverBasedOnRole('', Job."Site Manager",ReceivingCompany)
+            ELSE
+              Job.TESTFIELD("Site Manager");
+          ConsentRule."Project Role"::Administrator:
+            IF Job."Project Administrator" <> '' THEN
+              ApproverUserID := GetApproverBasedOnRole('', Job."Project Administrator",ReceivingCompany)
+            ELSE
+              Job.TESTFIELD("Project Administrator");
+          ConsentRule."Project Role"::Estimator:
+            IF Job.Estimator <> '' THEN
+              ApproverUserID := GetApproverBasedOnRole('', Job.Estimator,ReceivingCompany)
+            ELSE
+              Job.TESTFIELD(Estimator);
+        END;
+    END;
+
+    LOCAL PROCEDURE DetermineApproverForServiceOrder@1100528423(ConsentRule@1100525000 : Record 11012227;ServiceOrderNo@1100525010 : Code[20];ReceivingCompany@1100528402 : Text[30]) ApproverUserID : Code[50];
+    VAR
+      ServiceOrder@1100528600 : Record 11012823;
+      ResourceWOP@1100528403 : Record 11229278;
+      ServiceLocation@1100528400 : Record 11012801;
+      ServiceContract@1100528401 : Record 11012812;
+    BEGIN
+      IF (ReceivingCompany <> '') AND (ReceivingCompany <> COMPANYNAME) THEN BEGIN
+        ServiceOrder.CHANGECOMPANY(ReceivingCompany);
+        ResourceWOP.CHANGECOMPANY(ReceivingCompany);
+        ServiceLocation.CHANGECOMPANY(ReceivingCompany);
+        ServiceContract.CHANGECOMPANY(ReceivingCompany);
+      END;
+
+      IF ServiceOrder.GET(ServiceOrderNo) THEN
+        CASE ConsentRule."Service Role" OF
+          ConsentRule."Service Role"::"Order Manager":
+            IF ServiceOrder."Order Manager" <> '' THEN
+              ApproverUserID := GetApproverBasedOnRole(ServiceOrder."Order Manager", '',ReceivingCompany)
+            ELSE
+              ServiceOrder.TESTFIELD("Order Manager");
+          ConsentRule."Service Role"::"Assigned to":
+            IF ServiceOrder."Assigned to" <> '' THEN
+              ApproverUserID := GetApproverBasedOnRole('', ServiceOrder."Assigned to",ReceivingCompany)
+            ELSE
+              ServiceOrder.TESTFIELD("Assigned to");
+          ConsentRule."Service Role"::Employee:
+            IF ServiceOrder."Employee No." <> '' THEN BEGIN
+              IF ResourceWOP.GET(ServiceOrder."Employee No.") THEN BEGIN
+                ResourceWOP.TESTFIELD(Type, ResourceWOP.Type::Employee);
+                IF ResourceWOP."Source No." <> '' THEN
+                  ApproverUserID := GetApproverBasedOnRole('', ResourceWOP."Source No.",ReceivingCompany)
+                END ELSE
+                  ResourceWOP.TESTFIELD("Source No.");
+            END ELSE
+              ServiceOrder.TESTFIELD("Employee No.");
+          ConsentRule."Service Role"::"Location Manager":
+            IF ServiceOrder."Service Location No." <> '' THEN BEGIN
+              IF ServiceLocation.GET(ServiceOrder."Service Location No.") THEN
+                IF ServiceLocation."Location Manager" <> '' THEN
+                  ApproverUserID := GetApproverBasedOnRole(ServiceLocation."Location Manager", '',ReceivingCompany)
+                ELSE
+                  ServiceLocation.TESTFIELD("Location Manager");
+            END ELSE
+              ServiceOrder.TESTFIELD("Service Location No.");
+          ConsentRule."Service Role"::"Contract Manager":
+            IF ServiceOrder."Service Contract No." <> '' THEN BEGIN
+              IF ServiceContract.GET(ServiceOrder."Service Contract No.") THEN
+                IF ServiceContract."Contract Manager" <> '' THEN
+                  ApproverUserID := GetApproverBasedOnRole(ServiceContract."Contract Manager", '',ReceivingCompany)
+                ELSE
+                  ServiceContract.TESTFIELD("Contract Manager");
+            END ELSE
+              ServiceOrder.TESTFIELD("Service Contract No.");
+        END;
+    END;
+
+    LOCAL PROCEDURE GetApproverBasedOnRole@1100528405(PurchaserCode@1100528403 : Code[10];EmployeeNo@1100528404 : Code[20];ReceivingCompany@1100528200 : Text[30]) ApproverUserID : Code[50];
+    VAR
+      UserSetup@1100528400 : Record 91;
+      Approver@1100528401 : Record 11012229;
+    BEGIN
+      IF (ReceivingCompany <> '') AND (ReceivingCompany <> COMPANYNAME) THEN
+        UserSetup.CHANGECOMPANY(ReceivingCompany);
+
+      IF PurchaserCode <> '' THEN BEGIN
+        UserSetup.SETCURRENTKEY("Salespers./Purch. Code");
+        UserSetup.SETRANGE("Salespers./Purch. Code", PurchaserCode);
+      END ELSE
+        UserSetup.SETRANGE("Employee No.", EmployeeNo);
+
+      UserSetup.FINDFIRST;
+      Approver.GET(UserSetup."User ID");
+      ApproverUserID := UserSetup."User ID";
+    END;
+
+    PROCEDURE CreateConsentLine@1100525003(RecRef@1100528401 : RecordRef;WorkflowStepInstance@1100528400 : Record 1504;ConsentProcess@1100525010 : 'Invoice,Invoice Approval,Advice Order,Purchase Order,Purchase Action,Purchase Quote,Credit Memo,Credit Memo Approval';DocType@1100525007 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote';DocNo@1100525006 : Code[20];DocLineNo@1100525005 : Integer;Amount@1100525004 : Decimal;VendorNo@1100525003 : Code[20];Type@1100525002 : ' ,Project,Service Order';TypeNo@1100525001 : Code[20];ConsentRule@1100525011 : Record 11012227;RunTemp@1100525000 : Boolean);
+    BEGIN
+      IF RunTemp THEN BEGIN
+        InsertConsentLine(RecRef, WorkflowStepInstance,
+          ConsentProcess, DocType, DocNo, DocLineNo, Amount, VendorNo,
+          Type, TypeNo, ConsentRule);
+      END ELSE BEGIN
+        InsertConsentLine(RecRef, WorkflowStepInstance,
+          ConsentProcess, DocType, DocNo, DocLineNo, Amount, VendorNo,
+          Type, TypeNo, ConsentRule);
+      END;
+    END;
+
+    PROCEDURE InsertConsentLine@1100528427(RecRef@1100528403 : RecordRef;WorkflowStepInstance@1100528401 : Record 1504;ConsentProcess@1100525010 : 'Invoice,Invoice Approval,Advice Order,Purchase Order,Purchase Action,Purchase Quote,Credit Memo,Credit Memo Approval';DocType@1100525007 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote';DocNo@1100525006 : Code[20];DocLineNo@1100525005 : Integer;Amount@1100525004 : Decimal;VendorNo@1100525003 : Code[20];Type@1100525002 : ' ,Project,Service Order';TypeNo@1100525001 : Code[20];ConsentRule@1100525011 : Record 11012227);
+    VAR
+      ApprovalsMgmt@1100528200 : Codeunit 1535;
+      EmptyGuid@1100528402 : GUID;
+    BEGIN
+      IF WorkflowStepInstance.ID <> EmptyGuid THEN
+        ApprovalsMgmt.InsertApprovalEntryForConsentRule(
+          RecRef,DocLineNo,WorkflowStepInstance, ConsentRule, Type, TypeNo)
+      ELSE
+        ApprovalsMgmt.InsertApprovalEntryForConsentRule(
+          RecRef,DocLineNo,WorkflowStepInstance, ConsentRule, Type, TypeNo); //TODO??
+    END;
+
+    PROCEDURE CurrentUserCanConsentThisLine@1100528413(ConsentRule@1100528400 : Record 11012227;Type@1100528402 : ' ,Project,Service Order';TypeNo@1100528401 : Code[20]) : Boolean;
+    BEGIN
+      IF NOT ConsentRule."Autom. Consent Own Lines" THEN
+        EXIT(FALSE);
+
+      IF ConsentRule.Approver = USERID THEN
+        EXIT(TRUE);
+
+      IF CurrentUserIsApproverGroupMember(ConsentRule) THEN
+        EXIT(TRUE);
+
+      IF Type = Type::Project THEN
+        IF CurrentUserHasProjectRole(ConsentRule, TypeNo) THEN
+          EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE CurrentUserIsApproverGroupMember@1100528415(ConsentRule@1100528400 : Record 11012227) : Boolean;
+    VAR
+      ApproverGroupMember@1100528401 : Record 11012232;
+    BEGIN
+      IF ConsentRule."Approver Group Code" = '' THEN
+        EXIT(FALSE);
+
+      IF ApproverGroupMember.GET(ConsentRule."Approver Group Code", USERID) THEN
+        EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE CurrentUserHasProjectRole@1100528416(ConsentRule@1100528400 : Record 11012227;ProjectNo@1100528401 : Code[20]) : Boolean;
+    VAR
+      JobsSetup@1100528403 : Record 315;
+      UserSetup@1100528405 : Record 91;
+      ProjectResponsiblePerson@1100528402 : Record 11012040;
+      ResponsibilityCode@1100528404 : Code[10];
+    BEGIN
+      IF ProjectNo = '' THEN
+        EXIT(FALSE);
+      IF NOT JobsSetup.GET THEN
+        EXIT(FALSE);
+      IF NOT UserSetup.GET(USERID) THEN
+        EXIT(FALSE);
+
+      CASE ConsentRule."Project Role" OF
+        ConsentRule."Project Role"::" ":
+          ResponsibilityCode := '';
+        ConsentRule."Project Role"::"Project Manager":
+          ResponsibilityCode := JobsSetup."Responsibility Project Manager";
+        ConsentRule."Project Role"::"Project Engineer":
+          ResponsibilityCode := JobsSetup."Responsibility ProjectEngineer";
+        ConsentRule."Project Role"::Purchaser:
+          ResponsibilityCode := '';
+        ConsentRule."Project Role"::"Site Manager":
+          ResponsibilityCode := JobsSetup."Responsibility Site Manager";
+        ConsentRule."Project Role"::Administrator:
+          ResponsibilityCode := '';
+        ConsentRule."Project Role"::Estimator:
+          ResponsibilityCode := JobsSetup."Responsibility Estimator";
+      END;
+
+      IF ResponsibilityCode <> '' THEN BEGIN
+        ProjectResponsiblePerson.SETCURRENTKEY("Employee No.", Responsibility, "Project No.");
+        ProjectResponsiblePerson.SETRANGE("Employee No.", UserSetup."Employee No.");
+        ProjectResponsiblePerson.SETRANGE(Responsibility, ResponsibilityCode);
+        ProjectResponsiblePerson.SETRANGE("Project No.", ProjectNo);
+        IF NOT ProjectResponsiblePerson.ISEMPTY THEN
+          EXIT(TRUE);
+      END;
+    END;
+
+    PROCEDURE CalcAmountLCY@1100528404(Amount@1100528400 : Decimal;CurrencyCode@1100528402 : Code[10];CurrencyFactor@1100528406 : Decimal;JobNo@1100528404 : Code[20];PostingDate@1100528405 : Date) AmountLCY : Decimal;
+    VAR
+      Currency@1100528401 : Record 4;
+      CurrencyExchangeRate@1100528403 : Record 330;
+      CurrExchRateDate@1100528407 : Date;
+    BEGIN
+      IF PostingDate <> 0D THEN
+        CurrExchRateDate := PostingDate
+      ELSE
+        CurrExchRateDate := WORKDATE;
+
+      Currency.InitRoundingPrecision;
+      IF CurrencyCode <> '' THEN
+        AmountLCY :=
+          ROUND(
+            CurrencyExchangeRate.ExchangeAmtFCYToLCY(
+              1, JobNo, CurrExchRateDate, CurrencyCode,
+              Amount, CurrencyFactor, FALSE),
+            Currency."Amount Rounding Precision")
+      ELSE
+        AmountLCY :=
+          ROUND(Amount, Currency."Amount Rounding Precision");
+    END;
+
+    LOCAL PROCEDURE RecordWithinConsentRuleFilters@1000000003(ConsentRule@1000000000 : Record 11012227;ReceivingCompany@1100528201 : Text[30];DimValueCodes@1000000008 : ARRAY [8] OF Code[20];JobNo@1000000007 : Code[20];ProjectElement@1100528400 : Code[20];ServiceOrderNo@1000000006 : Code[20];AccountNo@1000000004 : Code[20];FixedAssetNo@1100528405 : Code[20];VendorNo@1000000003 : Code[20];ItemNo@1100528401 : Code[20];PlantTypeCode@1100528402 : Code[20];LocationCode@1000000002 : Code[10];CostComponentPlantCode@1100525000 : Code[10];PurchaseRequisitionCode@1100528200 : Code[20];DocumentType@1100528000 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote,Purchase Requisition';DocumentNo@1100528001 : Code[20]) : Integer;
+    VAR
+      ConsentRuleFilter@1000000001 : Record 11229793;
+      AllObjWithCaption@1100528403 : Record 2000000058;
+      I@1000000013 : Integer;
+      DimensionCode@1100528407 : Code[20];
+      FilterResult@1100528404 : 'NoFilter,InFilter,OutOfFilter';
+    BEGIN
+      ConsentRuleFilter.SETRANGE("Consent Rule Process", ConsentRule.Process);
+      ConsentRuleFilter.SETRANGE("Consent Rule Line No.", ConsentRule."Line No.");
+      IF ConsentRuleFilter.ISEMPTY THEN
+        EXIT(FilterResult::NoFilter);
+      ConsentRuleFilter.GetApplicableTables(AllObjWithCaption);
+      IF NOT AllObjWithCaption.FINDSET THEN
+        EXIT(FilterResult::NoFilter);
+      REPEAT
+        ConsentRuleFilter.SETRANGE("Table No.",AllObjWithCaption."Object ID");
+        IF NOT ConsentRuleFilter.ISEMPTY THEN
+          CASE TRUE OF
+            AllObjWithCaption."Object ID" = DATABASE::Vendor:
+              IF NOT FieldsAreWithinFilters(ConsentRuleFilter,'',AllObjWithCaption."Object ID", VendorNo, 1, '', 0) THEN
+                EXIT(FilterResult::OutOfFilter);
+            AllObjWithCaption."Object ID" = DATABASE::"Dimension Value":
+              FOR I := 1 TO 8 DO BEGIN
+                DimensionCode := GetShortcutDimensionCode(I);
+                IF DimensionCode <> '' THEN BEGIN
+                  ConsentRuleFilter.SETRANGE("Dimension Code", DimensionCode);
+                  IF NOT FieldsAreWithinFilters(
+                    ConsentRuleFilter,'',AllObjWithCaption."Object ID", DimensionCode, 1, DimValueCodes[I], 2)
+                  THEN
+                    EXIT(FilterResult::OutOfFilter);
+                  ConsentRuleFilter.SETRANGE("Dimension Code");
+                END;
+              END;
+            AllObjWithCaption."Object ID" = DATABASE::Job:
+              IF NOT FieldsAreWithinFilters(ConsentRuleFilter,ReceivingCompany,AllObjWithCaption."Object ID", JobNo, 1, '', 0) THEN
+                EXIT(FilterResult::OutOfFilter);
+            AllObjWithCaption."Object ID" = DATABASE::"Service Order":
+              IF NOT FieldsAreWithinFilters(ConsentRuleFilter,ReceivingCompany,AllObjWithCaption."Object ID", ServiceOrderNo, 10, '', 0) THEN
+                EXIT(FilterResult::OutOfFilter);
+            AllObjWithCaption."Object ID" = DATABASE::"Purchase Header":
+              IF DocumentType IN
+                [DocumentType::"Purchase Quote", DocumentType::Order,
+                 DocumentType::Invoice, DocumentType::"Credit Memo"]
+              THEN
+                IF NOT FieldsAreWithinFilters(
+                  ConsentRuleFilter,'',AllObjWithCaption."Object ID", GetPurchHeaderDocumentTypeFilter(DocumentType), 1, DocumentNo, 3)
+                THEN
+                  EXIT(FilterResult::OutOfFilter);
+            AllObjWithCaption."Object ID" = DATABASE::"Purchase Header Extension":
+              IF DocumentType IN
+                [DocumentType::"Purchase Quote", DocumentType::Order,
+                 DocumentType::Invoice, DocumentType::"Credit Memo"]
+              THEN
+                IF NOT FieldsAreWithinFilters(
+                  ConsentRuleFilter,'',AllObjWithCaption."Object ID", GetPurchHeaderDocumentTypeFilter(DocumentType), 1, DocumentNo, 2)
+                THEN
+                  EXIT(FilterResult::OutOfFilter);
+            (AllObjWithCaption."Object ID" = DATABASE::"Purch. Inv. Header") AND (DocumentType = DocumentType::"Posted Invoice"):
+              IF NOT FieldsAreWithinFilters(ConsentRuleFilter,'',AllObjWithCaption."Object ID", DocumentNo, 3, '', 0) THEN
+                EXIT(FilterResult::OutOfFilter);
+            (AllObjWithCaption."Object ID" = DATABASE::"Purch. Cr. Memo Hdr.") AND (DocumentType = DocumentType::"Posted Credit Memo"):
+              IF NOT FieldsAreWithinFilters(ConsentRuleFilter,'',AllObjWithCaption."Object ID", DocumentNo, 3, '', 0) THEN
+                EXIT(FilterResult::OutOfFilter);
+            AllObjWithCaption."Object ID" = DATABASE::Location:
+              IF NOT FieldsAreWithinFilters(ConsentRuleFilter,'',AllObjWithCaption."Object ID", LocationCode, 1, '', 0) THEN
+                EXIT(FilterResult::OutOfFilter);
+            AllObjWithCaption."Object ID" = DATABASE::"Project Element":
+              IF NOT FieldsAreWithinFilters(ConsentRuleFilter,ReceivingCompany,AllObjWithCaption."Object ID", JobNo, 10, ProjectElement, 20) THEN
+                EXIT(FilterResult::OutOfFilter);
+            AllObjWithCaption."Object ID" = DATABASE::"G/L Account":
+              IF NOT FieldsAreWithinFilters(ConsentRuleFilter,'',AllObjWithCaption."Object ID", AccountNo, 1, '', 0) THEN
+                EXIT(FilterResult::OutOfFilter);
+            AllObjWithCaption."Object ID" = DATABASE::"Fixed Asset":
+              IF NOT FieldsAreWithinFilters(ConsentRuleFilter,'',AllObjWithCaption."Object ID", FixedAssetNo, 1, '', 0) THEN
+                EXIT(FilterResult::OutOfFilter);
+            AllObjWithCaption."Object ID" = DATABASE::Item:
+              IF NOT FieldsAreWithinFilters(ConsentRuleFilter,'',AllObjWithCaption."Object ID", ItemNo, 1, '', 0) THEN
+                EXIT(FilterResult::OutOfFilter);
+            AllObjWithCaption."Object ID" = DATABASE::"Plant Type":
+              IF NOT FieldsAreWithinFilters(ConsentRuleFilter,'',AllObjWithCaption."Object ID", PlantTypeCode, 10, '', 0) THEN
+                EXIT(FilterResult::OutOfFilter);
+            AllObjWithCaption."Object ID" = DATABASE::"Purchase Requisition":
+              IF NOT FieldsAreWithinFilters(ConsentRuleFilter,'',AllObjWithCaption."Object ID", PurchaseRequisitionCode, 10, '', 0) THEN
+                EXIT(FilterResult::OutOfFilter);
+            //C037014.sn
+            AllObjWithCaption."Object ID" = DATABASE::"Cost Component Plant":
+              IF NOT FieldsAreWithinFilters(ConsentRuleFilter,'',AllObjWithCaption."Object ID", CostComponentPlantCode, 10, '', 0) THEN
+                EXIT(FilterResult::OutOfFilter);
+            //C037014.en
+          END;
+      UNTIL AllObjWithCaption.NEXT = 0;
+      EXIT(FilterResult::InFilter);
+    END;
+
+    LOCAL PROCEDURE FieldsAreWithinFilters@1100528428(VAR ConsentRuleFilter@1100528401 : Record 11229793;ReceivingCompany@1100528200 : Text[30];TableID@1100528403 : Integer;PrimaryKeyValue1@1100528400 : Text;PrimaryKeyFieldNo1@1100528406 : Integer;PrimaryKeyValue2@1100528409 : Text;PrimaryKeyFieldNo2@1100528408 : Integer) WithinFilter : Boolean;
+    VAR
+      ConsentRuleFilter2@1100528402 : Record 11229793;
+      RecRef@1100528404 : RecordRef;
+      FieldRef@1100528405 : FieldRef;
+    BEGIN
+      WithinFilter := TRUE;
+      ConsentRuleFilter2.COPYFILTERS(ConsentRuleFilter);
+      IF NOT ConsentRuleFilter2.FINDSET THEN
+        EXIT; // No filter specified, so within filter.
+      IF (ReceivingCompany <> '') AND (ReceivingCompany <> ConsentRuleFilter2.CURRENTCOMPANY) THEN
+        RecRef.OPEN(TableID,FALSE,ReceivingCompany)
+      ELSE
+        RecRef.OPEN(TableID);
+      RecRef.FILTERGROUP(9);
+      IF PrimaryKeyFieldNo1 > 0 THEN BEGIN
+        FieldRef := RecRef.FIELD(PrimaryKeyFieldNo1);
+        FieldRef.SETFILTER('%1', PrimaryKeyValue1);
+      END;
+      IF PrimaryKeyFieldNo2 > 0 THEN BEGIN
+        FieldRef := RecRef.FIELD(PrimaryKeyFieldNo2);
+        FieldRef.SETFILTER('%1', PrimaryKeyValue2);
+      END;
+      RecRef.FILTERGROUP(0);
+
+      REPEAT
+        FieldRef := RecRef.FIELD(ConsentRuleFilter2."Field No.");
+        FieldRef.SETFILTER(ConsentRuleFilter2.Filter);
+      UNTIL ConsentRuleFilter2.NEXT = 0;
+
+      IF RecRef.ISEMPTY THEN
+        WithinFilter := FALSE;
+      RecRef.CLOSE;
+    END;
+
+    LOCAL PROCEDURE GetShortcutDimensionCode@1100528406(I@1100528400 : Integer) DimensionCode : Code[20];
+    VAR
+      GeneralLedgerSetup@1100528401 : Record 98;
+    BEGIN
+      GeneralLedgerSetup.GET;
+      CASE I OF
+        1:
+          DimensionCode := GeneralLedgerSetup."Shortcut Dimension 1 Code";
+        2:
+          DimensionCode := GeneralLedgerSetup."Shortcut Dimension 2 Code";
+        3:
+          DimensionCode := GeneralLedgerSetup."Shortcut Dimension 3 Code";
+        4:
+          DimensionCode := GeneralLedgerSetup."Shortcut Dimension 4 Code";
+        5:
+          DimensionCode := GeneralLedgerSetup."Shortcut Dimension 5 Code";
+        6:
+          DimensionCode := GeneralLedgerSetup."Shortcut Dimension 6 Code";
+        7:
+          DimensionCode := GeneralLedgerSetup."Shortcut Dimension 7 Code";
+        8:
+          DimensionCode := GeneralLedgerSetup."Shortcut Dimension 8 Code";
+      END;
+    END;
+
+    LOCAL PROCEDURE GetPurchHeaderDocumentTypeFilter@1100528419(DocumentType@1100528400 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote') DocumentTypeFilter : Text;
+    VAR
+      PurchaseHeader@1100528402 : Record 38;
+      DocumentTypeInt@1100528401 : Integer;
+    BEGIN
+      CASE DocumentType OF
+        DocumentType::"Purchase Quote":
+          DocumentTypeInt := PurchaseHeader."Document Type"::Quote;
+        DocumentType::Order:
+          DocumentTypeInt := PurchaseHeader."Document Type"::Order;
+        DocumentType::Invoice:
+          DocumentTypeInt := PurchaseHeader."Document Type"::Invoice;
+        DocumentType::"Credit Memo":
+          DocumentTypeInt := PurchaseHeader."Document Type"::"Credit Memo";
+      END;
+      DocumentTypeFilter := STRSUBSTNO('%1', DocumentTypeInt);
+    END;
+
+    PROCEDURE LoopPostedLines@1100528216(WorkflowStepInstance@1100528400 : Record 1504;DocNo@1100528202 : Code[20];DocType@1100528201 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo';DocApproved@1100528203 : Boolean;TempBln@1100528200 : Boolean);
+    BEGIN
+      IF NOT DocApproved THEN
+        LoopApprovalLines(WorkflowStepInstance,DocNo,DocType,TempBln)
+      ELSE
+        LoopPostedPurchLines(WorkflowStepInstance,DocNo,DocType,TempBln);
+    END;
+
+    PROCEDURE LoopApprovalLines@1100485013(WorkflowStepInstance@1100528400 : Record 1504;DocNo@1100485000 : Code[20];DocType@1100485002 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo';TempBln@1100485001 : Boolean);
+    VAR
+      ApprovallineRec@1100485003 : Record 11012032;
+    BEGIN
+      CASE DocType OF
+        DocType::"Posted Invoice":
+          ApprovallineRec.SETRANGE("Document Type",ApprovallineRec."Document Type"::"Purchase Invoice");
+        DocType::"Posted Credit Memo":
+          ApprovallineRec.SETRANGE("Document Type",ApprovallineRec."Document Type"::"Credit Memo");
+      END;
+
+      ApprovallineRec.SETRANGE("Document No.",DocNo);
+      IF ApprovallineRec.FINDSET THEN BEGIN
+        REPEAT
+          HandleApprovalLine(WorkflowStepInstance,ApprovallineRec,DocType,DocNo,TempBln);
+        UNTIL ApprovallineRec.NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE LoopPostedPurchLines@1100528204(WorkflowStepInstance@1100528400 : Record 1504;DocNo@1100485000 : Code[20];DocType@1100485002 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo';TempBln@1100485001 : Boolean);
+    VAR
+      PurchInvLine@1100485003 : Record 123;
+      PurchCrMemoLine@1100528200 : Record 125;
+    BEGIN
+      CASE DocType OF
+        DocType::"Posted Invoice":
+        BEGIN
+          PurchInvLine.SETRANGE("Document No.",DocNo);
+          PurchInvLine.SETFILTER(Type, '<>%1', PurchInvLine.Type::" ");
+          IF PurchInvLine.FINDSET THEN BEGIN
+            REPEAT
+              HandlePostedPurchInvLine(WorkflowStepInstance,PurchInvLine,DocType,DocNo,TempBln);
+            UNTIL PurchInvLine.NEXT = 0;
+          END;
+        END;
+        DocType::"Posted Credit Memo":
+        BEGIN
+          PurchCrMemoLine.SETRANGE("Document No.",DocNo);
+          PurchCrMemoLine.SETFILTER(Type, '<>%1', PurchCrMemoLine.Type::" ");
+          IF PurchCrMemoLine.FINDSET THEN BEGIN
+            REPEAT
+              HandlePostedCrMemoLine(WorkflowStepInstance,PurchCrMemoLine,DocType,DocNo,TempBln);
+            UNTIL PurchCrMemoLine.NEXT = 0;
+          END;
+        END;
+      END;
+    END;
+
+    PROCEDURE HandlePostedPurchInvLine@1100528210(WorkflowStepInstance@1100528402 : Record 1504;VAR PurchInvLine@1100485000 : Record 123;DocType@1100485005 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote';DocNo@1100485006 : Code[20];TempBln@1100485001 : Boolean);
+    VAR
+      PurchInvHeader@1100528401 : Record 122;
+      RecRef@1100528403 : RecordRef;
+      DimensionManagement@1100528400 : Codeunit 408;
+      DimArrayCde@1100525000 : ARRAY [8] OF Code[20];
+      ConsentProcess@1100525001 : 'Invoice,Invoice Approval,Advice Order,Purchase Order,Purchase Action,Purchase Quote,Credit Memo,Credit Memo Approval,Purchase Requisition,Not Posted Invoice,Not Posted Credit Memo';
+      AccountNo@1100528404 : Code[20];
+      FixedAssetNo@1100528405 : Code[20];
+    BEGIN
+      ConsentProcess := ConsentProcess::Invoice;
+
+      IF PurchInvHeader.GET(PurchInvLine."Document No.") THEN;
+
+      //Purchase Registration Line should not be considered in consent of posted purchase invoice
+      IF (NOT PurchInvHeader."Direct Posting") AND (NOT PurchInvLine."Approval Entry") THEN
+        EXIT;
+
+      WITH PurchInvLine DO BEGIN
+        DimensionManagement.UpdateGlobalDimFromDimSetID("Dimension Set ID", DimArrayCde[1], DimArrayCde[2]);
+        DimensionManagement.GetShortcutDimensions("Dimension Set ID", DimArrayCde);
+        CASE Type OF
+          Type::"G/L Account":
+            AccountNo := "No.";
+          Type::"Fixed Asset":
+            FixedAssetNo := "No.";
+        END;
+        //CreateConsentLines(
+        RecRef.GETTABLE(PurchInvLine);
+        CreateConsentLines(RecRef,WorkflowStepInstance,
+          DocType,ConsentProcess,1,DocNo,"Line No.",DimArrayCde,"Job No.",Element,"Service Order No.",AccountNo,
+          FixedAssetNo,"Buy-from Vendor No.","Item No.","Plant Type", "Location Code","Cost Component Plant","Receiving Company","Purchase Requisition No.",
+          "Amount (LCY)",0,0,TempBln,PurchInvHeader."Approval Code");
+      END;
+    END;
+
+    PROCEDURE HandlePostedCrMemoLine@1100528211(WorkflowStepInstance@1100528402 : Record 1504;VAR PurchCrMemoLine@1100485000 : Record 125;DocType@1100485005 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote';DocNo@1100485006 : Code[20];TempBln@1100485001 : Boolean);
+    VAR
+      PurchCrMemoHdr@1100528401 : Record 124;
+      RecRef@1100528403 : RecordRef;
+      DimensionManagement@1100528400 : Codeunit 408;
+      DimArrayCde@1100525000 : ARRAY [8] OF Code[20];
+      ConsentProcess@1100525001 : 'Invoice,Invoice Approval,Advice Order,Purchase Order,Purchase Action,Purchase Quote,Credit Memo,Credit Memo Approval,Purchase Requisition,Not Posted Invoice,Not Posted Credit Memo';
+      AccountNo@1100528404 : Code[20];
+      FixedAssetNo@1100528405 : Code[20];
+    BEGIN
+      ConsentProcess := ConsentProcess::"Credit Memo";
+
+      IF PurchCrMemoHdr.GET(PurchCrMemoLine."Document No.") THEN;
+
+      //Purchase Registration Line should not be considered in consent of posted credit memo
+      IF (NOT PurchCrMemoHdr."Direct Posting") AND (NOT PurchCrMemoLine."Approval Entry") THEN
+        EXIT;
+
+      WITH PurchCrMemoLine DO BEGIN
+        DimensionManagement.UpdateGlobalDimFromDimSetID("Dimension Set ID", DimArrayCde[1], DimArrayCde[2]);
+        DimensionManagement.GetShortcutDimensions("Dimension Set ID", DimArrayCde);
+        CASE Type OF
+          Type::"G/L Account":
+            AccountNo := "No.";
+          Type::"Fixed Asset":
+            FixedAssetNo := "No.";
+        END;
+        //CreateConsentLines(
+        RecRef.GETTABLE(PurchCrMemoLine);
+        CreateConsentLines(RecRef,WorkflowStepInstance,
+          DocType,ConsentProcess,1,DocNo,"Line No.",DimArrayCde,"Job No.",Element,"Service Order No.",AccountNo,
+          FixedAssetNo,"Buy-from Vendor No.","Item No.","Plant Type","Location Code","Cost Component Plant","Receiving Company","Purchase Requisition No.",
+          "Amount (LCY)",0,0,TempBln,PurchCrMemoHdr."Approval Code");
+      END;
+    END;
+
+    LOCAL PROCEDURE CompressedLineNo@1100528410() : Integer;
+    BEGIN
+      EXIT(-10000);
+    END;
+
+    PROCEDURE Approve@1100528447(RunFromMenu@1100485007 : Boolean);
+    VAR
+      Approver@1100529600 : Record 11012229;
+      CompressionLevel@1100528400 : 'Default,Detailed,Compressed';
+      ApprovalPageOption@1100529601 : 'All,Hours,All Except Hours';
+    BEGIN
+      IF Approver.GET(USERID) THEN
+        IF Approver."Separate Consent Lines Hours" THEN
+          ApprovalPageOption := ApprovalPageOption::"All Except Hours"
+        ELSE
+          ApprovalPageOption := ApprovalPageOption::All;
+
+      StartApprovalForm(RunFromMenu, TRUE, 0, '', CompressionLevel::Default, FALSE, ApprovalPageOption);
+    END;
+
+    PROCEDURE ShowAllDetailedApprovalEntriesFromCompressedApprovalPage@1100528457(ApprovalPageOption@1100529600 : 'All,Hours,All Except Hours');
+    VAR
+      CompressionLevel@1100528400 : 'Default,Detailed,Compressed';
+    BEGIN
+      StartApprovalForm(TRUE, TRUE, 0, '', CompressionLevel::Detailed, TRUE, ApprovalPageOption);
+    END;
+
+    PROCEDURE ShowAllCompressedApprovalEntriesFromDetailedApprovalPage@1100528456(ApprovalPageOption@1100529601 : 'All,Hours,All Except Hours');
+    VAR
+      CompressionLevel@1100528400 : 'Default,Detailed,Compressed';
+    BEGIN
+      StartApprovalForm(TRUE, TRUE, 0, '', CompressionLevel::Compressed, TRUE, ApprovalPageOption);
+    END;
+
+    LOCAL PROCEDURE StartApprovalForm@1100528453(RunFromMenu@1100485007 : Boolean;ShowAllApprovalEntries@1100528400 : Boolean;DocumentType@1100528401 : Integer;DocumentNo@1100528402 : Code[20];CompressionLevel@1100528403 : 'Default,Detailed,Compressed';FromApprovalPage@1100528405 : Boolean;ApprovalPageOption@1100529600 : 'All,Hours,All Except Hours');
+    VAR
+      TempApprovalEntry@1100528406 : TEMPORARY Record 454;
+      ApprovalPageID@1100528404 : Integer;
+      NoOfApprovalEntries@1100528407 : Integer;
+    BEGIN
+      FillTempApprovalEntries(TempApprovalEntry, ShowAllApprovalEntries, FALSE, DocumentType, DocumentNo, USERID, CompressionLevel, ApprovalPageOption);
+      IF TempApprovalEntry.FINDFIRST THEN;
+
+      IF ApprovalPageOption = ApprovalPageOption::Hours THEN
+        ApprovalPageID := PAGE::"Approval Hours"
+      ELSE
+        IF CompressionIsUsed(USERID, CompressionLevel) THEN
+          ApprovalPageID := PAGE::"Approval (Compressed)"
+        ELSE
+          ApprovalPageID := PAGE::"Approval (Detailed)";
+
+      IF NOT RunFromMenu THEN BEGIN
+        NoOfApprovalEntries := TempApprovalEntry.COUNT;
+        IF NoOfApprovalEntries > 0 THEN
+          IF CONFIRM(STRSUBSTNO(Text000, NoOfApprovalEntries, 0), TRUE) THEN
+            PAGE.RUN(ApprovalPageID, TempApprovalEntry);
+      END ELSE
+        IF FromApprovalPage THEN
+          PAGE.RUNMODAL(ApprovalPageID, TempApprovalEntry)
+        ELSE
+          PAGE.RUN(ApprovalPageID, TempApprovalEntry);
+    END;
+
+    PROCEDURE ShowDetailedApprovalEntriesForCompressedEntry@1100528455(TempCompressedApprovalEntry@1100528400 : TEMPORARY Record 454);
+    VAR
+      ApprovalDetailed@1100528401 : Page 11071876;
+    BEGIN
+      ApprovalDetailed.SetTempCompressedApprovalEntry(TempCompressedApprovalEntry);
+      ApprovalDetailed.AddTempDetailedEntriesForCompressedEntry;
+      ApprovalDetailed.RUNMODAL;
+    END;
+
+    PROCEDURE FillTempDetailedApprovalEntriesForCompressedEntry@1100528454(VAR TempApprovalEntry@1100528402 : TEMPORARY Record 454;TempCompressedApprovalEntry@1100528400 : TEMPORARY Record 454);
+    VAR
+      ApprovalEntry@1100528401 : Record 454;
+    BEGIN
+      IF TempCompressedApprovalEntry."Document Line No." = CompressedLineNo THEN BEGIN
+        ApprovalEntry.SETRANGE("Document Type", TempCompressedApprovalEntry."Document Type");
+        ApprovalEntry.SETRANGE("Document No.", TempCompressedApprovalEntry."Document No.");
+        ApprovalEntry.SETRANGE("Record ID to Approve",TempCompressedApprovalEntry."Record ID to Approve");
+        ApprovalEntry.SETFILTER("Document Line No.", '<>%1', 0);
+        ApprovalEntry.SETRANGE("Approver ID", TempCompressedApprovalEntry."Approver ID");
+        ApprovalEntry.SETRANGE("Approver Group Code", TempCompressedApprovalEntry."Approver Group Code");
+      END ELSE BEGIN
+        ApprovalEntry.SETRANGE("Entry No.", TempCompressedApprovalEntry."Entry No.");
+        ApprovalEntry.SETRANGE("Approver ID", TempCompressedApprovalEntry."Approver ID");
+      END;
+
+      ApprovalEntry.SETRANGE(Status, ApprovalEntry.Status::Open);
+
+      IF ApprovalEntry.FINDSET THEN
+        REPEAT
+          IF NOT LowerLevelApprovalEntryExists(ApprovalEntry) THEN BEGIN
+            TempApprovalEntry := ApprovalEntry;
+            TempApprovalEntry.INSERT;
+            TempApprovalEntry.MARK(TRUE);
+          END;
+        UNTIL ApprovalEntry.NEXT = 0;
+    END;
+
+    PROCEDURE FillTempApprovalEntries@1100528448(VAR TempApprovalEntry@1100528402 : TEMPORARY Record 454;ShowAllTypes@1100528400 : Boolean;ShowEntriesOfAllUsers@1100528407 : Boolean;DocumentType@1100528405 : Integer;DocumentNo@1100528404 : Code[20];ApproverUserID@1100528408 : Code[50];CompressionLevel@1100528410 : 'Default,Detailed,Compressed';ApprovalPageOption@1100529600 : 'All,Hours,All Except Hours');
+    VAR
+      ApprovalEntry@1100528401 : Record 454;
+      UseCompression@1100528409 : Boolean;
+      DocumentTypeOption@1100529601 : ' ,All,Hours,All Except Hours,Orders,All Except Orders,Invoices,All Except Invoices';
+    BEGIN
+      IF NOT ShowAllTypes THEN BEGIN
+        ApprovalEntry.SETRANGE("Document Type", DocumentType);
+        ApprovalEntry.SETRANGE("Document No.", DocumentNo);
+      END ELSE
+        IF ApprovalPageOption <> ApprovalPageOption::All THEN BEGIN
+          ApprovalEntry.FILTERGROUP(10);
+          CASE ApprovalPageOption OF
+            ApprovalPageOption::Hours:
+              ApprovalEntry.SETRANGE("Document Type", ApprovalEntry."Document Type"::"Hour Accounting", ApprovalEntry."Document Type"::"Site Mgt HourAccounting");
+            ApprovalPageOption::"All Except Hours":
+              ApprovalEntry.SETFILTER("Document Type", '<>%1&<>%2', ApprovalEntry."Document Type"::"Hour Accounting", ApprovalEntry."Document Type"::"Site Mgt HourAccounting");
+          END;
+          ApprovalEntry.FILTERGROUP(0);
+        END;
+
+      ApprovalEntry.SETRANGE(Status, ApprovalEntry.Status::Open);
+
+      IF ShowEntriesOfAllUsers THEN
+        IF GetDocumentTypeOption(ApproverUserID, DocumentTypeOption) THEN BEGIN
+          CASE DocumentTypeOption OF
+            DocumentTypeOption::Hours:
+              ApprovalEntry.SETRANGE("Document Type", ApprovalEntry."Document Type"::"Hour Accounting", ApprovalEntry."Document Type"::"Site Mgt HourAccounting");
+            DocumentTypeOption::Invoices:
+              ApprovalEntry.SETRANGE("Document Type", ApprovalEntry."Document Type"::Invoice, ApprovalEntry."Document Type"::"Credit Memo");
+            DocumentTypeOption::Orders:
+              ApprovalEntry.SETFILTER("Document Type", '<>%1&<>%2&<>%3&<>%4',
+                                      ApprovalEntry."Document Type"::"Hour Accounting", ApprovalEntry."Document Type"::"Site Mgt HourAccounting",
+                                      ApprovalEntry."Document Type"::Invoice, ApprovalEntry."Document Type"::"Credit Memo");
+            DocumentTypeOption::"All Except Hours":
+              ApprovalEntry.SETFILTER("Document Type", '<>%1&<>%2', ApprovalEntry."Document Type"::"Hour Accounting", ApprovalEntry."Document Type"::"Site Mgt HourAccounting");
+            DocumentTypeOption::"All Except Invoices":
+              ApprovalEntry.SETFILTER("Document Type", '<>%1&<>%2', ApprovalEntry."Document Type"::Invoice, ApprovalEntry."Document Type"::"Credit Memo");
+            DocumentTypeOption::"All Except Orders":
+              ApprovalEntry.SETFILTER("Document Type", '%1|%2|%3|%4',
+                                      ApprovalEntry."Document Type"::Invoice, ApprovalEntry."Document Type"::"Credit Memo",
+                                      ApprovalEntry."Document Type"::"Hour Accounting", ApprovalEntry."Document Type"::"Site Mgt HourAccounting");
+          END;
+          MarkApprovalEntries(ApprovalEntry);
+          ApprovalEntry.SETRANGE("Document Type");
+        END;
+
+      MarkApprovalEntriesOfUserID(ApprovalEntry, ApproverUserID);
+      ApprovalEntry.MARKEDONLY(TRUE);
+
+      IF ApprovalEntry.FINDSET THEN BEGIN
+        UseCompression := CompressionIsUsed(ApproverUserID, CompressionLevel);
+        REPEAT
+          IF NOT LowerLevelApprovalEntryExists(ApprovalEntry) THEN BEGIN
+            AddTempApprovalEntry(TempApprovalEntry, ApprovalEntry, UseCompression);
+          END;
+        UNTIL ApprovalEntry.NEXT = 0;
+      END;
+
+      TempApprovalEntry.SETCURRENTKEY(
+        "Document Type", "Document No.", "Document Line No.", "Approver ID",
+        "Approver Group Code");
+    END;
+
+    LOCAL PROCEDURE MarkApprovalEntriesOfUserID@1100528450(VAR ApprovalEntry@1100528400 : Record 454;ApproverUserID@1100528402 : Code[50]);
+    VAR
+      ApprovalSharingWorkflow@1100528200 : Record 11229350;
+    BEGIN
+      ApprovalEntry.SETCURRENTKEY("Approver ID");
+      ApprovalEntry.SETRANGE("Approver ID", ApproverUserID);
+      MarkApprovalEntries(ApprovalEntry);
+
+      IF NOT FilterApprovalSharingToUser(ApprovalSharingWorkflow, ApproverUserID) THEN BEGIN
+        ApprovalEntry.SETRANGE("Approver ID");
+        EXIT;
+      END;
+
+      IF ApprovalSharingWorkflow.FINDSET THEN
+        REPEAT
+          ApprovalEntry.SETRANGE("Approver ID", ApprovalSharingWorkflow."Owner User ID");
+          MarkApprovalEntries(ApprovalEntry);
+        UNTIL ApprovalSharingWorkflow.NEXT = 0;
+
+      ApprovalEntry.SETRANGE("Approver ID");
+    END;
+
+    PROCEDURE FilterApprovalSharingToUser@161024012(VAR ApprovalSharingWorkflow@161024012 : Record 11229350;_UserId@161024013 : Code[50]) : Boolean;
+    BEGIN
+      ApprovalSharingWorkflow.RESET;
+      ApprovalSharingWorkflow.SETCURRENTKEY("Shared to User ID");
+      ApprovalSharingWorkflow.SETRANGE("Shared to User ID",_UserId);
+      ApprovalSharingWorkflow.SETRANGE("Valid From",0D,TODAY);
+      ApprovalSharingWorkflow.SETFILTER("Valid To",'%1|%2..',0D,TODAY);
+      EXIT(ApprovalSharingWorkflow.FINDFIRST);
+    END;
+
+    PROCEDURE FilterApprovalSharingFromUser@161024020(VAR ApprovalSharingWorkflow@161024012 : Record 11229350;_UserId@161024013 : Code[50]) : Boolean;
+    BEGIN
+      ApprovalSharingWorkflow.RESET;
+      ApprovalSharingWorkflow.SETCURRENTKEY("Owner User ID");
+      ApprovalSharingWorkflow.SETRANGE("Owner User ID",_UserId);
+      ApprovalSharingWorkflow.SETRANGE("Valid From",0D,TODAY);
+      ApprovalSharingWorkflow.SETFILTER("Valid To",'%1|%2..',0D,TODAY);
+      EXIT(ApprovalSharingWorkflow.FINDFIRST);
+    END;
+
+    LOCAL PROCEDURE MarkApprovalEntries@1100528449(VAR ApprovalEntry@1100528400 : Record 454);
+    BEGIN
+      IF ApprovalEntry.FINDSET THEN
+        REPEAT
+          ApprovalEntry.MARK(TRUE);
+        UNTIL ApprovalEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE LowerLevelApprovalEntryExists@1100528451(ApprovalEntry@1100485000 : Record 454) HigherLevelPrecense : Boolean;
+    VAR
+      ApprovalEntry2@1100485001 : Record 454;
+    BEGIN
+      ApprovalEntry2.SETRANGE("Document Type", ApprovalEntry."Document Type");
+      ApprovalEntry2.SETRANGE("Document No.", ApprovalEntry."Document No.");
+      ApprovalEntry2.SETRANGE("Document Line No.", ApprovalEntry."Document Line No.");
+      ApprovalEntry2.SETRANGE("Record ID to Approve",ApprovalEntry."Record ID to Approve");
+      ApprovalEntry2.SETRANGE(Status, ApprovalEntry2.Status::Open);
+      ApprovalEntry2.SETFILTER("Sequence No.", '<%1', ApprovalEntry."Sequence No.");
+      EXIT(ApprovalEntry2.FINDFIRST);
+    END;
+
+    LOCAL PROCEDURE AddTempApprovalEntry@1100528452(VAR TempApprovalEntry@1100528400 : TEMPORARY Record 454;ApprovalEntry@1100528401 : Record 454;UseCompression@1100528402 : Boolean);
+    BEGIN
+      IF (ApprovalEntry."Document Type" <> ApprovalEntry."Document Type"::"Advice Order") AND
+         (ApprovalEntry."Document Type" <> ApprovalEntry."Document Type"::"Purchase Action") AND
+         (ApprovalEntry."Document Line No." <> 0) AND
+         UseCompression
+      THEN BEGIN
+        TempApprovalEntry.SETRANGE("Document Type", ApprovalEntry."Document Type");
+        TempApprovalEntry.SETRANGE("Document No.", ApprovalEntry."Document No.");
+        TempApprovalEntry.SETRANGE("Record ID to Approve",ApprovalEntry."Record ID to Approve");
+        TempApprovalEntry.SETRANGE("Document Line No.", CompressedLineNo);
+        TempApprovalEntry.SETRANGE("Approver ID", ApprovalEntry."Approver ID");
+        TempApprovalEntry.SETRANGE("Approver Group Code", ApprovalEntry."Approver Group Code");
+        IF TempApprovalEntry.FINDFIRST THEN BEGIN
+          TempApprovalEntry.Amount := TempApprovalEntry.Amount + ApprovalEntry.Amount;
+          TempApprovalEntry.Hours := TempApprovalEntry.Hours + ApprovalEntry.Hours;
+          TempApprovalEntry.Kilometers := TempApprovalEntry.Kilometers + ApprovalEntry.Kilometers;
+          IF (TempApprovalEntry."Receiving Company" <> '') AND (TempApprovalEntry."Receiving Company" <> ApprovalEntry."Receiving Company") THEN BEGIN
+            TempApprovalEntry."Receiving Company" := '';
+            TempApprovalEntry."Project No." := '';
+            TempApprovalEntry.Element := '';
+            TempApprovalEntry."Extension Contract" := '';
+            TempApprovalEntry."Service Order No." := '';
+            TempApprovalEntry.Department := '';
+            TempApprovalEntry."Cost Object" := '';
+            TempApprovalEntry."Wage Component" := '';
+            TempApprovalEntry."Plant Company" := '';
+            TempApprovalEntry."Plant Type" := '';
+            TempApprovalEntry."Plant No." := '';
+            TempApprovalEntry."Supplying Company" := '';
+            TempApprovalEntry."Cost Code" := '';
+            TempApprovalEntry."Plant Location" := '';
+          END;
+
+          IF (TempApprovalEntry."Project No." <> '') AND (TempApprovalEntry."Project No." <> ApprovalEntry."Project No.") THEN BEGIN
+            TempApprovalEntry."Project No." := '';
+            TempApprovalEntry.Element := '';
+            TempApprovalEntry."Extension Contract" := '';
+          END;
+
+          IF (TempApprovalEntry.Element <> '') AND (TempApprovalEntry.Element <> ApprovalEntry.Element) THEN
+            TempApprovalEntry.Element := '';
+
+          IF (TempApprovalEntry."Extension Contract" <> '') AND (TempApprovalEntry."Extension Contract" <> ApprovalEntry."Extension Contract") THEN
+            TempApprovalEntry."Extension Contract" := '';
+
+          IF (TempApprovalEntry."Service Order No." <> '') AND (TempApprovalEntry."Service Order No." <> ApprovalEntry."Service Order No.") THEN
+            TempApprovalEntry."Service Order No." := '';
+
+          IF (TempApprovalEntry.Department <> '') AND (TempApprovalEntry.Department <> ApprovalEntry.Department) THEN
+            TempApprovalEntry.Department := '';
+
+          IF (TempApprovalEntry."Cost Object" <> '') AND (TempApprovalEntry."Cost Object" <> ApprovalEntry."Cost Object") THEN
+            TempApprovalEntry."Cost Object" := '';
+
+          IF (TempApprovalEntry."Wage Component" <> '') AND (TempApprovalEntry."Wage Component" <> ApprovalEntry."Wage Component") THEN
+            TempApprovalEntry."Wage Component" := '';
+
+          IF (TempApprovalEntry."Plant Company" <> '') AND (TempApprovalEntry."Plant Company" <> ApprovalEntry."Plant Company") THEN BEGIN
+            TempApprovalEntry."Plant Company" := '';
+            TempApprovalEntry."Plant Type" := '';
+            TempApprovalEntry."Plant No." := '';
+            TempApprovalEntry."Plant Location" := '';
+          END;
+
+          IF (TempApprovalEntry."Plant Type" <> '') AND (TempApprovalEntry."Plant Type" <> ApprovalEntry."Plant Type") THEN BEGIN
+            TempApprovalEntry."Plant Type" := '';
+            TempApprovalEntry."Plant No." := '';
+          END;
+
+          IF (TempApprovalEntry."Plant No." <> '') AND (TempApprovalEntry."Plant No." <> ApprovalEntry."Plant No.") THEN
+            TempApprovalEntry."Plant No." := '';
+
+          IF (TempApprovalEntry."Plant Location" <> '') AND (TempApprovalEntry."Plant Location" <> ApprovalEntry."Plant Location") THEN
+            TempApprovalEntry."Plant Location" := '';
+
+          IF (TempApprovalEntry."Cost Code" <> '') AND (TempApprovalEntry."Cost Code" <> ApprovalEntry."Cost Code") THEN
+            TempApprovalEntry."Cost Code" := '';
+
+          IF (TempApprovalEntry."Resource Req. Receiv. Company" <> '') AND (TempApprovalEntry."Resource Req. Receiv. Company" <> ApprovalEntry."Resource Req. Receiv. Company") THEN BEGIN
+            TempApprovalEntry."Resource Req. Receiv. Company" := '';
+            TempApprovalEntry."Resource Request No." := '';
+          END;
+
+          IF (TempApprovalEntry."Resource Request No." <> '') AND (TempApprovalEntry."Resource Request No." <> ApprovalEntry."Resource Request No.") THEN
+            TempApprovalEntry."Resource Request No." := '';
+
+          IF (TempApprovalEntry."Supplying Company" <> '') AND (TempApprovalEntry."Supplying Company" <> ApprovalEntry."Supplying Company") THEN
+            TempApprovalEntry."Supplying Company" := '';
+
+          TempApprovalEntry.MODIFY;
+        END ELSE BEGIN
+          TempApprovalEntry := ApprovalEntry;
+          TempApprovalEntry."Document Line No." := CompressedLineNo;
+          TempApprovalEntry.INSERT;
+        END;
+        TempApprovalEntry.RESET;
+      END ELSE BEGIN
+        TempApprovalEntry := ApprovalEntry;
+        TempApprovalEntry.INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE GetConsentProcessForPurchHeader@1100528407(DocType@1100528400 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote') : Integer;
+    VAR
+      ConsentProcess@1100528401 : 'Invoice,Invoice Approval,Advice Order,Purchase Order,Purchase Action,Purchase Quote,Credit Memo,Credit Memo Approval,Purchase Requisition,Not Posted Invoice,Not Posted Credit Memo';
+    BEGIN
+      CASE DocType OF
+        DocType::"Purchase Quote":
+          ConsentProcess := ConsentProcess::"Purchase Quote";
+        DocType::Order:
+          ConsentProcess := ConsentProcess::"Purchase Order";
+        DocType::"Posted Invoice":
+          ConsentProcess := ConsentProcess::Invoice;
+        DocType::"Posted Credit Memo":
+          ConsentProcess := ConsentProcess::"Credit Memo";
+        DocType::Invoice:
+          ConsentProcess := ConsentProcess::"Not Posted Invoice";
+        DocType::"Credit Memo":
+          ConsentProcess := ConsentProcess::"Not Posted Credit Memo";
+      END;
+
+      EXIT(ConsentProcess);
+    END;
+
+    LOCAL PROCEDURE CreateConsentLineForSuperApproverDeniedLines@1100528418(RecRef@1100528412 : RecordRef;WorkflowStepInstance@1100528411 : Record 1504;ConsentProcess@1100528409 : 'Invoice,Invoice Approval,Advice Order,Purchase Order,Purchase Action,Purchase Quote,Credit Memo,Credit Memo Approval';DocType@1100528408 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote';DocNo@1100528407 : Code[20];DocLineNo@1100528406 : Integer;Amount@1100528405 : Decimal;VendorNo@1100528404 : Code[20];Type@1100528403 : ' ,Project,Service Order';TypeNo@1100528402 : Code[20];RunTemp@1100528400 : Boolean);
+    VAR
+      PurchasesPayablesSetup@1100528410 : Record 312;
+      ConsentRule@1100528401 : Record 11012227;
+    BEGIN
+      PurchasesPayablesSetup.GET;
+      IF ConsentProcess IN [ConsentProcess::"Advice Order", ConsentProcess::"Purchase Order", ConsentProcess::"Purchase Action", ConsentProcess::"Purchase Quote"] THEN BEGIN
+        PurchasesPayablesSetup.TESTFIELD("Sup. Approver Den. Order Lines");
+        ConsentRule.Approver := PurchasesPayablesSetup."Sup. Approver Den. Order Lines";
+      END ELSE BEGIN
+        PurchasesPayablesSetup.TESTFIELD("Sup. Approver Den. Inv. Lines");
+        ConsentRule.Approver := PurchasesPayablesSetup."Sup. Approver Den. Inv. Lines";
+      END;
+      ConsentRule."Consent Level" := 0;
+      CreateConsentLine(RecRef,WorkflowStepInstance,
+        ConsentProcess, DocType, DocNo, DocLineNo, Amount,
+        VendorNo, Type, TypeNo, ConsentRule, RunTemp);
+    END;
+
+    LOCAL PROCEDURE CompressionIsUsed@1100528445(ApproverUserID@1100528401 : Code[50];CompressionLevel@1100528400 : 'Default,Detailed,Compressed') UseCompression : Boolean;
+    VAR
+      Approver@1100528402 : Record 11012229;
+    BEGIN
+      UseCompression := TRUE;
+      CASE CompressionLevel OF
+        CompressionLevel::Default:
+          IF Approver.GET(ApproverUserID) THEN
+            IF Approver."Initial View Consent Lines" = Approver."Initial View Consent Lines"::Compressed THEN
+              UseCompression := TRUE
+            ELSE
+              UseCompression := FALSE;
+        CompressionLevel::Detailed:
+          UseCompression := FALSE;
+        CompressionLevel::Compressed:
+          UseCompression := TRUE;
+      END;
+    END;
+
+    PROCEDURE ApprovalsPurchaseInvHeader@1100528442(PurchInvHeader@1100485000 : Record 122;WorkflowStepInstance@1100528403 : Record 1504;VAR AmountLCY@1100529600 : Decimal);
+    VAR
+      RecRef@1100528405 : RecordRef;
+      DocType@1100528401 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote';
+      ConsentProcess@1100528402 : 'Invoice,Invoice Approval,Advice Order,Purchase Order,Purchase Action,Purchase Quote,Credit Memo,Credit Memo Approval,Purchase Requisition,Not Posted Invoice,Not Posted Credit Memo';
+      DimArrayCde@1100525000 : ARRAY [8] OF Code[20];
+    BEGIN
+      //New for Workflow approvals
+      PurchSetupRec.GET;
+
+      WITH PurchInvHeader DO BEGIN
+        AmountLCY := CalcPurchInvHeaderAmountLCY(PurchInvHeader);
+
+        DimensionManagement.UpdateGlobalDimFromDimSetID("Dimension Set ID", DimArrayCde[1], DimArrayCde[2]);
+        DimensionManagement.GetShortcutDimensions("Dimension Set ID", DimArrayCde);
+        RecRef.GETTABLE(PurchInvHeader);
+
+        IF PurchInvHeader."Invoice Approved" THEN
+          ConsentProcess := ConsentProcess::Invoice
+        ELSE
+          ConsentProcess := ConsentProcess::"Invoice Approval";
+
+        CreateConsentLines(RecRef, WorkflowStepInstance,
+          DocType::"Posted Invoice",ConsentProcess,0,PurchInvHeader."No.",0,DimArrayCde,"Job No.",'',
+          "Service Order No.",'','',"Buy-from Vendor No.",'','',"Location Code",'','',"Purchase Requisition No.",
+          AmountLCY,0,0,FALSE,PurchInvHeader."Approval Code");
+
+        DocType := DocType::"Posted Invoice";
+        LoopPostedLines(WorkflowStepInstance,PurchInvHeader."No.",DocType,PurchInvHeader."Invoice Approved",FALSE);
+      END;
+    END;
+
+    PROCEDURE ApprovalsPurchCrMemoHdr@1100528458(PurchCrMemoHdr@1100485000 : Record 124;WorkflowStepInstance@1100528403 : Record 1504;VAR AmountLCY@1100529600 : Decimal);
+    VAR
+      RecRef@1100528405 : RecordRef;
+      DocType@1100528401 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote';
+      ConsentProcess@1100528402 : 'Invoice,Invoice Approval,Advice Order,Purchase Order,Purchase Action,Purchase Quote,Credit Memo,Credit Memo Approval,Purchase Requisition,Not Posted Invoice,Not Posted Credit Memo';
+      DimArrayCde@1100525000 : ARRAY [8] OF Code[20];
+    BEGIN
+      //New for Workflow approvals
+      PurchSetupRec.GET;
+
+      WITH PurchCrMemoHdr DO BEGIN
+        AmountLCY := CalcPurchCrMemoHdrAmountLCY(PurchCrMemoHdr);
+
+        DimensionManagement.UpdateGlobalDimFromDimSetID("Dimension Set ID", DimArrayCde[1], DimArrayCde[2]);
+        DimensionManagement.GetShortcutDimensions("Dimension Set ID", DimArrayCde);
+        RecRef.GETTABLE(PurchCrMemoHdr);
+
+        IF PurchCrMemoHdr."Credit Memo Approved" THEN
+          ConsentProcess := ConsentProcess::"Credit Memo"
+        ELSE
+          ConsentProcess := ConsentProcess::"Credit Memo Approval";
+
+        CreateConsentLines(RecRef, WorkflowStepInstance,
+          DocType::"Posted Credit Memo",ConsentProcess,0,PurchCrMemoHdr."No.",0,DimArrayCde,"Job No.",'',
+          "Service Order No.",'','',"Buy-from Vendor No.",'','',"Location Code",'','',"Purchase Requisition No.",
+          AmountLCY,0,0,FALSE,PurchCrMemoHdr."Approval Code");
+
+        DocType := DocType::"Posted Credit Memo";
+        LoopPostedLines(WorkflowStepInstance,PurchCrMemoHdr."No.",DocType,PurchCrMemoHdr."Credit Memo Approved",FALSE);
+      END;
+    END;
+
+    PROCEDURE ApprovalsPurchaseHeader@1100528459(VAR PurchHeader@1100485000 : Record 38;WorkflowStepInstance@1100528401 : Record 1504;VAR AmountLCY@1100529600 : Decimal);
+    VAR
+      PurchaseLineRec@1100485004 : Record 39;
+      RecRef@1100528402 : RecordRef;
+      DimArrayCde@1100525000 : ARRAY [8] OF Code[20];
+      ConsentProcess@1100525001 : 'Invoice,Invoice Approval,Advice Order,Purchase Order,Purchase Action,Purchase Quote,Credit Memo,Credit Memo Approval,Purchase Requisition,Not Posted Invoice,Not Posted Credit Memo';
+      DocType@1100528403 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote';
+      ApprovalCode@1100528200 : Code[20];
+    BEGIN
+      //New for Workflow approvals
+      PurchSetupRec.GET;
+
+      WITH PurchHeader DO BEGIN
+        AmountLCY := CalcPurchaseHeaderAmountLCY(PurchHeader);
+
+        DimensionManagement.UpdateGlobalDimFromDimSetID("Dimension Set ID", DimArrayCde[1], DimArrayCde[2]);
+        DimensionManagement.GetShortcutDimensions("Dimension Set ID", DimArrayCde);
+
+        CASE PurchHeader."Document Type" OF
+          PurchHeader."Document Type"::Quote:
+            BEGIN
+              ConsentProcess := ConsentProcess::"Purchase Quote";
+              DocType := DocType::"Purchase Quote";
+            END;
+          PurchHeader."Document Type"::Order:
+            BEGIN
+              ConsentProcess := ConsentProcess::"Purchase Order";
+              DocType := DocType::Order;
+            END;
+          PurchHeader."Document Type"::Invoice:
+            BEGIN
+              ConsentProcess := ConsentProcess::"Not Posted Invoice";
+              DocType := DocType::Invoice;
+              ApprovalCode := PurchHeader."Approval Code";
+            END;
+          PurchHeader."Document Type"::"Credit Memo":
+            BEGIN
+              ConsentProcess := ConsentProcess::"Not Posted Credit Memo";
+              DocType := DocType::"Credit Memo";
+              ApprovalCode := PurchHeader."Approval Code";
+            END;
+        END;
+
+        RecRef.GETTABLE(PurchHeader);
+        CreateConsentLines(RecRef,WorkflowStepInstance,
+          DocType,ConsentProcess,0,"No.",0,DimArrayCde,"Job No.",'',"Service Order No.",'','',
+          "Buy-from Vendor No.",'','',"Location Code",'','',"Purchase Requisition No.",
+          AmountLCY,0,0,FALSE,ApprovalCode);
+
+        PurchaseLineRec.SETRANGE("Document Type",PurchHeader."Document Type");
+        PurchaseLineRec.SETRANGE("Document No.",PurchHeader."No.");
+        PurchaseLineRec.SETFILTER(Type, '<>%1', PurchaseLineRec.Type::" ");
+        IF PurchaseLineRec.FINDSET THEN BEGIN
+          REPEAT
+            HandlePurchaseLine(WorkflowStepInstance, PurchaseLineRec,DocType,PurchHeader."No.",FALSE,ApprovalCode);
+          UNTIL PurchaseLineRec.NEXT = 0;
+        END;
+
+      END;
+    END;
+
+    PROCEDURE ApprovalsProjectPurchaseAction@1100528460(ProjectPurchaseAction@1100485000 : Record 11012026;WorkflowStepInstance@1100528403 : Record 1504;VAR AmountLCY@1100529600 : Decimal);
+    VAR
+      RecRef@1100528405 : RecordRef;
+      DocType@1100528401 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote';
+      ConsentProcess@1100528402 : 'Invoice,Invoice Approval,Advice Order,Purchase Order,Purchase Action,Purchase Quote,Credit Memo,Credit Memo Approval,Purchase Requisition,Not Posted Invoice,Not Posted Credit Memo';
+      DimArrayCde@1100525000 : ARRAY [8] OF Code[20];
+    BEGIN
+      //New for Workflow approvals
+      AmountLCY := CalcPurchaseActionAmount(ProjectPurchaseAction);
+      RecRef.GETTABLE(ProjectPurchaseAction);
+
+      CreateConsentLines(RecRef,WorkflowStepInstance,
+        DocType::"Purchase Action",ConsentProcess::"Purchase Action",0,ProjectPurchaseAction.Code,0,
+        DimArrayCde,ProjectPurchaseAction."Project No.",'','','','','','','','','','','',
+        AmountLCY,0,0,FALSE,'');
+    END;
+
+    PROCEDURE ApprovalsAdviceOrderLine@1100528461(AdviceOrderLine@1100485000 : Record 11012055;WorkflowStepInstance@1100528403 : Record 1504;VAR AmountLCY@1100529600 : Decimal);
+    VAR
+      RecRef@1100528405 : RecordRef;
+      DocType@1100528401 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote';
+      ConsentProcess@1100528402 : 'Invoice,Invoice Approval,Advice Order,Purchase Order,Purchase Action,Purchase Quote,Credit Memo,Credit Memo Approval,Purchase Requisition,Not Posted Invoice,Not Posted Credit Memo';
+      DimArrayCde@1100525000 : ARRAY [8] OF Code[20];
+    BEGIN
+      //New for Workflow approvals
+      WITH AdviceOrderLine DO BEGIN
+        FillGlobalDimsInDimArray('', "Cost Object", DimArrayCde);
+        AmountLCY := AdviceOrderLine."Amount (LCY)";
+        RecRef.GETTABLE(AdviceOrderLine);
+        CreateConsentLines(RecRef,WorkflowStepInstance,
+          DocType::"Advice Order",ConsentProcess::"Advice Order",1,'',"Line No.",DimArrayCde,"Project No.",
+          Element,"Service Order No.",'','',Vendor,"Item No.","Plant Type","Location Code",'','','',
+          AmountLCY,0,0,FALSE,'');
+      END;
+    END;
+
+    PROCEDURE ApprovalsPurchaseRequisition@1100528200(PurchaseRequisition@1100485000 : Record 11229330;WorkflowStepInstance@1100528403 : Record 1504;VAR AmountLCY@1100529600 : Decimal);
+    VAR
+      PurchaseRequisitionLine@1100528200 : Record 11229331;
+      RecRef@1100528405 : RecordRef;
+      DocType@1100528401 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote,Purchase Requisition';
+      ConsentProcess@1100528402 : 'Invoice,Invoice Approval,Advice Order,Purchase Order,Purchase Action,Purchase Quote,Credit Memo,Credit Memo Approval,Purchase Requisition,Not Posted Invoice,Not Posted Credit Memo';
+      DimArrayCde@1100525000 : ARRAY [8] OF Code[20];
+    BEGIN
+      //New for Workflow approvals
+      FillGlobalDimsInDimArray(PurchaseRequisition."Global Dimension 1 Code", '', DimArrayCde);
+      PurchaseRequisition.CALCFIELDS("Requisition Amount (LCY)");
+      AmountLCY := PurchaseRequisition."Requisition Amount (LCY)";
+      RecRef.GETTABLE(PurchaseRequisition);
+
+      CreateConsentLines(RecRef,WorkflowStepInstance,
+        DocType::"Purchase Requisition",ConsentProcess::"Purchase Requisition",0,PurchaseRequisition."No.",0,
+        DimArrayCde,PurchaseRequisition."Project No.",'',
+        PurchaseRequisition."Service Order No.",'','','','','','','','',PurchaseRequisition."No.",
+        AmountLCY,0,0,FALSE,'');
+
+        PurchaseRequisitionLine.SETRANGE("Purchase Requisition No.",PurchaseRequisition."No.");
+        IF PurchaseRequisitionLine.FINDSET THEN BEGIN
+          REPEAT
+            HandlePurchaseRequisitionLine(WorkflowStepInstance, PurchaseRequisitionLine,
+              DocType::"Purchase Requisition",ConsentProcess::"Purchase Requisition",PurchaseRequisition."No.",FALSE);
+          UNTIL PurchaseRequisitionLine.NEXT = 0;
+        END;
+    END;
+
+    PROCEDURE HandlePurchaseRequisitionLine@1100528203(WorkflowStepInstance@1100528400 : Record 1504;VAR PurchaseRequisitionLine@1100485000 : Record 11229331;DocType@1100485005 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote,Purchase Requisition';ConsentProcess@1100528200 : 'Invoice,Invoice Approval,Advice Order,Purchase Order,Purchase Action,Purchase Quote,Credit Memo,Credit Memo Approval,Purchase Requisition,Not Posted Invoice,Not Posted Credit Memo';DocNo@1100485006 : Code[20];TempBln@1100485001 : Boolean);
+    VAR
+      RecRef@1100528401 : RecordRef;
+      DimArrayCde@1100525000 : ARRAY [8] OF Code[20];
+    BEGIN
+      WITH PurchaseRequisitionLine DO BEGIN
+        // CreateConsentLines
+        DimensionManagement.UpdateGlobalDimFromDimSetID("Dimension Set ID", DimArrayCde[1], DimArrayCde[2]);
+        DimensionManagement.GetShortcutDimensions("Dimension Set ID", DimArrayCde);
+        RecRef.GETTABLE(PurchaseRequisitionLine);
+        CreateConsentLines(RecRef,WorkflowStepInstance,
+          DocType,ConsentProcess,1,DocNo,PurchaseRequisitionLine."Line No.",DimArrayCde,"Project No.",Element,"Service Order No.","G/L Account",
+          '','',"Item No.","Plant Type",'',"Cost Component Plant",'',DocNo,
+          "Amount (LCY)",0,0,TempBln,'');
+      END;
+    END;
+
+    PROCEDURE ApproveHours@1100529600(ShowHours@1100529602 : Boolean);
+    VAR
+      Approver@1100529600 : Record 11012229;
+      CompressionLevel@1100529601 : 'Default,Detailed,Compressed';
+      ApprovalPageOption@1100529603 : 'All,Hours,All Except Hours';
+    BEGIN
+      IF FPSLicenseManagement.LicenseAndReadPermissionForTable(Approver) THEN
+        IF ShowHours THEN
+          StartApprovalForm(TRUE, TRUE, 0, '', CompressionLevel::Detailed, FALSE, ApprovalPageOption::Hours)
+        ELSE
+          StartApprovalForm(TRUE, TRUE, 0, '', CompressionLevel::Default, FALSE, ApprovalPageOption::"All Except Hours")
+      ELSE
+        MESSAGE(Text010);
+    END;
+
+    PROCEDURE CalcPurchaseHeaderAmountLCY@1100529601(VAR PurchaseHeader@1100529600 : Record 38) : Decimal;
+    BEGIN
+      PurchaseHeader.CALCFIELDS(Amount);
+      EXIT(CalcAmountLCY(
+        PurchaseHeader.Amount, PurchaseHeader."Currency Code", PurchaseHeader."Currency Factor",
+        PurchaseHeader."Job No.", PurchaseHeader."Posting Date"));
+    END;
+
+    PROCEDURE CalcPurchInvHeaderAmountLCY@1100529605(VAR PurchInvHeader@1100529600 : Record 122) : Decimal;
+    BEGIN
+      PurchInvHeader.CALCFIELDS(Amount);
+      EXIT(CalcAmountLCY(
+        PurchInvHeader.Amount, PurchInvHeader."Currency Code", PurchInvHeader."Currency Factor",
+        PurchInvHeader."Job No.", PurchInvHeader."Posting Date"));
+    END;
+
+    PROCEDURE CalcPurchCrMemoHdrAmountLCY@1100529603(VAR PurchCrMemoHdr@1100529600 : Record 124) : Decimal;
+    BEGIN
+      PurchCrMemoHdr.CALCFIELDS(Amount);
+      EXIT(CalcAmountLCY(
+        PurchCrMemoHdr.Amount, PurchCrMemoHdr."Currency Code", PurchCrMemoHdr."Currency Factor",
+        PurchCrMemoHdr."Job No.", PurchCrMemoHdr."Posting Date"));
+    END;
+
+    LOCAL PROCEDURE GetDocumentTypeOption@1100529606(ApproverID@1100529600 : Code[50];VAR DocumentTypeOption@1100529602 : ' ,All,Hours,All Except Hours,Orders,All Except Orders,Invoices,All Except Invoices') : Boolean;
+    VAR
+      Approver@1100529601 : Record 11012229;
+    BEGIN
+      DocumentTypeOption := 0;
+      IF Approver.GET(ApproverID) THEN
+        IF Approver."Sup. Approver Purch. Invoices" THEN
+          IF Approver."Super Approver Purchase Orders" THEN
+            IF Approver."Super Approver Hours" THEN
+              DocumentTypeOption :=  DocumentTypeOption::All
+            ELSE
+              DocumentTypeOption :=  DocumentTypeOption::"All Except Hours"
+          ELSE
+            IF Approver."Super Approver Hours" THEN
+              DocumentTypeOption :=  DocumentTypeOption::"All Except Orders"
+            ELSE
+              DocumentTypeOption :=  DocumentTypeOption::Invoices
+        ELSE
+          IF Approver."Super Approver Purchase Orders" THEN
+            IF Approver."Super Approver Hours" THEN
+              DocumentTypeOption :=  DocumentTypeOption::"All Except Invoices"
+            ELSE
+              DocumentTypeOption :=  DocumentTypeOption::Orders
+          ELSE
+            IF Approver."Super Approver Hours" THEN
+              DocumentTypeOption :=  DocumentTypeOption::Hours;
+
+      EXIT(DocumentTypeOption <> 0);
+    END;
+
+    [External]
+    PROCEDURE EntryCanBeApprovedAutomatically@1100529608(ApprovalEntry@1100529600 : Record 454) : Boolean;
+    VAR
+      ConsentRule@1100529601 : Record 11012227;
+      Type2@1100529603 : ' ,Project,Service Order';
+      TypeNo@1100529602 : Code[20];
+    BEGIN
+      IF ApprovalEntry."Consent Rule Line No." = 0 THEN
+        EXIT(TRUE);
+      IF NOT ConsentRule.GET(ApprovalEntry."Consent Rule Process", ApprovalEntry."Consent Rule Line No.") THEN
+        EXIT(FALSE);
+
+      IF ApprovalEntry."Project No." <> '' THEN BEGIN
+        Type2 := Type2::Project;
+        TypeNo := ApprovalEntry."Project No.";
+      END ELSE
+        IF ApprovalEntry."Service Order No." <> '' THEN BEGIN
+          Type2 := Type2::"Service Order";
+          TypeNo := ApprovalEntry."Service Order No.";
+        END ELSE BEGIN
+          Type2 := Type2::" ";
+          TypeNo := '';
+        END;
+
+      EXIT(CurrentUserCanConsentThisLine(ConsentRule, Type2, TypeNo));
+    END;
+
+    LOCAL PROCEDURE "**4PSSE**"@1101285000();
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE ConsentLineMustBeCreated2@1100285307(ConsentRule@1101285021 : Record 11012227;ReceivingCompany@1101285020 : Text[30];DimValueCodes@1101285019 : ARRAY [8] OF Code[20];JobNo@1101285018 : Code[20];ProjectElement@1101285017 : Code[20];ServiceOrderNo@1101285016 : Code[20];AccountNo@1101285015 : Code[20];FixedAssetNo@1101285014 : Code[20];VendorNo@1101285013 : Code[20];ItemNo@1101285012 : Code[20];PlantTypeCode@1101285011 : Code[20];LocationCode@1101285010 : Code[10];CostComponentPlantCode@1101285009 : Code[10];PurchaseRequisitionCode@1101285008 : Code[20];Amount@1101285007 : Decimal;BudgetFound@1101285006 : Boolean;ReceiptLineFound@1101285005 : Boolean;Difference@1101285004 : Decimal;Percentage@1101285003 : Decimal;DocumentType@1101285002 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote,Purchase Requisition';DocumentNo@1101285001 : Code[20];VAR ConsentRuleHasBeenFound@1101285000 : Boolean;Type@1100285301 : ' ,Project,Service Order';TypeNo@1100285300 : Code[20]) : Boolean;
+    VAR
+      lvExitBln@1100525009 : Boolean;
+      i@1100525013 : Integer;
+      lvJobRec@1100525014 : Record 11072003;
+      lvUserSetupRec@1100525015 : Record 91;
+      lvConsenterRec@1100525016 : Record 11012229;
+      ServiceOrder@1100528600 : Record 11012823;
+      FilterResult@1100528200 : 'NoFilter,InFilter,OutOfFilter';
+    BEGIN
+      //4PSSE.sn 190613
+      IF NOT ConsentIsNeededForMaxAmount(
+        ConsentRule, Amount, BudgetFound, ReceiptLineFound, Difference, Percentage, Type, TypeNo)
+      THEN
+        EXIT(FALSE);
+
+      IF (ConsentRule.Type IN [ConsentRule.Type::Service, ConsentRule.Type::Other]) AND
+         (JobNo <> '')
+      THEN
+        EXIT(FALSE);
+
+      IF ConsentRule.Type = ConsentRule.Type::Project THEN BEGIN
+        IF JobNo = '' THEN
+          EXIT(FALSE)
+      END;
+
+      IF (ConsentRule.Type IN [ConsentRule.Type::Project, ConsentRule.Type::Other]) AND
+         (ServiceOrderNo <> '')
+      THEN
+        EXIT(FALSE);
+
+      IF ConsentRule.Type = ConsentRule.Type::Service THEN
+        IF ServiceOrderNo = '' THEN
+          EXIT(FALSE);
+
+      FilterResult := RecordWithinConsentRuleFilters(
+        ConsentRule, ReceivingCompany, DimValueCodes, JobNo, ProjectElement, ServiceOrderNo,
+        AccountNo, FixedAssetNo, VendorNo, ItemNo, PlantTypeCode, LocationCode,CostComponentPlantCode,PurchaseRequisitionCode,
+        DocumentType, DocumentNo);
+      IF FilterResult = FilterResult::OutOfFilter THEN
+        EXIT(FALSE);
+
+      ConsentRuleHasBeenFound := TRUE;
+
+      IF ConsentRule."No Consent" THEN
+        EXIT(FALSE);
+
+      EXIT(TRUE);
+      //4PSSE.se 190613
+    END;
+
+    LOCAL PROCEDURE ConsentIsNeededForMaxAmount@1000000005(ConsentRule@1100528403 : Record 11012227;Amount@1100528402 : Decimal;BudgetFound@1101285000 : Boolean;ReceiptLineFound@1100528404 : Boolean;Difference@1100528401 : Decimal;Percentage@1100528400 : Decimal;Type@1000000001 : ' ,Project,Service Order';TypeNo@1000000000 : Code[20]) : Boolean;
+    BEGIN
+      //4PSSE.sn 190613
+      IF (ConsentRule."Minimum Amount" <> 0)
+      THEN
+        IF (CurrentUserCanConsentThisLine(ConsentRule, Type, TypeNo)) AND
+           (Amount <= ConsentRule."Maximum Amount")
+        THEN
+          EXIT(TRUE);
+
+      IF ConsentIsNeededForDeviation(
+        ConsentRule."Min. Deviation From Rcpt. %", Percentage,
+        ConsentRule."Min. Deviation From Rcpt.", Difference, Amount,
+        (ConsentRule."Consent Deviation if No Rcpt." AND NOT ReceiptLineFound),FALSE)
+      THEN
+        EXIT(TRUE);
+
+      IF ConsentIsNeededForDeviation(
+        ConsentRule."Min. Deviation From Budget %", Percentage,
+        ConsentRule."Min. Deviation From Budget", Difference, Amount,
+        (ConsentRule."Consent Deviation if No Budget" AND NOT BudgetFound),TRUE)
+      THEN
+        EXIT(TRUE);
+      //4PSSE.se 190613
+    END;
+
+    BEGIN
+    {
+      190613 ORANGO.WG Determine startlevel of approval.
+    }
+    END.
+  }
+}
+

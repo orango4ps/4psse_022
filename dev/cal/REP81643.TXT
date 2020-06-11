@@ -1,0 +1,405 @@
+OBJECT Report 81643 Account Open hours
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=ENH-054,RFC056;
+  }
+  PROPERTIES
+  {
+    ProcessingOnly=Yes;
+  }
+  DATASET
+  {
+    { 1100285501;;DataItem;<Job2>            ;
+               DataItemTable=Table11072003;
+               DataItemTableView=SORTING(No.);
+               MaxIteration=1;
+               OnPreDataItem=BEGIN
+                               //>> ITERO.LP RFC056
+                               JnlGroupBuffer.DELETEALL;
+                               TempHourAccLine.DELETEALL;
+                               //<< ITERO.LP RFC056
+                             END;
+
+               ReqFilterFields=Project Status,Project Type }
+
+    { 1100285500;;DataItem;                  ;
+               DataItemTable=Table11012039;
+               DataItemTableView=SORTING(Year,Week,Employee No.,Line No.)
+                                 WHERE(Type=CONST(Project),
+                                       Project No.=FILTER(<>''));
+               OnPreDataItem=VAR
+                               TEMPDimValueChains@1100285501 : TEMPORARY Record 11128020;
+                               First@1100285500 : Boolean;
+                             BEGIN
+                               GLSetup.GET;
+
+                               IF Pdate = 0D THEN
+                                 ERROR('Bokf”ringsdatum m†ste fyllas i');
+                               IF (BatchName = '') OR (TempName ='') THEN
+                                 ERROR('Fyll i journalmall');
+                               IF BalAcc = '' THEN
+                                 ERROR('Fyll balanskonto');
+                               IF "Hour Accounting Line".GETFILTER("Posting Date") = '' THEN
+                                 ERROR('Datumfilter p† tidrader m†ste anges');
+
+
+
+                               //*** Filters on cost center from dimension filter ***
+
+                               FilterCostCenter := '';
+
+                               IF DimensionCode = GLSetup."Shortcut Dimension 1 Code" THEN BEGIN
+
+                                 FilterCostCenter := DimensionValueCode;
+                               END ELSE BEGIN
+
+                                 IF DimensionValueCode <> '' THEN
+                                   TEMPDimValueChains.getSourceDimensions(DimensionCode, DimensionValueCode, GLSetup."Shortcut Dimension 1 Code", TEMPDimValueChains);
+
+                                 First := TRUE;
+                                 IF TEMPDimValueChains.FINDSET(FALSE) THEN REPEAT
+
+                                   IF First THEN BEGIN
+                                     FilterCostCenter := TEMPDimValueChains."Start Dimension Value Code";
+                                     First := FALSE
+                                   END ELSE
+                                     FilterCostCenter += '|' + TEMPDimValueChains."Start Dimension Value Code";
+                                 UNTIL TEMPDimValueChains.NEXT = 0;
+                               END;
+                               // ***
+
+                               GenJournalLine.SETRANGE("Journal Template Name",TempName);
+                               GenJournalLine.SETRANGE("Journal Batch Name",BatchName);
+                               GenJournalLine.DELETEALL(TRUE);
+                               LineNo:=10000;
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  CLEAR(GenJournalLine);
+                                  CLEAR(Job);
+
+                                  Job.COPYFILTERS("<Job2>");
+
+                                  IF FilterCostCenter<>'' THEN
+                                    Job.SETFILTER("Global Dimension 1 Code",FilterCostCenter);
+                                  Job.SETRANGE("No.","Hour Accounting Line"."Project No.");
+
+                                  //>>190205
+                                  // IF Job.FINDSET THEN BEGIN
+                                  IF NOT Job.ISEMPTY THEN BEGIN
+                                  //<<190205
+                                    //>> ITERO.LP RFC056
+                                    DimValue := GetDefaultDimensionValue(DATABASE::Employee, "Employee No.", GLSetup."Shortcut Dimension 3 Code", 3);
+
+                                    // Save group level to insert final journal lines
+                                    IF NOT JnlGroupBuffer.GET("Cost Object", "Project No.", DimValue, '', '') THEN BEGIN
+                                      JnlGroupBuffer.Key1 := "Cost Object";
+                                      JnlGroupBuffer.Key2 := "Project No.";
+                                      JnlGroupBuffer.Key3 := DimValue;
+                                      JnlGroupBuffer.INSERT;
+                                    END;
+
+                                    // Insert line data to buffer
+                                    TempHourAccLine.INIT;
+                                    TempHourAccLine.Year := Year;
+                                    TempHourAccLine.Week := Week;
+                                    TempHourAccLine."Line No." := LineNo; // "Line No.";
+                                    TempHourAccLine."Cost Object" := "Cost Object";
+                                    TempHourAccLine."Project No." := "Project No.";
+                                    TempHourAccLine."Employee No." := DimValue; // Save the dim here instead for filtering
+                                    TempHourAccLine."Document No." := "Document No.";
+                                    TempHourAccLine."Total Line" := "Total Line";
+                                    TempHourAccLine."Amount (LCY)" := "Amount (LCY)" + "Overhead Surcharge Project";
+                                    TempHourAccLine.INSERT;
+                                    LineNo += 10000;
+                                    //<< ITERO.LP RFC056
+
+                                    //>> ITERO.LP RFC056: Disabled code
+                                    //GenJournalLine.VALIDATE("Journal Template Name",TempName);
+                                    //GenJournalLine.VALIDATE("Journal Batch Name",BatchName);
+                                    //GenJournalLine.VALIDATE("Line No.",LineNo);
+                                    //GenJournalLine.INSERT(TRUE);
+
+                                    //GenJournalLine.VALIDATE("Posting Date",Pdate);
+                                    //GenJournalLine.VALIDATE("Job No.","Hour Accounting Line"."Project No.");
+                                    //GenJournalLine.VALIDATE("Shortcut Dimension 2 Code","Hour Accounting Line"."Cost Object");
+                                    //GenJournalLine.VALIDATE("Document No.","Hour Accounting Line"."Document No.");
+                                    //GenJournalLine.VALIDATE(Quantity,"Hour Accounting Line"."Total Line");
+                                    //GenJournalLine.VALIDATE("Amount (LCY)","Hour Accounting Line"."Amount (LCY)"+"Hour Accounting Line"."Overhead Surcharge Project");
+                                    //GenJournalLine.VALIDATE("Bal. Account No.",BalAcc);
+                                    //GenJournalLine.MODIFY(TRUE);
+                                    //LineNo:=LineNo+10000;
+                                    //<< ITERO.LP RFC056
+                                  END;
+                                END;
+
+               OnPostDataItem=BEGIN
+                                //>> ITERO.LP RFC056
+                                LineNo := 10000;
+
+                                // Insert main lines
+                                IF JnlGroupBuffer.FINDSET THEN
+                                REPEAT
+                                  TempHourAccLine.SETRANGE("Cost Object", JnlGroupBuffer.Key1);
+                                  TempHourAccLine.SETRANGE("Project No.", JnlGroupBuffer.Key2);
+                                  TempHourAccLine.SETRANGE("Employee No.", JnlGroupBuffer.Key3);
+                                  IF TempHourAccLine.FINDSET THEN BEGIN
+                                    GenJournalLine.INIT;
+                                    GenJournalLine.VALIDATE("Journal Template Name",TempName);
+                                    GenJournalLine.VALIDATE("Journal Batch Name",BatchName);
+                                    GenJournalLine.VALIDATE("Line No.",LineNo);
+                                    GenJournalLine.INSERT(TRUE);
+                                    GenJournalLine.VALIDATE("Posting Date", Pdate);
+                                    GenJournalLine.VALIDATE("Job No.", JnlGroupBuffer.Key2);
+                                    GenJournalLine.VALIDATE("Shortcut Dimension 2 Code", JnlGroupBuffer.Key1);
+                                    GenJournalLine.VALIDATE("Document No.", TempHourAccLine."Document No.");
+                                    LineNo += 10000;
+                                    REPEAT
+                                      GenJournalLine.VALIDATE(Quantity, GenJournalLine.Quantity + TempHourAccLine."Total Line");
+                                      GenJournalLine.VALIDATE("Amount (LCY)", GenJournalLine."Amount (LCY)" + TempHourAccLine."Amount (LCY)");
+                                    UNTIL TempHourAccLine.NEXT = 0;
+
+                                    GenJournalLine.VALIDATE("Bal. Account No.",BalAcc);
+                                    GenJournalLine.ValidateShortcutDimCode(3, JnlGroupBuffer.Key3);
+                                    GenJournalLine.MODIFY(TRUE);
+                                  END;
+                                UNTIL JnlGroupBuffer.NEXT = 0;
+
+                                // Insert balancing lines
+                                GenJournalLine.RESET;
+                                GenJournalLine.SETRANGE("Journal Template Name",TempName);
+                                GenJournalLine.SETRANGE("Journal Batch Name",BatchName);
+                                IF GenJournalLine.FINDLAST THEN
+                                  LineNo := GenJournalLine."Line No.";
+
+                                GenJournalLine.SETRANGE("Line No.", 0, LineNo); // Otherwise it will extend the range for each inserted row
+                                LineNo += 10000;
+                                IF GenJournalLine.FINDSET THEN
+                                REPEAT
+                                  GenJournalLine2.INIT;
+                                  GenJournalLine2.VALIDATE("Journal Template Name", TempName);
+                                  GenJournalLine2.VALIDATE("Journal Batch Name", BatchName);
+                                  GenJournalLine2.VALIDATE("Line No.", LineNo);
+                                  GenJournalLine2.INSERT(TRUE);
+                                  GenJournalLine2.VALIDATE("Posting Date", TODAY);
+                                  GenJournalLine2.VALIDATE("Job No.", GenJournalLine."Job No.");
+                                  GenJournalLine2.VALIDATE("Shortcut Dimension 2 Code", GenJournalLine."Shortcut Dimension 2 Code");
+                                  GenJournalLine2.VALIDATE("Document No.", GenJournalLine."Document No.");
+                                  GenJournalLine2.VALIDATE(Quantity, -GenJournalLine.Quantity);
+                                  GenJournalLine2.VALIDATE("Amount (LCY)", -GenJournalLine."Amount (LCY)");
+                                  GenJournalLine2.VALIDATE("Bal. Account No.", BalAcc);
+                                  GenJournalLine.ShowShortcutDimCode(ShortcutDimCode);
+                                  GenJournalLine2.ValidateShortcutDimCode(3, ShortcutDimCode[3]);
+                                  GenJournalLine2.MODIFY(TRUE);
+                                  LineNo += 10000;
+                                UNTIL GenJournalLine.NEXT = 0;
+                                //<< ITERO.LP RFC056
+
+                                //>> ITERO.LP RFC056: Disabled code
+                                //CLEAR(GenJournalLine);
+                                //GenJournalLine.SETRANGE("Journal Template Name",TempName);
+                                //GenJournalLine.SETRANGE("Journal Batch Name",BatchName);
+                                //IF GenJournalLine.FINDSET THEN REPEAT
+                                //
+                                //  GenJournalLine2.SETRANGE("Journal Template Name",TempName);
+                                //  GenJournalLine2.SETRANGE("Journal Batch Name",BatchName);
+                                //  GenJournalLine2.SETFILTER("Line No.",'<>%1',GenJournalLine."Line No.");
+                                //  GenJournalLine2.SETRANGE("Shortcut Dimension 2 Code",GenJournalLine."Shortcut Dimension 2 Code");
+                                //  GenJournalLine2.SETRANGE("Job No.",GenJournalLine."Job No.");
+                                //  GenJournalLine2.CALCSUMS(Quantity);
+                                //  GenJournalLine2.CALCSUMS("Amount (LCY)");
+                                //
+                                //  GenJournalLine.VALIDATE(Quantity,GenJournalLine.Quantity+GenJournalLine2.Quantity);
+                                //  GenJournalLine.VALIDATE("Amount (LCY)",GenJournalLine."Amount (LCY)"+GenJournalLine2."Amount (LCY)");
+                                //  GenJournalLine.MODIFY(TRUE);
+                                //
+                                //  GenJournalLine2.DELETEALL(TRUE);
+                                //
+                                //UNTIL GenJournalLine.NEXT=0;
+                                //
+                                //CLEAR(GenJournalLine);
+                                //GenJournalLine.SETRANGE("Journal Template Name",TempName);
+                                //GenJournalLine.SETRANGE("Journal Batch Name",BatchName);
+                                //IF GenJournalLine.FINDLAST THEN
+                                //  LastLine:=GenJournalLine."Line No.";
+                                //
+                                //CLEAR(GenJournalLine);
+                                //GenJournalLine.SETRANGE("Journal Template Name",TempName);
+                                //GenJournalLine.SETRANGE("Journal Batch Name",BatchName);
+                                //GenJournalLine.SETRANGE("Line No.",0,LastLine);
+                                //
+                                //IF GenJournalLine.FINDSET THEN REPEAT
+                                //  CLEAR(GenJournalLine2);
+                                //  GenJournalLine2.VALIDATE("Journal Template Name",TempName);
+                                //  GenJournalLine2.VALIDATE("Journal Batch Name",BatchName);
+                                //  GenJournalLine2.VALIDATE("Line No.",LineNo+10000);
+                                //  GenJournalLine2.INSERT(TRUE);
+                                //
+                                //  GenJournalLine2.VALIDATE("Posting Date",TODAY);
+                                //  GenJournalLine2.VALIDATE("Job No.",GenJournalLine."Job No.");
+                                //  GenJournalLine2.VALIDATE("Shortcut Dimension 2 Code",GenJournalLine."Shortcut Dimension 2 Code");
+                                //  GenJournalLine2.VALIDATE("Document No.",GenJournalLine."Document No.");
+                                //  GenJournalLine2.VALIDATE(Quantity,GenJournalLine.Quantity*-1);
+                                //  GenJournalLine2.VALIDATE("Amount (LCY)",GenJournalLine."Amount (LCY)"*-1);
+                                //  GenJournalLine2.VALIDATE("Bal. Account No.",BalAcc);
+                                //  GenJournalLine2.MODIFY(TRUE);
+                                //  LineNo:=LineNo+10000;
+                                //UNTIL GenJournalLine.NEXT=0;
+
+                                MESSAGE('Klar, g† till journal %1, %2 f”r att bokf”ra',TempName,BatchName);
+                              END;
+
+               ReqFilterFields=Posting Date,Project No.,Wage Component }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      SaveValues=Yes;
+      OnClosePage=BEGIN
+                    IF Pdate=0D THEN
+                      ERROR('Datum m†ste fyllas i');
+                  END;
+
+    }
+    CONTROLS
+    {
+      { 1100285500;;Container;
+                  Name=Options;
+                  ContainerType=ContentArea }
+
+      { 1100285501;1;Field  ;
+                  CaptionML=[ENU=Posting date (last in month);
+                             SVE=Bokf”ringsdatum (sista i m†naden)];
+                  NotBlank=Yes;
+                  SourceExpr=Pdate }
+
+      { 1100285503;1;Field  ;
+                  Name=Journal Name;
+                  CaptionML=[ENU=Journal Template Name;
+                             SVE=Mallnamn f”r journal];
+                  NotBlank=Yes;
+                  SourceExpr=TempName;
+                  TableRelation="Gen. Journal Template" }
+
+      { 1100285502;1;Field  ;
+                  Name=Journal Batch name;
+                  CaptionML=[ENU=Journal Batch Name;
+                             SVE=Journalnamn];
+                  NotBlank=Yes;
+                  SourceExpr=BatchName;
+                  OnLookup=BEGIN
+                             IF TempName <> '' THEN
+                               GenJournalBatch.SETRANGE("Journal Template Name",TempName);
+
+                             GJB.SETTABLEVIEW(GenJournalBatch);
+                             GJB.SETRECORD(GenJournalBatch);
+                             GJB.LOOKUPMODE(TRUE);
+                             IF GJB.RUNMODAL = ACTION::LookupOK THEN BEGIN
+                               GJB.GETRECORD(GenJournalBatch);
+                               CLEAR(GJB);
+                               BatchName:=GenJournalBatch.Name;
+                             END;
+                           END;
+                            }
+
+      { 1100285504;1;Field  ;
+                  CaptionML=[ENU=Balance Account;
+                             SVE=Balanskonto];
+                  NotBlank=Yes;
+                  SourceExpr=BalAcc;
+                  TableRelation="G/L Account" }
+
+      { 1100285507;1;Group  ;
+                  Name=Dimensioner;
+                  GroupType=Group }
+
+      { 1100285506;2;Field  ;
+                  CaptionML=[ENU=Dimension;
+                             SVE=Dimension];
+                  SourceExpr=DimensionCode;
+                  OnLookup=VAR
+                             Dimension@1100285000 : Record 348;
+                           BEGIN
+                             IF PAGE.RUNMODAL(0, Dimension) = ACTION::LookupOK THEN
+                               DimensionCode := Dimension.Code;
+                             RequestOptionsPage.UPDATE;
+                           END;
+                            }
+
+      { 1100285505;2;Field  ;
+                  CaptionML=[ENU=Dimension Value;
+                             SVE=Dimensionsv„rde];
+                  SourceExpr=DimensionValueCode;
+                  OnLookup=VAR
+                             DimensionValue@1100285000 : Record 349;
+                           BEGIN
+                             DimensionValue.SETRANGE("Dimension Code", DimensionCode);
+                             IF PAGE.RUNMODAL(0, DimensionValue) = ACTION::LookupOK THEN
+                               DimensionValueCode := DimensionValue.Code;
+                             RequestOptionsPage.UPDATE;
+                           END;
+                            }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      GenJournalLine@1100285500 : Record 81;
+      LineNo@1100285501 : Integer;
+      DF@1100285502 : DateFormula;
+      GenJournalLine2@1100285503 : Record 81;
+      Pdate@1100285504 : Date;
+      LastLine@1100285505 : Integer;
+      BatchName@1100285507 : Code[10];
+      TempName@1100285506 : Code[10];
+      GenJournalBatch@1100285508 : Record 232;
+      GJB@1100285509 : Page 251;
+      BalAcc@1100285510 : Code[20];
+      Job@1100285511 : Record 11072003;
+      FilterCostCenter@1100285515 : Text;
+      DimensionCode@1100285514 : Code[20];
+      DimensionValueCode@1100285513 : Code[20];
+      GLSetup@1100285512 : Record 98;
+      PStatus@1100285516 : Option;
+      PType@1100285517 : Code[20];
+      int@1100285518 : Integer;
+      JnlGroupBuffer@1100285101 : TEMPORARY Record 81628;
+      TempHourAccLine@1100285102 : TEMPORARY Record 11012039;
+      DimValue@1100285103 : Code[20];
+      ShortcutDimCode@1100285100 : ARRAY [8] OF Code[20];
+
+    PROCEDURE GetDefaultDimensionValue@1100285102(TableID@1100285100 : Integer;No@1100285101 : Code[20];DimensionCode@1100285102 : Code[20];ShortcutDimNo@1100285105 : Integer) : Code[20];
+    VAR
+      DefaultDimension@1100285104 : Record 352;
+    BEGIN
+      DefaultDimension.SETRANGE("Table ID", TableID);
+      DefaultDimension.SETRANGE("No.", No);
+      DefaultDimension.SETRANGE("Dimension Code", DimensionCode);
+      IF DefaultDimension.FINDFIRST THEN
+        EXIT(DefaultDimension."Dimension Value Code")
+      ELSE
+        EXIT('');
+    END;
+
+    BEGIN
+    {
+      151229 ITERO.LP RFC056 Added Dimension 3 (FUNKTION) from the Employee.
+      150318 ITERO.LP RFC056 Adjusted LinNo.
+      190205 ORANGO.DL #22923 findset creates record-lock due to insert in other table
+    }
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

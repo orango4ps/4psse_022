@@ -1,0 +1,356 @@
+OBJECT Codeunit 11130048 App Base Library
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text001@1100527200 : TextConst 'ENU=No DocumentNo has been specified';
+      Text002@1100527201 : TextConst 'ENU=The given Filename is not unique';
+
+    PROCEDURE ConvertUTF8ToBase64@1100528002(Input@1100528000 : Text) : Text;
+    VAR
+      TextEncodingUTF8@1100528001 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.UTF8Encoding";
+      SystemConvert@1100528002 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Convert";
+    BEGIN
+      TextEncodingUTF8 := TextEncodingUTF8.UTF8Encoding;
+      EXIT(SystemConvert.ToBase64String(TextEncodingUTF8.GetBytes(Input)));
+    END;
+
+    PROCEDURE ConvertBase64ToUTF8@1100528005(Base64Input@1100528000 : Text) : Text;
+    VAR
+      TextEncodingUTF8@1100528001 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.UTF8Encoding";
+      SystemConvert@1100528002 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Convert";
+    BEGIN
+      TextEncodingUTF8 := TextEncodingUTF8.UTF8Encoding;
+      EXIT(TextEncodingUTF8.GetString(SystemConvert.FromBase64String(Base64Input)));
+    END;
+
+    PROCEDURE CreateNewDocumentAndLink@1100527203(TableNo@1100527204 : Integer;EntityKeys@1100527205 : ARRAY [5] OF Code[20];Document@1100527203 : DotNet "'Fps.Base.Shared.ReplicationObject, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null'.Fps.Base.Shared.ReplicationObject.ReplicationObjects.Document";Username@1100527202 : Text[250];CreatedByFieldService@1100527201 : Boolean;AvailableForFieldService@1100527200 : Boolean);
+    BEGIN
+      InsertNewDocument(Document, Username, CreatedByFieldService, AvailableForFieldService);
+      InsertNewDocumentLink(TableNo, EntityKeys, Document.DocumentNo);
+    END;
+
+    [TryFunction]
+    PROCEDURE TryConvertBase64ToUTF8@1100528000(Base64Input@1100528000 : Text;VAR UTF8Output@1100528003 : Text);
+    BEGIN
+      UTF8Output := ConvertBase64ToUTF8(Base64Input);
+    END;
+
+    PROCEDURE InsertNewDocument@1100528007(Document@1100528002 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";Username@1100528000 : Text[250];CreatedByFieldService@1100528003 : Boolean;AvailableForFieldService@1100528004 : Boolean);
+    VAR
+      DocumentProperties@1100528001 : Record 11012746;
+      DocumentMgtSetup@1100528005 : Record 11071831;
+      NoSeriesManagement@1100528006 : Codeunit 396;
+      DocumentNo@1100528700 : Text;
+    BEGIN
+
+      DocumentMgtSetup.GET;
+      DocumentMgtSetup.TESTFIELD("External Document Nos.");
+      DocumentNo := NoSeriesManagement.GetNextNo(DocumentMgtSetup."External Document Nos.", TODAY, TRUE);
+      SetPropertyByName(Document, 'DocumentNo' , DocumentNo);
+
+      DocumentProperties.INIT;
+      DocumentProperties."No." := DocumentNo;
+      DocumentProperties.Description := GetPropertyValueByNameAsText(Document, 'Description');
+      DocumentProperties.File := GetPropertyValueByNameAsText(Document, 'FileName');
+      DocumentProperties."External Document" := TRUE;
+      DocumentProperties."User ID" := Username;
+      DocumentProperties."Created by Field Service" := CreatedByFieldService;
+      DocumentProperties."Available for Field Service" := AvailableForFieldService;
+      DocumentProperties."Creation Date" := GetPropertyValueByNameAsDate(Document, 'CreationDate');
+      DocumentProperties."Creation Time" :=  DT2TIME(GetPropertyValueByNameAsDateTime(Document, 'CreationDate'));
+      DocumentProperties."Document Type" := GetPropertyValueByNameAsText(Document, 'DocumentType');
+      DocumentProperties."SharePoint Status" := DocumentProperties."SharePoint Status"::New;
+      DocumentProperties.VALIDATE("Internal Company", COMPANYNAME);
+      DocumentProperties.INSERT;
+      DocumentProperties.FillModificationData;
+      COMMIT;
+    END;
+
+    PROCEDURE InsertNewDocumentLink@1100528010(TableNo@1100528000 : Integer;EntityKey@1100528001 : ARRAY [5] OF Code[20];DocumentNo@1100528002 : Code[20]);
+    VAR
+      DocumentLinkManagement@1100528005 : Codeunit 11012401;
+      DocLinkRID@1100528004 : ARRAY [5] OF RecordID;
+      RecRef@1100528003 : RecordRef;
+      DocumentProperties@1100528006 : Record 11012746;
+    BEGIN
+      DocumentLinkManagement.GetLinkDocRecRef(TableNo, EntityKey, RecRef);
+      DocLinkRID[1] := RecRef.RECORDID;
+      DocumentProperties.GET(DocumentNo);
+      DocumentLinkManagement.CreateDocumentLink(DocumentProperties, DocLinkRID);
+    END;
+
+    LOCAL PROCEDURE DefaultMaxMessageSize@1100528011() : Decimal;
+    BEGIN
+      EXIT(1024 * 1024 * 1024);
+    END;
+
+    PROCEDURE GetNSTMaxMessageSize@1100528012() : Decimal;
+    VAR
+      Settings@1100528001 : DotNet "'Microsoft.Dynamics.Nav.Types, Version=14.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.Types.ServerUserSettings";
+      MessageSize@1100528000 : Decimal;
+    BEGIN
+      Settings := Settings.Instance;
+
+      IF ISNULL(Settings) THEN
+        EXIT(DefaultMaxMessageSize);
+
+      MessageSize := Settings.SOAPServicesMaxMsgSize.Value;
+      EXIT(MessageSize * 1024);
+    END;
+
+    PROCEDURE InsertQueuedDoc@1100527200(VAR QueuedExternalDocument@1100527203 : Record 11012148;PathFolder@1100527202 : Text;FileName@1100527201 : Text;Username@1100527204 : Text);
+    VAR
+      FileManagement@1100527200 : Codeunit 419;
+    BEGIN
+      WITH QueuedExternalDocument DO BEGIN
+        "Line No." := 0;
+        User := Username;
+        Folder := PathFolder;
+        "File Name" := FileName;
+        Source := QueuedExternalDocument.Source::User;
+        INSERT(TRUE);
+      END;
+    END;
+
+    PROCEDURE RegisterDocument@1100527201(VAR DocumentPropertiesInit@1100527200 : Record 11012746);
+    VAR
+      QueuedExternalDocument@1100527201 : Record 11012148;
+      ErrorTxt@1100527203 : Text[250];
+      DocumentPropertiesError@1100527202 : Record 11012746;
+    BEGIN
+        IF NOT QueuedExternalDocument.RegisterDocument(DocumentPropertiesInit, FALSE, 0, '', ErrorTxt, DocumentPropertiesError) THEN
+            ERROR(ErrorTxt);
+    END;
+
+    PROCEDURE GetDocuments@1100527204(TableNo@1100527204 : Integer;EntityKeys@1100527205 : ARRAY [5] OF Code[20];Documents@1100527209 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Collections.Generic.List`1");
+    VAR
+      RecRef@1100527207 : RecordRef;
+      PrimKeyRef@1100527206 : KeyRef;
+      PrimFieldRef@1100527202 : FieldRef;
+      DocumentLinkManagement@1100527201 : Codeunit 11012401;
+      i@1100527200 : Integer;
+      DocumentProperties@1100527208 : Record 11012746;
+      Document@1100527203 : DotNet "'Fps.Base.Shared.ReplicationObject, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null'.Fps.Base.Shared.ReplicationObject.ReplicationObjects.Document";
+    BEGIN
+      DocumentProperties.SETRANGE("Available for Field Service", TRUE);
+
+      RecRef.OPEN(TableNo);
+      i := 1;
+      PrimKeyRef := RecRef.KEYINDEX(1);
+      REPEAT
+        PrimFieldRef := PrimKeyRef.FIELDINDEX(i);
+        PrimFieldRef.VALUE := EntityKeys[i];
+        i += 1;
+      UNTIL i > PrimKeyRef.FIELDCOUNT;
+
+      IF NOT RecRef.FIND('=') THEN
+        RecRef.INIT;
+      DocumentLinkManagement.GetDocuments(DocumentProperties, RecRef);
+      DocumentProperties.MARKEDONLY(TRUE);
+
+      IF DocumentProperties.FINDSET THEN BEGIN
+        REPEAT
+          //documentNos[i] := DocumentProperties."No.";
+            Document := Document.Document;
+            Documents.Add(Document);
+            DocumentPropertiesToDocument(DocumentProperties, Document);
+        UNTIL (DocumentProperties.NEXT = 0);
+      END;
+    END;
+
+    PROCEDURE WriteContentToFile@1100527202(DocumentContent@1100527207 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject");
+    VAR
+      DocumentProperties@1100527206 : Record 11012746;
+      File@1100527205 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.File";
+      Convert@1100527204 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Convert";
+      DocumentMgtSetup@1100527203 : Record 11071831;
+      fullFileName@1100527202 : Text;
+      ExternalDocumentManagement@1100527201 : Codeunit 11012403;
+      IgnoreVariable@1100527200 : Text;
+      DocumentServiceManagement@1100527219 : Codeunit 9510;
+      DocumentServiceURL@1100527218 : Text;
+      DocumentDirectory@1100527216 : Text;
+      DocumentServiceDocumentSubdir@1100527215 : Text;
+      DocumentType@1100527214 : Record 11012405;
+      DocumentServiceFileName@1100527213 : Text;
+      MemoryStream@1100527209 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.MemoryStream";
+      FileManagement@1100527208 : Codeunit 419;
+      OutStream@1100528500 : OutStream;
+      TargetStorageURI@1100527800 : Text;
+      TargetStorageType@1100527801 : Option;
+      DocumentManagement@1100527802 : Codeunit 11012406;
+      Value@1100528700 : Variant;
+      Content@1100528701 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Array";
+    BEGIN
+      IF NOT DocumentProperties.GET(GetPropertyValueByNameAsText(DocumentContent, 'DocumentNo')) THEN BEGIN
+        ERROR(Text001)
+      END;
+
+      GetPropertyValueByNameAsByteArray(DocumentContent, 'Content', Value);
+      Content := Value;
+      MemoryStream  := MemoryStream.MemoryStream(Content);
+      OutStream := MemoryStream;
+      ExternalDocumentManagement.RegisterFileByOutStream(
+        OutStream,DocumentProperties.FileNameShort,DocumentProperties."Document Type",
+        DocumentProperties."Creation Date",TargetStorageURI,TargetStorageType);
+      MemoryStream.Close;
+      CLEAR(MemoryStream);
+      DocumentProperties.ValidateStorageURI(TargetStorageType,TargetStorageURI);
+      DocumentProperties.MODIFY;
+    END;
+
+    LOCAL PROCEDURE DocumentPropertiesToDocument@1100527207(VAR DocumentProperty@1100527200 : Record 11012746;Document@1100527202 : DotNet "'Fps.Base.Shared.ReplicationObject, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null'.Fps.Base.Shared.ReplicationObject.ReplicationObjects.Document");
+    BEGIN
+      Document.DocumentNo := DocumentProperty."No.";
+      Document.Description := DocumentProperty.Description;
+      Document.FileName := DocumentProperty.File;
+      Document.CreationDate := CREATEDATETIME(DocumentProperty."Creation Date", DocumentProperty."Creation Time");
+      Document.DocumentType := DocumentProperty."Document Type";
+    END;
+
+    PROCEDURE GetPropertyValueByName@1100528706(JObject@1100528702 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";PropertyName@1100528700 : Text;VAR Value@1100528701 : Variant);
+    VAR
+      JsonManagement@1100528703 : Codeunit 5459;
+    BEGIN
+      JsonManagement.InitializeObjectFromJObject(JObject);
+      IF NOT JsonManagement.GetPropertyValueByName(PropertyName, Value) THEN
+        ERROR(Text001, PropertyName);
+    END;
+
+    PROCEDURE GetPropertyValueByNameAsText@1100528708(JObject@1100528702 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";PropertyName@1100528700 : Text) Value : Text;
+    VAR
+      JsonManagement4PS@1100528703 : Codeunit 11125361;
+      Val@1100528701 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JToken";
+    BEGIN
+      Val := JObject.GetValue(PropertyName);
+
+      IF ISNULL(Val) THEN
+        Value := ''
+      ELSE
+        Value := Val.ToString;
+    END;
+
+    PROCEDURE GetPropertyValueByNameAsInt@1100528709(JObject@1100528702 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";PropertyName@1100528700 : Text) Value : Integer;
+    VAR
+      JsonManagement4PS@1100528703 : Codeunit 11125361;
+    BEGIN
+      Value := JsonManagement4PS.GetValueAsInteger(JObject, PropertyName);
+    END;
+
+    PROCEDURE GetPropertyValueByNameAsDate@1100528703(JObject@1100528704 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";PropertyName@1100528700 : Text) Value : Date;
+    VAR
+      JsonManagement4PS@1100528702 : Codeunit 11125361;
+    BEGIN
+      Value := JsonManagement4PS.GetValueAsDate(JObject, PropertyName);
+    END;
+
+    PROCEDURE GetPropertyValueByNameAsDateTime@1100528705(JObject@1100528704 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";PropertyName@1100528700 : Text) Value : DateTime;
+    VAR
+      JsonManagement4PS@1100528702 : Codeunit 11125361;
+    BEGIN
+      Value := JsonManagement4PS.GetValueAsDateTime(JObject, PropertyName);
+    END;
+
+    PROCEDURE GetPropertyValueByNameAsDecimal@1100528723(JObject@1100528702 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";PropertyName@1100528700 : Text) Value : Decimal;
+    VAR
+      JSONManagement@1100528704 : Codeunit 5459;
+      StringValue@1100528703 : Text;
+    BEGIN
+      JSONManagement.GetStringPropertyValueFromJObjectByName(JObject, PropertyName, StringValue);
+      IF (StringValue = '') THEN
+        EXIT;
+      JSONManagement.GetDecimalPropertyValueFromJObjectByName(JObject, PropertyName, Value);
+    END;
+
+    PROCEDURE GetPropertyValueByNameAsBoolean@1100528701(JObject@1100528702 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";PropertyName@1100528700 : Text) Value : Boolean;
+    VAR
+      JsonManagement4PS@1100528703 : Codeunit 11125361;
+    BEGIN
+      Value := JsonManagement4PS.GetValueAsBoolean(JObject, PropertyName);
+    END;
+
+    PROCEDURE GetPropertyValueByNameAsByteArray@1100528702(JObject@1100528702 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";PropertyName@1100528700 : Text;VAR Value@1100528703 : Variant);
+    VAR
+      Convert@1100528701 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Convert";
+    BEGIN
+      Value := Convert.FromBase64String(JObject.GetValue(PropertyName).ToString);
+    END;
+
+    PROCEDURE SetPropertyByName@1100528700(JObject@1100528700 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";propertyName@1100528701 : Text;Value@1100528702 : Variant);
+    VAR
+      JsonManagement@1100528703 : Codeunit 5459;
+    BEGIN
+      JsonManagement.ReplaceOrAddJPropertyInJObject(JObject, propertyName, Value);
+    END;
+
+    LOCAL PROCEDURE "=== App Codes ==="@1100528003();
+    BEGIN
+    END;
+
+    PROCEDURE AppCodeBase@1100528006() : Code[10];
+    BEGIN
+      EXIT('BASE')
+    END;
+
+    PROCEDURE AppCodeFSA@1100528015() : Code[10];
+    BEGIN
+      EXIT('FSA');
+    END;
+
+    PROCEDURE AppCodePLA@1100528004() : Code[10];
+    BEGIN
+      EXIT('PLA');
+    END;
+
+    PROCEDURE AppCodeCCA@1100525000() : Code[10];
+    BEGIN
+      EXIT('CCA');
+    END;
+
+    PROCEDURE AppCodeWHA@1100528013() : Code[10];
+    BEGIN
+      EXIT('WHA');
+    END;
+
+    PROCEDURE AppCodeOSA@1100526000() : Code[10];
+    BEGIN
+      EXIT('OSA');
+    END;
+
+    PROCEDURE AppCodeGAP@1100526001() : Code[10];
+    BEGIN
+      EXIT('GAP');
+    END;
+
+    LOCAL PROCEDURE "=== Response Types ==="@1100528001();
+    BEGIN
+    END;
+
+    PROCEDURE ResponseOK@1100528008() : Code[10];
+    BEGIN
+      EXIT('OK');
+    END;
+
+    PROCEDURE ResponseError@1100528009() : Code[10];
+    BEGIN
+      EXIT('ERROR');
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

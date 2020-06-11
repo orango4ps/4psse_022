@@ -1,0 +1,192 @@
+OBJECT Codeunit 11012621 Create Demo Data CCA
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1100525001 : TextConst 'ENU="Dear %1,%4 %4Thank you for creating a demo account.%4Below you can find instructions on how to start using the 4PS Civil Construction App: %4%4 1. Download the app from the store (<a href=""https://play.google.com/store/apps/details?id=com.fps.cca&hl=en"">Android</a>, <a href=""https://itunes.apple.com/us/app/4ps-gww/id1413730771?ls=1&mt=8"">iOS</a>))%4%4 2. After installation click <a href=""https://cca.4ps.nl/login/?username=%2&proxy=%5"">here (Android)</a> or <a href=""fps.cca://login/?username=%2&proxy=%5"">here (iOS)</a>  to start the app.%4 <i>The app opens and the connection with the back-office will be set.</i>%4You can find a working link on <a href=""%5"">this page</a> of the above link doesn''t work (which is the case in some mail clients).%4%4"';
+      Text001@1100525000 : TextConst 'ENU=3. Log in with the following credentials:%4User Name: %2%4Password: %3%4%4 4. Refresh the work order overview to fetch the orders that are prepared for you!%4 <i>You can always get new orders. You can find that possibility on the settings page.</i>%4%4With kind regards,%4 4PS';
+      Text002@1100525002 : TextConst 'ENU=Login details for the Civil Construction App';
+      MailTemplateManagement@1100525003 : Codeunit 11012622;
+
+    PROCEDURE CreateDemoUser@1100525000(Employee@1100525001 : Record 5200) : Boolean;
+    VAR
+      AppUser@1100528104 : Record 11130031;
+      ResourceWOP@1100528105 : Record 11229278;
+      Password@1100525000 : Text;
+    BEGIN
+      IF NOT ResourceWOP.GET(Employee."No.") THEN BEGIN
+        ResourceWOP.INIT;
+        ResourceWOP."No." := Employee."No.";
+        ResourceWOP.VALIDATE(Name, Employee."Last Name");
+        ResourceWOP.VALIDATE(Company, COMPANYNAME);
+        ResourceWOP.VALIDATE(Type, ResourceWOP.Type::Employee);
+        ResourceWOP.VALIDATE("Source No.", Employee."No.");
+        ResourceWOP.VALIDATE("Synchronize FSA", ResourceWOP."Synchronize FSA"::"Changes Only");
+        ResourceWOP.INSERT(TRUE);
+      END;
+
+      ResourceWOP.VALIDATE("Active in CCA" , TRUE);
+      ResourceWOP.MODIFY;
+
+      IF NOT AppUser.GET(Employee."No.") THEN BEGIN
+        AppUser.INIT;
+        AppUser.Username := Employee."No.";
+        AppUser.VALIDATE("Resource No.", ResourceWOP."No.");
+        AppUser.VALIDATE("Employee No.", Employee."No.");
+        AppUser.VALIDATE(Active, TRUE);
+        AppUser.INSERT(TRUE);
+      END;
+
+      Password := GeneratePassword();
+      AppUser.VALIDATE(Password, Password);
+      AppUser.MODIFY(TRUE);
+
+      CreateResourceRequestsForResource(ResourceWOP."No.");
+
+      COMMIT;
+      SendEmail(AppUser, Employee, Password);
+
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE GeneratePassword@1100528302() : Text;
+    VAR
+      StringFunctions@1100525000 : Codeunit 11012273;
+      PasswordPlain@1100525001 : Text;
+    BEGIN
+      StringFunctions.GeneratePasswordPlainText(PasswordPlain, 8);
+      EXIT(PasswordPlain);
+    END;
+
+    LOCAL PROCEDURE SendEmail@1100528101(AppUser@1100525007 : Record 11130031;Employee@1100525000 : Record 5200;Password@1100525002 : Text);
+    VAR
+      MailTemplate@1100525006 : Record 11229450;
+      BodyText@1100528100 : Text;
+      SMTPMail@1100528102 : Codeunit 400;
+      MailTemplateNo@1100525004 : Integer;
+      Subject@1100525005 : Text;
+    BEGIN
+      MailTemplateNo := 170;
+      Subject := Text002;
+      MailTemplateManagement.GetMailTemplate(MailTemplate, MailTemplateNo, Employee."Global Dimension 1 Code");
+      IF (MailTemplate."Use Mail Template Subject Text") THEN
+        Subject := MailTemplateManagement.GetLayoutTextSubstitutedSubjectOnly(MailTemplateNo, '',
+          AppUser);
+
+      BodyText := GetBodyText(Employee."No.", Password, Employee."First Name");
+
+       SMTPMail.CreateMessage(
+        MailTemplate."From Name",
+        MailTemplate.From,
+        Employee."Company E-Mail",
+        Subject,
+        BodyText,
+        TRUE);
+
+      SMTPMail.Send;
+    END;
+
+    LOCAL PROCEDURE GetBodyText@1100528106(Username@1100525001 : Code[20];Password@1100525000 : Text;FirstName@1100525002 : Text[30]) : Text;
+    VAR
+      CCAAppSetup@1100525004 : Record 11128520;
+      BodyText@1100528102 : Text;
+      StringFunctions@1100525003 : Codeunit 11012273;
+    BEGIN
+      CCAAppSetup.GET();
+      BodyText := STRSUBSTNO(Text000, FirstName, Username, Password, STRSUBSTNO('%1%2', StringFunctions.CarriageReturn, StringFunctions.LineFeed), CCAAppSetup."Proxy URL");
+      BodyText := BodyText + STRSUBSTNO(Text001, FirstName, Username, Password, STRSUBSTNO('%1%2', StringFunctions.CarriageReturn, StringFunctions.LineFeed), CCAAppSetup."Proxy URL");
+      EXIT(BodyText);
+    END;
+
+    PROCEDURE CreateResourceRequestsForResource@1100525001(ResourceNo@1100525000 : Code[20]) : Boolean;
+    VAR
+      ResourceRequestBase@1100526202 : Record 11124901;
+      ResourceRequest@1100526201 : Record 11124901;
+      Count@1100526203 : Integer;
+    BEGIN
+      IF (ResourceNo = '') THEN
+        EXIT(FALSE);
+
+      ResourceRequestBase.SETFILTER("No.", '%1', 'DEMO*');
+      IF ResourceRequestBase.FINDSET THEN BEGIN
+        IF ResourceRequestBase.COUNT > 3 THEN BEGIN
+          RANDOMIZE();
+          ResourceRequestBase.NEXT(RANDOM(ResourceRequestBase.COUNT - 3));
+        END;
+        REPEAT
+          ResourceRequest := ResourceRequestBase;
+          ResourceRequest."No." := '';
+          ResourceRequest.INSERT(TRUE);
+          CreateResourceRequestOrders(ResourceRequestBase, ResourceRequest."No.", ResourceNo);
+          Count += 1;
+        UNTIL (ResourceRequestBase.NEXT = 0) OR (Count = 3)
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateResourceRequestOrders@1100525005(ResourceRequestBase@1100525000 : Record 11124901;ResourceRequestNo@1100526201 : Code[20];ResourceNo@1100526200 : Code[20]);
+    VAR
+      WorkOrder@1100525001 : Record 11229279;
+      OperatedPlantWorkOrderNo@1100526203 : Code[20];
+      NewWorkOrderNo@1100526204 : Code[20];
+    BEGIN
+      WorkOrder.SETFILTER("Source No.", ResourceRequestBase."No.");
+      WorkOrder.SETCURRENTKEY("Resource Type");
+      WorkOrder.SETASCENDING("Resource Type", FALSE);
+      IF WorkOrder.FINDSET THEN BEGIN
+        REPEAT
+          NewWorkOrderNo := CreateResourceRequestOrder(WorkOrder, OperatedPlantWorkOrderNo, ResourceRequestNo, ResourceNo, TODAY);
+          IF WorkOrder."Resource Type" = WorkOrder."Resource Type"::Plant THEN
+            OperatedPlantWorkOrderNo := NewWorkOrderNo;
+        UNTIL WorkOrder.NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateResourceRequestOrder@1100525007(BaseWorkOrder@1100525000 : Record 11229279;OperatedPlantWorkOrderNo@1100525006 : Code[20];ResourceRequestNo@1100525003 : Code[20];ResourceNo@1100525004 : Code[20];StartingDate@1100525002 : Date) : Code[20];
+    VAR
+      WorkOrder@1100525001 : Record 11229279;
+      NewWorkOrderNo@1100526201 : Code[20];
+    BEGIN
+      NewWorkOrderNo := BaseWorkOrder.DuplicateWorkorder(TRUE);
+      IF WorkOrder.GET(NewWorkOrderNo) THEN BEGIN
+        WorkOrder."Source No." := ResourceRequestNo;
+        WorkOrder."Starting Date/Time" := CREATEDATETIME(StartingDate, DT2TIME(BaseWorkOrder."Starting Date/Time"));
+        WorkOrder.VALIDATE("Ending Date/Time", CREATEDATETIME(StartingDate, DT2TIME(BaseWorkOrder."Ending Date/Time")));
+        IF WorkOrder."Resource Type" = WorkOrder."Resource Type"::Employee THEN BEGIN
+          IF WorkOrder."Operates Plant (WO)" <> '' THEN
+            WorkOrder.VALIDATE("Operates Plant (WO)", OperatedPlantWorkOrderNo);
+          WorkOrder.VALIDATE("Resource No.", ResourceNo);
+          WorkOrder.VALIDATE("Export to FSA", TRUE)
+        END;
+        WorkOrder.MODIFY(TRUE);
+        UpdateAdditionalInfoWo(NewWorkOrderNo, ResourceRequestNo);
+      END;
+      EXIT(WorkOrder."No.");
+    END;
+
+    LOCAL PROCEDURE UpdateAdditionalInfoWo@1100526212(WorkOrderNo@1100526201 : Code[20];ResourceRequestNo@1100526202 : Code[20]);
+    VAR
+      AdditionalInfoRequestWO@1100526200 : Record 11124915;
+    BEGIN
+      IF AdditionalInfoRequestWO.GET(WorkOrderNo) THEN BEGIN
+        AdditionalInfoRequestWO."Request No." := ResourceRequestNo;
+        AdditionalInfoRequestWO.MODIFY;
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

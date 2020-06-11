@@ -1,0 +1,570 @@
+OBJECT Codeunit 81694 EventSubscriberCUAssemblin
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PSSE;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      errText01@1101285000 : TextConst 'ENU=Filename must not be exceed 25 characters.;NOR=Filnavnet m† ikke overstige 25 tegn.;SVE=Filnamnet f†r inte vara l„ngre „n 25 tecken.';
+      errText02@1101285001 : TextConst 'ENU=Post Code too long';
+      errText03@1100285100 : TextConst 'ENU=Missing %1 in %2;SVE=%1 saknas i %2';
+      gETIMVendorLocalMgtCode@1100285101 : Code[15];
+
+    [EventSubscriber(Table,81,OnValidateReceivedAmount)]
+    LOCAL PROCEDURE OnValidateReceivedAmount@1100285100(VAR Rec@1100285100 : Record 81;xRec@1100285101 : Record 81);
+    BEGIN
+      //RFC1127
+      IF (Rec."Received amount" = 0) OR (Rec.Amount = 0) OR Rec."Not Matched" THEN EXIT;
+
+      IF (Rec."Received amount" <> -Rec.Amount) AND NOT Rec."Not Matched" THEN
+        Rec."Not Matched" := TRUE;
+    END;
+
+    [EventSubscriber(Table,11012148,OnAfterErrorifDocLinkNotOK)]
+    LOCAL PROCEDURE ErrorifDocLinkNotOK@1101285000(FileName@1101285000 : Text;TableNo@1101285001 : Integer);
+    VAR
+      PathHelper@1101285003 : DotNet "'mscorlib, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.Path";
+      ShortFileName@1101285002 : Text;
+    BEGIN
+      //190321
+      ShortFileName := PathHelper.GetFileNameWithoutExtension(FileName);
+      IF STRLEN(ShortFileName) > 25 THEN
+        ERROR(errText01);
+    END;
+
+    [EventSubscriber(Codeunit,11127976,OnBeforeFindItemRelationOrderTradeItem4)]
+    LOCAL PROCEDURE OnBeforeFindItemRelationOrderTradeItem@1100285101(VAR ItemRelation@1101285000 : Record 11012319;SymbrioPurchaseLine@1101285001 : Record 11127979;VAR RelationFound@1101285002 : Boolean);
+    VAR
+      SESetup@1100285103 : Record 11128004;
+      lvTradeItem@1100285104 : Record 11012317;
+      UnitofMeasure@1100285114 : Record 204;
+      ItemUnitofMeasure@1100285112 : Record 5404;
+      TemplItem@1100285115 : Record 27;
+      CopiedItem@1100285111 : Record 27;
+      CentralDataManagement@1100285109 : Codeunit 11012010;
+      CopyCu@1100285116 : Codeunit 11012017;
+      CopyItem@1100285110 : Page 11071827;
+      NavItemsNotEditable@1100285108 : Boolean;
+      DiscountTermsNotEditable@1100285107 : Boolean;
+      DiscountGroupsNotEditable@1100285106 : Boolean;
+      RecipesNotEditable@1100285105 : Boolean;
+      StoreLink@1100285122 : Boolean;
+      NewSeries@1100285121 : Code[20];
+      NewItem@1100285120 : Code[20];
+      NewDesc@1100285119 : Text[50];
+      gvItem@1100285118 : Code[20];
+      CreateStockkeepingUnit@1100285113 : Report 5706;
+      lvType@1100285102 : 'BasicItem,TradeItem';
+      lvBasicItemRec@1100285101 : Record 11012316;
+      lvItemRec@1100285100 : Record 27;
+      SymbrioPurchaseHeader@1100285124 : Record 11127978;
+      SymbrioSetup@1100285117 : Record 11127975;
+      ETIMRelationIsSet@1100285123 : Boolean;
+      ETIMVendorLocalMgt@1100285125 : Record 11012313;
+    BEGIN
+      //RFC1234, create NAV-items if relation is missing
+      ETIMRelationIsSet := RelationFound AND (gETIMVendorLocalMgtCode<>'');
+      RelationFound :=FALSE;
+      CLEAR(lvTradeItem);
+      lvTradeItem.SETRANGE("Item Code" , SymbrioPurchaseLine.ArticleNo);
+      IF NOT lvTradeItem.FINDFIRST THEN
+        EXIT;
+
+      IF SymbrioPurchaseLine.BranchNo <> '' THEN
+        lvTradeItem.SETRANGE("GTIN Code (Item)",SymbrioPurchaseLine.BranchNo);
+      IF NOT lvTradeItem.FINDFIRST THEN
+        lvTradeItem.SETRANGE("GTIN Code (Item)");
+      lvTradeItem.FINDFIRST;
+
+      CLEAR(ItemRelation);
+      ItemRelation.SETCURRENTKEY(Vendor,"Trade Item");
+      ItemRelation.SETRANGE("Source Type",    ItemRelation."Source Type"::"Trade Item");
+      ItemRelation.SETRANGE("GTIN Code",      lvTradeItem."GTIN Code (Item)");
+      ItemRelation.SETFILTER("Navision Item", '<>%1','');
+      RelationFound := ItemRelation.FINDFIRST;
+      IF RelationFound THEN
+        EXIT;
+
+      IF NOT SESetup.GET(SESetup."Line type"::Setup,'SYMBRIO','CR.ITM') THEN  //CReate missing ITeMs
+        EXIT;
+      IF NOT SESetup."Value (bool)" THEN
+        EXIT;
+
+      IF NOT UnitofMeasure.GET(SymbrioPurchaseLine.QuantityMeasurement) THEN BEGIN
+        IF SESetup."Value (int)"=0 THEN
+          ERROR(errText03,SymbrioPurchaseLine.QuantityMeasurement, UnitofMeasure.TABLECAPTION);
+        MESSAGE(errText03,SymbrioPurchaseLine.QuantityMeasurement, UnitofMeasure.TABLECAPTION);
+        EXIT;
+      END;
+
+      //create NAV-item and link them with a relation
+      //  ERROR(Text022, SymbrioPurchaseLine.ArticleNo, ItemRelation."Source Type"::"Trade Item", ItemRelation.TABLECAPTION);
+
+      CentralDataManagement.ItemFormEditable(
+        NavItemsNotEditable, DiscountTermsNotEditable, DiscountGroupsNotEditable, RecipesNotEditable);
+      IF NavItemsNotEditable THEN
+        EXIT;
+
+      IF (NOT SymbrioPurchaseHeader.GET(SymbrioPurchaseLine.OrderHeadID,
+          SymbrioPurchaseLine."DateTime Received", SymbrioPurchaseLine."EntryNo Head in BatchRead",
+          SymbrioPurchaseLine."Date Received",SymbrioPurchaseLine."Time Received")) AND
+          (NOT ETIMRelationIsSet)
+        THEN EXIT;
+
+      SymbrioSetup.GET;
+
+      IF ETIMRelationIsSet THEN BEGIN
+        CLEAR(lvTradeItem);
+        lvTradeItem.SETRANGE("Item Code" , SymbrioPurchaseLine.ArticleNo);
+        lvTradeItem.SETRANGE(Vendor, gETIMVendorLocalMgtCode);
+        IF NOT lvTradeItem.GET(gETIMVendorLocalMgtCode,SymbrioPurchaseLine.ArticleNo) THEN
+          lvTradeItem.INIT;
+      END ELSE BEGIN
+        ETIMVendorLocalMgt.SETRANGE("Vendor (Purchase)", SymbrioPurchaseHeader.SupplierIdentification);
+        IF NOT ETIMVendorLocalMgt.FINDFIRST THEN
+          ETIMVendorLocalMgt.SETRANGE("Vendor (Purchase)", SymbrioSetup."Vendor Warehouse Pricelist");
+        IF ETIMVendorLocalMgt.FINDFIRST THEN BEGIN
+          CLEAR(lvTradeItem);
+          lvTradeItem.SETRANGE("Item Code" , SymbrioPurchaseLine.ArticleNo);
+          lvTradeItem.SETRANGE(Vendor, ETIMVendorLocalMgt.Code);
+          IF NOT lvTradeItem.GET(ETIMVendorLocalMgt.Code,SymbrioPurchaseLine.ArticleNo) THEN
+            lvTradeItem.INIT;
+        END;
+      END;
+
+      // IF NOT SESetup.GET(SESetup."Line type"::Setup,'SYMBRIO','DEF.ITM') THEN  //DEFault ITeM
+      //  EXIT;
+      // IF (NOT SESetup."Value (bool)") AND (SESetup."Value (txt)"='') THEN
+      //  EXIT;
+      //
+      // //get def.item
+      // IF SESetup."Value (bool)" THEN
+      //  TemplItem.GetDefaultItem
+      // ELSE
+      //  TemplItem.GET(SESetup."Value (txt)");
+      TemplItem.GetDefaultItem;
+
+      GetNoSerieCopy(TemplItem,NewSeries,NewItem);
+      NewDesc := COPYSTR(SymbrioPurchaseLine.ArticleName,1,MAXSTRLEN(CopiedItem.Description));
+
+      //use logic as/from rep11012302
+      IF NOT lvBasicItemRec.GET(lvTradeItem.Manufacturer, lvTradeItem."Product Code") THEN
+        lvBasicItemRec.INIT;
+      lvType := lvType::TradeItem;
+      lvItemRec.ProcessItemRelation(lvType,NewItem,NewSeries,lvBasicItemRec,lvTradeItem);
+      //g†r h†rt p† def.item, ej styrbart
+      CopiedItem.GET(NewItem);
+      IF CopiedItem.Description<>NewDesc THEN BEGIN
+        CopiedItem.VALIDATE(Description,NewDesc);
+        CopiedItem.MODIFY;
+      END;
+      ItemRelation.GET(NewItem);
+
+      // CopyCu.CopyItem(TemplItem,NewSeries,NewItem,NewDesc,TRUE,FALSE,TRUE);  //returns new item
+      // CopiedItem.GET(TemplItem."No.");
+       //add UoM
+      IF NOT ItemUnitofMeasure.GET(CopiedItem."No.",UnitofMeasure.Code) THEN BEGIN
+        ItemUnitofMeasure.INIT;
+        ItemUnitofMeasure."Item No." := CopiedItem."No.";
+        ItemUnitofMeasure.Code := UnitofMeasure.Code;
+        ItemUnitofMeasure."Qty. per Unit of Measure" := 1;
+        ItemUnitofMeasure.INSERT;
+      END;
+      //
+      // ItemRelation.INIT;
+      // ItemRelation."Navision Item" := CopiedItem."No.";
+      // ItemRelation."Source Type" :=   ItemRelation."Source Type"::"Trade Item";
+      // ItemRelation."GTIN Code" :=     lvTradeItem."GTIN Code (Item)";
+      // ItemRelation.Vendor :=          lvTradeItem.Vendor;
+      // ItemRelation."Trade Item" :=    lvTradeItem."Item Code";
+      // ItemRelation."Cost Object (Trade Item)" := lvTradeItem."Cost Object";
+      // ItemRelation.INSERT(TRUE);
+
+      // PurchaseLine.VALIDATE("Location Code",SymbrioPurchaseLine.ProjectNo);
+      CopiedItem.SETRECFILTER;
+      CopiedItem.SETFILTER("Location Filter",SymbrioPurchaseLine.ProjectNo);
+      CreateStockkeepingUnit.InitializeRequest(0,FALSE,FALSE);
+      CreateStockkeepingUnit.SETTABLEVIEW(CopiedItem);
+      CreateStockkeepingUnit.USEREQUESTPAGE := FALSE;
+      CreateStockkeepingUnit.RUNMODAL;
+
+      RelationFound := TRUE;
+    END;
+
+    LOCAL PROCEDURE GetNoSerieCopy@1100285104(ItemRec@1100285106 : Record 27;VAR NewSeries@1100285109 : Code[20];VAR NewItem@1100285108 : Code[20]);
+    VAR
+      InventSetup@1100285105 : Record 313;
+      SerRec@1100285104 : Record 308;
+      SerLineRec@1100285103 : Record 309;
+      SerRelRec@1100285102 : Record 310;
+      NoSeriesMgt@1100285101 : Codeunit 396;
+      ItemNos@1100285100 : Code[20];
+    BEGIN
+      //code from pag11071827.DetermineNewItem
+      // ItemRec.GET(lvItem);
+      // NewDesc := ItemRec.Description;
+
+      IF ItemRec."No. Series" <> '' THEN BEGIN
+        ItemNos := ItemRec."No. Series";
+      END ELSE BEGIN
+        InventSetup.GET;
+        ItemNos := InventSetup."Item Nos.";
+      END;
+
+      IF NOT SerRec.GET(ItemNos) THEN BEGIN
+        ItemNos := '';
+        NewItem := '';
+      END;
+
+      SerRelRec.SETRANGE(Code, ItemNos);
+      IF SerRelRec.FINDSET THEN BEGIN
+        REPEAT
+          SerLineRec.SETRANGE("Series Code", SerRelRec."Series Code");
+          IF SerLineRec.FINDSET(FALSE, FALSE) THEN BEGIN
+            REPEAT
+              IF (SerLineRec.Open = TRUE) AND
+                 (ItemRec."No." >= SerLineRec."Starting No.") AND
+                 ((ItemRec."No." < SerLineRec."Ending No.") OR (SerLineRec."Ending No." = '')) THEN
+                ItemNos := SerLineRec."Series Code";
+            UNTIL SerLineRec.NEXT = 0;
+          END;
+        UNTIL SerRelRec.NEXT = 0;
+      END;
+
+      NewSeries := ItemNos;
+      IF ItemNos <> '' THEN
+        NewItem := NoSeriesMgt.GetNextNo(ItemNos,0D,TRUE);
+    END;
+
+    [EventSubscriber(Page,11072005,OnPressTransfer,"",Skip,Skip)]
+    LOCAL PROCEDURE OnPressTransferJobLedger@1100583000(JobLedgerEntry@1100583000 : Record 11072005);
+    VAR
+      ItemJournal@1100583004 : Page 40;
+      ItemJournalLine@1100583003 : Record 83;
+      xItemJournalLine@1100285100 : Record 83;
+      LineNo@1100583002 : Integer;
+      StockkeepingUnit@1100583001 : Record 5700;
+      SESetup@1100583005 : Record 11128004;
+      BatchName@1100583006 : Code[10];
+      TemplateName@1100583007 : Code[10];
+      ItemRelation@1100583008 : Record 11012319;
+      SymbrioPurchaseLineBuffer@1100583009 : TEMPORARY Record 11127979;
+      RelationFound@1100583010 : Boolean;
+      Location@1100583011 : Record 14;
+    BEGIN
+      //>> 191025 ORANGO.SB RFC-1234 Svalbard
+      IF NOT SESetup.GET(SESetup."Line type"::Setup,'SYMBRIO','TRANSFER TEMPLATE') THEN
+        EXIT;
+      TemplateName := SESetup."Value (txt)";
+
+      IF NOT SESetup.GET(SESetup."Line type"::Setup,'SYMBRIO','TRANSFER BATCH') THEN
+        EXIT;
+      BatchName := SESetup."Value (txt)";
+
+      IF (TemplateName = '') OR (BatchName = '') THEN
+        EXIT;
+
+      SymbrioPurchaseLineBuffer.INIT;
+      SymbrioPurchaseLineBuffer.ArticleNo := JobLedgerEntry."Trade Item";
+      SymbrioPurchaseLineBuffer.BranchNo := JobLedgerEntry."Trade Item";
+      SymbrioPurchaseLineBuffer.QuantityMeasurement := JobLedgerEntry."Unit of Measure Code";
+      SymbrioPurchaseLineBuffer.ArticleName := JobLedgerEntry.Description;
+
+      Location.SETRANGE("Global Dimension 1 Code",JobLedgerEntry."Global Dimension 1 Code");
+      IF Location.FINDFIRST THEN
+        SymbrioPurchaseLineBuffer.ProjectNo := Location.Code;
+
+      //Hitta eller skapa artikeln h„r
+      //>>191031
+      gETIMVendorLocalMgtCode := JobLedgerEntry."Vendor (Trade Item)";
+      RelationFound := gETIMVendorLocalMgtCode <>'';
+      //<<191031
+
+      IF JobLedgerEntry."Trade Item" = '' THEN
+        EXIT;
+      // IF JobLedgerEntry."Trade Item" <> '' THEN
+      OnBeforeFindItemRelationOrderTradeItem(ItemRelation,SymbrioPurchaseLineBuffer,RelationFound);
+
+      IF NOT RelationFound THEN
+        EXIT;
+
+      //Skapa journalrad f”r den hittade/skapade artikeln
+      xItemJournalLine.SETRANGE("Journal Template Name", TemplateName);
+      xItemJournalLine.SETRANGE("Journal Batch Name",BatchName);
+      IF NOT xItemJournalLine.FINDLAST THEN BEGIN
+        xItemJournalLine.INIT;
+        xItemJournalLine."Journal Template Name" := TemplateName;
+        xItemJournalLine."Journal Batch Name" := BatchName;
+        xItemJournalLine."Line No." := 0;
+        xItemJournalLine.INSERT(FALSE);
+      END;
+      LineNo := xItemJournalLine."Line No." + 10000;
+
+      ItemJournalLine.INIT;
+      ItemJournalLine.VALIDATE("Journal Template Name",TemplateName);
+      ItemJournalLine.VALIDATE("Journal Batch Name",BatchName);
+      ItemJournalLine.SetUpNewLine(xItemJournalLine);
+      ItemJournalLine.VALIDATE("Line No.", LineNo);
+      ItemJournalLine.INSERT(TRUE);
+      IF (xItemJournalLine."Line No."=0) AND (xItemJournalLine.Quantity=0) THEN
+        xItemJournalLine.DELETE(FALSE);
+      ItemJournalLine.VALIDATE("Entry Type", ItemJournalLine."Entry Type"::Purchase);
+
+      ItemJournalLine.VALIDATE("Item No.",ItemRelation."Navision Item"); //GetItemNoFromGTINCode(JobLedgerEntry."Trade Item"));
+
+      ItemJournalLine.VALIDATE("Job No.", JobLedgerEntry."Job No.");
+      ItemJournalLine.VALIDATE(Quantity,0);
+      ItemJournalLine.VALIDATE("Posting Date",WORKDATE);
+
+      StockkeepingUnit.SETRANGE("Item No.",ItemJournalLine."Item No.");
+      IF StockkeepingUnit.FINDFIRST THEN
+        ItemJournalLine.VALIDATE("Location Code", StockkeepingUnit."Location Code");
+      ItemJournalLine.VALIDATE("Unit Amount",JobLedgerEntry."Unit Cost (LCY)");
+
+      ItemJournalLine.MODIFY(TRUE);
+
+      ItemJournal.SetSelectionTemplateAndBatch(TemplateName,BatchName);
+      ItemJournal.RUN;
+      //<<
+    END;
+
+    [EventSubscriber(Table,302,T302_OnAfterInsertCustNo,"",Skip,Skip)]
+    LOCAL PROCEDURE T302_OnAfterInsertCustNo@1000000000(VAR Rec@1000000000 : Record 302;Cust@1000000002 : Record 18);
+    VAR
+      SeSetup@1000000001 : Record 11128004;
+    BEGIN
+      //>>RFC-1248
+      //Cost Center from SeSetup if FINCHARGE, COSTCENTER
+      SeSetup.SETRANGE("Line type",SeSetup."Line type"::Mapping);
+      SeSetup.SETRANGE(Code,'FINCHARGE');
+      SeSetup.SETRANGE("Code 2",'COSTCENTER');
+      IF SeSetup.FIND('-') THEN BEGIN
+        IF SeSetup."Value (txt)" <> '' THEN
+          Rec.VALIDATE("Shortcut Dimension 1 Code",SeSetup."Value (txt)");
+      END ELSE BEGIN
+        Rec.VALIDATE("Shortcut Dimension 1 Code",Cust."Global Dimension 1 Code");
+      END;
+
+      //<<RFC-1248
+    END;
+
+    [EventSubscriber(Table,303,T303_OnAfterValidateDocNo,"",Skip,Skip)]
+    LOCAL PROCEDURE T303_OnAfterValidateDocNo@1000000002(VAR FinChrgMemoHeader@1000000000 : Record 302;CustLedgerEntry@1000000001 : Record 21);
+    VAR
+      SeSetup@1000000002 : Record 11128004;
+    BEGIN
+      //>>RFC-1248
+      //Cost Center from SeSetup if FINCHARGE, COSTCENTER
+      SeSetup.SETRANGE("Line type",SeSetup."Line type"::Mapping);
+      SeSetup.SETRANGE(Code,'FINCHARGE');
+      SeSetup.SETRANGE("Code 2",'COSTCENTER');
+      IF SeSetup.FIND('-') THEN BEGIN
+        IF SeSetup."Value (txt)" = '' THEN BEGIN
+          FinChrgMemoHeader.VALIDATE("Shortcut Dimension 1 Code",CustLedgerEntry."Global Dimension 1 Code");
+          FinChrgMemoHeader.MODIFY;
+        END;
+      END;
+      //<<RFC-1248
+    END;
+
+    [EventSubscriber(Codeunit,394,CU394_OnMakeLines2,"",Skip,Skip)]
+    LOCAL PROCEDURE CU394_OnMakeLines2@1000000001(VAR FinChrgMemoHeader@1000000000 : Record 302;CustLedgerEntry@1000000001 : Record 21);
+    VAR
+      SeSetup@1000000002 : Record 11128004;
+    BEGIN
+      //>>RFC-1248
+      //Cost Center from SeSetup if FINCHARGE, COSTCENTER
+      SeSetup.SETRANGE("Line type",SeSetup."Line type"::Mapping);
+      SeSetup.SETRANGE(Code,'FINCHARGE');
+      SeSetup.SETRANGE("Code 2",'COSTCENTER');
+      IF SeSetup.FIND('-') THEN BEGIN
+        IF SeSetup."Value (txt)" = '' THEN
+          FinChrgMemoHeader.VALIDATE("Shortcut Dimension 1 Code",CustLedgerEntry."Global Dimension 1 Code");
+      END;
+      //<<RFC-1248
+    END;
+
+    [EventSubscriber(Table,11012039,OnAfterValidateEvent,Monday,Skip,Skip)]
+    LOCAL PROCEDURE T11012039_OnAfterValidateMonday@1100285102(VAR Rec@1100285100 : Record 11012039;VAR xRec@1100285101 : Record 11012039;CurrFieldNo@1100285102 : Integer);
+    VAR
+      _NormHour@1100285103 : Decimal;
+    BEGIN
+      //RFC1199
+      IF NOT GetCheckWageCompFullDay(Rec) THEN
+        EXIT;
+
+      _NormHour := Rec.GetNormHourMon; IF Rec.Monday = _NormHour  THEN Rec.Monday := 1;
+
+      IF Rec.Monday <> 1 THEN
+        Rec.Monday := 0
+      ELSE
+        Rec.Monday := _NormHour * Rec.Monday;
+      Rec.TotalHours;
+    END;
+
+    [EventSubscriber(Table,11012039,OnAfterValidateEvent,Tuesday,Skip,Skip)]
+    LOCAL PROCEDURE T11012039_OnAfterValidateTuesday@1100285114(VAR Rec@1100285100 : Record 11012039;VAR xRec@1100285101 : Record 11012039;CurrFieldNo@1100285102 : Integer);
+    VAR
+      _NormHour@1100285103 : Decimal;
+    BEGIN
+      //RFC1199
+      IF NOT GetCheckWageCompFullDay(Rec) THEN
+        EXIT;
+
+      _NormHour := Rec.GetNormHourTue; IF Rec.Tuesday = _NormHour THEN Rec.Tuesday := 1;
+
+      IF Rec.Tuesday <> 1 THEN
+        Rec.Tuesday := 0
+      ELSE
+        Rec.Tuesday := _NormHour * Rec.Tuesday;
+      Rec.TotalHours;
+    END;
+
+    [EventSubscriber(Table,11012039,OnAfterValidateEvent,Wednesday,Skip,Skip)]
+    LOCAL PROCEDURE T11012039_OnAfterValidateWednesday@1100285115(VAR Rec@1100285100 : Record 11012039;VAR xRec@1100285101 : Record 11012039;CurrFieldNo@1100285102 : Integer);
+    VAR
+      _NormHour@1100285103 : Decimal;
+    BEGIN
+      //RFC1199
+      IF NOT GetCheckWageCompFullDay(Rec) THEN
+        EXIT;
+
+      _NormHour := Rec.GetNormHourWed; IF Rec.Wednesday = _NormHour THEN Rec.Wednesday := 1;
+
+      IF Rec.Wednesday <> 1 THEN
+        Rec.Wednesday := 0
+      ELSE
+        Rec.Wednesday := Rec.GetNormHourWed * Rec.Wednesday;
+      Rec.TotalHours;
+    END;
+
+    [EventSubscriber(Table,11012039,OnAfterValidateEvent,Thursday,Skip,Skip)]
+    LOCAL PROCEDURE T11012039_OnAfterValidateThursday@1100285116(VAR Rec@1100285100 : Record 11012039;VAR xRec@1100285101 : Record 11012039;CurrFieldNo@1100285102 : Integer);
+    VAR
+      _NormHour@1100285103 : Decimal;
+    BEGIN
+      //RFC1199
+      IF NOT GetCheckWageCompFullDay(Rec) THEN
+        EXIT;
+
+      _NormHour := Rec.GetNormHourThu; IF Rec.Thursday = _NormHour THEN Rec.Thursday := 1;
+
+      IF Rec.Thursday <> 1 THEN
+        Rec.Thursday := 0
+      ELSE
+        Rec.Thursday := Rec.GetNormHourThu * Rec.Thursday;
+      Rec.TotalHours;
+    END;
+
+    [EventSubscriber(Table,11012039,OnAfterValidateEvent,Friday,Skip,Skip)]
+    LOCAL PROCEDURE T11012039_OnAfterValidateFriday@1100285117(VAR Rec@1100285100 : Record 11012039;VAR xRec@1100285101 : Record 11012039;CurrFieldNo@1100285102 : Integer);
+    VAR
+      _NormHour@1100285103 : Decimal;
+    BEGIN
+      //RFC1199
+      IF NOT GetCheckWageCompFullDay(Rec) THEN
+        EXIT;
+
+      _NormHour := Rec.GetNormHourFri; IF Rec.Friday = _NormHour THEN Rec.Friday := 1;
+
+      IF Rec.Friday <> 1 THEN
+        Rec.Friday := 0
+      ELSE
+        Rec.Friday := Rec.GetNormHourFri * Rec.Friday;
+      Rec.TotalHours;
+    END;
+
+    [EventSubscriber(Table,11012039,OnAfterValidateEvent,Saturday,Skip,Skip)]
+    LOCAL PROCEDURE T11012039_OnAfterValidateSaturday@1100285118(VAR Rec@1100285100 : Record 11012039;VAR xRec@1100285101 : Record 11012039;CurrFieldNo@1100285102 : Integer);
+    VAR
+      _NormHour@1100285103 : Decimal;
+    BEGIN
+      //RFC1199
+      IF NOT GetCheckWageCompFullDay(Rec) THEN
+        EXIT;
+
+      _NormHour := Rec.GetNormHourSat; IF Rec.Saturday = _NormHour THEN Rec.Saturday := 1;
+
+      IF Rec.Saturday <> 1 THEN
+        Rec.Saturday := 0
+      ELSE
+        Rec.Saturday := Rec.GetNormHourSat * Rec.Saturday;
+      Rec.TotalHours;
+    END;
+
+    [EventSubscriber(Table,11012039,OnAfterValidateEvent,Sunday,Skip,Skip)]
+    LOCAL PROCEDURE T11012039_OnAfterValidateSunday@1100285119(VAR Rec@1100285100 : Record 11012039;VAR xRec@1100285101 : Record 11012039;CurrFieldNo@1100285102 : Integer);
+    VAR
+      _NormHour@1100285103 : Decimal;
+    BEGIN
+      //RFC1199
+      IF NOT GetCheckWageCompFullDay(Rec) THEN
+        EXIT;
+
+      _NormHour := Rec.GetNormHourSun; IF Rec.Sunday = _NormHour THEN Rec.Sunday := 1;
+
+      IF Rec.Sunday <> 1 THEN
+        Rec.Sunday := 0
+      ELSE
+        Rec.Sunday := Rec.GetNormHourSun * Rec.Sunday;
+      Rec.TotalHours;
+    END;
+
+    LOCAL PROCEDURE GetCheckWageCompFullDay@1100285103(VAR Rec@1100285101 : Record 11012039) : Boolean;
+    VAR
+      WageComponent@1100285100 : Record 11012014;
+    BEGIN
+      //RFC1199
+      IF Rec.ISTEMPORARY THEN
+        EXIT(FALSE);
+
+      IF NOT WageComponent.GET(Rec."Wage Component") THEN
+        EXIT(FALSE);
+      IF WageComponent."Day Component to Generate" = '' THEN
+        EXIT(FALSE);
+      IF NOT WageComponent.GET(WageComponent."Day Component to Generate") THEN
+        EXIT(FALSE);
+
+      IF (WageComponent."Component Type" <> WageComponent."Component Type"::Days) OR
+         (WageComponent."Type of Day"<>WageComponent."Type of Day"::"Vacation/Day Off")  THEN
+        EXIT(FALSE);
+
+      EXIT(TRUE);
+    END;
+
+    [EventSubscriber(Table,11072003,OnAfterInsertEvent,"",Skip,Skip)]
+    LOCAL PROCEDURE OnAfterInsertJob@1100285105(VAR Rec@1100285100 : Record 11072003;RunTrigger@1100285101 : Boolean);
+    BEGIN
+      //200123
+      IF Rec."Single/Main/Sub Project" <> Rec."Single/Main/Sub Project"::"Sub Project" THEN BEGIN
+        Rec."Auto. Surcharge on Settl.Sheet" := TRUE;
+        Rec.MODIFY(FALSE);
+      END;
+    END;
+
+    BEGIN
+    {
+      190213 ORANGO.DL RFC1127 use publisher for "Received amount", Bock i ej matchning i inbetalningsjournal
+      190321 ORANGO.DL #22969 filelenghts to InExchange attachments, added OnAfterErrorifDocLinkNotOK
+      190904 ORANGO.DL RFC1229 created OnAfterValidatePostCode-publisher
+      190926 ORANGO.DL RFC1234 create items and relations automaticly, must have trade-item in advance
+      191025 ORANGO.SB RFC1234 Svalbard
+      191030 ORANGO.DL RFC1234 remake OnBeforeFindItemRelationOrderTradeItem
+      200114 ORANGO.PR RFC-1248 - Created T302_OnAfterInsertCustNo-publisher,T303_OnAfterInsertCustNo,CU394_OnMakeLines2
+      200121 ORANGO.DL RFC1199 report only vacation as full day
+      200123 ORANGO.FH RFC1149 Sett "Auto. Surcharge on Settl.Sheet" to TRUE on new project
+    }
+    END.
+  }
+}
+

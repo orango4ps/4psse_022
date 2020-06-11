@@ -1,0 +1,237 @@
+OBJECT Report 11012795 Send SO Appointm. Confirm.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    CaptionML=ENU=Send Service Order Appointment Confirmation;
+    ProcessingOnly=Yes;
+    OnPreReport=BEGIN
+                  IF FORMAT(ExecuteWithin) = '' THEN
+                    ERROR(Text000);
+                  IF NOT GUIALLOWED THEN
+                    IF SendBy <> SendBy::"Only E-mail" THEN
+                      ERROR(Text002);
+                END;
+
+    UsageCategory=Tasks;
+  }
+  DATASET
+  {
+    { 1100528600;;DataItem;                  ;
+               DataItemTable=Table11012823;
+               DataItemTableView=SORTING(Starting Date,Starting Time)
+                                 WHERE(Status=CONST(Open));
+               OnPreDataItem=BEGIN
+                               FILTERGROUP(7);
+                               SETFILTER("Starting Date", '>%1&<=%2', TODAY, CALCDATE(ExecuteWithin, TODAY));
+                               FILTERGROUP(0);
+                               SETRANGE("FLS VisiTour ID", 0);
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  ServiceOrderExtension@1100528600 : Record 11071727;
+                                  SCCustSourceTypeSetup@1100528601 : Record 11071800;
+                                  ServiceWorkOrderStatusMail@1100528400 : Codeunit 11012816;
+                                BEGIN
+                                  ServiceOrderExtension.GetServOrderExtension("No.");
+                                  IF ResendAll AND (ServiceOrderExtension."Date Appointm. Confirm. Sent" <> 0D) AND
+                                    NOT ServiceOrderExtension."Resend Appointm. Confirmation"
+                                  THEN BEGIN
+                                    ServiceOrderExtension."Resend Appointm. Confirmation" := TRUE;
+                                    ServiceOrderExtension.UpdateServOrderExtension("No.");
+                                  END;
+                                  IF ((ServiceOrderExtension."Date Appointm. Confirm. Sent" = 0D) AND NOT OnlyMarkedAsResend) OR
+                                     ServiceOrderExtension."Resend Appointm. Confirmation"
+                                  THEN BEGIN
+                                    SCCustSourceTypeSetup.GetAppointmentInfoByServiceOrder("Service Order", SCCustSourceTypeSetup);
+                                    CASE SCCustSourceTypeSetup."Appointments by" OF
+                                      SCCustSourceTypeSetup."Appointments by"::Letter:
+                                        IF SendBy IN [SendBy::"Only Letter", SendBy::Both] THEN
+                                          MarkServiceOrderForSendingByLetter(
+                                            OverruleAppointmentLetterCode, "Service Order", ServiceOrderByLetter, ServiceOrderExtension);
+                                      SCCustSourceTypeSetup."Appointments by"::"E-Mail":
+                                        IF SendBy IN [SendBy::"Only E-mail", SendBy::Both] THEN
+                                          IF ServiceWorkOrderStatusMail.GetEmailMaintAppointment("Service Order") <> '' THEN BEGIN
+                                            ServiceOrderByMail := "Service Order";
+                                            ServiceOrderByMail.MARK(TRUE);
+                                          END ELSE
+                                            IF SendByLetterIfEmailIsEmpty THEN
+                                              MarkServiceOrderForSendingByLetter(
+                                                OverruleAppointmentLetterCode, "Service Order", ServiceOrderByLetter, ServiceOrderExtension);
+                                    END;
+                                  END;
+                                END;
+
+               OnPostDataItem=VAR
+                                ServiceOrderExtension@1100525000 : Record 11071727;
+                                DocumentPrint@1100528600 : Codeunit 229;
+                              BEGIN
+                                ServiceOrderByLetter.MARKEDONLY(TRUE);
+                                IF NOT ServiceOrderByLetter.ISEMPTY THEN BEGIN
+                                  DocumentPrint.SaveSOAppointmentLettersAsExternalDocuments(
+                                    ServiceOrderByLetter, OnlyMarkedAsResend, ExecuteWithin);
+                                  COMMIT;
+                                  DocumentPrint.PrintSOAppointmentLetter(ServiceOrderByLetter, ExecuteWithin);
+                                END;
+                                ServiceOrderByMail.MARKEDONLY(TRUE);
+                                IF NOT ServiceOrderByMail.ISEMPTY THEN BEGIN
+                                  COMMIT;
+                                  REPORT.RUNMODAL(REPORT::"E-Mail Appointment Confirm.", FALSE, TRUE, ServiceOrderByMail);
+                                END;
+
+                                IF ServiceOrderByLetter.FINDSET THEN
+                                  REPEAT
+                                    ServiceOrderExtension.GetServOrderExtension(ServiceOrderByLetter."No.");
+                                    IF ServiceOrderExtension."Resend Appointm. Confirmation" THEN
+                                      ServiceOrderExtension."Resend Appointm. Confirmation" := FALSE;
+                                    ServiceOrderExtension.UpdateServOrderExtension(ServiceOrderByLetter."No.");
+                                  UNTIL ServiceOrderByLetter.NEXT = 0;
+
+                                IF ServiceOrderByMail.FINDSET THEN
+                                  REPEAT
+                                    ServiceOrderExtension.GetServOrderExtension(ServiceOrderByMail."No.");
+                                    IF ServiceOrderExtension."Resend Appointm. Confirmation" THEN
+                                      ServiceOrderExtension."Resend Appointm. Confirmation" := FALSE;
+                                    ServiceOrderExtension.UpdateServOrderExtension(ServiceOrderByMail."No.");
+                                  UNTIL ServiceOrderByMail.NEXT = 0;
+
+                                IF GUIALLOWED THEN
+                                  MESSAGE(Text001, ServiceOrderByLetter.COUNT, ServiceOrderByMail.COUNT);
+                              END;
+
+               ReqFilterFields=No.,Customer No.,Bill-to Customer No.,Service Contract No.,Service Location No. }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      OnInit=VAR
+               ServiceSetup@1100528600 : Record 11012800;
+             BEGIN
+               ServiceSetup.GET;
+               ExecuteWithin := ServiceSetup."Appointment Confirm. Interval";
+             END;
+
+      OnOpenPage=BEGIN
+                   UpdateEditable;
+                 END;
+
+    }
+    CONTROLS
+    {
+      { 1100528600;;Container;
+                  ContainerType=ContentArea }
+
+      { 1100528601;1;Group  ;
+                  CaptionML=[ENU=Options;
+                             NOR=Alternativer;
+                             SVE=Alternativ];
+                  GroupType=Group }
+
+      { 1100528606;2;Field  ;
+                  CaptionML=ENU=Send By;
+                  OptionCaptionML=ENU=Both,Only E-mail,Only Letter;
+                  SourceExpr=SendBy;
+                  OnValidate=BEGIN
+                               IF (SendBy = SendBy::"Only Letter") THEN
+                                 SendByLetterIfEmailIsEmpty := FALSE;
+                               IF (SendBy = SendBy::"Only E-mail") AND NOT SendByLetterIfEmailIsEmpty THEN
+                                 OverruleAppointmentLetterCode := '';
+                               UpdateEditable;
+                             END;
+                              }
+
+      { 1100528400;2;Field  ;
+                  CaptionML=ENU=Send by Letter if E-mail is empty;
+                  SourceExpr=SendByLetterIfEmailIsEmpty;
+                  Editable=SendByLetterIfEmailIsEmptyEditable;
+                  OnValidate=BEGIN
+                               IF (SendBy = SendBy::"Only E-mail") AND NOT SendByLetterIfEmailIsEmpty THEN
+                                 OverruleAppointmentLetterCode := '';
+                               UpdateEditable;
+                             END;
+                              }
+
+      { 1100528602;2;Field  ;
+                  CaptionML=ENU=Execute within;
+                  SourceExpr=ExecuteWithin }
+
+      { 1100528603;2;Field  ;
+                  CaptionML=ENU=Overrule Appointment Letter;
+                  SourceExpr=OverruleAppointmentLetterCode;
+                  TableRelation="SO Appointment Letter";
+                  Editable=OverruleAppointmentLetterCodeEditable }
+
+      { 1100528605;2;Field  ;
+                  CaptionML=ENU=(Re)Send All;
+                  SourceExpr=ResendAll;
+                  OnValidate=BEGIN
+                               IF ResendAll THEN
+                                 OnlyMarkedAsResend := FALSE;
+                             END;
+                              }
+
+      { 1100528604;2;Field  ;
+                  CaptionML=ENU=Only Marked as Resend;
+                  SourceExpr=OnlyMarkedAsResend;
+                  OnValidate=BEGIN
+                               IF OnlyMarkedAsResend THEN
+                                 ResendAll := FALSE;
+                             END;
+                              }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      ServiceOrderByLetter@1100528602 : Record 11012823;
+      ServiceOrderByMail@1100528603 : Record 11012823;
+      Text000@1100528601 : TextConst 'ENU=Execute Within not given';
+      Text001@1100528604 : TextConst 'ENU=%1 Appointments sent by Letter, %2 appointments sent by E-Mail';
+      OnlyMarkedAsResend@1100528605 : Boolean INDATASET;
+      ResendAll@1100528607 : Boolean INDATASET;
+      OverruleAppointmentLetterCode@1100528606 : Code[10];
+      SendBy@1100528608 : 'Both,Only E-mail,Only Letter';
+      ExecuteWithin@1100528609 : DateFormula;
+      SendByLetterIfEmailIsEmpty@1100528400 : Boolean;
+      OverruleAppointmentLetterCodeEditable@1100528600 : Boolean INDATASET;
+      Text002@1100528610 : TextConst 'ENU=Execute by NAS only for E-mail, use report 11012736 for Letters.';
+      SendByLetterIfEmailIsEmptyEditable@1100528401 : Boolean INDATASET;
+
+    LOCAL PROCEDURE MarkServiceOrderForSendingByLetter@1100528400(OverruleAppointmentLetterCode@1100528400 : Code[10];ServiceOrder@1100528403 : Record 11012823;VAR ServiceOrderByLetter@1100528401 : Record 11012823;VAR ServiceOrderExtension@1100528402 : Record 11071727);
+    BEGIN
+      IF OverruleAppointmentLetterCode <> '' THEN BEGIN
+        ServiceOrderExtension."Appointment Letter Code" := OverruleAppointmentLetterCode;
+        ServiceOrderExtension.UpdateServOrderExtension(ServiceOrder."No.");
+      END;
+      IF ServiceOrderExtension."Appointment Letter Code" <> '' THEN BEGIN
+        ServiceOrderByLetter := ServiceOrder;
+        ServiceOrderByLetter.MARK(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateEditable@1100528601();
+    BEGIN
+      SendByLetterIfEmailIsEmptyEditable := SendBy IN [SendBy::"Only E-mail", SendBy::Both];
+      OverruleAppointmentLetterCodeEditable := (SendBy IN [SendBy::"Only Letter", SendBy::Both]) OR
+                                               SendByLetterIfEmailIsEmpty;
+    END;
+
+    BEGIN
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

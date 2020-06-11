@@ -1,0 +1,382 @@
+OBJECT Codeunit 11126705 Debrief Management FSA WS
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text001@1100528000 : TextConst 'DEU=Buchung Empfangsbest„tigungen von Auftrag ''%1'' hat folgende Fehler ''%2'' - ''%3'';ENU=Posting receives of purchase order  ''%1'' has de following error ''%2'' - ''%3'';NLD=Het boeken van de ontvangen van inkooporder ''%1'' geeft de volgende fout ''%2'' - ''%3''';
+
+    [External]
+    PROCEDURE AreServiceOrderObjectsProcessed@1100528000(ServiceOrderNo@1100528002 : Code[20]) : Boolean;
+    VAR
+      WorkOrder@1100528001 : Record 11229279;
+      DebriefServiceOrderObject@1100528000 : Record 11125652;
+      DebriefLinesReceived@1100528004 : Boolean;
+    BEGIN
+      DebriefLinesReceived := FALSE;
+      WorkOrder.SETRANGE("Source Company", COMPANYNAME);
+      WorkOrder.SETRANGE("Source Type", WorkOrder."Source Type"::ServiceOrder);
+      WorkOrder.SETRANGE("Source No.", ServiceOrderNo);
+      IF WorkOrder.FINDSET THEN
+        REPEAT
+          DebriefServiceOrderObject.RESET;
+          DebriefServiceOrderObject.CHANGECOMPANY(WorkOrder."Source Company");
+          DebriefServiceOrderObject.SETRANGE("Work Order No.", WorkOrder."No.");
+          DebriefServiceOrderObject.SETRANGE("Resource No. (Employee)", WorkOrder."Resource No.");
+          IF NOT DebriefServiceOrderObject.ISEMPTY THEN
+            DebriefLinesReceived := TRUE
+        UNTIL (WorkOrder.NEXT = 0) OR DebriefLinesReceived;
+
+      IF NOT DebriefLinesReceived THEN
+        EXIT(FALSE);
+
+      IF WorkOrder.FINDSET THEN
+        REPEAT
+          DebriefServiceOrderObject.RESET;
+          DebriefServiceOrderObject.CHANGECOMPANY(WorkOrder."Source Company");
+          DebriefServiceOrderObject.SETRANGE("Work Order No.", WorkOrder."No.");
+          DebriefServiceOrderObject.SETRANGE("Resource No. (Employee)", WorkOrder."Resource No.");
+          DebriefServiceOrderObject.SETFILTER(Status, '<>%1', DebriefServiceOrderObject.Status::Processed);
+          IF NOT DebriefServiceOrderObject.ISEMPTY THEN
+            EXIT(FALSE);
+
+          DebriefServiceOrderObject.SETRANGE(Status);
+          IF DebriefServiceOrderObject.FINDLAST THEN
+            IF NOT DebriefServiceOrderObject."Last Object of Message" THEN
+              EXIT(FALSE);
+        UNTIL WorkOrder.NEXT = 0;
+
+      EXIT(TRUE);
+    END;
+
+    [External]
+    PROCEDURE IsPurchaseOrderHeaderProcessed@1100528003(DecentralCreatedGuid@1100528000 : Code[36]) : Boolean;
+    VAR
+      PurchaseHeader@1100528001 : Record 38;
+      GUIDEntityLink@1100528004 : Record 11126703;
+    BEGIN
+      EXIT(GUIDEntityLink.GET(DecentralCreatedGuid))
+    END;
+
+    [External]
+    PROCEDURE HasPurchaseOrderHeaderErrors@1100528008(DecentralCreateGuid@1100528001 : Code[36]) : Boolean;
+    VAR
+      DebriefPurchaseOrder@1100528000 : Record 11126701;
+    BEGIN
+      DebriefPurchaseOrder.SETRANGE("Decentral Created Guid",DecentralCreateGuid);
+      DebriefPurchaseOrder.SETRANGE(Status, DebriefPurchaseOrder.Status::Error);
+      IF DebriefPurchaseOrder.FINDFIRST THEN
+        EXIT(TRUE);
+      EXIT(FALSE);
+    END;
+
+    [External]
+    PROCEDURE GetPurchaseOrderNo@1100528002(DecentralCreatedGuid@1100528001 : Code[36]) : Code[20];
+    VAR
+      GUIDEntityLink@1100528000 : Record 11126703;
+    BEGIN
+      IF GUIDEntityLink.GET(DecentralCreatedGuid) THEN
+        EXIT(GUIDEntityLink."Entity No.");
+
+      EXIT('');
+    END;
+
+    [External]
+    PROCEDURE ArePurchaseOrderLinesProcessed@1100528007(PurchaseHeaderNo@1100528000 : Code[20]) : Boolean;
+    VAR
+      DebriefPurchaseOrderLine@1100528001 : Record 11126702;
+    BEGIN
+      DebriefPurchaseOrderLine.SETRANGE("Purchase Order No.", PurchaseHeaderNo);
+      DebriefPurchaseOrderLine.SETRANGE(Status, DebriefPurchaseOrderLine.Status::Received);
+      IF DebriefPurchaseOrderLine.FINDFIRST THEN
+        EXIT(FALSE);
+      EXIT(TRUE);
+    END;
+
+    [External]
+    PROCEDURE HasPurchaseOrderLinesErrors@1100528006(PurchaseHeaderNo@1100528001 : Code[20]) : Boolean;
+    VAR
+      DebriefPurchaseOrderLine@1100528000 : Record 11126702;
+    BEGIN
+      DebriefPurchaseOrderLine.SETRANGE("Purchase Order No.", PurchaseHeaderNo);
+      DebriefPurchaseOrderLine.SETRANGE(Status, DebriefPurchaseOrderLine.Status::Error);
+      IF DebriefPurchaseOrderLine.FINDFIRST THEN
+        EXIT(TRUE);
+      EXIT(FALSE);
+    END;
+
+    [External]
+    PROCEDURE PostPurchaseHeaderReceives@1100528001(PurchaseOrderNo@1100528000 : Code[20]);
+    VAR
+      PurchaseHeader@1100528001 : Record 38;
+      ErrorRec@1100528002 : Record 11012051;
+    BEGIN
+      CLEARLASTERROR;
+      PurchaseHeader.GET(PurchaseHeader."Document Type"::Order, PurchaseOrderNo);
+      PurchaseHeader.Receive := TRUE;
+      IF NOT CanPostPurchaseOrder(PurchaseHeader) THEN BEGIN
+        ErrorRec.InsertError(ErrorRec."Source Type"::Mobile,STRSUBSTNO(Text001,PurchaseOrderNo,GETLASTERRORCODE,GETLASTERRORTEXT));
+        EXIT;
+      END;
+
+      IF NOT CODEUNIT.RUN(CODEUNIT::"Purch.-Post",PurchaseHeader) THEN BEGIN
+         ErrorRec.InsertError(ErrorRec."Source Type"::Mobile,STRSUBSTNO(Text001,PurchaseOrderNo,GETLASTERRORCODE,GETLASTERRORTEXT));
+      END;
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE CanPostPurchaseOrder@1100528005(VAR PurchaseHeader@1100528000 : Record 38);
+    BEGIN
+      PurchaseHeader.IsApprovedForPosting;
+    END;
+
+    [External]
+    PROCEDURE DoesDecentralWorkOrderExistInLogbook@1100526003(DecentralWorkOrderNo@1100528001 : Code[50]) : Boolean;
+    VAR
+      DebriefDecentralWorkOrder@1100526001 : Record 11012686;
+    BEGIN
+      DebriefDecentralWorkOrder.SETRANGE("Mobile Work Order No.", DecentralWorkOrderNo);
+      EXIT(NOT DebriefDecentralWorkOrder.ISEMPTY);
+    END;
+
+    [External]
+    PROCEDURE GetWorkOrderNoByDecentraWorklOrderNo@1100528004(DecentralWorkOrderNo@1100528000 : Code[50]) : Code[20];
+    VAR
+      MobileDecentralWorkOrder@1100528001 : Record 11125649;
+    BEGIN
+      MobileDecentralWorkOrder.SETRANGE("Mobile Work Order No.", DecentralWorkOrderNo);
+
+      IF MobileDecentralWorkOrder.FINDFIRST THEN
+        EXIT(MobileDecentralWorkOrder."Work Order No.");
+      EXIT('');
+    END;
+
+    [External]
+    PROCEDURE ArePurchaseReceiptLinesProcessed@1100528009(PurchaseOrderNo@1100528000 : Code[20]) : Boolean;
+    VAR
+      DebriefPurchaseReceiptLine@1100528001 : Record 11126704;
+    BEGIN
+      DebriefPurchaseReceiptLine.SETRANGE("Purchase Order No.", PurchaseOrderNo);
+      DebriefPurchaseReceiptLine.SETRANGE(Status, DebriefPurchaseReceiptLine.Status::Received);
+      EXIT(DebriefPurchaseReceiptLine.ISEMPTY);
+    END;
+
+    [External]
+    PROCEDURE HasPurchaseReceiptLinesErrors@1100528010(PurchaseOrderNo@1100528001 : Code[20]) : Boolean;
+    VAR
+      DebriefPurchaseReceiptLine@1100528000 : Record 11126704;
+    BEGIN
+      DebriefPurchaseReceiptLine.SETRANGE("Purchase Order No.", PurchaseOrderNo);
+      DebriefPurchaseReceiptLine.SETRANGE(Status, DebriefPurchaseReceiptLine.Status::Error);
+      EXIT(NOT DebriefPurchaseReceiptLine.ISEMPTY);
+    END;
+
+    [External]
+    PROCEDURE AreInventoryMgtLinesProcessed@1100528012(Guid@1100528000 : Text) : Boolean;
+    VAR
+      DebriefInventoryMgt@1100528001 : Record 11126707;
+    BEGIN
+      DebriefInventoryMgt.SETRANGE(Guid, Guid);
+      DebriefInventoryMgt.SETRANGE(Status, DebriefInventoryMgt.Status::Received);
+      EXIT(DebriefInventoryMgt.ISEMPTY);
+    END;
+
+    [External]
+    PROCEDURE HasInventoryMgtLinesErrors@1100528011(Guid@1100528001 : Text) : Boolean;
+    VAR
+      DebriefInventoryMgt@1100528002 : Record 11126707;
+    BEGIN
+      DebriefInventoryMgt.SETRANGE(Guid, Guid);
+      DebriefInventoryMgt.SETRANGE(Status, DebriefInventoryMgt.Status::Error);
+      EXIT(NOT DebriefInventoryMgt.ISEMPTY);
+    END;
+
+    [External]
+    PROCEDURE AreConditionMeasurementLinesProcessed@1100528014(Guid@1100528000 : Text) : Boolean;
+    VAR
+      DebriefCondMeasLine@1100528001 : Record 11126705;
+    BEGIN
+      DebriefCondMeasLine.SETRANGE("Decentral Created Guid", UPPERCASE(Guid));
+      DebriefCondMeasLine.SETRANGE(Status, DebriefCondMeasLine.Status::Received);
+      EXIT(DebriefCondMeasLine.ISEMPTY);
+    END;
+
+    [External]
+    PROCEDURE IsConditionMeasurementLineCreated@1100527000(Guid@1100528000 : Text;VAR HeaderEntryID@1100527000 : Integer;VAR StructureLineCode@1100527001 : Code[20];VAR LineNo@1100527002 : Integer) : Boolean;
+    VAR
+      GUIDEntityLink@1100527003 : Record 11126703;
+      NEN2767LTMPLine@1100527004 : Record 11128785;
+      RecRef@1100527005 : RecordRef;
+      RID@1100527006 : RecordID;
+    BEGIN
+      IF GUIDEntityLink.GET(UPPERCASE(Guid)) THEN BEGIN
+        RID := GUIDEntityLink.RecordID;
+        RecRef.OPEN(RID.TABLENO);
+        IF RecRef.GET(GUIDEntityLink.RecordID) THEN BEGIN
+          RecRef.SETTABLE(NEN2767LTMPLine);
+          HeaderEntryID := NEN2767LTMPLine."Header Entry ID";
+          StructureLineCode := NEN2767LTMPLine."Structure Line Code";
+          LineNo := NEN2767LTMPLine."Line No.";
+          EXIT(TRUE);
+        END;
+      END;
+    END;
+
+    [External]
+    PROCEDURE HasConditionMeasurementLinesErrors@1100528013(Guid@1100528001 : Text) : Boolean;
+    VAR
+      DebriefCondMeasLine@1100528002 : Record 11126705;
+    BEGIN
+      DebriefCondMeasLine.SETRANGE("Decentral Created Guid", UPPERCASE(Guid));
+      DebriefCondMeasLine.SETRANGE(Status, DebriefCondMeasLine.Status::Error);
+      EXIT(NOT DebriefCondMeasLine.ISEMPTY);
+    END;
+
+    [External]
+    PROCEDURE IsOpenWorkOrderProcessed@1100528016(Guid@1100529900 : Text) : Boolean;
+    VAR
+      DebriefPostGeneral@1100528001 : Record 11126706;
+    BEGIN
+      DebriefPostGeneral.SETRANGE(Guid, Guid);
+      DebriefPostGeneral.SETRANGE(Status, DebriefPostGeneral.Status::Received);
+      EXIT(DebriefPostGeneral.ISEMPTY);
+    END;
+
+    [External]
+    PROCEDURE HasOpenWorkOrderErrors@1100528015(BatchGuid@1100529900 : Text) : Boolean;
+    VAR
+      DebriefPostGeneral@1100528000 : Record 11126706;
+    BEGIN
+      DebriefPostGeneral.SETRANGE(Guid, BatchGuid);
+      DebriefPostGeneral.SETRANGE(Status, DebriefPostGeneral.Status::Error);
+      EXIT(NOT DebriefPostGeneral.ISEMPTY);
+    END;
+
+    [External]
+    PROCEDURE AreSupRecordingLinesProcessed@1100528018(BatchGuid@1100528000 : Text) : Boolean;
+    VAR
+      DebriefWUPProduction@1100528001 : Record 11125650;
+    BEGIN
+      DebriefWUPProduction.SETRANGE("Debrief Batch Guid", BatchGuid);
+      DebriefWUPProduction.SETRANGE(Status, DebriefWUPProduction.Status::Received);
+      EXIT(DebriefWUPProduction.ISEMPTY);
+    END;
+
+    [External]
+    PROCEDURE HasSupRecordingLinesErrors@1100528017(BatchGuid@1100528001 : Text) : Boolean;
+    VAR
+      DebriefWUPProduction@1100528000 : Record 11125650;
+    BEGIN
+      DebriefWUPProduction.SETRANGE("Debrief Batch Guid", BatchGuid);
+      DebriefWUPProduction.SETRANGE(Status, DebriefWUPProduction.Status::Error);
+      EXIT(NOT DebriefWUPProduction.ISEMPTY);
+    END;
+
+    [External]
+    PROCEDURE GetSupRecordingLineLineNo@1100528019(ServiceOrderNo@1100528000 : Code[20];DecentralGuid@1100528001 : Text) : Integer;
+    VAR
+      SUPRecordingLine@1100528002 : Record 11071772;
+    BEGIN
+      SUPRecordingLine.SETRANGE("Service Order No.", ServiceOrderNo);
+      SUPRecordingLine.SETRANGE("Decentral Guid", DecentralGuid);
+      IF SUPRecordingLine.FINDFIRST THEN
+        EXIT(SUPRecordingLine."Line No.");
+    END;
+
+    [External]
+    PROCEDURE AreAllRelatedWorkOrdersCompleted@1100527001(WorkOrderNo@1100527000 : Code[20]) : Boolean;
+    VAR
+      WorkOrder@1100527001 : Record 11229279;
+      Resource@1100527002 : Record 11229278;
+    BEGIN
+      IF NOT WorkOrder.GET(WorkOrderNo) THEN
+        EXIT(FALSE);
+
+      WorkOrder.SETRANGE("Source Company", WorkOrder."Source Company");
+      WorkOrder.SETRANGE("Source Type", WorkOrder."Source Type");
+      WorkOrder.SETRANGE("Source No.", WorkOrder."Source No.");
+      WorkOrder.SETRANGE("Resource Type", WorkOrder."Resource Type"::Employee);
+      WorkOrder.SETFILTER("Resource No.", '<>%1', '');
+      WorkOrder.SETFILTER("No.", '<>%1', WorkOrder."No.");
+      IF NOT WorkOrder.FINDSET THEN
+        EXIT(TRUE);
+
+      REPEAT
+        IF Resource.GET(WorkOrder."Resource No.") THEN
+          IF Resource."Active in FSA" THEN
+            IF NOT WorkOrder."WO Finished (Field Service)" THEN
+              EXIT(FALSE);
+      UNTIL WorkOrder.NEXT = 0;
+
+      EXIT(TRUE);
+    END;
+
+    [External]
+    PROCEDURE GetSynchronisationTypeForResource@1100528021(ResourceNo@1100528000 : Code[20]) : Integer;
+    VAR
+      AppUserSetupGAP@1100529301 : Record 11124976;
+    BEGIN
+      AppUserSetupGAP.SETRANGE("Resource No.", ResourceNo);
+      IF AppUserSetupGAP.FINDFIRST THEN
+        EXIT(GetSynchronisationType(AppUserSetupGAP.Username));
+    END;
+
+    [External]
+    PROCEDURE GetSynchronisationType@1100526000(Username@1100526000 : Code[20]) : Integer;
+    VAR
+      FSAUserSetupGAP@1100526004 : Record 11229875;
+      CommonDataSyncSchedule@1100526003 : Record 11130034;
+      DT@1100526002 : DateTime;
+      Type@1100526001 : 'None,All,Changes';
+    BEGIN
+      Type := Type::None;
+
+      FSAUserSetupGAP.SETRANGE(Username, Username);
+      IF FSAUserSetupGAP.FINDFIRST THEN BEGIN
+        IF CommonDataSyncSchedule.GET(FSAUserSetupGAP."Common Data Sync. Schedule") THEN
+          IF (CommonDataSyncSchedule.Active) AND (CommonDataSyncSchedule."Start Date/Time" <= CURRENTDATETIME) THEN BEGIN
+            DT := CREATEDATETIME(
+                    CALCDATE(CommonDataSyncSchedule.Interval, DT2DATE(FSAUserSetupGAP."Common Data Last Sync. on")),
+                    DT2TIME(FSAUserSetupGAP."Common Data Last Sync. on"));
+            IF (DT <= CommonDataSyncSchedule.GetNextSyncDateTime) THEN BEGIN
+              CASE CommonDataSyncSchedule."Synchronisation Type" OF
+                CommonDataSyncSchedule."Synchronisation Type"::All : Type := Type::All;
+                CommonDataSyncSchedule."Synchronisation Type"::Changes : Type := Type::Changes;
+              END;
+            END;
+          END;
+      END;
+
+      EXIT(Type);
+    END;
+
+    [External]
+    PROCEDURE GetUnitPriceFilter@1100526001(ResourceNo@1100526000 : Code[20]) : Text;
+    VAR
+      Resource@1100526002 : Record 11229278;
+      ServiceUnitPrice@1100526004 : Record 11071769;
+      ExportFilterSetMgt@1100526003 : Codeunit 11012200;
+    BEGIN
+      IF Resource.GET(ResourceNo) THEN
+        IF Resource.Company = COMPANYNAME THEN BEGIN
+          ExportFilterSetMgt.SetExportFiltersOnServiceUnitPrice(Resource."Filter Set (Mobile)", COMPANYNAME, ServiceUnitPrice);
+          EXIT(ServiceUnitPrice.GETFILTERS);
+        END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

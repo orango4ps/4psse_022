@@ -1,0 +1,987 @@
+OBJECT Codeunit 99000773 Calculate Prod. Order
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.04;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData 27=r,
+                TableData 5406=rimd,
+                TableData 5407=rimd,
+                TableData 99000765=r,
+                TableData 99000772=rimd,
+                TableData 99000776=rimd,
+                TableData 5405=rimd,
+                TableData 5416=rimd;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'DEU=Phantomstcklistenstruktur von %1 hat mehr als 50 Ebenen.;ENU=BOM phantom structure for %1 is higher than 50 levels.;NLD=Phantomstructuur van stuklijst voor %1 bevat meer dan 50 niveaus.;NOR=Stykklistefantomstruktur for %1 er h›yere enn 50 niv†er.;SVE=Struktur med fiktiva artiklar f”r %1 „r mer „n 50 niv†er.';
+      Text001@1001 : TextConst 'DEU=%2 %3 mit dem Status %1 kann nicht berechnet werden, wenn ein oder mehrere %4 gebucht wurden.;ENU=%1 %2 %3 can not be calculated, if at least one %4 has been posted.;NLD=%1 %2 %3 kan niet berekend worden als er minstens ‚‚n %4 geboekt is.;NOR=%1 %2 %3 kan ikke beregnes hvis minst ‚n %4 er bokf›rt.;SVE=%1 %2 %3 kan inte kalkyleras om minst en %4 har bokf”rts.';
+      OperationCannotFollowErr@1002 : TextConst '@@@="%1 = Operation No.";DEU=Bearbeitung Nummer %1 kann nicht einer anderen Bearbeitung in dem Bearbeitungsplan dieser Fertigungsauftragszeile folgen.;ENU=Operation No. %1 cannot follow another operation in the routing of this Prod. Order Line.;NLD=Bewerking nummer %1 kan niet volgen op een andere bewerking in het bewerkingsplan van deze productieorderregel.;NOR=Operasjon nr. %1 kan ikke komme etter en annen operasjon i ruten p† denne prod.ordrelinjen;SVE=Operationsnr %1 kan inte komma efter en annan operation i operationsf”ljden p† denna produktionsorderrad';
+      OperationCannotPrecedeErr@1003 : TextConst '@@@="%1 = Operation No.";DEU=Bearbeitung Nummer %1 kann nicht einer anderen Bearbeitung in dem Bearbeitungsplan dieser Fertigungsauftragszeile vorangehen.;ENU=Operation No. %1 cannot precede another operation in the routing of this Prod. Order Line.;NLD=Bewerking nummer %1 kan niet voorafgaan aan een andere bewerking in het bewerkingsplan van deze productieorderregel.;NOR=Operasjon nr. %1 kan ikke g† foran en annen operasjon i ruten for denne produksjonsordrelinjen;SVE=Operationsnr %1 kan inte f”reg† en annan operation i operationsf”ljden p† denna produktionsorderrad';
+      Item@1004 : Record 27;
+      Location@1006 : Record 14;
+      SKU@1005 : Record 5700;
+      ProdOrder@1007 : Record 5405;
+      ProdOrderLine@1008 : Record 5406;
+      ProdOrderComp@1009 : Record 5407;
+      ProdOrderRoutingLine2@1010 : Record 5409;
+      ProdBOMLine@1012 : ARRAY [99] OF Record 99000772;
+      UOMMgt@1014 : Codeunit 5402;
+      CostCalcMgt@1015 : Codeunit 5836;
+      VersionMgt@1016 : Codeunit 99000756;
+      ProdOrderRouteMgt@1017 : Codeunit 99000772;
+      GetPlanningParameters@1018 : Codeunit 99000855;
+      LeadTimeMgt@1019 : Codeunit 5404;
+      CalendarMgt@1023 : Codeunit 99000755;
+      WMSManagement@1024 : Codeunit 7302;
+      NextProdOrderCompLineNo@1020 : Integer;
+      Blocked@1021 : Boolean;
+      ProdOrderModify@1022 : Boolean;
+
+    LOCAL PROCEDURE TransferRouting@5();
+    VAR
+      RoutingHeader@1000 : Record 99000763;
+      RoutingLine@1001 : Record 99000764;
+      ProdOrderRoutingLine@1002 : Record 5409;
+      WorkCenter@1003 : Record 99000754;
+      MachineCenter@1004 : Record 99000758;
+      IsHandled@1005 : Boolean;
+    BEGIN
+      IsHandled := FALSE;
+      OnBeforeTransferRouting(ProdOrder,ProdOrderLine,IsHandled);
+      IF IsHandled THEN
+        EXIT;
+
+      IF ProdOrderLine."Routing No." = '' THEN
+        EXIT;
+
+      RoutingHeader.GET(ProdOrderLine."Routing No.");
+
+      ProdOrderRoutingLine.SETRANGE(Status,ProdOrderLine.Status);
+      ProdOrderRoutingLine.SETRANGE("Prod. Order No.",ProdOrderLine."Prod. Order No.");
+      ProdOrderRoutingLine.SETRANGE("Routing Reference No.",ProdOrderLine."Routing Reference No.");
+      ProdOrderRoutingLine.SETRANGE("Routing No.",ProdOrderLine."Routing No.");
+      IF NOT ProdOrderRoutingLine.ISEMPTY THEN
+        EXIT;
+
+      RoutingLine.SETRANGE("Routing No.",ProdOrderLine."Routing No.");
+      RoutingLine.SETRANGE("Version Code",ProdOrderLine."Routing Version Code");
+      IF RoutingLine.FIND('-') THEN
+        REPEAT
+          RoutingLine.TESTFIELD(Recalculate,FALSE);
+          ProdOrderRoutingLine.INIT;
+          ProdOrderRoutingLine.Status := ProdOrderLine.Status;
+          ProdOrderRoutingLine."Prod. Order No." := ProdOrderLine."Prod. Order No.";
+          ProdOrderRoutingLine."Routing Reference No." := ProdOrderLine."Routing Reference No.";
+          ProdOrderRoutingLine."Routing No." := ProdOrderLine."Routing No.";
+          ProdOrderRoutingLine.CopyFromRoutingLine(RoutingLine);
+          CASE ProdOrderRoutingLine.Type OF
+            ProdOrderRoutingLine.Type::"Work Center":
+              BEGIN
+                WorkCenter.GET(RoutingLine."Work Center No.");
+                ProdOrderRoutingLine."Flushing Method" := WorkCenter."Flushing Method";
+              END;
+            ProdOrderRoutingLine.Type::"Machine Center":
+              BEGIN
+                MachineCenter.GET(ProdOrderRoutingLine."No.");
+                ProdOrderRoutingLine."Flushing Method" := MachineCenter."Flushing Method";
+              END;
+          END;
+          CostCalcMgt.RoutingCostPerUnit(
+            ProdOrderRoutingLine.Type,
+            ProdOrderRoutingLine."No.",
+            ProdOrderRoutingLine."Direct Unit Cost",
+            ProdOrderRoutingLine."Indirect Cost %",
+            ProdOrderRoutingLine."Overhead Rate",
+            ProdOrderRoutingLine."Unit Cost per",
+            ProdOrderRoutingLine."Unit Cost Calculation");
+          ProdOrderRoutingLine.VALIDATE("Direct Unit Cost");
+          ProdOrderRoutingLine."Starting Time" := ProdOrderLine."Starting Time";
+          ProdOrderRoutingLine."Starting Date" := ProdOrderLine."Starting Date";
+          ProdOrderRoutingLine."Ending Time" := ProdOrderLine."Ending Time";
+          ProdOrderRoutingLine."Ending Date" := ProdOrderLine."Ending Date";
+          ProdOrderRoutingLine.UpdateDatetime;
+          OnAfterTransferRoutingLine(ProdOrderLine,RoutingLine,ProdOrderRoutingLine);
+          ProdOrderRoutingLine.INSERT;
+          OnAfterInsertProdRoutingLine(ProdOrderRoutingLine,ProdOrderLine);
+          TransferTaskInfo(ProdOrderRoutingLine,ProdOrderLine."Routing Version Code");
+        UNTIL RoutingLine.NEXT = 0;
+
+      OnAfterTransferRouting(ProdOrderLine);
+    END;
+
+    [External]
+    PROCEDURE TransferTaskInfo@3(VAR FromProdOrderRoutingLine@1000 : Record 5409;VersionCode@1009 : Code[20]);
+    BEGIN
+      CopyRoutingTools(FromProdOrderRoutingLine,VersionCode);
+      CopyRoutingPersonnel(FromProdOrderRoutingLine,VersionCode);
+      CopyRoutingQualityMeasures(FromProdOrderRoutingLine,VersionCode);
+      CopyRoutingComments(FromProdOrderRoutingLine,VersionCode);
+
+      OnAfterTransferTaskInfo(FromProdOrderRoutingLine,VersionCode);
+    END;
+
+    LOCAL PROCEDURE TransferBOM@4(ProdBOMNo@1000 : Code[20];Level@1001 : Integer;LineQtyPerUOM@1002 : Decimal;ItemQtyPerUOM@1010 : Decimal) : Boolean;
+    VAR
+      BOMHeader@1003 : Record 99000771;
+      ProductionBOMVersion@1009 : Record 99000779;
+      ReqQty@1006 : Decimal;
+      ErrorOccured@1005 : Boolean;
+      VersionCode@1008 : Code[20];
+      IsHandled@1021 : Boolean;
+      SkipTransfer@1004 : Boolean;
+    BEGIN
+      IsHandled := FALSE;
+      OnBeforeTransferBOM(ProdOrder,ProdOrderLine,ProdBOMNo,Level,LineQtyPerUOM,ItemQtyPerUOM,Blocked,ErrorOccured,IsHandled);
+      IF IsHandled THEN
+        EXIT(NOT ErrorOccured);
+
+      IF ProdBOMNo = '' THEN
+        EXIT;
+
+      ProdOrderComp.LOCKTABLE;
+
+      IF Level > 50 THEN
+        ERROR(
+          Text000,
+          ProdBOMNo);
+
+      BOMHeader.GET(ProdBOMNo);
+
+      IF Level > 1 THEN
+        VersionCode := VersionMgt.GetBOMVersion(ProdBOMNo,ProdOrderLine."Starting Date",TRUE)
+      ELSE
+        VersionCode := ProdOrderLine."Production BOM Version Code";
+
+      IF VersionCode <> '' THEN BEGIN
+        ProductionBOMVersion.GET(ProdBOMNo,VersionCode);
+        ProductionBOMVersion.TESTFIELD(Status,ProductionBOMVersion.Status::Certified);
+      END ELSE
+        BOMHeader.TESTFIELD(Status,BOMHeader.Status::Certified);
+
+      ProdBOMLine[Level].SETRANGE("Production BOM No.",ProdBOMNo);
+      ProdBOMLine[Level].SETRANGE("Version Code",VersionCode);
+      ProdBOMLine[Level].SETFILTER("Starting Date",'%1|..%2',0D,ProdOrderLine."Starting Date");
+      ProdBOMLine[Level].SETFILTER("Ending Date",'%1|%2..',0D,ProdOrderLine."Starting Date");
+      OnTransferBOMOnAfterSetFiltersProdBOMLine(ProdBOMLine[Level],ProdOrderLine);
+      IF ProdBOMLine[Level].FIND('-') THEN
+        REPEAT
+          IsHandled := FALSE;
+          OnBeforeTransferBOMComponent(ProdOrder,ProdOrderLine,ProdBOMLine[Level],ErrorOccured,IsHandled);
+          IF NOT IsHandled THEN BEGIN
+            IF ProdBOMLine[Level]."Routing Link Code" <> '' THEN BEGIN
+              ProdOrderRoutingLine2.SETRANGE(Status,ProdOrderLine.Status);
+              ProdOrderRoutingLine2.SETRANGE("Prod. Order No.",ProdOrderLine."Prod. Order No.");
+              ProdOrderRoutingLine2.SETRANGE("Routing Link Code",ProdBOMLine[Level]."Routing Link Code");
+              ProdOrderRoutingLine2.FINDFIRST;
+              ReqQty :=
+                ProdBOMLine[Level].Quantity * (1 + ProdBOMLine[Level]."Scrap %" / 100) *
+                (1 + ProdOrderRoutingLine2."Scrap Factor % (Accumulated)") * LineQtyPerUOM / ItemQtyPerUOM +
+                ProdOrderRoutingLine2."Fixed Scrap Qty. (Accum.)";
+            END ELSE
+              ReqQty :=
+                ProdBOMLine[Level].Quantity * (1 + ProdBOMLine[Level]."Scrap %" / 100) * LineQtyPerUOM / ItemQtyPerUOM;
+
+            OnTransferBOMOnAfterCalcReqQty(
+              ProdBOMLine[Level],ProdOrderRoutingLine2,ProdOrderLine,ReqQty,LineQtyPerUOM,ItemQtyPerUOM);
+
+            CASE ProdBOMLine[Level].Type OF
+              ProdBOMLine[Level].Type::Item:
+                BEGIN
+                  SkipTransfer := FALSE;
+                  OnTransferBOMOnBeforeProcessItem(ProdBOMLine[Level],ReqQty,SkipTransfer);
+                  IF NOT SkipTransfer THEN
+                    TransferBOMProcessItem(Level,LineQtyPerUOM,ItemQtyPerUOM,ErrorOccured);
+                END;
+              ProdBOMLine[Level].Type::"Production BOM":
+                BEGIN
+                  OnTransferBOMOnBeforeProcessProdBOM(ProdBOMLine[Level],LineQtyPerUOM,ItemQtyPerUOM,ReqQty);
+                  TransferBOM(ProdBOMLine[Level]."No.",Level + 1,ReqQty,1);
+                  ProdBOMLine[Level].SETRANGE("Production BOM No.",ProdBOMNo);
+                  IF Level > 1 THEN
+                    ProdBOMLine[Level].SETRANGE("Version Code",VersionMgt.GetBOMVersion(ProdBOMNo,ProdOrderLine."Starting Date",TRUE))
+                  ELSE
+                    ProdBOMLine[Level].SETRANGE("Version Code",ProdOrderLine."Production BOM Version Code");
+                  ProdBOMLine[Level].SETFILTER("Starting Date",'%1|..%2',0D,ProdOrderLine."Starting Date");
+                  ProdBOMLine[Level].SETFILTER("Ending Date",'%1|%2..',0D,ProdOrderLine."Starting Date");
+                END;
+            END;
+          END;
+        UNTIL ProdBOMLine[Level].NEXT = 0;
+
+      OnAfterTransferBOM(ProdOrder,ProdOrderLine,ProdBOMNo,Level,LineQtyPerUOM,ItemQtyPerUOM,Blocked,ErrorOccured);
+
+      EXIT(NOT ErrorOccured);
+    END;
+
+    LOCAL PROCEDURE TransferBOMProcessItem@28(Level@1000 : Integer;LineQtyPerUOM@1001 : Decimal;ItemQtyPerUOM@1002 : Decimal;VAR ErrorOccured@1005 : Boolean);
+    VAR
+      Item2@1004 : Record 27;
+      ComponentSKU@1003 : Record 5700;
+    BEGIN
+      ProdOrderComp.SETCURRENTKEY(Status,"Prod. Order No.","Prod. Order Line No.","Item No.");
+      ProdOrderComp.SETRANGE(Status,ProdOrderLine.Status);
+      ProdOrderComp.SETRANGE("Prod. Order No.",ProdOrderLine."Prod. Order No.");
+      ProdOrderComp.SETRANGE("Prod. Order Line No.",ProdOrderLine."Line No.");
+      ProdOrderComp.SetFilterFromProdBOMLine(ProdBOMLine[Level]);
+      OnAfterProdOrderCompFilter(ProdOrderComp,ProdBOMLine[Level]);
+      IF NOT ProdOrderComp.FINDFIRST THEN BEGIN
+        ProdOrderComp.RESET;
+        ProdOrderComp.SETRANGE(Status,ProdOrderLine.Status);
+        ProdOrderComp.SETRANGE("Prod. Order No.",ProdOrderLine."Prod. Order No.");
+        ProdOrderComp.SETRANGE("Prod. Order Line No.",ProdOrderLine."Line No.");
+        IF ProdOrderComp.FINDLAST THEN
+          NextProdOrderCompLineNo := ProdOrderComp."Line No." + 10000
+        ELSE
+          NextProdOrderCompLineNo := 10000;
+
+        ProdOrderComp.INIT;
+        ProdOrderComp.SetIgnoreErrors;
+        ProdOrderComp.BlockDynamicTracking(Blocked);
+        ProdOrderComp.Status := ProdOrderLine.Status;
+        ProdOrderComp."Prod. Order No." := ProdOrderLine."Prod. Order No.";
+        ProdOrderComp."Prod. Order Line No." := ProdOrderLine."Line No.";
+        ProdOrderComp."Line No." := NextProdOrderCompLineNo;
+        ProdOrderComp.VALIDATE("Item No.",ProdBOMLine[Level]."No.");
+        ProdOrderComp."Variant Code" := ProdBOMLine[Level]."Variant Code";
+        IF Item2.GET(ProdOrderComp."Item No.") THEN
+          IF Item2.IsInventoriableType THEN
+            ProdOrderComp."Location Code" := SKU."Components at Location";
+        ProdOrderComp."Bin Code" := GetDefaultBin;
+        ProdOrderComp.Description := ProdBOMLine[Level].Description;
+        ProdOrderComp.VALIDATE("Unit of Measure Code",ProdBOMLine[Level]."Unit of Measure Code");
+        ProdOrderComp."Quantity per" := ProdBOMLine[Level]."Quantity per" * LineQtyPerUOM / ItemQtyPerUOM;
+        ProdOrderComp.Length := ProdBOMLine[Level].Length;
+        ProdOrderComp.Width := ProdBOMLine[Level].Width;
+        ProdOrderComp.Weight := ProdBOMLine[Level].Weight;
+        ProdOrderComp.Depth := ProdBOMLine[Level].Depth;
+        ProdOrderComp.Position := ProdBOMLine[Level].Position;
+        ProdOrderComp."Position 2" := ProdBOMLine[Level]."Position 2";
+        ProdOrderComp."Position 3" := ProdBOMLine[Level]."Position 3";
+        ProdOrderComp."Lead-Time Offset" := ProdBOMLine[Level]."Lead-Time Offset";
+        ProdOrderComp.VALIDATE("Routing Link Code",ProdBOMLine[Level]."Routing Link Code");
+        ProdOrderComp.VALIDATE("Scrap %",ProdBOMLine[Level]."Scrap %");
+        ProdOrderComp.VALIDATE("Calculation Formula",ProdBOMLine[Level]."Calculation Formula");
+
+        OnTransferBOMProcessItemOnBeforeGetPlanningParameters(ProdOrderComp,ProdBOMLine[Level]);
+        GetPlanningParameters.AtSKU(
+          ComponentSKU,ProdOrderComp."Item No.",ProdOrderComp."Variant Code",ProdOrderComp."Location Code");
+
+        ProdOrderComp."Flushing Method" := ComponentSKU."Flushing Method";
+        IF (SKU."Manufacturing Policy" = SKU."Manufacturing Policy"::"Make-to-Order") AND
+           (ComponentSKU."Manufacturing Policy" = ComponentSKU."Manufacturing Policy"::"Make-to-Order") AND
+           (ComponentSKU."Replenishment System" = ComponentSKU."Replenishment System"::"Prod. Order")
+        THEN BEGIN
+          IF ProdOrderComp."Quantity per" = 0 THEN
+            EXIT;
+          ProdOrderComp."Planning Level Code" := ProdOrderLine."Planning Level Code" + 1;
+          Item2.GET(ProdOrderComp."Item No.");
+          ProdOrderComp."Item Low-Level Code" := Item2."Low-Level Code";
+        END;
+        ProdOrderComp.GetDefaultBin;
+        OnAfterTransferBOMComponent(ProdOrderLine,ProdBOMLine[Level],ProdOrderComp,LineQtyPerUOM,ItemQtyPerUOM);
+        ProdOrderComp.INSERT(TRUE);
+        OnAfterProdOrderCompInsert(ProdOrderComp,ProdBOMLine[Level]);
+      END ELSE BEGIN
+        ProdOrderComp.SetIgnoreErrors;
+        ProdOrderComp.SETCURRENTKEY(Status,"Prod. Order No."); // Reset key
+        ProdOrderComp.BlockDynamicTracking(Blocked);
+        ProdOrderComp.VALIDATE(
+          "Quantity per",
+          ProdOrderComp."Quantity per" + ProdBOMLine[Level]."Quantity per" * LineQtyPerUOM / ItemQtyPerUOM);
+        ProdOrderComp.VALIDATE("Routing Link Code",ProdBOMLine[Level]."Routing Link Code");
+        OnBeforeProdOrderCompModify(ProdOrderComp,ProdBOMLine[Level],LineQtyPerUOM,ItemQtyPerUOM);
+        ProdOrderComp.MODIFY;
+      END;
+      IF ProdOrderComp.HasErrorOccured THEN
+        ErrorOccured := TRUE;
+      ProdOrderComp.AutoReserve;
+      CopyProdBOMComments(ProdBOMLine[Level]);
+    END;
+
+    [External]
+    PROCEDURE CalculateComponents@7();
+    VAR
+      ProdOrderComp@1000 : Record 5407;
+      IsHandled@1001 : Boolean;
+    BEGIN
+      ProdOrderComp.SETRANGE(Status,ProdOrderLine.Status);
+      ProdOrderComp.SETRANGE("Prod. Order No.",ProdOrderLine."Prod. Order No.");
+      ProdOrderComp.SETRANGE("Prod. Order Line No.",ProdOrderLine."Line No.");
+      IF ProdOrderComp.FIND('-') THEN
+        REPEAT
+          ProdOrderComp.BlockDynamicTracking(Blocked);
+          IsHandled := FALSE;
+          OnCalculateComponentsOnBeforeUpdateRoutingLinkCode(ProdOrderComp,ProdOrderLine,IsHandled);
+          IF NOT IsHandled THEN BEGIN
+            ProdOrderComp.VALIDATE("Routing Link Code");
+            ProdOrderComp.MODIFY;
+            ProdOrderComp.AutoReserve;
+          END;
+        UNTIL ProdOrderComp.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE CalculateRoutingFromActual@11(ProdOrderRoutingLine@1000 : Record 5409;Direction@1001 : 'Forward,Backward';CalcStartEndDate@1002 : Boolean);
+    VAR
+      CalculateRoutingLine@1003 : Codeunit 99000774;
+    BEGIN
+      IF ProdOrderRouteMgt.NeedsCalculation(
+           ProdOrderRoutingLine.Status,
+           ProdOrderRoutingLine."Prod. Order No.",
+           ProdOrderRoutingLine."Routing Reference No.",
+           ProdOrderRoutingLine."Routing No.")
+      THEN BEGIN
+        ProdOrderLine.SETRANGE(Status,ProdOrderRoutingLine.Status);
+        ProdOrderLine.SETRANGE("Prod. Order No.",ProdOrderRoutingLine."Prod. Order No.");
+        ProdOrderLine.SETRANGE("Routing Reference No.",ProdOrderRoutingLine."Routing Reference No.");
+        ProdOrderLine.SETRANGE("Routing No.",ProdOrderRoutingLine."Routing No.");
+        ProdOrderLine.FINDFIRST;
+        ProdOrderRouteMgt.Calculate(ProdOrderLine);
+        ProdOrderRoutingLine.GET(
+          ProdOrderRoutingLine.Status,
+          ProdOrderRoutingLine."Prod. Order No.",
+          ProdOrderRoutingLine."Routing Reference No.",
+          ProdOrderRoutingLine."Routing No.",
+          ProdOrderRoutingLine."Operation No.");
+      END;
+      IF Direction = Direction::Forward THEN
+        ProdOrderRoutingLine.SETCURRENTKEY(Status,"Prod. Order No.","Routing Reference No.",
+          "Routing No.","Sequence No. (Forward)")
+      ELSE
+        ProdOrderRoutingLine.SETCURRENTKEY(Status,"Prod. Order No.","Routing Reference No.",
+          "Routing No.","Sequence No. (Backward)");
+
+      ProdOrderRoutingLine.SETRANGE(Status,ProdOrderRoutingLine.Status);
+      ProdOrderRoutingLine.SETRANGE("Prod. Order No.",ProdOrderRoutingLine."Prod. Order No.");
+      ProdOrderRoutingLine.SETRANGE("Routing Reference No.",ProdOrderRoutingLine."Routing Reference No.");
+      ProdOrderRoutingLine.SETRANGE("Routing No.",ProdOrderRoutingLine."Routing No.");
+      ProdOrderRoutingLine.SETFILTER("Routing Status",'<>%1',ProdOrderRoutingLine."Routing Status"::Finished);
+      REPEAT
+        IF CalcStartEndDate AND NOT ProdOrderRoutingLine."Schedule Manually" THEN
+          IF ((Direction = Direction::Forward) AND (ProdOrderRoutingLine."Previous Operation No." <> '')) OR
+             ((Direction = Direction::Backward) AND (ProdOrderRoutingLine."Next Operation No." <> ''))
+          THEN BEGIN
+            ProdOrderRoutingLine."Starting Time" := 0T;
+            ProdOrderRoutingLine."Starting Date" := 0D;
+            ProdOrderRoutingLine."Ending Time" := 235959T;
+            ProdOrderRoutingLine."Ending Date" := CalendarMgt.GetMaxDate;
+          END;
+        CalculateRoutingLine.CalculateRoutingLine(ProdOrderRoutingLine,Direction,CalcStartEndDate);
+        CalcStartEndDate := TRUE;
+      UNTIL ProdOrderRoutingLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CalculateRouting@6(Direction@1000 : 'Forward,Backward';LetDueDateDecrease@1003 : Boolean);
+    VAR
+      ProdOrderRoutingLine@1001 : Record 5409;
+      LeadTime@1002 : Code[20];
+    BEGIN
+      IF ProdOrderRouteMgt.NeedsCalculation(
+           ProdOrderLine.Status,
+           ProdOrderLine."Prod. Order No.",
+           ProdOrderLine."Routing Reference No.",
+           ProdOrderLine."Routing No.")
+      THEN
+        ProdOrderRouteMgt.Calculate(ProdOrderLine);
+
+      IF Direction = Direction::Forward THEN
+        ProdOrderRoutingLine.SETCURRENTKEY(Status,"Prod. Order No.","Routing Reference No.","Routing No.",
+          "Sequence No. (Forward)")
+      ELSE
+        ProdOrderRoutingLine.SETCURRENTKEY(Status,"Prod. Order No.","Routing Reference No.","Routing No.",
+          "Sequence No. (Backward)");
+
+      ProdOrderRoutingLine.SETRANGE(Status,ProdOrderLine.Status);
+      ProdOrderRoutingLine.SETRANGE("Prod. Order No.",ProdOrderLine."Prod. Order No.");
+      ProdOrderRoutingLine.SETRANGE("Routing Reference No.",ProdOrderLine."Routing Reference No.");
+      ProdOrderRoutingLine.SETRANGE("Routing No.",ProdOrderLine."Routing No.");
+      ProdOrderRoutingLine.SETFILTER("Routing Status",'<>%1',ProdOrderRoutingLine."Routing Status"::Finished);
+      IF NOT ProdOrderRoutingLine.FINDFIRST THEN BEGIN
+        LeadTime :=
+          LeadTimeMgt.ManufacturingLeadTime(
+            ProdOrderLine."Item No.",
+            ProdOrderLine."Location Code",
+            ProdOrderLine."Variant Code");
+        IF Direction = Direction::Forward THEN
+          // Ending Date calculated forward from Starting Date
+          ProdOrderLine."Ending Date" :=
+            LeadTimeMgt.PlannedEndingDate2(
+              ProdOrderLine."Item No.",
+              ProdOrderLine."Location Code",
+              ProdOrderLine."Variant Code",
+              '',
+              LeadTime,
+              2,
+              ProdOrderLine."Starting Date")
+        ELSE
+          // Starting Date calculated backward from Ending Date
+          ProdOrderLine."Starting Date" :=
+            LeadTimeMgt.PlannedStartingDate(
+              ProdOrderLine."Item No.",
+              ProdOrderLine."Location Code",
+              ProdOrderLine."Variant Code",
+              '',
+              LeadTime,
+              2,
+              ProdOrderLine."Ending Date");
+
+        CalculateProdOrderDates(ProdOrderLine,LetDueDateDecrease);
+        EXIT;
+      END;
+
+      IF Direction = Direction::Forward THEN BEGIN
+        ProdOrderRoutingLine."Starting Date" := ProdOrderLine."Starting Date";
+        ProdOrderRoutingLine."Starting Time" := ProdOrderLine."Starting Time";
+      END ELSE BEGIN
+        ProdOrderRoutingLine."Ending Date" := ProdOrderLine."Ending Date";
+        ProdOrderRoutingLine."Ending Time" := ProdOrderLine."Ending Time";
+      END;
+      ProdOrderRoutingLine.UpdateDatetime;
+      CalculateRoutingFromActual(ProdOrderRoutingLine,Direction,FALSE);
+
+      CalculateProdOrderDates(ProdOrderLine,LetDueDateDecrease);
+    END;
+
+    [External]
+    PROCEDURE CalculateProdOrderDates@12(VAR ProdOrderLine@1000 : Record 5406;LetDueDateDecrease@1003 : Boolean);
+    VAR
+      ProdOrderRoutingLine@1002 : Record 5409;
+      NewDueDate@1004 : Date;
+      IsHandled@1001 : Boolean;
+    BEGIN
+      OnBeforeCalculateProdOrderDates(ProdOrderLine);
+
+      ProdOrder.GET(ProdOrderLine.Status,ProdOrderLine."Prod. Order No.");
+
+      ProdOrderRoutingLine.SETRANGE(Status,ProdOrderLine.Status);
+      ProdOrderRoutingLine.SETRANGE("Prod. Order No.",ProdOrderLine."Prod. Order No.");
+      ProdOrderRoutingLine.SETRANGE("Routing No.",ProdOrderLine."Routing No.");
+      IF ProdOrder."Source Type" <> ProdOrder."Source Type"::Family THEN
+        ProdOrderRoutingLine.SETRANGE("Routing Reference No.",ProdOrderLine."Line No.")
+      ELSE
+        ProdOrderRoutingLine.SETRANGE("Routing Reference No.",0);
+      ProdOrderRoutingLine.SETFILTER("Routing Status",'<>%1',ProdOrderRoutingLine."Routing Status"::Finished);
+      ProdOrderRoutingLine.SETFILTER("Next Operation No.",'%1','');
+      OnCalculateProdOrderDatesOnAfterSetFilters(ProdOrderRoutingLine,ProdOrder,ProdOrderLine);
+
+      IF ProdOrderRoutingLine.FINDFIRST THEN BEGIN
+        ProdOrderLine."Ending Date" := ProdOrderRoutingLine."Ending Date";
+        ProdOrderLine."Ending Time" := ProdOrderRoutingLine."Ending Time";
+      END;
+
+      ProdOrderRoutingLine.SETRANGE("Next Operation No.");
+      ProdOrderRoutingLine.SETFILTER("Previous Operation No.",'%1','');
+
+      IF ProdOrderRoutingLine.FINDFIRST THEN BEGIN
+        ProdOrderLine."Starting Date" := ProdOrderRoutingLine."Starting Date";
+        ProdOrderLine."Starting Time" := ProdOrderRoutingLine."Starting Time";
+      END;
+
+      IsHandled := FALSE;
+      OnCalculateProdOrderDatesOnSetBeforeDueDate(ProdOrderLine,IsHandled);
+      IF NOT IsHandled THEN BEGIN
+        IF ProdOrderLine."Planning Level Code" = 0 THEN
+          NewDueDate :=
+            LeadTimeMgt.PlannedDueDate(
+              ProdOrderLine."Item No.",ProdOrderLine."Location Code",ProdOrderLine."Variant Code",ProdOrderLine."Ending Date",'',2)
+        ELSE
+          NewDueDate := ProdOrderLine."Ending Date";
+
+        IF LetDueDateDecrease OR (NewDueDate > ProdOrderLine."Due Date") THEN
+          ProdOrderLine."Due Date" := NewDueDate;
+      END;
+
+      ProdOrderLine.UpdateDatetime;
+      ProdOrderLine.MODIFY;
+
+      OnBeforeUpdateProdOrderDates(ProdOrder,ProdOrderLine);
+
+      IF NOT ProdOrderModify THEN BEGIN
+        ProdOrder.AdjustStartEndingDate;
+        ProdOrder.MODIFY;
+      END;
+    END;
+
+    [External]
+    PROCEDURE Calculate@1(ProdOrderLine2@1000 : Record 5406;Direction@1001 : 'Forward,Backward';CalcRouting@1002 : Boolean;CalcComponents@1003 : Boolean;DeleteRelations@1004 : Boolean;LetDueDateDecrease@1012 : Boolean) : Boolean;
+    VAR
+      CapLedgEntry@1005 : Record 5832;
+      ItemLedgEntry@1009 : Record 32;
+      ProdOrderRoutingLine3@1006 : Record 5409;
+      ProdOrderRoutingLine4@1007 : Record 5409;
+      RoutingHeader@1008 : Record 99000763;
+      ProdOrderRoutingLine@1010 : Record 5409;
+      ErrorOccured@1011 : Boolean;
+      IsHandled@1013 : Boolean;
+    BEGIN
+      ProdOrderLine := ProdOrderLine2;
+
+      OnBeforeCalculate(ItemLedgEntry,CapLedgEntry);
+
+      IF ProdOrderLine.Status = ProdOrderLine.Status::Released THEN BEGIN
+        ItemLedgEntry.SETCURRENTKEY("Order Type","Order No.");
+        ItemLedgEntry.SETRANGE("Order Type",ItemLedgEntry."Order Type"::Production);
+        ItemLedgEntry.SETRANGE("Order No.",ProdOrderLine."Prod. Order No.");
+        IF NOT ItemLedgEntry.ISEMPTY THEN
+          ERROR(
+            Text001,
+            ProdOrderLine.Status,ProdOrderLine.TABLECAPTION,ProdOrderLine."Prod. Order No.",
+            ItemLedgEntry.TABLECAPTION);
+
+        CapLedgEntry.SETCURRENTKEY("Order Type","Order No.");
+        CapLedgEntry.SETRANGE("Order Type",CapLedgEntry."Order Type"::Production);
+        CapLedgEntry.SETRANGE("Order No.",ProdOrderLine."Prod. Order No.");
+        IF NOT CapLedgEntry.ISEMPTY THEN
+          ERROR(
+            Text001,
+            ProdOrderLine.Status,ProdOrderLine.TABLECAPTION,ProdOrderLine."Prod. Order No.",
+            CapLedgEntry.TABLECAPTION);
+      END;
+
+      ProdOrderLine.TESTFIELD(Quantity);
+      IF Direction = Direction::Backward THEN
+        ProdOrderLine.TESTFIELD("Ending Date")
+      ELSE
+        ProdOrderLine.TESTFIELD("Starting Date");
+
+      IF DeleteRelations THEN
+        ProdOrderLine.DeleteRelations;
+
+      IF CalcRouting THEN BEGIN
+        TransferRouting;
+        IF NOT CalcComponents THEN BEGIN // components will not be calculated later- update bin code
+          ProdOrderRoutingLine.SETRANGE(Status,ProdOrderLine.Status);
+          ProdOrderRoutingLine.SETRANGE("Prod. Order No.",ProdOrderLine."Prod. Order No.");
+          ProdOrderRoutingLine.SETRANGE("Routing Reference No.",ProdOrderLine."Routing Reference No.");
+          ProdOrderRoutingLine.SETRANGE("Routing No.",ProdOrderLine."Routing No.");
+          IF NOT ProdOrderRouteMgt.UpdateComponentsBin(ProdOrderRoutingLine,TRUE) THEN
+            ErrorOccured := TRUE;
+        END;
+      END ELSE
+        IF RoutingHeader.GET(ProdOrderLine2."Routing No.") OR (ProdOrderLine2."Routing No." = '') THEN
+          IF RoutingHeader.Type <> RoutingHeader.Type::Parallel THEN BEGIN
+            ProdOrderRoutingLine3.SETRANGE(Status,ProdOrderLine2.Status);
+            ProdOrderRoutingLine3.SETRANGE("Prod. Order No.",ProdOrderLine2."Prod. Order No.");
+            ProdOrderRoutingLine3.SETRANGE("Routing Reference No.",ProdOrderLine2."Routing Reference No.");
+            ProdOrderRoutingLine3.SETRANGE("Routing No.",ProdOrderLine2."Routing No.");
+            ProdOrderRoutingLine3.SETFILTER("Routing Status",'<>%1',ProdOrderRoutingLine3."Routing Status"::Finished);
+            ProdOrderRoutingLine4.COPYFILTERS(ProdOrderRoutingLine3);
+            IF ProdOrderRoutingLine3.FIND('-') THEN
+              REPEAT
+                IF ProdOrderRoutingLine3."Next Operation No." <> '' THEN BEGIN
+                  ProdOrderRoutingLine4.SETRANGE("Operation No.",ProdOrderRoutingLine3."Next Operation No.");
+                  IF ProdOrderRoutingLine4.ISEMPTY THEN BEGIN
+                    IsHandled := FALSE;
+                    OnCalculateOnBeforeCheckNextOperation(ProdOrder,ProdOrderLine2,ProdOrderRoutingLine3,IsHandled);
+                    IF NOT IsHandled THEN
+                      ERROR(OperationCannotFollowErr,ProdOrderRoutingLine3."Next Operation No.");
+                  END;
+                END;
+                IF ProdOrderRoutingLine3."Previous Operation No." <> '' THEN BEGIN
+                  ProdOrderRoutingLine4.SETRANGE("Operation No.",ProdOrderRoutingLine3."Previous Operation No.");
+                  IF ProdOrderRoutingLine4.ISEMPTY THEN BEGIN
+                    IsHandled := FALSE;
+                    OnCalculateOnBeforeCheckPrevOperation(ProdOrder,ProdOrderLine2,ProdOrderRoutingLine3,IsHandled);
+                    IF NOT IsHandled THEN
+                      ERROR(OperationCannotPrecedeErr,ProdOrderRoutingLine3."Previous Operation No.");
+                  END;
+                END;
+              UNTIL ProdOrderRoutingLine3.NEXT = 0;
+          END;
+
+      IF CalcComponents THEN
+        IF ProdOrderLine."Production BOM No." <> '' THEN BEGIN
+          Item.GET(ProdOrderLine."Item No.");
+          GetPlanningParameters.AtSKU(
+            SKU,
+            ProdOrderLine."Item No.",
+            ProdOrderLine."Variant Code",
+            ProdOrderLine."Location Code");
+
+          IF NOT TransferBOM(
+               ProdOrderLine."Production BOM No.",
+               1,
+               ProdOrderLine."Qty. per Unit of Measure",
+               UOMMgt.GetQtyPerUnitOfMeasure(
+                 Item,
+                 VersionMgt.GetBOMUnitOfMeasure(
+                   ProdOrderLine."Production BOM No.",
+                   ProdOrderLine."Production BOM Version Code")))
+          THEN
+            ErrorOccured := TRUE;
+        END;
+      Recalculate(ProdOrderLine,Direction,LetDueDateDecrease);
+      EXIT(NOT ErrorOccured);
+    END;
+
+    LOCAL PROCEDURE CopyProdBOMComments@27(ProdBOMLine@1000 : Record 99000772);
+    VAR
+      ProdBOMCommentLine@1001 : Record 99000776;
+      ProdOrderCompCmtLine@1002 : Record 5416;
+      IsHandled@1003 : Boolean;
+    BEGIN
+      IsHandled := FALSE;
+      OnBeforeCopyProdBOMComments(ProdBOMCommentLine,ProdBOMLine,IsHandled);
+      IF IsHandled THEN
+        EXIT;
+
+      ProdBOMCommentLine.SETRANGE("Production BOM No.",ProdBOMLine."Production BOM No.");
+      ProdBOMCommentLine.SETRANGE("BOM Line No.",ProdBOMLine."Line No.");
+      ProdBOMCommentLine.SETRANGE("Version Code",ProdBOMLine."Version Code");
+      IF ProdBOMCommentLine.FINDSET THEN
+        REPEAT
+          ProdOrderCompCmtLine.CopyFromProdBOMComponent(ProdBOMCommentLine,ProdOrderComp);
+          IF NOT ProdOrderCompCmtLine.INSERT THEN
+            ProdOrderCompCmtLine.MODIFY;
+        UNTIL ProdBOMCommentLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CopyRoutingComments@40(ProdOrderRoutingLine@1001 : Record 5409;VersionCode@1000 : Code[20]);
+    VAR
+      RoutingCommentLine@1003 : Record 99000775;
+      ProdOrderRtngCommentLine@1002 : Record 5415;
+    BEGIN
+      RoutingCommentLine.SETRANGE("Routing No.",ProdOrderRoutingLine."Routing No.");
+      RoutingCommentLine.SETRANGE("Operation No.",ProdOrderRoutingLine."Operation No.");
+      RoutingCommentLine.SETRANGE("Version Code",VersionCode);
+      IF RoutingCommentLine.FIND('-') THEN
+        REPEAT
+          ProdOrderRtngCommentLine.TRANSFERFIELDS(RoutingCommentLine);
+          ProdOrderRtngCommentLine.Status := ProdOrderRoutingLine.Status;
+          ProdOrderRtngCommentLine."Prod. Order No." := ProdOrderRoutingLine."Prod. Order No.";
+          ProdOrderRtngCommentLine."Routing Reference No." := ProdOrderRoutingLine."Routing Reference No.";
+          ProdOrderRtngCommentLine.INSERT;
+        UNTIL RoutingCommentLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CopyRoutingPersonnel@36(ProdOrderRoutingLine@1001 : Record 5409;VersionCode@1000 : Code[20]);
+    VAR
+      RoutingPersonnel@1002 : Record 99000803;
+      ProdOrderRoutingPersonnel@1003 : Record 5412;
+    BEGIN
+      RoutingPersonnel.SETRANGE("Routing No.",ProdOrderRoutingLine."Routing No.");
+      RoutingPersonnel.SETRANGE("Operation No.",ProdOrderRoutingLine."Operation No.");
+      RoutingPersonnel.SETRANGE("Version Code",VersionCode);
+      IF RoutingPersonnel.FIND('-') THEN
+        REPEAT
+          ProdOrderRoutingPersonnel.TRANSFERFIELDS(RoutingPersonnel);
+          ProdOrderRoutingPersonnel.Status := ProdOrderRoutingLine.Status;
+          ProdOrderRoutingPersonnel."Prod. Order No." := ProdOrderRoutingLine."Prod. Order No.";
+          ProdOrderRoutingPersonnel."Routing Reference No." := ProdOrderRoutingLine."Routing Reference No.";
+          ProdOrderRoutingPersonnel.INSERT;
+        UNTIL RoutingPersonnel.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CopyRoutingQualityMeasures@38(ProdOrderRoutingLine@1001 : Record 5409;VersionCode@1000 : Code[20]);
+    VAR
+      RoutingQualityMeasure@1002 : Record 99000805;
+      ProdOrderRtngQltyMeas@1003 : Record 5413;
+    BEGIN
+      RoutingQualityMeasure.SETRANGE("Routing No.",ProdOrderRoutingLine."Routing No.");
+      RoutingQualityMeasure.SETRANGE("Operation No.",ProdOrderRoutingLine."Operation No.");
+      RoutingQualityMeasure.SETRANGE("Version Code",VersionCode);
+      IF RoutingQualityMeasure.FIND('-') THEN
+        REPEAT
+          ProdOrderRtngQltyMeas.TRANSFERFIELDS(RoutingQualityMeasure);
+          ProdOrderRtngQltyMeas.Status := ProdOrderRoutingLine.Status;
+          ProdOrderRtngQltyMeas."Prod. Order No." := ProdOrderRoutingLine."Prod. Order No.";
+          ProdOrderRtngQltyMeas."Routing Reference No." := ProdOrderRoutingLine."Routing Reference No.";
+          ProdOrderRtngQltyMeas.INSERT;
+        UNTIL RoutingQualityMeasure.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CopyRoutingTools@32(ProdOrderRoutingLine@1000 : Record 5409;VersionCode@1002 : Code[20]);
+    VAR
+      RoutingTool@1001 : Record 99000802;
+      ProdOrderRoutingTool@1003 : Record 5411;
+    BEGIN
+      RoutingTool.SETRANGE("Routing No.",ProdOrderRoutingLine."Routing No.");
+      RoutingTool.SETRANGE("Operation No.",ProdOrderRoutingLine."Operation No.");
+      RoutingTool.SETRANGE("Version Code",VersionCode);
+      IF RoutingTool.FIND('-') THEN
+        REPEAT
+          ProdOrderRoutingTool.TRANSFERFIELDS(RoutingTool);
+          ProdOrderRoutingTool.Status := ProdOrderRoutingLine.Status;
+          ProdOrderRoutingTool."Prod. Order No." := ProdOrderRoutingLine."Prod. Order No.";
+          ProdOrderRoutingTool."Routing Reference No." := ProdOrderRoutingLine."Routing Reference No.";
+          ProdOrderRoutingTool.INSERT;
+        UNTIL RoutingTool.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE Recalculate@2(VAR ProdOrderLine2@1000 : Record 5406;Direction@1001 : 'Forward,Backward';LetDueDateDecrease@1002 : Boolean);
+    BEGIN
+      ProdOrderLine := ProdOrderLine2;
+      ProdOrderLine.BlockDynamicTracking(Blocked);
+
+      CalculateRouting(Direction,LetDueDateDecrease);
+      CalculateComponents;
+      ProdOrderLine2 := ProdOrderLine;
+    END;
+
+    [External]
+    PROCEDURE BlockDynamicTracking@17(SetBlock@1000 : Boolean);
+    BEGIN
+      Blocked := SetBlock;
+    END;
+
+    [External]
+    PROCEDURE SetParameter@8(NewProdOrderModify@1000 : Boolean);
+    BEGIN
+      ProdOrderModify := NewProdOrderModify;
+    END;
+
+    LOCAL PROCEDURE GetDefaultBin@9() BinCode : Code[20];
+    VAR
+      WMSMgt@1000 : Codeunit 7302;
+    BEGIN
+      WITH ProdOrderComp DO
+        IF "Location Code" <> '' THEN BEGIN
+          IF Location.Code <> "Location Code" THEN
+            Location.GET("Location Code");
+          IF Location."Bin Mandatory" AND (NOT Location."Directed Put-away and Pick") THEN
+            WMSMgt.GetDefaultBin("Item No.","Variant Code","Location Code",BinCode);
+        END;
+    END;
+
+    [External]
+    PROCEDURE SetProdOrderLineBinCodeFromRoute@35(VAR ProdOrderLine@1000 : Record 5406;ParentLocationCode@1001 : Code[10];RoutingNo@1003 : Code[20]);
+    VAR
+      RouteBinCode@1005 : Code[20];
+    BEGIN
+      RouteBinCode :=
+        WMSManagement.GetLastOperationFromBinCode(
+          RoutingNo,
+          ProdOrderLine."Routing Version Code",
+          ProdOrderLine."Location Code",
+          FALSE,
+          0);
+      SetProdOrderLineBinCode(ProdOrderLine,RouteBinCode,ParentLocationCode);
+    END;
+
+    [External]
+    PROCEDURE SetProdOrderLineBinCodeFromProdRtngLines@10(VAR ProdOrderLine@1000 : Record 5406);
+    VAR
+      ProdOrderRoutingLineBinCode@1005 : Code[20];
+    BEGIN
+      IF ProdOrderLine."Planning Level Code" > 0 THEN
+        EXIT;
+
+      ProdOrderRoutingLineBinCode :=
+        WMSManagement.GetProdRtngLastOperationFromBinCode(
+          ProdOrderLine.Status,
+          ProdOrderLine."Prod. Order No.",
+          ProdOrderLine."Line No.",
+          ProdOrderLine."Routing No.",
+          ProdOrderLine."Location Code");
+      SetProdOrderLineBinCode(ProdOrderLine,ProdOrderRoutingLineBinCode,ProdOrderLine."Location Code");
+    END;
+
+    [External]
+    PROCEDURE SetProdOrderLineBinCodeFromPlanningRtngLines@19(VAR ProdOrderLine@1000 : Record 5406;ReqLine@1003 : Record 246);
+    VAR
+      PlanningLinesBinCode@1005 : Code[20];
+    BEGIN
+      IF ProdOrderLine."Planning Level Code" > 0 THEN
+        EXIT;
+
+      PlanningLinesBinCode :=
+        WMSManagement.GetPlanningRtngLastOperationFromBinCode(
+          ReqLine."Worksheet Template Name",
+          ReqLine."Journal Batch Name",
+          ReqLine."Line No.",
+          ReqLine."Location Code");
+      SetProdOrderLineBinCode(ProdOrderLine,PlanningLinesBinCode,ReqLine."Location Code");
+    END;
+
+    LOCAL PROCEDURE SetProdOrderLineBinCode@20(VAR ProdOrderLine@1001 : Record 5406;ParentBinCode@1000 : Code[20];ParentLocationCode@1003 : Code[10]);
+    VAR
+      Location@1002 : Record 14;
+      FromProdBinCode@1004 : Code[20];
+    BEGIN
+      IF ParentBinCode <> '' THEN
+        ProdOrderLine.VALIDATE("Bin Code",ParentBinCode)
+      ELSE
+        IF ProdOrderLine."Bin Code" = '' THEN BEGIN
+          IF Location.GET(ParentLocationCode) THEN
+            FromProdBinCode := Location."From-Production Bin Code";
+          IF FromProdBinCode <> '' THEN
+            ProdOrderLine.VALIDATE("Bin Code",FromProdBinCode)
+          ELSE
+            IF Location."Bin Mandatory" AND NOT Location."Directed Put-away and Pick" THEN
+              IF WMSManagement.GetDefaultBin(ProdOrderLine."Item No.",ProdOrderLine."Variant Code",Location.Code,FromProdBinCode) THEN
+                ProdOrderLine.VALIDATE("Bin Code",FromProdBinCode);
+        END;
+    END;
+
+    [External]
+    PROCEDURE FindAndSetProdOrderLineBinCodeFromProdRtngLines@13(ProdOrderStatus@1002 : Option;ProdOrderNo@1001 : Code[20];ProdOrderLineNo@1000 : Integer);
+    BEGIN
+      IF ProdOrderLine.GET(ProdOrderStatus,ProdOrderNo,ProdOrderLineNo) THEN BEGIN
+        SetProdOrderLineBinCodeFromProdRtngLines(ProdOrderLine);
+        ProdOrderLine.MODIFY;
+      END;
+    END;
+
+    [External]
+    PROCEDURE AssignProdOrderLineBinCodeFromProdRtngLineMachineCenter@14(VAR ProdOrderRoutingLine@1001 : Record 5409);
+    VAR
+      MachineCenter@1000 : Record 99000758;
+    BEGIN
+      MachineCenter.SETRANGE("Work Center No.",ProdOrderRoutingLine."Work Center No.");
+      IF PAGE.RUNMODAL(PAGE::"Machine Center List",MachineCenter) = ACTION::LookupOK THEN
+        IF (ProdOrderRoutingLine."No." <> MachineCenter."No.") OR
+           (ProdOrderRoutingLine.Type = ProdOrderRoutingLine.Type::"Work Center")
+        THEN BEGIN
+          ProdOrderRoutingLine.Type := ProdOrderRoutingLine.Type::"Machine Center";
+          ProdOrderRoutingLine.VALIDATE("No.",MachineCenter."No.");
+          FindAndSetProdOrderLineBinCodeFromProdRtngLines(
+            ProdOrderRoutingLine.Status,ProdOrderRoutingLine."Prod. Order No.",ProdOrderRoutingLine."Routing Reference No.");
+        END;
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterInsertProdRoutingLine@23(VAR ProdOrderRoutingLine@1000 : Record 5409;ProdOrderLine@1001 : Record 5406);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterTransferBOM@39(ProdOrder@1000 : Record 5405;ProdOrderLine@1001 : Record 5406;ProdBOMNo@1002 : Code[20];Level@1003 : Integer;LineQtyPerUOM@1004 : Decimal;ItemQtyPerUOM@1005 : Decimal;Blocked@1006 : Boolean;VAR ErrorOccured@1007 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterTransferTaskInfo@15(VAR ProdOrderRoutingLine@1000 : Record 5409;VersionCode@1001 : Code[20]);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterTransferRouting@18(VAR ProdOrderLine@1000 : Record 5406);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterTransferRoutingLine@22(VAR ProdOrderLine@1000 : Record 5406;VAR RoutingLine@1001 : Record 99000764;VAR ProdOrderRoutingLine@1002 : Record 5409);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterTransferBOMComponent@21(VAR ProdOrderLine@1000 : Record 5406;VAR ProductionBOMLine@1001 : Record 99000772;VAR ProdOrderComponent@1002 : Record 5407;LineQtyPerUOM@1003 : Decimal;ItemQtyPerUOM@1004 : Decimal);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterProdOrderCompFilter@16(VAR ProdOrderComp@1000 : Record 5407;ProdBOMLine@1001 : Record 99000772);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterProdOrderCompInsert@48(VAR ProdOrderComponent@1000 : Record 5407;ProductionBOMLine@1001 : Record 99000772);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeCalculate@37(VAR ItemLedgerEntry@1000 : Record 32;VAR CapacityLedgerEntry@1001 : Record 5832);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeCalculateProdOrderDates@24(VAR ProdOrderLine@1000 : Record 5406);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeCopyProdBOMComments@31(VAR ProductionBOMCommentLine@1000 : Record 99000776;VAR ProductionBOMLine@1001 : Record 99000772;VAR IsHandled@1002 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeProdOrderCompModify@29(VAR ProdOrderComp@1000 : Record 5407;VAR ProdBOMLine@1001 : Record 99000772;LineQtyPerUOM@1003 : Decimal;ItemQtyPerUOM@1002 : Decimal);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeTransferBOM@33(VAR ProdOrder@1000 : Record 5405;VAR ProdOrderLine@1001 : Record 5406;ProdBOMNo@1005 : Code[20];Level@1004 : Integer;LineQtyPerUOM@1003 : Decimal;ItemQtyPerUOM@1002 : Decimal;Blocked@1006 : Boolean;VAR ErrorOccured@1008 : Boolean;VAR IsHandled@1007 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeTransferBOMComponent@43(ProdOrder@1000 : Record 5405;ProdOrderLine@1001 : Record 5406;VAR ProdBOMLine@1002 : Record 99000772;VAR ErrorOccured@1003 : Boolean;VAR IsHandled@1004 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeTransferRouting@30(VAR ProdOrder@1000 : Record 5405;VAR ProdOrderLine@1001 : Record 5406;VAR IsHandled@1002 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeUpdateProdOrderDates@26(VAR ProductionOrder@1000 : Record 5405;VAR ProdOrderLine@1001 : Record 5406);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnCalculateOnBeforeCheckNextOperation@49(ProdOrder@1000 : Record 5405;ProdOrderLine2@1001 : Record 5406;VAR ProdOrderRoutingLine3@1002 : Record 5409;VAR IsHandled@1003 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnCalculateOnBeforeCheckPrevOperation@46(ProdOrder@1000 : Record 5405;ProdOrderLine2@1001 : Record 5406;VAR ProdOrderRoutingLine3@1002 : Record 5409;VAR IsHandled@1003 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnCalculateComponentsOnBeforeUpdateRoutingLinkCode@52(VAR ProdOrderComp@1000 : Record 5407;ProdOrderLine@1001 : Record 5406;VAR IsHandled@1002 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnCalculateProdOrderDatesOnAfterSetFilters@42(VAR ProdOrderRoutingLine@1000 : Record 5409;ProductionOrder@1001 : Record 5405;ProdOrderLine@1002 : Record 5406);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnCalculateProdOrderDatesOnSetBeforeDueDate@34(VAR ProdOrderLine@1000 : Record 5406;VAR IsHandled@1001 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnTransferBOMOnAfterCalcReqQty@41(ProductionBOMLine@1000 : Record 99000772;ProdOrderRoutingLine@1001 : Record 5409;ProdOrderLine@1002 : Record 5406;VAR ReqQty@1003 : Decimal;LineQtyPerUOM@1004 : Decimal;ItemQtyPerUOM@1005 : Decimal);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnTransferBOMOnAfterSetFiltersProdBOMLine@25(VAR ProdBOMLine@1000 : Record 99000772;ProdOrderLine@1001 : Record 5406);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnTransferBOMOnBeforeProcessItem@47(ProdBOMLine@1001 : Record 99000772;ReqQty@1002 : Decimal;VAR SkipTransfer@1000 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnTransferBOMOnBeforeProcessProdBOM@44(ProdBOMLine@1004 : Record 99000772;LineQtyPerUOM@1001 : Decimal;ItemQtyPerUOM@1000 : Decimal;VAR ReqQty@1003 : Decimal);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnTransferBOMProcessItemOnBeforeGetPlanningParameters@45(VAR ProdOrderComponent@1000 : Record 5407;ProductionBOMLine@1001 : Record 99000772);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

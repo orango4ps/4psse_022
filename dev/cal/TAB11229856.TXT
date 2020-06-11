@@ -1,0 +1,181 @@
+OBJECT Table 11229856 Rental Package Line Rate
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnInsert=BEGIN
+               CheckPackageEditable();
+               TESTFIELD("Line No.");
+               CheckRateLineEditable('I', TRUE);
+             END;
+
+    OnModify=BEGIN
+               CheckPackageEditable();
+               CheckRateLineEditable('M', TRUE);
+             END;
+
+    OnDelete=BEGIN
+               CheckPackageEditable();
+               CheckRateLineEditable('D', TRUE);
+             END;
+
+    OnRename=BEGIN
+               CheckPackageEditable();
+               CheckRateLineEditable('R', TRUE);
+             END;
+
+    CaptionML=ENU=Rental Package Line Rate;
+  }
+  FIELDS
+  {
+    { 10  ;   ;Project No.         ;Code20        ;TableRelation=Job.No.;
+                                                   CaptionML=[ENU=Project No.;
+                                                              NOR=Prosjektnr;
+                                                              SVE=Projektnr];
+                                                   NotBlank=Yes }
+    { 20  ;   ;Rental Unit         ;Code20        ;TableRelation="Rental Unit"."Rental Unit" WHERE (Project No.=FIELD(Project No.));
+                                                   CaptionML=[ENU=Rental Unit;
+                                                              NOR=Leieenhet;
+                                                              SVE=Uthyrningsenhet];
+                                                   NotBlank=Yes }
+    { 30  ;   ;Starting Date Package;Date         ;TableRelation="Rental Package"."Starting Date" WHERE (Project No.=FIELD(Project No.),
+                                                                                                         Rental Unit=FIELD(Rental Unit));
+                                                   CaptionML=[ENU=Starting Date Package;
+                                                              NOR=Startdato for Pakke];
+                                                   NotBlank=Yes }
+    { 40  ;   ;Line No.            ;Integer       ;TableRelation="Rental Rate Line"."Line No." WHERE (Project No.=FIELD(Project No.),
+                                                                                                      Rental Unit=FIELD(Rental Unit),
+                                                                                                      Starting Date Package=FIELD(Starting Date Package));
+                                                   CaptionML=[ENU=Line No.;
+                                                              NOR=Linjenr.;
+                                                              SVE=Radnr];
+                                                   NotBlank=Yes }
+    { 50  ;   ;Date                ;Date          ;OnValidate=BEGIN
+                                                                IF Date <> xRec.Date THEN
+                                                                  CheckRateLineEditable('Date', TRUE);
+                                                              END;
+
+                                                   CaptionML=[ENU=Date;
+                                                              NOR=Dato;
+                                                              SVE=Datum] }
+    { 60  ;   ;Period Amount       ;Decimal       ;OnValidate=BEGIN
+                                                                IF ("Period Amount" <> xRec."Period Amount") THEN
+                                                                  CalculateYearAmount();
+                                                              END;
+
+                                                   CaptionML=ENU=Period Amount;
+                                                   AutoFormatType=1 }
+    { 70  ;   ;Year Amount         ;Decimal       ;OnValidate=BEGIN
+                                                                IF ("Year Amount" <> xRec."Year Amount") THEN
+                                                                  CalculatePeriodAmount(FALSE, 0);
+                                                              END;
+
+                                                   CaptionML=ENU=Year Amount;
+                                                   AutoFormatType=1 }
+  }
+  KEYS
+  {
+    {    ;Project No.,Rental Unit,Starting Date Package,Line No.,Date;
+                                                   MaintainSIFTIndex=No;
+                                                   Clustered=Yes }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+    VAR
+      Text001@1100529000 : TextConst 'ENU=%1 is already %2 ''%3'',';
+      Text002a@1100529001 : TextConst 'ENU=insert %1 only allowed after this date';
+      Text002b@1100529002 : TextConst 'ENU=modify %1 not allowed';
+      Text002c@1100529003 : TextConst 'ENU=delete %1 not allowed';
+      Text002d@1100529004 : TextConst 'ENU=%1 must be greater';
+
+    PROCEDURE CheckPackageEditable@1100529002();
+    VAR
+      RentalPackage@1100529000 : Record 11012941;
+    BEGIN
+      RentalPackage.CheckIfPackageIsEditable("Project No.", "Rental Unit", "Starting Date Package");
+    END;
+
+    PROCEDURE CheckRateLineEditable@1100529003(Mode@1100529002 : Code[10];ErrorMode@1100529001 : Boolean) : Boolean;
+    VAR
+      RentalRateLine@1100529000 : Record 11012942;
+      ErrorText@1100529003 : Text;
+    BEGIN
+      RentalRateLine.GET("Project No.", "Rental Unit", "Starting Date Package", "Line No.");
+      IF (RentalRateLine."Invoiced Until" <> 0D) AND
+          (((Mode <> 'R') AND (Date <= RentalRateLine."Invoiced Until")) OR
+           ((Mode = 'R') AND (xRec.Date <= RentalRateLine."Invoiced Until")))
+      THEN BEGIN
+        IF NOT ErrorMode THEN
+          EXIT(FALSE)
+        ELSE BEGIN
+          ErrorText := STRSUBSTNO(Text001, RentalRateLine.TABLECAPTION, RentalRateLine.FIELDCAPTION("Invoiced Until"), RentalRateLine."Invoiced Until") + ' ';
+          CASE Mode OF
+            'I':
+              ErrorText += STRSUBSTNO(Text002a, TABLECAPTION);
+            'M','R':
+              ErrorText += STRSUBSTNO(Text002b, TABLECAPTION);
+            'D':
+              ErrorText += STRSUBSTNO(Text002c, TABLECAPTION);
+            'DATE':
+              ErrorText += STRSUBSTNO(Text002d, FIELDCAPTION(Date));
+          END;
+          ERROR(ErrorText);
+        END;
+      END;
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE CalculatePeriodAmount@1100529000(UseCurrFreq@1100529002 : Boolean;CurrInvoiceFreq@1100529003 : Option);
+    VAR
+      RentalPackage@1100529000 : Record 11012941;
+      Factor@1100529001 : Integer;
+    BEGIN
+      IF UseCurrFreq THEN  //If freq of package is modified and not updated yet in the table. (or already read)
+        RentalPackage."Invoice Frequency" := CurrInvoiceFreq
+      ELSE
+        RentalPackage.GET("Project No.", "Rental Unit", "Starting Date Package");
+      CASE RentalPackage."Invoice Frequency" OF
+        RentalPackage."Invoice Frequency"::Month:
+          Factor := 12;
+        RentalPackage."Invoice Frequency"::Quarter:
+          Factor := 4;
+        RentalPackage."Invoice Frequency"::HalfYear:
+          Factor := 2;
+        RentalPackage."Invoice Frequency"::Year:
+          Factor := 1;
+      END;
+      "Period Amount" := ROUND("Year Amount" / Factor);
+    END;
+
+    PROCEDURE CalculateYearAmount@1100529001();
+    VAR
+      RentalPackage@1100529000 : Record 11012941;
+      Factor@1100529001 : Integer;
+    BEGIN
+      RentalPackage.GET("Project No.", "Rental Unit", "Starting Date Package");
+      CASE RentalPackage."Invoice Frequency" OF
+        RentalPackage."Invoice Frequency"::Month:
+          Factor := 12;
+        RentalPackage."Invoice Frequency"::Quarter:
+          Factor := 4;
+        RentalPackage."Invoice Frequency"::HalfYear:
+          Factor := 2;
+        RentalPackage."Invoice Frequency"::Year:
+          Factor := 1;
+      END;
+      "Year Amount" := ROUND("Period Amount" * Factor);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

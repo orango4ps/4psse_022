@@ -1,0 +1,181 @@
+OBJECT Codeunit 1259 Certificate Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      TempBlob@1010 : Record 99008535;
+      DotNet_X509Certificate2@1005 : Codeunit 3043;
+      PasswordSuffixTxt@1000 : TextConst '@@@={Locked};ENU=Password;NOR=Password';
+      SavingPasswordErr@1002 : TextConst 'ENU=Could not save the password.;NOR=Kan ikke lagre passordet.';
+      SavingCertErr@1003 : TextConst 'ENU=Could not save the certificate.;NOR=Kunne ikke lagre sertifikatet.';
+      ReadingCertErr@1004 : TextConst 'ENU=Could not get the certificate.;NOR=Kan ikke hente sertifikatet.';
+      FileManagement@1006 : Codeunit 419;
+      SelectFileTxt@1007 : TextConst 'ENU=Select a certificate file;NOR=Velg en sertifikatfil';
+      CertFileNotValidDotNetTok@1008 : TextConst '@@@={Locked};ENU=Cannot find the requested object.;NOR=Cannot find the requested object.';
+      CertFileNotValidErr@1009 : TextConst 'ENU=This is not a valid certificate file.;NOR=Dette er ikke en gyldig sertifikatfil.';
+      CertFileFilterTxt@1011 : TextConst '@@@={Locked};ENU="Certificate Files (*.pfx, *.p12,*.p7b,*.cer,*.crt,*.der)|*.pfx;*.p12;*.p7b;*.cer;*.crt;*.der";NOR="Certificate Files (*.pfx, *.p12,*.p7b,*.cer,*.crt,*.der)|*.pfx;*.p12;*.p7b;*.cer;*.crt;*.der"';
+      CertExtFilterTxt@1012 : TextConst '@@@={Locked};ENU=.pfx.p12.p7b.cer.crt.der;NOR=.pfx.p12.p7b.cer.crt.der';
+      EncryptionManagement@1001 : Codeunit 1266;
+      UploadedCertFileName@1013 : Text;
+
+    PROCEDURE UploadAndVerifyCert@6(VAR IsolatedCertificate@1000 : Record 1262) : Boolean;
+    VAR
+      FileName@1001 : Text;
+    BEGIN
+      FileName := FileManagement.UploadFileWithFilter(SelectFileTxt,CertExtFilterTxt,CertFileFilterTxt,CertExtFilterTxt);
+      IF FileName = '' THEN
+        ERROR('');
+
+      TempBlob.Blob.IMPORT(FileName);
+      UploadedCertFileName := FileManagement.GetFileName(FileName);
+      FileManagement.DeleteServerFile(FileName);
+
+      EXIT(VerifyCert(IsolatedCertificate));
+    END;
+
+    PROCEDURE VerifyCert@2(VAR IsolatedCertificate@1002 : Record 1262) : Boolean;
+    BEGIN
+      IF NOT TempBlob.Blob.HASVALUE THEN
+        ERROR(CertFileNotValidErr);
+
+      IF ReadCertFromBlob(IsolatedCertificate.Password) THEN BEGIN
+        ValidateCertFields(IsolatedCertificate);
+        EXIT(TRUE);
+      END;
+
+      IF STRPOS(GETLASTERRORTEXT,CertFileNotValidDotNetTok) <> 0 THEN
+        ERROR(CertFileNotValidErr);
+      EXIT(FALSE);
+    END;
+
+    PROCEDURE VerifyCertFromString@11(VAR IsolatedCertificate@1002 : Record 1262;CertString@1000 : Text);
+    BEGIN
+      TempBlob.INIT;
+      TempBlob.FromBase64String(CertString);
+      VerifyCert(IsolatedCertificate);
+    END;
+
+    PROCEDURE SaveCertToIsolatedStorage@1(IsolatedCertificate@1000 : Record 1262);
+    VAR
+      CertString@1004 : Text;
+    BEGIN
+      IF NOT TempBlob.Blob.HASVALUE THEN
+        ERROR(CertFileNotValidErr);
+
+      CertString := TempBlob.ToBase64String;
+      IF NOT ISOLATEDSTORAGE.SET(IsolatedCertificate.Code,CertString,GetCertDataScope(IsolatedCertificate)) THEN
+        ERROR(SavingCertErr);
+    END;
+
+    PROCEDURE SavePasswordToIsolatedStorage@5(IsolatedCertificate@1000 : Record 1262);
+    BEGIN
+      WITH IsolatedCertificate DO BEGIN
+        IF Password <> '' THEN BEGIN
+          IF EncryptionManagement.IsEncryptionEnabled THEN BEGIN
+            IF NOT ISOLATEDSTORAGE.SETENCRYPTED(Code + PasswordSuffixTxt,Password,GetCertDataScope(IsolatedCertificate)) THEN
+              ERROR(SavingPasswordErr);
+          END ELSE
+            IF NOT ISOLATEDSTORAGE.SET(Code + PasswordSuffixTxt,Password,GetCertDataScope(IsolatedCertificate)) THEN
+              ERROR(SavingPasswordErr);
+        END;
+
+        Password := '*';
+      END;
+    END;
+
+    PROCEDURE GetPasswordAsSecureString@3(VAR DotNet_SecureString@1004 : Codeunit 3044;IsolatedCertificate@1008 : Record 1262);
+    VAR
+      DotNetHelper_SecureString@1001 : Codeunit 3750;
+      StoredPassword@1000 : Text;
+    BEGIN
+      StoredPassword := '';
+      IF ISOLATEDSTORAGE.GET(IsolatedCertificate.Code + PasswordSuffixTxt,GetCertDataScope(IsolatedCertificate),StoredPassword)THEN;
+      DotNetHelper_SecureString.SecureStringFromString(DotNet_SecureString,StoredPassword);
+    END;
+
+    PROCEDURE GetCertAsBase64String@14(IsolatedCertificate@1000 : Record 1262) : Text;
+    VAR
+      CertString@1002 : Text;
+    BEGIN
+      CertString := '';
+      IF NOT ISOLATEDSTORAGE.GET(IsolatedCertificate.Code,GetCertDataScope(IsolatedCertificate),CertString)THEN
+        ERROR(ReadingCertErr);
+      EXIT(CertString);
+    END;
+
+    PROCEDURE GetCertDataScope@4(IsolatedCertificate@1000 : Record 1262) : DataScope;
+    BEGIN
+      CASE IsolatedCertificate.Scope OF
+        IsolatedCertificate.Scope::Company:
+          EXIT(DATASCOPE::Company);
+        IsolatedCertificate.Scope::CompanyAndUser:
+          EXIT(DATASCOPE::CompanyAndUser);
+        IsolatedCertificate.Scope::User:
+          EXIT(DATASCOPE::User);
+      END;
+    END;
+
+    PROCEDURE DeleteCertAndPasswordFromIsolatedStorage@7(IsolatedCertificate@1001 : Record 1262);
+    VAR
+      CertDataScope@1000 : DataScope;
+    BEGIN
+      CertDataScope := GetCertDataScope(IsolatedCertificate);
+      WITH IsolatedCertificate DO BEGIN
+        IF ISOLATEDSTORAGE.CONTAINS(Code,CertDataScope) THEN
+          ISOLATEDSTORAGE.DELETE(Code,CertDataScope);
+        IF ISOLATEDSTORAGE.CONTAINS(Code + PasswordSuffixTxt,CertDataScope) THEN
+          ISOLATEDSTORAGE.DELETE(Code + PasswordSuffixTxt,CertDataScope);
+      END;
+    END;
+
+    PROCEDURE GetUploadedCertFileName@9() : Text;
+    BEGIN
+      EXIT(UploadedCertFileName);
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE ReadCertFromBlob@12(Password@1000 : Text[50]);
+    VAR
+      DotNet_X509KeyStorageFlags@1003 : Codeunit 3041;
+      DotNet_Array@1004 : Codeunit 3000;
+      Convert@1014 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Convert";
+    BEGIN
+      DotNet_Array.SetArray(Convert.FromBase64String(TempBlob.ToBase64String));
+      DotNet_X509KeyStorageFlags.Exportable;
+      DotNet_X509Certificate2.X509Certificate2(DotNet_Array,Password,DotNet_X509KeyStorageFlags);
+    END;
+
+    LOCAL PROCEDURE GetIssuer@8(Issuer@1000 : Text) : Text;
+    BEGIN
+      IF STRPOS(Issuer,'CN=') <> 0 THEN
+        EXIT(SELECTSTR(1,COPYSTR(Issuer,STRPOS(Issuer,'CN=') + 3)));
+    END;
+
+    LOCAL PROCEDURE ValidateCertFields@15(VAR IsolatedCertificate@1000 : Record 1262);
+    BEGIN
+      WITH IsolatedCertificate DO BEGIN
+        VALIDATE("Expiry Date",DotNet_X509Certificate2.Expiration);
+        VALIDATE("Has Private Key",DotNet_X509Certificate2.HasPrivateKey);
+        VALIDATE(ThumbPrint,COPYSTR(DotNet_X509Certificate2.Thumbprint,1,MAXSTRLEN(ThumbPrint)));
+        VALIDATE("Issued By",GetIssuer(DotNet_X509Certificate2.Issuer));
+        VALIDATE("Issued To",GetIssuer(DotNet_X509Certificate2.Subject));
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

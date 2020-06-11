@@ -1,0 +1,1609 @@
+OBJECT Codeunit 11012901 Project CF Mgt.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      CostObjectMissingInRubric@1100527700 : TextConst 'DEU=KostentrÑger %1 fehlt in Rubriken.;ENU=Cost Object %1 is missing in Rubrics;NLD=Kostendrager %1 ontbreekt in rubrieken';
+      LandCostInstallmentMissing@1100527701 : TextConst 'DEU=%1 %2 hat keine GrundstÅckrate.;ENU=%1 %2 has no Plot Installment.;NLD=%1 %2 heeft geen grondtermijn.';
+      CheckDateError@1100527702 : TextConst 'DEU=Der %1 darf niet spÑter sein als der %2 bei %3 %4;ENU=%1 can not be later than %2;NLD=De %1 mag niet later zijn dan de %2 bij %3 %4';
+      TempProjectCFDetail@1100527703 : TEMPORARY Record 11012638;
+
+    PROCEDURE CreateProjectCF@1100527788(VAR ProjectCF@1100527704 : Record 11012635;CreateNewProjectCF@1100527701 : Boolean;CopyFromCF@1100527702 : Boolean);
+    VAR
+      Job@1100527703 : Record 11072003;
+      TempProjectInstallment@1100527700 : TEMPORARY Record 11012018;
+      SourceProjectCF@1100527705 : Record 11012635;
+    BEGIN
+      ProjectCF.TESTFIELD("Project No.");
+      IF CopyFromCF THEN BEGIN
+        SourceProjectCF := ProjectCF;
+        SourceProjectCF.FIND; //must be present
+      END;
+
+      ReadProjectAndBuildCostControl(ProjectCF."Project No.",Job);
+      WITH ProjectCF DO BEGIN
+        IF CreateNewProjectCF THEN BEGIN
+          INIT;
+          "Cash Flow" := ROUNDDATETIME(CREATEDATETIME(WORKDATE,TIME));
+          "Prognosis Date" := DeterminePrognosisDate(99991231D,Job);
+          "Reference Date" := CalcReferenceDate("Prognosis Date");
+          IF CopyFromCF THEN BEGIN
+            Description := SourceProjectCF.Description;
+            "Revenues based on" := SourceProjectCF."Revenues based on";
+            "Template Code" := SourceProjectCF."Template Code";
+            SetCopyFromCF;
+          END ELSE
+            ProjectCF.GetDataFromProject;
+          INSERT(TRUE);
+          IF CopyFromCF THEN
+            GetDataFromCF(SourceProjectCF);
+        END ELSE BEGIN
+          ProjectCF.GetDataFromProject;
+          "Prognosis Date" := DeterminePrognosisDate(99991231D,Job);
+          MODIFY(TRUE);
+        END;
+      END;
+      ProjectCF.CheckInstallmentsAlreadyInvoiced;
+      GenerateVirtualInstallments(ProjectCF,TempProjectInstallment);
+      CreateOrUpdateProjectCFRubrics(ProjectCF,Job,TempProjectInstallment,CopyFromCF,SourceProjectCF)
+    END;
+
+    LOCAL PROCEDURE GenerateVirtualInstallments@1100527724(ProjectCF@1100527701 : Record 11012635;VAR TempProjectInstallment@1100527702 : TEMPORARY Record 11012018);
+    VAR
+      GenerateProjectInstallments@1100527700 : Codeunit 11012007;
+    BEGIN
+      IF ProjectCF."Revenues based on" = ProjectCF."Revenues based on"::Products THEN
+        EXIT;
+
+      GenerateProjectInstallments.FromCashFlow(ProjectCF."Project No.",TempProjectInstallment);
+    END;
+
+    LOCAL PROCEDURE CreateOrUpdateProjectCFRubrics@1100527779(ProjectCF@1100527700 : Record 11012635;VAR Job@1100527701 : Record 11072003;VAR TempProjectInstallment@1100527704 : TEMPORARY Record 11012018;CopyFromCF@1100527705 : Boolean;SourceProjectCF@1100527706 : Record 11012635);
+    VAR
+      ProjectCFRubric@1100527702 : Record 11012637;
+      CFRubric@1100527703 : Record 11012637;
+      ProjectCFParameter@1100527707 : Record 11012631;
+    BEGIN
+      CheckCostObjectsInRubricFilter(Job,ProjectCF,TempProjectInstallment);
+
+      WITH ProjectCFRubric DO BEGIN
+        IF CopyFromCF THEN BEGIN
+          SETRANGE("Record Type","Record Type"::"Cash Flow");
+          SETRANGE("Project No.",SourceProjectCF."Project No.");
+          SETRANGE("Cash Flow",SourceProjectCF."Cash Flow");
+        END ELSE BEGIN
+          SETRANGE("Record Type","Record Type"::Project);
+          SETRANGE("Project No.",ProjectCF."Project No.");
+          SETRANGE("Cash Flow",0DT);
+        END;
+        IF FINDSET THEN
+          REPEAT
+            CFRubric := ProjectCFRubric;
+            CFRubric."Cash Flow" := ProjectCF."Cash Flow";
+            CFRubric."Record Type" := CFRubric."Record Type"::"Cash Flow";
+
+            IF NOT CFRubric.FIND THEN
+              CFRubric.INSERT;
+          UNTIL NEXT = 0;
+      END;
+
+      CheckProductRubrics(ProjectCF);
+
+      ProjectCFParameter.SETAUTOCALCFIELDS("Until Date","From Date");
+      WITH CFRubric DO BEGIN
+        SETRANGE("Record Type","Record Type"::"Cash Flow");
+        SETRANGE("Project No.",ProjectCF."Project No.");
+        SETRANGE("Cash Flow",ProjectCF."Cash Flow");
+        SETFILTER(Type,'%1|%2',Type::Costs,Type::Revenues);
+
+        //Not Based on other Rubrics
+        IF FINDSET THEN
+          REPEAT
+            ProjectCFParameter.GET(ProjectCFParameter."Record Type"::"Cash Flow",CFRubric."Project No.",CFRubric."Cash Flow",CFRubric."Parameter Code",CFRubric."Template Code");
+            IF ProjectCFParameter."Divide Option" <> ProjectCFParameter."Divide Option"::"Based on Other Rubric" THEN BEGIN
+              ClearRubricAmounts(CFRubric);
+              CalcAndDistributeCFRubrAmounts(ProjectCF,CFRubric,Job,TempProjectInstallment);
+
+              IF RubricIsRelevant(CFRubric) THEN BEGIN
+                CheckParameterDatesFilled(ProjectCFParameter);
+                CFRubric.MODIFY;
+              END ELSE
+                CFRubric.DELETE(TRUE);
+            END;
+          UNTIL NEXT = 0;
+
+        //Based on other Rubrics
+        IF FINDSET THEN
+          REPEAT
+            ProjectCFParameter.GET(ProjectCFParameter."Record Type"::"Cash Flow",CFRubric."Project No.",CFRubric."Cash Flow",CFRubric."Parameter Code",CFRubric."Template Code");
+            IF ProjectCFParameter."Divide Option" = ProjectCFParameter."Divide Option"::"Based on Other Rubric" THEN BEGIN
+              ClearRubricAmounts(CFRubric);
+              CalcAndDistributeCFRubrAmounts(ProjectCF,CFRubric,Job,TempProjectInstallment);
+
+              IF RubricIsRelevant(CFRubric) THEN BEGIN
+                CheckParameterDatesFilled(ProjectCFParameter);
+                CFRubric.MODIFY;
+              END ELSE
+                CFRubric.DELETE(TRUE);
+            END;
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckCostObjectsInRubricFilter@1100527706(VAR Job@1100527702 : Record 11072003;ProjectCF@1100527701 : Record 11012635;VAR TempProjectInstallment@1100527705 : TEMPORARY Record 11012018);
+    VAR
+      ProjectInstallment@1100527700 : Record 11012018;
+    BEGIN
+      CheckCostObjectsInCostControl(Job,ProjectCF."Project No.");
+      IF ProjectCF."Revenues based on" = ProjectCF."Revenues based on"::Installments THEN BEGIN
+        CheckCostObjectsInProjInstallments(ProjectCF."Project No.",ProjectInstallment);
+        CheckCostObjectsInProjInstallments(ProjectCF."Project No.",TempProjectInstallment);
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckCostObjectsInCostControl@1100527715(VAR Job@1100527705 : Record 11072003;ProjectNo@1100527701 : Code[20]);
+    VAR
+      ControlProjectCostObject@1100527700 : Record 11012047;
+      ProjectCFRubric@1100527703 : Record 11012637;
+      ImaginaryProjectCFRubric@1100527704 : Record 11012637;
+      CostObjectInRubric@1100527702 : Boolean;
+    BEGIN
+      WITH ControlProjectCostObject DO BEGIN
+        SETRANGE("Project No.",ProjectNo);
+        SETFILTER("Cost Object",'<>%1','');
+        IF FINDSET THEN
+          REPEAT
+            CostObjectInRubric := FALSE;
+            ProjectCFRubric.SETRANGE("Record Type",ProjectCFRubric."Record Type"::Project);
+            ProjectCFRubric.SETRANGE("Project No.",ProjectNo);
+            ProjectCFRubric.SETRANGE("Cash Flow",0DT);
+            ProjectCFRubric.SETRANGE(Type,ProjectCFRubric.Type::Costs,ProjectCFRubric.Type::Revenues);
+            ProjectCFRubric.SETFILTER("Cost Object Filter",'<>%1','');
+            IF ProjectCFRubric.FINDSET THEN
+              REPEAT
+                SETRANGE("Cost Object","Cost Object");
+                FILTERGROUP(10);
+                SETFILTER("Cost Object",ProjectCFRubric."Cost Object Filter");
+                FILTERGROUP(0);
+                CostObjectInRubric := NOT ISEMPTY;
+              UNTIL (ProjectCFRubric.NEXT = 0) OR CostObjectInRubric;
+            SETFILTER("Cost Object",'<>%1','');
+            FILTERGROUP(10);
+            SETRANGE("Cost Object");
+            FILTERGROUP(0);
+            IF NOT CostObjectInRubric THEN BEGIN
+              //Check Amounts involved
+              ImaginaryProjectCFRubric."Project No." := ProjectNo;
+              ImaginaryProjectCFRubric."Cost Object Filter" := "Cost Object";
+              CalculateCostContrAmnts(ImaginaryProjectCFRubric,Job);
+
+              IF (ImaginaryProjectCFRubric."Prognosis Amount" <> 0) OR
+                 (ImaginaryProjectCFRubric."Total Cost" <> 0) OR
+                 (ImaginaryProjectCFRubric."Total Prognosis" <> 0) OR
+                 (ImaginaryProjectCFRubric."Open (Purchase)" <> 0) OR
+                 (ImaginaryProjectCFRubric."Received/Not Invoiced" <> 0) OR
+                 (ImaginaryProjectCFRubric.Remaining <> 0) OR
+                 (ImaginaryProjectCFRubric."Actual Amount" <> 0)
+              THEN
+                ERROR(CostObjectMissingInRubric,"Cost Object");
+            END;
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckCostObjectsInProjInstallments@1100527717(ProjectNo@1100527701 : Code[20];VAR ProjectInstallment@1100527700 : Record 11012018);
+    VAR
+      ProjectCFRubric@1100527703 : Record 11012637;
+      CostObjectInRubric@1100527702 : Boolean;
+    BEGIN
+      WITH ProjectInstallment DO BEGIN
+        SETRANGE("Project No.",ProjectNo);
+        SETFILTER("Cost Object",'<>%1','');
+        IF FINDSET THEN
+          REPEAT
+            CostObjectInRubric := FALSE;
+            ProjectCFRubric.SETRANGE("Record Type",ProjectCFRubric."Record Type"::Project);
+            ProjectCFRubric.SETRANGE("Project No.",ProjectNo);
+            ProjectCFRubric.SETRANGE("Cash Flow",0DT);
+            ProjectCFRubric.SETRANGE(Type,ProjectCFRubric.Type::Revenues);
+            ProjectCFRubric.SETFILTER("Cost Object Filter",'<>%1','');
+            IF ProjectCFRubric.FINDSET THEN
+              REPEAT
+                SETRANGE("Cost Object","Cost Object");
+                FILTERGROUP(10);
+                SETFILTER("Cost Object",ProjectCFRubric."Cost Object Filter");
+                FILTERGROUP(0);
+                CostObjectInRubric := NOT ISEMPTY;
+              UNTIL (ProjectCFRubric.NEXT = 0) OR CostObjectInRubric;
+            SETFILTER("Cost Object",'<>%1','');
+            FILTERGROUP(10);
+            SETRANGE("Cost Object");
+            FILTERGROUP(0);
+            IF NOT CostObjectInRubric THEN
+              ERROR(CostObjectMissingInRubric,"Cost Object")
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckProductRubrics@1100527725(ProjectCF@1100527702 : Record 11012635);
+    VAR
+      ProjectCFProduct@1100527703 : Record 11012633;
+    BEGIN
+      IF ProjectCF."Revenues based on" = ProjectCF."Revenues based on"::Installments THEN
+        EXIT;
+
+      WITH ProjectCFProduct DO BEGIN
+        SETRANGE("Record Type","Record Type"::"Cash Flow");
+        SETRANGE("Project No.",ProjectCF."Project No.");
+        SETRANGE("Cash Flow",ProjectCF."Cash Flow");
+        IF FINDSET THEN
+          REPEAT
+            IF "Construction Cost Excl. VAT" <> 0 THEN
+              TESTFIELD("Rubric Construct");
+            IF "Land Cost Excl. VAT" <> 0 THEN
+              TESTFIELD("Rubric Land");
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckParameterDates@1100527707(VAR ProjectCFParameter@1100527700 : Record 11012631);
+    VAR
+      ProjectCFDate@1100527701 : Record 11012630;
+    BEGIN
+      WITH ProjectCFParameter DO
+        IF ("Until Date" <> 0D) AND ("From Date" <> 0D) THEN BEGIN
+          IF "From Date" > "Until Date" THEN BEGIN
+            ProjectCFDate.GET(ProjectCFParameter."Record Type",ProjectCFParameter."Project No.",ProjectCFParameter."Cash Flow",ProjectCFParameter."From Date Code",ProjectCFParameter."Template Code");
+            IF ProjectCFDate."Relate with" = ProjectCFDate."Relate with"::"Reference Date" THEN
+              "Until Date" := "From Date"
+            ELSE
+              ERROR(CheckDateError,FIELDCAPTION("From Date"),FIELDCAPTION("Until Date"),TABLECAPTION,Code);
+          END;
+        END;
+    END;
+
+    LOCAL PROCEDURE CheckParameterDatesFilled@1100525002(ProjectCFParameter@1100527700 : Record 11012631);
+    VAR
+      ProjectCFDate@1100527701 : Record 11012630;
+    BEGIN
+      IF (ProjectCFParameter."From Date Code" <> '') THEN BEGIN
+        ProjectCFDate.RESET;
+        ProjectCFDate.GET(ProjectCFDate."Record Type"::"Cash Flow",ProjectCFParameter."Project No.",ProjectCFParameter."Cash Flow",ProjectCFParameter."From Date Code",ProjectCFParameter."Template Code");
+        ProjectCFDate.TESTFIELD(Date);
+      END;
+      IF (ProjectCFParameter."Until Date Code" <> '') THEN BEGIN
+        ProjectCFDate.RESET;
+        ProjectCFDate.GET(ProjectCFDate."Record Type"::"Cash Flow",ProjectCFParameter."Project No.",ProjectCFParameter."Cash Flow",ProjectCFParameter."Until Date Code",ProjectCFParameter."Template Code");
+        ProjectCFDate.TESTFIELD(Date);
+      END;
+    END;
+
+    LOCAL PROCEDURE CalcAndDistributeCFRubrAmounts@1100527780(ProjectCF@1100527701 : Record 11012635;VAR CFRubric@1100527700 : Record 11012637;VAR Job@1100527704 : Record 11072003;VAR TempProjectInstallment@1100527702 : TEMPORARY Record 11012018);
+    VAR
+      ProjectCFParameter@1100527714 : Record 11012631;
+      BegindateMain@1100527713 : Date;
+      MonthsMain@1100527712 : Integer;
+      BegindateBefore@1100527710 : Date;
+      MonthsBefore@1100527709 : Integer;
+      BeginDateAfter@1100527707 : Date;
+      MonthsAfter@1100527706 : Integer;
+      MonthsBeforeRefDate@1100527703 : Integer;
+    BEGIN
+      CFRubric.TESTFIELD("Parameter Code");
+
+      ProjectCFParameter.SETAUTOCALCFIELDS("Until Date","From Date");
+      ProjectCFParameter.GET(ProjectCFParameter."Record Type"::"Cash Flow",CFRubric."Project No.",CFRubric."Cash Flow",CFRubric."Parameter Code",CFRubric."Template Code");
+
+      CheckParameterDates(ProjectCFParameter);
+
+      CASE CFRubric.Type OF
+        CFRubric.Type::Costs:
+          IF CFRubric."Cost Object Filter" <> '' THEN BEGIN
+            CalculateCostContrAmnts(CFRubric,Job);
+            GetDatesAndMonths(
+              ProjectCF,ProjectCFParameter,BegindateMain,MonthsMain,BegindateBefore,MonthsBefore,BeginDateAfter,MonthsAfter,MonthsBeforeRefDate);
+            DistributePurchaseAmnts(
+              ProjectCF,CFRubric,Job,ProjectCFParameter,BegindateMain,MonthsMain,BegindateBefore,MonthsBefore,BeginDateAfter,MonthsAfter,MonthsBeforeRefDate);
+            IF ProjectCFParameter."Divide Option" <> ProjectCFParameter."Divide Option"::"Based on Other Rubric" THEN BEGIN
+              DistributeCostPrognosis(
+                ProjectCF,CFRubric,ProjectCFParameter,BegindateMain,MonthsMain,BegindateBefore,MonthsBefore,BeginDateAfter,MonthsAfter,MonthsBeforeRefDate);
+              AdjustResultSoFar(ProjectCF,CFRubric,BegindateMain,MonthsMain);
+              MoveTempDataToPrognosisDetail(ProjectCF);
+            END ELSE BEGIN
+              CreateDetailFromOtherRubric(ProjectCFParameter,ProjectCF,CFRubric);
+            END;
+          END;
+        CFRubric.Type::Revenues:
+          BEGIN
+            IF (CFRubric."Cost Object Filter" <> '') OR (ProjectCF."Revenues based on" = ProjectCF."Revenues based on"::Products) THEN BEGIN
+              GetDatesAndMonths(
+                ProjectCF,ProjectCFParameter,BegindateMain,MonthsMain,BegindateBefore,MonthsBefore,BeginDateAfter,MonthsAfter,MonthsBeforeRefDate);
+              DistributeRevenues(
+                ProjectCF,CFRubric,ProjectCFParameter,BegindateMain,MonthsMain,BegindateBefore,MonthsBefore,BeginDateAfter,MonthsAfter,MonthsBeforeRefDate,
+                TempProjectInstallment);
+              MoveTempDataToPrognosisDetail(ProjectCF);
+              CalculatePrognosisRevenues(CFRubric);
+            END;
+            IF CFRubric."Cost Object Filter" <> '' THEN
+              CalculateInvoicedRevenues(ProjectCF,CFRubric,Job);
+          END;
+      END;
+    END;
+
+    LOCAL PROCEDURE CalculateCostContrAmnts@1100527712(VAR CFRubric@1100527700 : Record 11012637;VAR Job@1100527703 : Record 11072003);
+    VAR
+      ControlProjectCostObject@1100527701 : Record 11012047;
+      CostControlManagement@1100527702 : Codeunit 11012006;
+      PrognosisLine@1100527704 : Record 11012035;
+    BEGIN
+      WITH ControlProjectCostObject DO BEGIN
+        Job.COPYFILTER("Cumulation Filter","Cumulation Filter");
+        Job.COPYFILTER("Prognosis Filter","Prognosis Filter");
+        SETRANGE("Project No.",CFRubric."Project No.");
+        SETFILTER("Cost Object",CFRubric."Cost Object Filter");
+        SETAUTOCALCFIELDS("Actual Costs",Prognosis,"Prognosis Total Cost","Open (Purchase)","Received/Not Invoiced");
+        IF FINDSET THEN
+          REPEAT
+            CFRubric."Prognosis Amount" -= Prognosis;
+            CFRubric."Total Cost" -= CostControlManagement.TotCostCostObj(ControlProjectCostObject,TRUE);
+            CFRubric."Total Prognosis" -= "Prognosis Total Cost";
+            CFRubric."Open (Purchase)" -= "Open (Purchase)";
+            CFRubric."Received/Not Invoiced" -= "Received/Not Invoiced";
+            CFRubric.Remaining := CFRubric."Prognosis Amount" + CFRubric."Open (Purchase)" + CFRubric."Received/Not Invoiced";
+          UNTIL NEXT = 0;
+
+        PrognosisLine.SETRANGE("Project No.",CFRubric."Project No.");
+        Job.COPYFILTER("Prognosis Filter",PrognosisLine."Prognosis Date");
+        PrognosisLine.SETFILTER("Cost Object",CFRubric."Cost Object Filter");
+        PrognosisLine.CALCSUMS("Actual Costs");
+        CFRubric."Actual Amount" := -PrognosisLine."Actual Costs";
+      END;
+    END;
+
+    LOCAL PROCEDURE CalculatePrognosisRevenues@1100527718(VAR CFRubric@1100527700 : Record 11012637);
+    VAR
+      ProjectCFDetail@1100527704 : Record 11012638;
+    BEGIN
+      ProjectCFDetail.SETRANGE("Project No.",CFRubric."Project No.");
+      ProjectCFDetail.SETRANGE("Cash Flow",CFRubric."Cash Flow");
+      ProjectCFDetail.SETRANGE(Rubric,CFRubric.Rubric);
+      ProjectCFDetail.SETRANGE(Type,ProjectCFDetail.Type::Revenue);
+      ProjectCFDetail.CALCSUMS(Amount);
+
+      CFRubric."Prognosis Amount" += ProjectCFDetail.Amount;
+      CFRubric."Total Prognosis" += ProjectCFDetail.Amount;
+      CFRubric.Remaining := CFRubric."Prognosis Amount" + CFRubric."Open (Purchase)" + CFRubric."Received/Not Invoiced";
+    END;
+
+    LOCAL PROCEDURE CalculateInvoicedRevenues@1100527727(ProjectCF@1100527702 : Record 11012635;VAR CFRubric@1100527700 : Record 11012637;Job@1100527703 : Record 11072003);
+    VAR
+      JobLedgerEntry@1100527701 : Record 11072005;
+    BEGIN
+      JobLedgerEntry.SETCURRENTKEY("Main Project No.","Job No.","Entry Type");
+      JobLedgerEntry.SETRANGE("Main Project No.",Job."Main Project");
+      IF Job."Single/Main/Sub Project" <> Job."Single/Main/Sub Project"::"Main Project" THEN
+        JobLedgerEntry.SETRANGE("Job No.",CFRubric."Project No.");
+      JobLedgerEntry.SETFILTER("Global Dimension 2 Code",CFRubric."Cost Object Filter");
+      JobLedgerEntry.SETRANGE("Entry Type",JobLedgerEntry."Entry Type"::Sale);
+      JobLedgerEntry.SETRANGE("Posting Date",0D,ProjectCF.GetDateFilterPrognOrReference);
+      JobLedgerEntry.CALCSUMS("Total Price (LCY)");
+
+      CFRubric."Actual Amount" -= JobLedgerEntry."Total Price (LCY)";
+    END;
+
+    LOCAL PROCEDURE DistributePurchaseAmnts@1100527700(ProjectCF@1100527702 : Record 11012635;CFRubric@1100527700 : Record 11012637;Job@1100527709 : Record 11072003;ProjectCFParameter@1100527703 : Record 11012631;BegindateMain@1100527717 : Date;MonthsMain@1100527716 : Integer;BegindateBefore@1100527714 : Date;MonthsBefore@1100527713 : Integer;BeginDateAfter@1100527711 : Date;MonthsAfter@1100527710 : Integer;MonthsBeforeRefDate@1100527719 : Integer);
+    VAR
+      PurchaseOrderControlLine@1100527701 : Record 11020221;
+      RecRef@1100527704 : ARRAY [2] OF RecordRef;
+      PlannedPaymentDate@1100527705 : Date;
+      AmountType@1100527706 : 'Order,Receipt,Prognosis';
+      OutstandingAmount@1100527707 : Decimal;
+      ReceivedNotInvoiceAmount@1100527708 : Decimal;
+    BEGIN
+      WITH PurchaseOrderControlLine DO BEGIN
+        SETRANGE("Main Project No.",Job."Main Project");
+        IF Job."Single/Main/Sub Project" <> Job."Single/Main/Sub Project"::"Main Project" THEN
+          SETRANGE("Project No.",CFRubric."Project No.");
+        SETFILTER("Shortcut Dimension 2 Code",CFRubric."Cost Object Filter");
+        SETRANGE(Date,0D,ProjectCF.GetDateFilterPrognOrReference);
+        SETFILTER("Line Type",'%1|%2',"Line Type"::Order,"Line Type"::Receipt);
+        IF FINDSET THEN BEGIN
+          REPEAT
+            PlannedPaymentDate := GetPlannedPaymentDate("Order No.","Order Line No.");
+
+            RecRef[1].GETTABLE(PurchaseOrderControlLine);
+            CASE "Line Type" OF
+              "Line Type"::Order:
+                BEGIN
+                  OutstandingAmount := CalcCumOutstPurchAmounts("Order No.","Order Line No.",'',0,0,ProjectCF);
+                  IF PlannedPaymentDate = 0D THEN
+                    DistributeInTime(
+                      ProjectCF,CFRubric,ProjectCFParameter,RecRef,AmountType::Order,-OutstandingAmount,BegindateMain,MonthsMain,
+                      BegindateBefore,MonthsBefore,BeginDateAfter,MonthsAfter,MonthsBeforeRefDate)
+                  ELSE
+                    InsertCashflowDetail(CFRubric,ProjectCFParameter,RecRef,AmountType::Order,-OutstandingAmount,PlannedPaymentDate,0,MonthsBeforeRefDate,TRUE);
+                END;
+              "Line Type"::Receipt:
+                BEGIN
+                  ReceivedNotInvoiceAmount := CalcCumOutstPurchAmounts("Order No.","Order Line No.","Receipt No.","Receipt Line No.",1,ProjectCF);
+                  IF PlannedPaymentDate = 0D THEN
+                    DistributeInTime(
+                      ProjectCF,CFRubric,ProjectCFParameter,RecRef,AmountType::Receipt,-ReceivedNotInvoiceAmount,BegindateMain,MonthsMain,
+                      BegindateBefore,MonthsBefore,BeginDateAfter,MonthsAfter,MonthsBeforeRefDate)
+                  ELSE
+                    InsertCashflowDetail(CFRubric,ProjectCFParameter,RecRef,AmountType::Receipt,-ReceivedNotInvoiceAmount,PlannedPaymentDate,0,MonthsBeforeRefDate,TRUE);
+                END;
+            END;
+          UNTIL NEXT = 0;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE DistributeCostPrognosis@1100527716(ProjectCF@1100527702 : Record 11012635;CFRubric@1100527700 : Record 11012637;ProjectCFParameter@1100527703 : Record 11012631;BegindateMain@1100527717 : Date;MonthsMain@1100527716 : Integer;BegindateBefore@1100527714 : Date;MonthsBefore@1100527713 : Integer;BeginDateAfter@1100527711 : Date;MonthsAfter@1100527710 : Integer;MonthsBeforeRefDate@1100527708 : Integer);
+    VAR
+      ProjectCFRubricPhase@1100527704 : Record 11012636;
+      ProjectCFParameterPhase@1100527705 : Record 11012631;
+      RecRef@1100527707 : ARRAY [2] OF RecordRef;
+      DummyRecRef@1100527701 : ARRAY [2] OF RecordRef;
+      AmountType@1100527706 : 'Order,Receipt,Prognosis';
+      AmountToDistribute@1100527709 : Decimal;
+    BEGIN
+      ProjectCFRubricPhase.SETRANGE("Record Type",ProjectCFRubricPhase."Record Type"::"Cash Flow");
+      ProjectCFRubricPhase.SETRANGE("Project No.",CFRubric."Project No.");
+      ProjectCFRubricPhase.SETRANGE("Cash Flow",CFRubric."Cash Flow");
+      ProjectCFRubricPhase.SETRANGE(Rubric,CFRubric.Rubric);
+      IF ProjectCFRubricPhase.FINDSET THEN BEGIN
+        ProjectCFRubricPhase.CALCFIELDS("Total Percentage Rubric");
+        ProjectCFRubricPhase.TESTFIELD("Total Percentage Rubric",100);
+        REPEAT
+          RecRef[1].GETTABLE(ProjectCFRubricPhase);
+
+          ProjectCFRubricPhase.TESTFIELD("Parameter Code");
+          ProjectCFParameterPhase.SETAUTOCALCFIELDS("Until Date","From Date");
+          ProjectCFParameterPhase.GET(ProjectCFParameterPhase."Record Type"::"Cash Flow",ProjectCFRubricPhase."Project No.",ProjectCFRubricPhase."Cash Flow",ProjectCFRubricPhase."Parameter Code",ProjectCFRubricPhase."Template Code");
+          CheckParameterDates(ProjectCFParameterPhase);
+
+          GetDatesAndMonths(
+            ProjectCF,ProjectCFParameterPhase,BegindateMain,MonthsMain,BegindateBefore,MonthsBefore,BeginDateAfter,MonthsAfter,MonthsBeforeRefDate);
+
+          IF ProjectCFParameterPhase."Divide Option" = ProjectCFParameterPhase."Divide Option"::"Based on Result" THEN
+            AmountToDistribute := CFRubric."Total Prognosis" - (CFRubric.Remaining - CFRubric."Prognosis Amount")
+          ELSE
+            AmountToDistribute := CFRubric."Prognosis Amount";
+          DistributeInTime(
+            ProjectCF,CFRubric,ProjectCFParameterPhase,RecRef,AmountType::Prognosis,AmountToDistribute * ProjectCFRubricPhase."Percentage of Amount" / 100,BegindateMain,MonthsMain,
+            BegindateBefore,MonthsBefore,BeginDateAfter,MonthsAfter,MonthsBeforeRefDate);
+        UNTIL ProjectCFRubricPhase.NEXT = 0
+      END ELSE BEGIN
+        IF ProjectCFParameter."Divide Option" = ProjectCFParameter."Divide Option"::"Based on Result" THEN
+          AmountToDistribute := CFRubric."Total Prognosis" - (CFRubric.Remaining - CFRubric."Prognosis Amount")
+        ELSE
+          AmountToDistribute := CFRubric."Prognosis Amount";
+        DistributeInTime(
+          ProjectCF,CFRubric,ProjectCFParameter,DummyRecRef,AmountType::Prognosis,AmountToDistribute,BegindateMain,MonthsMain,
+          BegindateBefore,MonthsBefore,BeginDateAfter,MonthsAfter,MonthsBeforeRefDate);
+      END;
+    END;
+
+    LOCAL PROCEDURE DistributeRevenues@1100527713(ProjectCF@1100527702 : Record 11012635;CFRubric@1100527701 : Record 11012637;ProjectCFParameter@1100527700 : Record 11012631;BegindateMain@1100527713 : Date;MonthsMain@1100527712 : Integer;BegindateBefore@1100527710 : Date;MonthsBefore@1100527709 : Integer;BeginDateAfter@1100527707 : Date;MonthsAfter@1100527706 : Integer;MonthsBeforeRefDate@1100527716 : Integer;VAR TempProjectInstallment@1100527715 : TEMPORARY Record 11012018);
+    VAR
+      Plot@1100527703 : Record 11012500;
+      ProjectInstallment@1100527704 : Record 11012018;
+      ProjectPrincipal@1100527717 : Record 11012005;
+      AmountToInvoice@1100527714 : Decimal;
+    BEGIN
+      IF ProjectCF."Revenues based on" = ProjectCF."Revenues based on"::Products THEN BEGIN
+        DistributeRevenuesProduct(
+          ProjectCF,CFRubric,ProjectCFParameter,BegindateMain,MonthsMain,BegindateBefore,MonthsBefore,BeginDateAfter,MonthsAfter,MonthsBeforeRefDate);
+      END ELSE BEGIN
+        DistributeRevenuesInstallments(
+          ProjectCF,CFRubric,ProjectCFParameter,ProjectInstallment,BegindateMain,MonthsMain,BegindateBefore,MonthsBefore,BeginDateAfter,MonthsAfter,MonthsBeforeRefDate);
+
+        SetDueDateOnVirtualInstallments(ProjectCF,TempProjectInstallment,ProjectCFParameter);
+
+        DistributeRevenuesInstallments(
+          ProjectCF,CFRubric,ProjectCFParameter,TempProjectInstallment,BegindateMain,MonthsMain,BegindateBefore,MonthsBefore,BeginDateAfter,MonthsAfter,MonthsBeforeRefDate);
+
+        //Check Installment Scheme's filled.
+        ProjectPrincipal.SETRANGE("Project No.",ProjectCF."Project No.");
+        IF ProjectPrincipal.FINDSET THEN
+          REPEAT
+            ProjectPrincipal.TESTFIELD("Cost Object");
+
+            ProjectPrincipal.SETFILTER("Cost Object",CFRubric."Cost Object Filter");
+            IF NOT ProjectPrincipal.ISEMPTY THEN BEGIN
+              Plot.SETRANGE("Project No.",ProjectPrincipal."Project No.");
+              Plot.SETRANGE(Principal,ProjectPrincipal.Principal);
+              Plot.SETRANGE("Installment Scheme",'');
+              IF Plot.FINDSET THEN
+                REPEAT
+                  Plot.CALCFIELDS("Modular Option Total");
+                  AmountToInvoice := Plot."Plot Price" + Plot."Building Price" + Plot."Additional Costs" + Plot."Modular Option Total";
+                  IF AmountToInvoice <> 0 THEN
+                    Plot.TESTFIELD("Installment Scheme");
+                UNTIL Plot.NEXT = 0;
+            END;
+            ProjectPrincipal.SETRANGE("Cost Object");
+          UNTIL ProjectPrincipal.NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE DistributeRevenuesProduct@1100527726(ProjectCF@1100527702 : Record 11012635;CFRubric@1100527701 : Record 11012637;ProjectCFParameter@1100527700 : Record 11012631;BegindateMain@1100527713 : Date;MonthsMain@1100527712 : Integer;BegindateBefore@1100527710 : Date;MonthsBefore@1100527709 : Integer;BeginDateAfter@1100527707 : Date;MonthsAfter@1100527706 : Integer;MonthsBeforeRefDate@1100527717 : Integer);
+    VAR
+      ProjectCFProduct@1100527703 : Record 11012633;
+      ProjectCFProductPhase@1100527704 : Record 11012634;
+      ProjectCFProductSold@1100527722 : Record 11012633;
+      ProjectCFProductUnsold@1100527724 : Record 11012633;
+      ProjectCFConstructRubric@1100527727 : Record 11012637;
+      ProjectCFConstructParameter@1100527726 : Record 11012631;
+      RecRef@1100527715 : ARRAY [2] OF RecordRef;
+      LandCostToDistribute@1100527723 : Decimal;
+      ConstructionCostToDistribute@1100527705 : Decimal;
+      AmountType@1100527716 : 'Order,Receipt,Prognosis,Revenue';
+      QuantityUnsold@1100527718 : Decimal;
+      QuantityToSellThisMonth@1100527711 : Decimal;
+      QuantityToSellThisMonthNotRounded@1100527708 : Decimal;
+      QuantityToSellThisMonthRounded@1100527719 : Integer;
+      QuantityDelayed@1100527714 : Decimal;
+      Month@1100527720 : Integer;
+      ExpectedSellingDate@1100527721 : Date;
+      RubricType@1100527725 : 'Land,Build';
+    BEGIN
+      WITH ProjectCFProduct DO BEGIN
+        FOR RubricType := RubricType::Land TO RubricType::Build DO BEGIN
+          RESET;
+          SETRANGE("Record Type","Record Type"::"Cash Flow");
+          SETRANGE("Project No.",CFRubric."Project No.");
+          SETRANGE("Cash Flow",CFRubric."Cash Flow");
+          IF RubricType = RubricType::Land THEN
+            SETRANGE("Rubric Land",CFRubric.Rubric)
+          ELSE
+            SETRANGE("Rubric Construct",CFRubric.Rubric);
+          SETFILTER("Unit Price Excl. VAT",'<>%1',0);
+          SETFILTER(Quantity,'<>%1',0);
+          IF FINDSET THEN
+            REPEAT
+              ProjectCFProductPhase.SETRANGE("Project No.","Project No.");
+              ProjectCFProductPhase.SETRANGE("Cash Flow","Cash Flow");
+              ProjectCFProductPhase.SETRANGE(Product,Product);
+              IF ProjectCFProductPhase.FINDSET THEN BEGIN
+                ProjectCFProductPhase.CALCFIELDS("Total Quantity Phases");
+                ProjectCFProductPhase.TESTFIELD("Total Quantity Phases",Quantity);
+                REPEAT
+                  DistributeRevenuesProductPhase(
+                    ProjectCFProductPhase,ProjectCFProduct,ProjectCF,CFRubric,ProjectCFParameter,RubricType,BegindateMain,MonthsMain,BegindateBefore,MonthsBefore,
+                    BeginDateAfter,MonthsAfter,MonthsBeforeRefDate);
+                UNTIL ProjectCFProductPhase.NEXT = 0
+              END ELSE BEGIN
+
+                AmountType := AmountType::Revenue;
+
+                //Sold
+                IF RubricType = RubricType::Land THEN BEGIN
+                  LandCostToDistribute := "Land Cost Excl. VAT" * Sold;
+                  ConstructionCostToDistribute := 0;
+                END ELSE BEGIN
+                  LandCostToDistribute := 0;
+                  ConstructionCostToDistribute := "Construction Cost Excl. VAT" * Sold;
+                END;
+
+                IF (LandCostToDistribute <> 0) OR (ConstructionCostToDistribute <> 0) THEN BEGIN
+                  ProjectCFProductSold := ProjectCFProduct;
+                  ProjectCFProductSold.Quantity := 0;
+                  RecRef[1].GETTABLE(ProjectCFProductSold);
+                  IF "Installment Scheme" = '' THEN
+                    DistributeInTime(
+                      ProjectCF,CFRubric,ProjectCFParameter,RecRef,AmountType,LandCostToDistribute+ConstructionCostToDistribute,BegindateMain,MonthsMain,
+                      BegindateBefore,MonthsBefore,BeginDateAfter,MonthsAfter,MonthsBeforeRefDate)
+                  ELSE
+                    DistributeRevenuesProductInstallmentScheme(
+                      ProjectCF,CFRubric,ProjectCFProduct,ProjectCFParameter,RecRef,ConstructionCostToDistribute,LandCostToDistribute,ProjectCFParameter."From Date");
+                END;
+
+                //Unsold
+                QuantityUnsold := Quantity - Sold;
+                IF RubricType = RubricType::Land THEN BEGIN
+                  LandCostToDistribute := "Land Cost Excl. VAT" * QuantityUnsold;
+                  ConstructionCostToDistribute := 0;
+                END ELSE BEGIN
+                  LandCostToDistribute := 0;
+                  ConstructionCostToDistribute := "Construction Cost Excl. VAT" * QuantityUnsold;
+                END;
+
+                IF (LandCostToDistribute <> 0) OR (ConstructionCostToDistribute <> 0) THEN BEGIN
+                  TESTFIELD("Installment Scheme");
+                  TESTFIELD("Selling Rate (Qty. / Month)");
+
+                  ProjectCFProductUnsold := ProjectCFProduct;
+                  ProjectCFProductUnsold.Quantity := QuantityUnsold;
+                  ProjectCFProductUnsold.Sold := 0;
+                  RecRef[1].GETTABLE(ProjectCFProductUnsold);
+
+                  Month := 1;
+                  WHILE QuantityUnsold > 0 DO BEGIN
+                    IF "Selling Rate (Qty. / Month)" > QuantityUnsold THEN
+                      QuantityToSellThisMonth := QuantityUnsold
+                    ELSE BEGIN
+                      QuantityToSellThisMonthNotRounded := "Selling Rate (Qty. / Month)" + QuantityDelayed;
+                      QuantityToSellThisMonthRounded := ROUND(QuantityToSellThisMonthNotRounded,1,'<');
+                      IF QuantityToSellThisMonthRounded > 0 THEN BEGIN
+                        QuantityToSellThisMonth := QuantityToSellThisMonthRounded;
+                        QuantityDelayed := QuantityToSellThisMonthNotRounded - QuantityToSellThisMonthRounded;
+                      END ELSE BEGIN
+                        QuantityToSellThisMonth := 0;
+                        QuantityDelayed := QuantityToSellThisMonthNotRounded;
+                      END;
+                    END;
+
+                    IF QuantityToSellThisMonth <> 0 THEN BEGIN
+                      ProjectCFProductUnsold.Quantity := QuantityToSellThisMonth;
+                      RecRef[1].GETTABLE(ProjectCFProductUnsold);
+
+                      IF RubricType = RubricType::Land THEN BEGIN
+                        LandCostToDistribute := "Land Cost Excl. VAT" * QuantityToSellThisMonth;
+                        ConstructionCostToDistribute := 0;
+                      END ELSE BEGIN
+                        LandCostToDistribute := 0;
+                        ConstructionCostToDistribute := "Construction Cost Excl. VAT" * QuantityToSellThisMonth;
+                      END;
+
+                      IF RubricType = RubricType::Land THEN BEGIN
+                        ProjectCFConstructRubric := CFRubric;
+                        ProjectCFConstructRubric.Rubric := "Rubric Construct";
+                        ProjectCFConstructRubric.FIND;
+                        ProjectCFConstructParameter := ProjectCFParameter;
+                        ProjectCFConstructParameter.Code := ProjectCFConstructRubric."Parameter Code";
+                        ProjectCFConstructParameter.SETAUTOCALCFIELDS("From Date");
+                        ProjectCFConstructParameter.FIND;
+                        ExpectedSellingDate := AddMonthsToDate(ProjectCFConstructParameter."From Date",Month);
+                      END ELSE
+                        ExpectedSellingDate := AddMonthsToDate(ProjectCFParameter."From Date",Month);
+                      DistributeRevenuesProductInstallmentScheme(
+                        ProjectCF,CFRubric,ProjectCFProduct,ProjectCFParameter,RecRef,ConstructionCostToDistribute,LandCostToDistribute,ExpectedSellingDate);
+
+                      QuantityUnsold -= QuantityToSellThisMonth;
+                    END;
+                    Month += 1;
+                  END;
+                END;
+              END;
+            UNTIL NEXT = 0;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE DistributeRevenuesProductPhase@1100527722(VAR ProjectCFProductPhase@1100527718 : Record 11012634;ProjectCFProduct@1100527719 : Record 11012633;ProjectCF@1100527702 : Record 11012635;CFRubric@1100527701 : Record 11012637;ProjectCFParameter@1100527700 : Record 11012631;RubricType@1100527705 : 'Land,Build';BegindateMain@1100527713 : Date;MonthsMain@1100527712 : Integer;BegindateBefore@1100527710 : Date;MonthsBefore@1100527709 : Integer;BeginDateAfter@1100527707 : Date;MonthsAfter@1100527706 : Integer;MonthsBeforeRefDate@1100527725 : Integer);
+    VAR
+      ProjectCFParameterPhase@1100527717 : Record 11012631;
+      ProjectCFProductPhaseSold@1100527723 : Record 11012634;
+      ProjectCFProductPhaseUnsold@1100527724 : Record 11012634;
+      RecRef@1100527715 : ARRAY [2] OF RecordRef;
+      ConstructionCostToDistribute@1100527714 : Decimal;
+      LandCostToDistribute@1100527703 : Decimal;
+      QuantityUnsold@1100527720 : Decimal;
+      QuantityToSellThisMonth@1100527708 : Decimal;
+      QuantityToSellThisMonthNotRounded@1100527726 : Decimal;
+      QuantityToSellThisMonthRounded@1100527711 : Integer;
+      QuantityDelayed@1100527704 : Decimal;
+      AmountType@1100527716 : 'Order,Receipt,Prognosis,Revenue';
+      Month@1100527721 : Integer;
+      ExpectedSellingDate@1100527722 : Date;
+    BEGIN
+      WITH ProjectCFProductPhase DO BEGIN
+
+        ProjectCFProductPhase.TESTFIELD("Parameter Code");
+        ProjectCFParameterPhase.SETAUTOCALCFIELDS("Until Date","From Date");
+        ProjectCFParameterPhase.GET(ProjectCFParameterPhase."Record Type"::"Cash Flow",ProjectCFProductPhase."Project No.",ProjectCFProductPhase."Cash Flow",ProjectCFProductPhase."Parameter Code",ProjectCFProductPhase."Template Code");
+        CheckParameterDates(ProjectCFParameterPhase);
+        IF ProjectCFProduct."Installment Scheme" = '' THEN
+          GetDatesAndMonths(
+            ProjectCF,ProjectCFParameterPhase,BegindateMain,MonthsMain,BegindateBefore,MonthsBefore,BeginDateAfter,MonthsAfter,MonthsBeforeRefDate);
+
+        AmountType := AmountType::Revenue;
+
+        //Sold
+        IF RubricType = RubricType::Land THEN BEGIN
+          LandCostToDistribute := ProjectCFProduct."Land Cost Excl. VAT" * Sold;
+          ConstructionCostToDistribute := 0;
+        END ELSE BEGIN
+          LandCostToDistribute := 0;
+          ConstructionCostToDistribute := ProjectCFProduct."Construction Cost Excl. VAT" * Sold;
+        END;
+
+        RecRef[1].GETTABLE(ProjectCFProductPhase);
+        IF (LandCostToDistribute <> 0) OR (ConstructionCostToDistribute <> 0) THEN BEGIN
+          ProjectCFProductPhaseSold := ProjectCFProductPhase;
+          ProjectCFProductPhaseSold.Quantity := 0;
+          RecRef[1].GETTABLE(ProjectCFProductPhaseSold);
+          IF ProjectCFProduct."Installment Scheme" = '' THEN
+            DistributeInTime(
+              ProjectCF,CFRubric,ProjectCFParameterPhase,RecRef,AmountType,LandCostToDistribute+ConstructionCostToDistribute,BegindateMain,MonthsMain,
+              BegindateBefore,MonthsBefore,BeginDateAfter,MonthsAfter,MonthsBeforeRefDate)
+          ELSE
+            DistributeRevenuesProductInstallmentScheme(
+              ProjectCF,CFRubric,ProjectCFProduct,ProjectCFParameterPhase,RecRef,ConstructionCostToDistribute,LandCostToDistribute,ProjectCFParameterPhase."From Date");
+        END;
+
+        //Unsold
+        QuantityUnsold := Quantity - Sold;
+        IF RubricType = RubricType::Land THEN BEGIN
+          LandCostToDistribute := ProjectCFProduct."Land Cost Excl. VAT" * QuantityUnsold;
+          ConstructionCostToDistribute := 0;
+        END ELSE BEGIN
+          LandCostToDistribute := 0;
+          ConstructionCostToDistribute := ProjectCFProduct."Construction Cost Excl. VAT" * QuantityUnsold;
+        END;
+
+        IF (LandCostToDistribute <> 0) OR (ConstructionCostToDistribute <> 0) THEN BEGIN
+          ProjectCFProduct.TESTFIELD("Installment Scheme");
+          TESTFIELD("Selling Rate (Qty. / Month)");
+
+          ProjectCFProductPhaseUnsold := ProjectCFProductPhase;
+          ProjectCFProductPhaseUnsold.Quantity := QuantityUnsold;
+          ProjectCFProductPhaseUnsold.Sold := 0;
+          RecRef[1].GETTABLE(ProjectCFProductPhaseUnsold);
+
+          Month := 1;
+          WHILE QuantityUnsold > 0 DO BEGIN
+            IF "Selling Rate (Qty. / Month)" > QuantityUnsold THEN
+              QuantityToSellThisMonth := QuantityUnsold
+            ELSE BEGIN
+              QuantityToSellThisMonthNotRounded := "Selling Rate (Qty. / Month)" + QuantityDelayed;
+              QuantityToSellThisMonthRounded := ROUND(QuantityToSellThisMonthNotRounded,1,'<');
+              IF QuantityToSellThisMonthRounded > 0 THEN BEGIN
+                QuantityToSellThisMonth := QuantityToSellThisMonthRounded;
+                QuantityDelayed := QuantityToSellThisMonthNotRounded - QuantityToSellThisMonthRounded;
+              END ELSE BEGIN
+                QuantityToSellThisMonth := 0;
+                QuantityDelayed := QuantityToSellThisMonthNotRounded;
+               END;
+             END;
+
+            ProjectCFProductPhaseUnsold.Quantity := QuantityToSellThisMonth;
+            RecRef[1].GETTABLE(ProjectCFProductPhaseUnsold);
+
+            IF RubricType = RubricType::Land THEN BEGIN
+              LandCostToDistribute := ProjectCFProduct."Land Cost Excl. VAT" * QuantityToSellThisMonth;
+              ConstructionCostToDistribute := 0;
+            END ELSE BEGIN
+              LandCostToDistribute := 0;
+              ConstructionCostToDistribute :=  ProjectCFProduct."Construction Cost Excl. VAT" * QuantityToSellThisMonth;
+            END;
+
+            ExpectedSellingDate := AddMonthsToDate(ProjectCFParameterPhase."From Date",Month);
+            DistributeRevenuesProductInstallmentScheme(
+              ProjectCF,CFRubric,ProjectCFProduct,ProjectCFParameterPhase,RecRef,ConstructionCostToDistribute,LandCostToDistribute,ExpectedSellingDate);
+
+            QuantityUnsold -= QuantityToSellThisMonth;
+            Month += 1;
+          END;
+        END;
+
+      END;
+    END;
+
+    LOCAL PROCEDURE DistributeRevenuesProductInstallmentScheme@1100527731(ProjectCF@1100527712 : Record 11012635;ProjectCFRubric@1100527701 : Record 11012637;ProjectCFProduct@1100527706 : Record 11012633;ProjectCFParameter@1100527700 : Record 11012631;RecRef@1100527705 : ARRAY [2] OF RecordRef;BuildingCostToDistribute@1100527704 : Decimal;LandCostToDistribute@1100527710 : Decimal;SellingDate@1100527702 : Date);
+    VAR
+      Installment@1100527708 : Record 11012017;
+      AmountPerInstallment@1100527707 : Decimal;
+      AmountType@1100527709 : 'Order,Receipt,Prognosis,Revenue';
+      PlannedInvoiceDate@1100527703 : Date;
+    BEGIN
+      IF (BuildingCostToDistribute = 0) AND (LandCostToDistribute = 0) THEN
+        EXIT;
+
+      Installment.SETRANGE(Scheme,ProjectCFProduct."Installment Scheme");
+      IF (LandCostToDistribute <> 0) THEN
+        Installment.SETRANGE("Installment No.",'0')
+      ELSE
+        Installment.SETFILTER("Installment No.",'1..');
+      Installment.FINDSET; //Must Exist
+
+      IF (Installment."Installment No." <> '0') AND (LandCostToDistribute <> 0) THEN
+        ERROR(LandCostInstallmentMissing,ProjectCFProduct.FIELDCAPTION("Installment Scheme"),ProjectCFProduct."Installment Scheme");
+      REPEAT
+        RecRef[2].GETTABLE(Installment);
+        IF (Installment."Installment No." = '0') AND (LandCostToDistribute <> 0) THEN
+          AmountPerInstallment := LandCostToDistribute
+        ELSE
+          AmountPerInstallment := BuildingCostToDistribute * Installment.Percentage / 100;
+
+        IF AmountPerInstallment <> 0 THEN BEGIN
+          PlannedInvoiceDate := ProjectCFParameter."From Date";
+          IF Installment."Cash Flow Interval (Months)" <> 0 THEN
+            PlannedInvoiceDate := AddMonthsToDate(PlannedInvoiceDate,Installment."Cash Flow Interval (Months)");
+
+          IF (Installment."Installment No." <> '0') THEN
+            IF ProjectCFProduct."Startdate Delay" <= PlannedInvoiceDate THEN
+              PlannedInvoiceDate := AddMonthsToDate(PlannedInvoiceDate,ProjectCFProduct."Delay Duration (Months)");
+
+          IF PlannedInvoiceDate < SellingDate THEN
+            PlannedInvoiceDate := SellingDate;
+
+          InsertCashflowDetail(ProjectCFRubric,ProjectCFParameter,RecRef,AmountType::Revenue,AmountPerInstallment,PlannedInvoiceDate,0,0,FALSE);
+        END;
+      UNTIL Installment.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE DistributeRevenuesInstallments@1100527719(ProjectCF@1100527702 : Record 11012635;CFRubric@1100527701 : Record 11012637;ProjectCFParameter@1100527700 : Record 11012631;VAR TempOrFixedProjectInstallment@1100527703 : Record 11012018;BegindateMain@1100527713 : Date;MonthsMain@1100527712 : Integer;BegindateBefore@1100527710 : Date;MonthsBefore@1100527709 : Integer;BeginDateAfter@1100527707 : Date;MonthsAfter@1100527706 : Integer;MonthsBeforeRefDate@1100527704 : Integer);
+    VAR
+      RecRef@1100527715 : ARRAY [2] OF RecordRef;
+      AmountToInvoice@1100527714 : Decimal;
+      AmountType@1100527716 : 'Order,Receipt,Prognosis,Revenue';
+      DueDate@1100527718 : Date;
+    BEGIN
+      WITH TempOrFixedProjectInstallment DO BEGIN
+        SETRANGE("Project No.",CFRubric."Project No.");
+        SETFILTER("Cost Object",CFRubric."Cost Object Filter");
+        IF FINDSET THEN
+          REPEAT
+            RecRef[1].GETTABLE(TempOrFixedProjectInstallment);
+            CALCFIELDS("Invoiced Price (LCY)");
+            AmountToInvoice := "Installment Amount (LCY)" - "Invoiced Price (LCY)";
+            IF "Due Date Actual" <> 0D THEN
+              DueDate := "Due Date Actual"
+            ELSE
+              DueDate := "Due Date Base";
+            IF DueDate >= ProjectCF."Reference Date" THEN
+              InsertCashflowDetail(CFRubric,ProjectCFParameter,RecRef,AmountType::Revenue,AmountToInvoice,DueDate,0,0,FALSE)
+            ELSE
+              DistributeInTime(
+                ProjectCF,CFRubric,ProjectCFParameter,RecRef,AmountType::Revenue,AmountToInvoice,BegindateMain,MonthsMain,
+                BegindateBefore,MonthsBefore,BeginDateAfter,MonthsAfter,MonthsBeforeRefDate)
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE SetDueDateOnVirtualInstallments@1100527703(ProjectCF@1100527709 : Record 11012635;VAR TempProjectInstallment@1100527700 : TEMPORARY Record 11012018;ProjectCFParameter@1100527702 : Record 11012631);
+    VAR
+      Installment@1100527701 : Record 11012017;
+      Plot@1100527703 : Record 11012500;
+      HouseModel@1100527704 : Record 11012501;
+      ProjectCFProduct@1100527705 : Record 11012633;
+      PlotCounter@1100527706 : Integer;
+      NoOfMonths@1100527707 : Integer;
+      FirstSellingDate@1100527710 : Date;
+      ExpectedSellingDate@1100527708 : Date;
+      ProductCode@1100527711 : Code[10];
+    BEGIN
+      IF TempProjectInstallment.FINDSET(TRUE) THEN
+        REPEAT
+          IF TempProjectInstallment."Plot No." <> '' THEN BEGIN
+            IF TempProjectInstallment."Plot No." <> Plot."Plot No." THEN BEGIN
+              Plot.GET(TempProjectInstallment."Project No.",TempProjectInstallment."Plot No.");
+              ProductCode := Plot."Product Code";
+              IF ProductCode = '' THEN BEGIN
+                IF Plot."House Model" <> '' THEN BEGIN
+                  HouseModel.GET(Plot."Project No.",Plot."House Model");
+                  HouseModel.TESTFIELD("Product Code");
+                  ProductCode := HouseModel."Product Code";
+                END ELSE
+                  Plot.TESTFIELD("Product Code");
+              END;
+
+              ProjectCFProduct.GET(ProjectCFProduct."Record Type"::"Cash Flow",TempProjectInstallment."Project No.",ProjectCFParameter."Cash Flow",ProductCode,ProjectCFParameter."Template Code");
+              ProjectCFProduct.TESTFIELD("Selling Rate (Qty. / Month)");
+
+              IF ProjectCF."Reference Date" > ProjectCFParameter."From Date" THEN
+                FirstSellingDate := ProjectCF."Reference Date"
+              ELSE
+                FirstSellingDate := ProjectCFParameter."From Date";
+
+              IF PlotCounter = 0 THEN
+                ExpectedSellingDate := FirstSellingDate
+              ELSE BEGIN
+                NoOfMonths := ROUND(PlotCounter / ProjectCFProduct."Selling Rate (Qty. / Month)",1,'<');
+                ExpectedSellingDate := AddMonthsToDate(FirstSellingDate,NoOfMonths);
+              END;
+
+              PlotCounter += 1;
+            END;
+            TempProjectInstallment."Due Date Base" := ProjectCFParameter."From Date";
+          END ELSE
+            TempProjectInstallment."Due Date Base" := ProjectCF."Reference Date";
+
+          Installment.GET(TempProjectInstallment.Scheme,DELCHR(TempProjectInstallment."Installment No.",'<','V'));
+          IF Installment."Cash Flow Interval (Months)" <> 0 THEN
+            TempProjectInstallment."Due Date Base" := AddMonthsToDate(TempProjectInstallment."Due Date Base",Installment."Cash Flow Interval (Months)");
+
+          IF TempProjectInstallment."Installment No." <> '0' THEN
+            IF ProjectCFProduct."Startdate Delay" <= TempProjectInstallment."Due Date Base" THEN
+              TempProjectInstallment."Due Date Base" := AddMonthsToDate(TempProjectInstallment."Due Date Base",ProjectCFProduct."Delay Duration (Months)");
+
+          IF TempProjectInstallment."Plot No." <> '' THEN
+            IF TempProjectInstallment."Due Date Base" < ExpectedSellingDate THEN
+              TempProjectInstallment."Due Date Base" := ExpectedSellingDate;
+
+          TempProjectInstallment.MODIFY;
+        UNTIL TempProjectInstallment.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE AdjustResultSoFar@1100527733(ProjectCF@1100527700 : Record 11012635;CFRubric@1100527703 : Record 11012637;BegindateMain@1100527702 : Date;MonthsMain@1100527701 : Integer);
+    VAR
+      ProjectCFParameter@1100527704 : Record 11012631;
+      AmountToAdjust@1100527705 : Decimal;
+    BEGIN
+      IF CFRubric."Total Prognosis" = CFRubric.Remaining THEN
+        EXIT;
+
+      AmountToAdjust := CFRubric."Total Prognosis" - CFRubric.Remaining;
+
+      TempProjectCFDetail.RESET;
+      TempProjectCFDetail.SETRANGE(Type,TempProjectCFDetail.Type::Prognosis);
+      TempProjectCFDetail.SETCURRENTKEY("Project No.","Cash Flow",Rubric,Date);
+      IF TempProjectCFDetail.FINDSET THEN
+        REPEAT
+          ProjectCFParameter.GET(ProjectCFParameter."Record Type"::"Cash Flow",ProjectCF."Project No.",ProjectCF."Cash Flow",TempProjectCFDetail."Parameter Code",TempProjectCFDetail."Template Code");
+          IF ProjectCFParameter."Divide Option" = ProjectCFParameter."Divide Option"::"Based on Result" THEN BEGIN
+            IF -TempProjectCFDetail.Amount < -AmountToAdjust THEN BEGIN
+              TempProjectCFDetail.DELETE;
+              AmountToAdjust := AmountToAdjust - TempProjectCFDetail.Amount;
+            END ELSE BEGIN
+              TempProjectCFDetail.Amount := TempProjectCFDetail.Amount - AmountToAdjust;
+              TempProjectCFDetail.MODIFY;
+              AmountToAdjust := 0;
+            END;
+          END;
+        UNTIL (TempProjectCFDetail.NEXT = 0) OR (AmountToAdjust = 0);
+    END;
+
+    LOCAL PROCEDURE MoveTempDataToPrognosisDetail@1100527728(ProjectCF@1100527701 : Record 11012635);
+    VAR
+      ProjectCFDetail@1100527700 : Record 11012638;
+      ProjectCFParameter@1100527702 : Record 11012631;
+      MonthsBeforeRefdate@1100527703 : Integer;
+      RemainingMonths@1100527704 : Integer;
+      MonthNo@1100527705 : Integer;
+    BEGIN
+      TempProjectCFDetail.RESET;
+      IF TempProjectCFDetail.FINDSET THEN
+        REPEAT
+          ProjectCFDetail := TempProjectCFDetail;
+          ProjectCFDetail."Line No." := 0;
+
+          IF TempProjectCFDetail."Has Expected Receipt Date" THEN
+            ProjectCFParameter."Divide Option" := ProjectCFParameter."Divide Option"::"First Month"
+          ELSE
+            ProjectCFParameter.GET(ProjectCFParameter."Record Type"::"Cash Flow",ProjectCF."Project No.",ProjectCF."Cash Flow",TempProjectCFDetail."Parameter Code",TempProjectCFDetail."Template Code");
+          CASE ProjectCFParameter."Divide Option" OF
+            ProjectCFParameter."Divide Option"::"First Month",
+            ProjectCFParameter."Divide Option"::"Based on Result":
+              BEGIN
+                IF TempProjectCFDetail.Date < ProjectCF."Reference Date" THEN BEGIN
+                  ProjectCFDetail."Original Date" := TempProjectCFDetail.Date;
+                  ProjectCFDetail.Date := ProjectCF."Reference Date";
+                END;
+                ProjectCFDetail.INSERT(TRUE);
+              END;
+            ProjectCFParameter."Divide Option"::"Remaining Months":
+              BEGIN
+                IF TempProjectCFDetail.Date < ProjectCF."Reference Date" THEN BEGIN
+                  MonthsBeforeRefdate := CalcNoOfMonths(TempProjectCFDetail.Date,ProjectCF."Reference Date") - 1;
+                  RemainingMonths := TempProjectCFDetail."No. of Months" - MonthsBeforeRefdate;
+                  IF RemainingMonths < 1 THEN
+                    RemainingMonths := 1;
+
+                  ProjectCFDetail."Original Date" := TempProjectCFDetail.Date;
+
+                  FOR MonthNo := 1 TO RemainingMonths DO BEGIN
+                    ProjectCFDetail.Amount := ROUND(TempProjectCFDetail.Amount/RemainingMonths);
+                    IF MonthNo = 1 THEN
+                      ProjectCFDetail.Date := ProjectCF."Reference Date"
+                    ELSE
+                      ProjectCFDetail.Date := AddMonthsToDate(ProjectCFDetail.Date,1);
+                    ProjectCFDetail."Line No." := 0;
+                    ProjectCFDetail.INSERT(TRUE);
+                  END;
+                END ELSE BEGIN
+                  ProjectCFDetail.INSERT(TRUE);
+                END;
+              END;
+            ProjectCFParameter."Divide Option"::"Next Months":
+              BEGIN
+                IF TempProjectCFDetail.Date < ProjectCF."Reference Date" THEN BEGIN
+                  ProjectCFDetail."Original Date" := TempProjectCFDetail.Date;
+                  ProjectCFDetail.Date := AddMonthsToDate(TempProjectCFDetail.Date,TempProjectCFDetail."Months Before Ref. Date");
+                END;
+                ProjectCFDetail.INSERT(TRUE);
+              END;
+          END;
+        UNTIL TempProjectCFDetail.NEXT = 0;
+
+      TempProjectCFDetail.DELETEALL;
+    END;
+
+    LOCAL PROCEDURE GetPlannedPaymentDate@1100527710(PurchaseOrderNo@1100527700 : Code[20];PurchaseLineNo@1100527702 : Integer) PlannedPaymentDate : Date;
+    VAR
+      PurchaseLine@1100527704 : Record 39;
+      PurchaseHeader@1100527703 : Record 38;
+      PaymentTerms@1100527701 : Record 3;
+    BEGIN
+      WITH PurchaseLine DO BEGIN
+        IF GET("Document Type"::Order,PurchaseOrderNo,PurchaseLineNo) THEN BEGIN
+          IF "Expected Receipt Date" = 0D THEN
+            EXIT(0D);
+
+          PlannedPaymentDate := "Expected Receipt Date";
+
+          IF PurchaseHeader.GET("Document Type"::Order,PurchaseOrderNo) THEN
+            IF PaymentTerms.GET(PurchaseHeader."Payment Terms Code") THEN
+              PlannedPaymentDate := CALCDATE(PaymentTerms."Due Date Calculation",PlannedPaymentDate);
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE CalcCumOutstPurchAmounts@1100525004(PurchaseOrderNo@1100527701 : Code[20];PurchaseLineNo@1100527700 : Integer;ReceiptNo@1100527704 : Code[20];ReceiptLineNo@1100527705 : Integer;OrderReceipt@1100527702 : 'Order,Receipt';ProjectCF@1100525001 : Record 11012635) : Decimal;
+    VAR
+      PurchaseOrderControlLine@1100527703 : Record 11020221;
+    BEGIN
+      WITH PurchaseOrderControlLine DO BEGIN
+        SETRANGE("Order No.",PurchaseOrderNo);
+        SETRANGE("Order Line No.",PurchaseLineNo);
+        SETRANGE(Date,0D,ProjectCF.GetDateFilterPrognOrReference);
+        CASE OrderReceipt OF
+          OrderReceipt::Order:
+            BEGIN
+              CALCSUMS("Outstanding Amount");
+              EXIT("Outstanding Amount");
+            END;
+          OrderReceipt::Receipt:
+            BEGIN
+              SETRANGE("Receipt No.",ReceiptNo);
+              SETRANGE("Receipt Line No.",ReceiptLineNo);
+              CALCSUMS("Amt. Rcd. Not Invoiced");
+              EXIT("Amt. Rcd. Not Invoiced");
+            END;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE DistributeInTime@1100527701(ProjectCF@1100527702 : Record 11012635;ProjectCFRubric@1100527701 : Record 11012637;ProjectCFParameter@1100527700 : Record 11012631;RecRef@1100527705 : ARRAY [2] OF RecordRef;AmountType@1100527703 : 'Order,Receipt,Prognosis,Revenue';AmountToDistribute@1100527704 : Decimal;BegindateMain@1100527724 : Date;MonthsMain@1100527723 : Integer;BegindateBefore@1100527721 : Date;MonthsBefore@1100527720 : Integer;BeginDateAfter@1100527715 : Date;MonthsAfter@1100527710 : Integer;MonthsBeforeRefDate@1100527706 : Integer);
+    VAR
+      AmountMain@1100527714 : Decimal;
+      AmountBefore@1100527711 : Decimal;
+      AmountAfter@1100527712 : Decimal;
+    BEGIN
+      IF AmountToDistribute = 0 THEN
+        EXIT;
+
+      CalcAmntsToDistribute(ProjectCFParameter,AmountToDistribute,MonthsBefore,MonthsMain,MonthsAfter,AmountMain,AmountBefore,AmountAfter);
+
+      IF AmountBefore <> 0 THEN
+        DistributeAmountsInTime(ProjectCFRubric,ProjectCFParameter,RecRef,AmountType,AmountBefore,MonthsBefore,BegindateBefore,FALSE,MonthsBeforeRefDate);
+
+      IF AmountMain <> 0 THEN
+        DistributeAmountsInTime(ProjectCFRubric,ProjectCFParameter,RecRef,AmountType,AmountMain,MonthsMain,BegindateMain,FALSE,MonthsBeforeRefDate);
+
+      IF AmountAfter <> 0 THEN
+        DistributeAmountsInTime(ProjectCFRubric,ProjectCFParameter,RecRef,AmountType,AmountAfter,MonthsAfter,BeginDateAfter,FALSE,MonthsBeforeRefDate);
+    END;
+
+    LOCAL PROCEDURE GetDatesAndMonths@1100527708(ProjectCF@1100527702 : Record 11012635;ProjectCFParameter@1100527707 : Record 11012631;VAR BeginDateMain@1100527714 : Date;VAR MonthsMain@1100527713 : Integer;VAR BegindateBefore@1100527711 : Date;VAR MonthsBefore@1100527710 : Integer;VAR BeginDateAfter@1100527709 : Date;VAR MonthsAfter@1100527708 : Integer;VAR MonthsBeforeRefDate@1100527704 : Integer);
+    VAR
+      StartDate@1100527701 : Date;
+      UntilDate@1100527700 : Date;
+      BeginDateGeneral@1100527712 : Date;
+      Months@1100527703 : Integer;
+    BEGIN
+      StartDate := ProjectCFParameter."From Date";
+      UntilDate := ProjectCFParameter."Until Date";
+      Months := ProjectCFParameter."No. Of Months";
+
+      IF (StartDate <> 0D) AND (UntilDate <> 0D) THEN BEGIN
+        MonthsMain := CalcNoOfMonths(StartDate,UntilDate);
+        BeginDateMain := StartDate;
+      END ELSE
+          MonthsMain := Months;
+
+      IF (StartDate = 0D) AND (UntilDate = 0D) THEN
+        BeginDateMain := ProjectCF."Reference Date";
+
+      IF (StartDate <> 0D) AND (UntilDate = 0D) THEN
+        BeginDateMain := StartDate;
+
+      IF (StartDate = 0D) AND (UntilDate <> 0D) THEN
+        IF Months > 0 THEN
+          BeginDateMain := AddMonthsToDate(UntilDate,-Months+1)
+        ELSE
+          BeginDateMain := UntilDate;
+
+      WITH ProjectCFParameter DO BEGIN
+        IF "Advance Startdate Months" <> 0 THEN BEGIN
+          MonthsBefore := "Advance Startdate Months";
+          IF "Advance Startdate Months" > 0 THEN
+            "Advance Startdate Months" := "Advance Startdate Months" * -1;
+          BegindateBefore := AddMonthsToDate(BeginDateMain,"Advance Startdate Months");
+          IF "Advanced Interval" <> 0 THEN
+            BegindateBefore := AddMonthsToDate(BegindateBefore,-"Advanced Interval");
+          IF ("% Before" = 0) AND ("Advanced Interval" = 0) THEN BEGIN
+            BeginDateMain := BegindateBefore;
+            MonthsMain := MonthsMain + MonthsBefore;
+          END;
+        END;
+
+        IF "Postpone Until Date Months" <> 0 THEN BEGIN
+          MonthsAfter := "Postpone Until Date Months";
+          IF "Postpone Until Date Months" < 0 THEN
+            "Postpone Until Date Months" := "Postpone Until Date Months" * -1;
+          BeginDateAfter := AddMonthsToDate(BeginDateMain,MonthsMain);
+          IF "Postponed Interval" <> 0 THEN
+            BeginDateAfter := AddMonthsToDate(BeginDateAfter,"Postponed Interval");
+          IF ("% After" = 0) AND ("Postponed Interval" = 0) THEN
+            MonthsMain := MonthsMain + MonthsAfter;
+        END;
+      END;
+
+      IF BegindateBefore <> 0D THEN
+        BeginDateGeneral := BegindateBefore
+      ELSE
+        IF BeginDateMain <> 0D THEN
+          BeginDateGeneral := BeginDateMain
+        ELSE
+          IF BeginDateAfter <> 0D THEN
+            BeginDateGeneral := BeginDateAfter;
+
+      IF BeginDateGeneral < ProjectCF."Reference Date" THEN BEGIN
+        MonthsBeforeRefDate := CalcNoOfMonths(BeginDateGeneral,ProjectCF."Reference Date") - 1;
+        IF MonthsBeforeRefDate < 0 THEN
+          MonthsBeforeRefDate := 0;
+      END ELSE
+        MonthsBeforeRefDate := 0;
+    END;
+
+    LOCAL PROCEDURE CheckRefdate@1100527737(ProjectCFParameter@1100527705 : Record 11012631;Refdate@1100527700 : Date;VAR Begindate@1100527701 : Date;VAR Months@1100527702 : Integer;VAR MonthsBeforeRefdate@1100527703 : Integer);
+    BEGIN
+      IF Begindate < Refdate THEN BEGIN
+        CASE ProjectCFParameter."Divide Option" OF
+          ProjectCFParameter."Divide Option"::"First Month",
+          ProjectCFParameter."Divide Option"::"Based on Result":
+            BEGIN
+              MonthsBeforeRefdate := CalcNoOfMonths(Begindate,Refdate) - 1;
+              IF MonthsBeforeRefdate < 0 THEN
+                MonthsBeforeRefdate := 0;
+              IF MonthsBeforeRefdate > 0 THEN
+                IF MonthsBeforeRefdate >= Months THEN
+                  MonthsBeforeRefdate := Months
+                ELSE
+                  Months := Months - MonthsBeforeRefdate;
+            END;
+          ProjectCFParameter."Divide Option"::"Remaining Months":
+            BEGIN
+              MonthsBeforeRefdate := CalcNoOfMonths(Begindate,Refdate) - 1;
+              IF MonthsBeforeRefdate > 0 THEN
+                IF MonthsBeforeRefdate >= Months THEN
+                  MonthsBeforeRefdate := Months
+                ELSE
+                  Months := Months - MonthsBeforeRefdate;
+              MonthsBeforeRefdate := 0;
+            END;
+          ProjectCFParameter."Divide Option"::"Next Months":
+            ;
+        END;
+        Begindate := Refdate;
+      END;
+    END;
+
+    LOCAL PROCEDURE CalcNoOfMonths@1100527709(StartDate@1100527701 : Date;UntilDate@1100527700 : Date) CalculatedMonths : Integer;
+    VAR
+      DateRec@1100527704 : Record 2000000007;
+      FirstDayOfStartMonth@1100527702 : Date;
+      LastDayOfUntilMonth@1100527703 : Date;
+    BEGIN
+      FirstDayOfStartMonth := CALCDATE('<-CM>',StartDate);
+      LastDayOfUntilMonth := CALCDATE ('<CM>',UntilDate);
+      WITH DateRec DO BEGIN
+        SETRANGE("Period Type","Period Type"::Month);
+        SETRANGE("Period Start",FirstDayOfStartMonth,LastDayOfUntilMonth);
+        EXIT(COUNT);
+      END;
+    END;
+
+    LOCAL PROCEDURE AddMonthsToDate@1100527702(OriginalDate@1100527700 : Date;Months@1100527701 : Integer) CalculatedDate : Date;
+    VAR
+      MonthTxt@1100527702 : Text[250];
+    BEGIN
+      EVALUATE(MonthTxt,'<'+FORMAT(Months) + 'M>');
+      CalculatedDate := CALCDATE(MonthTxt,OriginalDate);
+    END;
+
+    LOCAL PROCEDURE CalcAmntsToDistribute@1100527714(ProjectCFParameter@1100527704 : Record 11012631;BaseAmount@1100527708 : Decimal;MonthsBefore@1100527709 : Integer;MonthsMain@1100527710 : Integer;MonthsAfter@1100527711 : Integer;VAR MainAmount@1100527701 : Decimal;VAR BeforeAmount@1100527702 : Decimal;VAR AfterAmount@1100527703 : Decimal);
+    VAR
+      Startdate@1100527706 : Date;
+      AmountPerMonth@1100527700 : Decimal;
+      BeforeSameAsMain@1100527705 : Boolean;
+      AfterSameAsMain@1100527707 : Boolean;
+    BEGIN
+      BeforeAmount := 0;
+      MainAmount := 0;
+      AfterAmount := 0;
+
+      WITH ProjectCFParameter DO BEGIN
+        BeforeSameAsMain := FALSE;
+        AfterSameAsMain := FALSE;
+        MainAmount := BaseAmount;
+        IF "Advance Startdate Months" <> 0 THEN
+          IF "% Before" <> 0 THEN BEGIN
+            BeforeAmount := CalcPercAmnt(BaseAmount,"% Before");
+            MainAmount := MainAmount - BeforeAmount;
+            BeforeAmount := ROUND(BeforeAmount / MonthsBefore);
+          END ELSE IF "Advanced Interval" <> 0 THEN BEGIN
+            BeforeSameAsMain := TRUE;
+          END;
+        IF "Postpone Until Date Months" <> 0 THEN
+          IF "% After" <> 0 THEN BEGIN
+            AfterAmount := CalcPercAmnt(BaseAmount,"% After");
+            MainAmount := MainAmount - AfterAmount;
+            AfterAmount := ROUND(AfterAmount / MonthsAfter);
+          END ELSE IF "Postponed Interval" <> 0 THEN BEGIN
+            AfterSameAsMain := TRUE;
+          END;
+
+        IF BeforeSameAsMain AND AfterSameAsMain THEN BEGIN
+          AmountPerMonth := MainAmount / (MonthsMain + MonthsBefore + MonthsAfter);
+          BeforeAmount  := AmountPerMonth;
+          AfterAmount := AmountPerMonth;
+          MainAmount := MainAmount - (BeforeAmount * MonthsBefore) - (AfterAmount * MonthsAfter);
+        END ELSE
+          IF NOT BeforeSameAsMain AND AfterSameAsMain THEN BEGIN
+            AmountPerMonth := MainAmount / (MonthsMain + MonthsAfter);
+            AfterAmount := AmountPerMonth;
+            MainAmount := MainAmount - (AfterAmount * MonthsAfter);
+          END ELSE
+            IF NOT AfterSameAsMain AND BeforeSameAsMain THEN BEGIN
+              AmountPerMonth := MainAmount / (MonthsMain + MonthsBefore);
+              BeforeAmount := AmountPerMonth;
+              MainAmount := MainAmount - (BeforeAmount * MonthsBefore);
+            END;
+
+        IF MonthsMain <> 0 THEN
+          MainAmount := ROUND(MainAmount / MonthsMain)
+        ELSE
+          MainAmount := ROUND(MainAmount);
+      END;
+    END;
+
+    LOCAL PROCEDURE CalcPercAmnt@1100527720(Amount@1100527700 : Decimal;Percentage@1100527701 : Decimal) CalculatedAmnt : Decimal;
+    BEGIN
+      CalculatedAmnt := ROUND((Amount / 100) * Percentage);
+    END;
+
+    LOCAL PROCEDURE DistributeAmountsInTime@1100527729(ProjectCFRubric@1100527701 : Record 11012637;ProjectCFParameter@1100527708 : Record 11012631;RecRef@1100527700 : ARRAY [2] OF RecordRef;AmountType@1100527702 : 'Order,Receipt,Prognosis,Revenue';AmountToDistribute@1100527703 : Decimal;Months@1100527704 : Integer;StartDate@1100527705 : Date;FirstMonth@1100527707 : Boolean;MonthsBeforeRefDate@1100527709 : Integer);
+    VAR
+      MonthNo@1100527706 : Integer;
+      RemainingMonths@1100527710 : Integer;
+    BEGIN
+      IF Months = 0 THEN
+        Months := 1;
+      FOR MonthNo := 1 TO Months DO BEGIN
+        RemainingMonths := Months - MonthNo + 1;
+        InsertCashflowDetail(ProjectCFRubric,ProjectCFParameter,RecRef,AmountType,AmountToDistribute,StartDate,RemainingMonths,MonthsBeforeRefDate,FALSE);
+        IF NOT FirstMonth THEN
+          StartDate := AddMonthsToDate(StartDate,1);
+      END;
+    END;
+
+    LOCAL PROCEDURE InsertCashflowDetail@1100527781(ProjectCFRubric@1100527701 : Record 11012637;ProjectCFParameter@1100527700 : Record 11012631;RecRef@1100527705 : ARRAY [2] OF RecordRef;AmountType@1100527703 : 'Order,Receipt,Prognosis,Revenue';AmountToDistribute@1100527702 : Decimal;PlannedPaymentdate@1100527704 : Date;NoOfMonths@1100527716 : Integer;MonthsBeforeRefDate@1100527717 : Integer;HasExpectedReceiptDate@1100527714 : Boolean);
+    VAR
+      PurchaseOrderControlLine@1100527706 : Record 11020221;
+      ProjectInstallment@1100527707 : Record 11012018;
+      Plot@1100527708 : Record 11012500;
+      ProjectCFProduct@1100527709 : Record 11012633;
+      ProjectCFProductPhase@1100527710 : Record 11012634;
+      ProjectCFRubricPhase@1100527711 : Record 11012636;
+      Installment@1100527713 : Record 11012017;
+      ArrayNo@1100527712 : Integer;
+      LineNo@1100527715 : Integer;
+    BEGIN
+      AmountToDistribute := ROUND(AmountToDistribute);
+      IF AmountToDistribute = 0 THEN
+        EXIT;
+
+      WITH TempProjectCFDetail DO BEGIN
+        RESET;
+        SETRANGE("Project No.","Project No.");
+        SETRANGE("Cash Flow","Cash Flow");
+        SETRANGE(Rubric,Rubric);
+        IF FINDLAST THEN
+          LineNo := "Line No." + 1
+        ELSE
+          LineNo := 1;
+
+        INIT;
+        "Project No." := ProjectCFRubric."Project No.";
+        "Cash Flow" := ProjectCFRubric."Cash Flow";
+        "Template Code" := ProjectCFRubric."Template Code";
+        Rubric := ProjectCFRubric.Rubric;
+        "Line No." := LineNo;
+        Type := AmountType;
+        Amount := AmountToDistribute;
+        Date := PlannedPaymentdate;
+        "Has Expected Receipt Date" := HasExpectedReceiptDate;
+        "Parameter Code" := ProjectCFParameter.Code;
+        "No. of Months" := NoOfMonths;
+        "Months Before Ref. Date" := MonthsBeforeRefDate;
+
+        FOR ArrayNo := 1 TO ARRAYLEN(RecRef) DO BEGIN
+          CASE RecRef[ArrayNo].NUMBER OF
+            DATABASE::"Purchase Order Control Line":
+              BEGIN
+                RecRef[ArrayNo].SETTABLE(PurchaseOrderControlLine);
+                "Cost Object" := PurchaseOrderControlLine."Shortcut Dimension 2 Code";
+                "Order No." := PurchaseOrderControlLine."Order No.";
+                "Order Line No." := PurchaseOrderControlLine."Order Line No.";
+              END;
+            DATABASE::"Project Installment":
+              BEGIN
+                RecRef[ArrayNo].SETTABLE(ProjectInstallment);
+                CASE TRUE OF
+                  ProjectInstallment."Extension Contract" <> '':
+                    "Revenue Type" := "Revenue Type"::"Extension Contract";
+                  ProjectInstallment."Plot No." <> '':
+                    "Revenue Type" := "Revenue Type"::Plot;
+                  ELSE
+                    "Revenue Type" := "Revenue Type"::"Contract Amount Principal";
+                END;
+                "Plot No." := ProjectInstallment."Plot No.";
+                "Installment Scheme" := ProjectInstallment.Scheme;
+                "Installment No." := ProjectInstallment."Installment No.";
+                "Extension Contract No." := ProjectInstallment."Extension Contract";
+                Principal := ProjectInstallment.Principal;
+              END;
+            DATABASE::"Project CF Rubric Phase":
+              BEGIN
+                RecRef[ArrayNo].SETTABLE(ProjectCFRubricPhase);
+                Phase := ProjectCFRubricPhase.Phase;
+              END;
+            DATABASE::"Project CF Product":
+              BEGIN
+                RecRef[ArrayNo].SETTABLE(ProjectCFProduct);
+                Product := ProjectCFProduct.Product;
+                "Installment Scheme" := ProjectCFProduct."Installment Scheme";
+                Quantity := ProjectCFProduct.Quantity;
+                Sold := ProjectCFProduct.Sold;
+              END;
+            DATABASE::"Project CF Product Phase":
+              BEGIN
+                RecRef[ArrayNo].SETTABLE(ProjectCFProductPhase);
+                Product := ProjectCFProductPhase.Product;
+                Phase := ProjectCFProductPhase.Phase;
+                Quantity := ProjectCFProductPhase.Quantity;
+                Sold := ProjectCFProductPhase.Sold;
+              END;
+            DATABASE::Installment:
+              BEGIN
+                RecRef[ArrayNo].SETTABLE(Installment);
+                "Installment Scheme" := Installment.Scheme;
+                "Installment No." := Installment."Installment No.";
+                Percentage := Installment.Percentage;
+                "Cash Flow Interval (Months)" := Installment."Cash Flow Interval (Months)";
+              END;
+
+          END;
+        END;
+        INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE ReadProjectAndBuildCostControl@1100527789(ProjectNo@1100527701 : Code[20];VAR Job@1100527705 : Record 11072003);
+    VAR
+      ProjectDevelopment@1100527700 : Record 11012915;
+    BEGIN
+      ProjectDevelopment.GET(ProjectNo);
+      Job.GET(ProjectNo);
+      Job.BuildCostControl();
+      COMMIT;
+    END;
+
+    PROCEDURE UpdateProjectCF@1100527704(VAR ProjectCF@1100527700 : Record 11012635);
+    VAR
+      Job@1100527703 : Record 11072003;
+      ProjectCFDetail@1100527704 : Record 11012638;
+      TempProjectInstallment@1100527705 : TEMPORARY Record 11012018;
+      DummyProjectCF@1100527706 : Record 11012635;
+      PrognosisDate@1100527702 : Date;
+    BEGIN
+      ProjectCF.TESTFIELD(Fixed,FALSE);
+      ProjectCF.CheckInstallmentsAlreadyInvoiced;
+
+      ReadProjectAndBuildCostControl(ProjectCF."Project No.",Job);
+
+      PrognosisDate := DeterminePrognosisDate(ProjectCF."Reference Date",Job);
+
+      IF PrognosisDate <> ProjectCF."Prognosis Date" THEN BEGIN
+        ProjectCF."Prognosis Date" := PrognosisDate;
+        IF ProjectCF."Reference Date" = 0D THEN
+          ProjectCF."Reference Date" := CalcReferenceDate(ProjectCF."Prognosis Date");
+        ProjectCF.MODIFY;
+      END;
+
+      ProjectCFDetail.SETRANGE("Project No.",ProjectCF."Project No.");
+      ProjectCFDetail.SETRANGE("Cash Flow",ProjectCF."Cash Flow");
+      ProjectCFDetail.DELETEALL(TRUE);
+
+      GenerateVirtualInstallments(ProjectCF,TempProjectInstallment);
+
+      CreateOrUpdateProjectCFRubrics(ProjectCF,Job,TempProjectInstallment,FALSE,DummyProjectCF);
+    END;
+
+    PROCEDURE DeterminePrognosisDate@1100527711(DateFilter@1100527701 : Date;VAR Job@1100527700 : Record 11072003) PrognosisDate : Date;
+    VAR
+      DeterminePrognosisDate@1100527702 : Codeunit 11012029;
+    BEGIN
+      Job.SETRANGE("Period Filter",0D,DateFilter);
+      Job.SETRANGE("Cumulation Filter",0D,DateFilter);
+      DeterminePrognosisDate.DetermineDate(Job);
+
+      IF Job.GETFILTER("Prognosis Filter") <> '''''' THEN
+        EVALUATE(PrognosisDate,Job.GETFILTER("Prognosis Filter"));
+
+      IF PrognosisDate <> 0D THEN BEGIN
+        Job.SETRANGE("Period Filter",0D,PrognosisDate);
+        Job.SETRANGE("Cumulation Filter",0D,PrognosisDate);
+      END;
+    END;
+
+    PROCEDURE CalcReferenceDate@1100527705(PrognosisDate@1100527700 : Date) FirstDayOfNextMonth : Date;
+    VAR
+      MonthInt@1100527701 : Integer;
+      YearInt@1100527702 : Integer;
+    BEGIN
+      IF PrognosisDate = 0D THEN
+        PrognosisDate := WORKDATE;
+
+      MonthInt := DATE2DMY(CALCDATE('<1M>',PrognosisDate),2);
+      YearInt := DATE2DMY(CALCDATE('<1M>',PrognosisDate),3);
+      EXIT(DMY2DATE(1,MonthInt,YearInt));
+    END;
+
+    LOCAL PROCEDURE RubricIsRelevant@1100527721(CFRubric@1100527700 : Record 11012637) : Boolean;
+    BEGIN
+      EXIT(
+        (CFRubric.Type = CFRubric.Type::Subtotal) OR
+        (CFRubric.Type = CFRubric.Type::Cumulative) OR
+        (CFRubric.Type = CFRubric.Type::Revenues) OR
+        (CFRubric."Actual Amount" <> 0) OR
+        (CFRubric."Prognosis Amount" <> 0) OR
+        (CFRubric."Total Prognosis" <> 0) OR
+        (CFRubric.Remaining <> 0));
+    END;
+
+    LOCAL PROCEDURE ClearRubricAmounts@1100527723(VAR CFRubric@1100527700 : Record 11012637);
+    BEGIN
+      WITH CFRubric DO BEGIN
+        "Actual Amount" := 0;
+        "Prognosis Amount" := 0;
+        "Total Cost" := 0;
+        "Total Prognosis" := 0;
+        "Open (Purchase)" := 0;
+        "Received/Not Invoiced" := 0;
+        Remaining := 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateDetailFromOtherRubric@1100527747(ProjectCFParameter@1100527701 : Record 11012631;ProjectCF@1100527703 : Record 11012635;ProjectCFRubric@1100527704 : Record 11012637);
+    VAR
+      ProjectCFDetail@1100527700 : Record 11012638;
+      NewProjectCFDetail@1100527702 : Record 11012638;
+      TotalAmount@1100527705 : Decimal;
+      BasedOnCFRubric@1100527706 : Record 11012637;
+      AmountPerDetail@1100527707 : Decimal;
+    BEGIN
+      ProjectCFParameter.TESTFIELD("Based on Rubric");
+      BasedOnCFRubric.GET(BasedOnCFRubric."Record Type"::"Cash Flow",ProjectCFParameter."Project No.",ProjectCFParameter."Cash Flow",ProjectCFParameter."Based on Rubric",ProjectCFParameter."Template Code");
+      TotalAmount := BasedOnCFRubric."Total Prognosis";
+
+      IF TotalAmount = 0 THEN
+        EXIT;
+
+      ProjectCFDetail.SETRANGE("Project No.",ProjectCFParameter."Project No.");
+      ProjectCFDetail.SETRANGE("Cash Flow",ProjectCFParameter."Cash Flow");
+      ProjectCFDetail.SETRANGE(Rubric,ProjectCFParameter."Based on Rubric");
+      IF ProjectCFDetail.FINDSET THEN
+        REPEAT
+          AmountPerDetail := (ProjectCFDetail.Amount / TotalAmount) * ProjectCFRubric."Total Prognosis";
+          NewProjectCFDetail.INIT;
+          NewProjectCFDetail."Project No." := ProjectCF."Project No.";
+          NewProjectCFDetail."Cash Flow" := ProjectCF."Cash Flow";
+          NewProjectCFDetail.Date := ProjectCFDetail.Date;
+          NewProjectCFDetail."Original Date" := ProjectCFDetail."Original Date";
+          NewProjectCFDetail."Parameter Code" := ProjectCFParameter.Code;
+          NewProjectCFDetail.Amount := AmountPerDetail;
+          NewProjectCFDetail.Rubric := ProjectCFRubric.Rubric;
+          NewProjectCFDetail."Line No." := GetLastLineNo(ProjectCFRubric);
+          NewProjectCFDetail.Type := NewProjectCFDetail.Type::Prognosis;
+          NewProjectCFDetail.INSERT;
+        UNTIL ProjectCFDetail.NEXT = 0;
+      TotalAmount := 0;
+    END;
+
+    LOCAL PROCEDURE GetLastLineNo@1100527730(ProjectCFRubric@1100527702 : Record 11012637) : Integer;
+    VAR
+      ProjectCFDetail@1100527700 : Record 11012638;
+      LineNo@1100527701 : Integer;
+    BEGIN
+      ProjectCFDetail.RESET;
+      ProjectCFDetail.SETRANGE("Project No.",ProjectCFRubric."Project No.");
+      ProjectCFDetail.SETRANGE("Cash Flow",ProjectCFRubric."Cash Flow");
+      ProjectCFDetail.SETRANGE(Rubric,ProjectCFRubric.Rubric);
+      IF ProjectCFDetail.FINDLAST THEN
+        LineNo := ProjectCFDetail."Line No." + 1
+      ELSE
+        LineNo := 1;
+      EXIT(LineNo);
+    END;
+
+    PROCEDURE CheckDatesUsedinRubrics@1100527732(ProjectCF@1100527700 : Record 11012635) : Boolean;
+    VAR
+      ProjectCFParameter@1100527704 : Record 11012631;
+      ProjectCFDate@1100527703 : Record 11012630;
+      TempProjectCFDate@1100527701 : TEMPORARY Record 11012630;
+      ProjectCFRubric@1100527705 : Record 11012637;
+    BEGIN
+      ProjectCFRubric.SETRANGE("Record Type",ProjectCFRubric."Record Type"::Project);
+      ProjectCFRubric.SETRANGE("Project No.",ProjectCF."Project No.");
+      ProjectCFRubric.SETRANGE("Cash Flow",0DT);
+      ProjectCFRubric.SETRANGE("Template Code",ProjectCF."Template Code");
+      IF ProjectCFRubric.FINDSET THEN BEGIN
+        REPEAT
+          IF ProjectCFParameter.GET(ProjectCFParameter."Record Type"::Project,ProjectCFRubric."Project No.",ProjectCFRubric."Cash Flow",ProjectCFRubric."Parameter Code",ProjectCFRubric."Template Code") THEN BEGIN
+            ProjectCFDate.SETRANGE("Project No.",ProjectCFParameter."Project No.");
+            ProjectCFDate.SETRANGE("Cash Flow",ProjectCFParameter."Cash Flow");
+            ProjectCFDate.SETFILTER(Code,'%1|%2',ProjectCFParameter."From Date Code",ProjectCFParameter."Until Date Code");
+            ProjectCFDate.SETRANGE("Template Code",ProjectCFParameter."Template Code");
+            IF ProjectCFDate.FINDSET THEN
+              REPEAT
+                IF (ProjectCFDate.Date = 0D) AND (ProjectCFDate."Relate with" <> ProjectCFDate."Relate with"::"Reference Date") THEN BEGIN
+                  IF NOT TempProjectCFDate.GET(ProjectCFDate."Record Type",ProjectCFDate."Project No.",ProjectCFDate."Cash Flow",ProjectCFDate.Code,ProjectCFDate."Template Code") THEN BEGIN
+                    TempProjectCFDate := ProjectCFDate;
+                    TempProjectCFDate.INSERT;
+                  END;
+                END;
+              UNTIL ProjectCFDate.NEXT = 0;
+          END;
+        UNTIL ProjectCFRubric.NEXT = 0;
+      END;
+
+      ProjectCFDate.RESET;
+      IF TempProjectCFDate.FINDSET THEN
+        REPEAT
+          IF ProjectCFDate.GET(TempProjectCFDate."Record Type"::Project,TempProjectCFDate."Project No.",TempProjectCFDate."Cash Flow",TempProjectCFDate.Code,TempProjectCFDate."Template Code") THEN
+            ProjectCFDate.MARK(TRUE);
+        UNTIL TempProjectCFDate.NEXT = 0;
+
+      ProjectCFDate.MARKEDONLY(TRUE);
+      IF ProjectCFDate.COUNT > 0 THEN BEGIN
+        PAGE.RUN(11130087,ProjectCFDate);
+        EXIT(TRUE);
+      END ELSE
+        EXIT(FALSE);
+    END;
+
+    PROCEDURE DeleteCashFlowRubrics@1100527734(ProjectCF@1100527701 : Record 11012635);
+    VAR
+      ProjectCFRubric@1100527700 : Record 11012637;
+    BEGIN
+      ProjectCFRubric.SETRANGE("Record Type",ProjectCFRubric."Record Type"::"Cash Flow");
+      ProjectCFRubric.SETRANGE("Project No.",ProjectCF."Project No.");
+      ProjectCFRubric.SETRANGE("Cash Flow",ProjectCF."Cash Flow");
+      ProjectCFRubric.SETRANGE("Template Code",ProjectCF."Template Code");
+      IF ProjectCFRubric.FINDSET THEN
+        ProjectCFRubric.DELETEALL;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -1,0 +1,289 @@
+OBJECT Report 1136 Copy Cost Acctg. Budget to G/L
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW113.00;
+  }
+  PROPERTIES
+  {
+    CaptionML=[DEU=Kostenrechnungsbudget in Finanzbuchhaltung kopieren;
+               ENU=Copy Cost Acctg. Budget to G/L;
+               NLD=Budget kostprijsboekhouding kopiâren naar grootboekrekening;
+               NOR=Kopier kostregnskapsbudsjett til finans];
+    ProcessingOnly=Yes;
+    OnInitReport=BEGIN
+                   IF NoOfCopies = 0 THEN
+                     NoOfCopies := 1;
+                   IF Factor = 0 THEN
+                     Factor := 1;
+                 END;
+
+  }
+  DATASET
+  {
+    { 3233;    ;DataItem;                    ;
+               DataItemTable=Table1109;
+               DataItemTableView=SORTING(Budget Name,Cost Type No.,Date);
+               OnPreDataItem=BEGIN
+                               IF Factor <= 0 THEN
+                                 ERROR(Text000);
+
+                               IF NoOfCopies < 1 THEN
+                                 ERROR(Text001);
+
+                               IF (NoOfCopies > 1) AND (DateChange = '') THEN
+                                 ERROR(Text002);
+
+                               IF GETFILTER("Budget Name") = '' THEN
+                                 ERROR(Text008);
+
+                               IF GLBudgetNameTarget.Name = '' THEN
+                                 ERROR(Text009);
+
+                               IF NOT CONFIRM(Text004,FALSE,GETFILTER("Budget Name"),GLBudgetNameTarget.Name,Factor,NoOfCopies,GETFILTER(Date),DateChange) THEN
+                                 ERROR('');
+
+                               LOCKTABLE;
+
+                               IF GLBudgetEntryTarget.FINDLAST THEN
+                                 LastEntryNo := GLBudgetEntryTarget."Entry No.";
+
+                               Window.OPEN(Text005);
+
+                               Window.UPDATE(1,COUNT);
+                               Window.UPDATE(2,NoOfCopies);
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  TempDimSetEntry@1000 : TEMPORARY Record 480;
+                                BEGIN
+                                  GLBudgetEntryTarget.INIT;
+                                  GLBudgetEntryTarget."Budget Name" := GLBudgetNameTarget.Name;
+
+                                  // Get corresponding G/L account
+                                  IF NOT CostType.GET("Cost Type No.") THEN BEGIN
+                                    NoSkipped := NoSkipped + 1;
+                                    CurrReport.SKIP;
+                                  END;
+
+                                  GLAcc.SETFILTER("No.",'%1',CostType."G/L Account Range");
+                                  IF NOT GLAcc.FINDFIRST THEN BEGIN
+                                    NoSkipped := NoSkipped + 1;
+                                    CurrReport.SKIP;
+                                  END;
+                                  GLBudgetEntryTarget."G/L Account No." := GLAcc."No.";
+                                  GLBudgetEntryTarget.Date := Date;
+
+                                  CostAccSetup.GET;
+                                  IF CostAccMgt.CostCenterExistsAsDimValue("Cost Center Code") THEN
+                                    GLBudgetEntryTarget.UpdateDimSet(TempDimSetEntry,CostAccSetup."Cost Center Dimension","Cost Center Code");
+                                  IF CostAccMgt.CostObjectExistsAsDimValue("Cost Object Code") THEN
+                                    GLBudgetEntryTarget.UpdateDimSet(TempDimSetEntry,CostAccSetup."Cost Object Dimension","Cost Object Code");
+                                  GLBudgetEntryTarget."Dimension Set ID" := DimMgt.GetDimensionSetID(TempDimSetEntry);
+                                  UpdateBudgetDimensions(GLBudgetEntryTarget);
+                                  OnAfterUpdateBudgetDimensions(GLBudgetEntryTarget);
+
+                                  GLBudgetEntryTarget.Description :=
+                                    COPYSTR(STRSUBSTNO(Text006,GETFILTER("Budget Name")),1,MAXSTRLEN(GLBudgetEntryTarget.Description));
+                                  GLBudgetEntryTarget."User ID" := USERID;
+
+                                  // Amt * req. window factor
+                                  GLBudgetEntryTarget.Amount := ROUND(Amount * Factor,0.01);
+
+                                  // Create entries according to "copies". Increment date.
+                                  FOR i := 1 TO NoOfCopies DO BEGIN
+                                    LastEntryNo := LastEntryNo + 1;
+                                    GLBudgetEntryTarget."Entry No." := LastEntryNo;
+
+                                    // Prepare date for next entry
+                                    IF DateChange <> '' THEN
+                                      GLBudgetEntryTarget.Date := CALCDATE(DateFormula,GLBudgetEntryTarget.Date);
+
+                                    GLBudgetEntryTarget.INSERT;
+
+                                    NoInserted := NoInserted + 1;
+                                    IF (NoInserted MOD 100) = 0 THEN
+                                      Window.UPDATE(3,NoInserted);
+                                  END;
+                                END;
+
+               OnPostDataItem=BEGIN
+                                Window.CLOSE;
+
+                                IF NoInserted = 0 THEN BEGIN
+                                  MESSAGE(Text010,NoSkipped);
+                                  ERROR('');
+                                END;
+
+                                IF NOT CONFIRM(Text007,TRUE,NoInserted,GLBudgetNameTarget.Name,NoSkipped) THEN
+                                  ERROR('');
+                              END;
+
+               ReqFilterFields=Budget Name,Cost Type No.,Cost Center Code,Cost Object Code,Date }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      SaveValues=Yes;
+      OnInit=BEGIN
+               GLBudgetNameTarget.INIT;
+             END;
+
+    }
+    CONTROLS
+    {
+      { 1900000001;0;Container;
+                  ContainerType=ContentArea }
+
+      { 1900000002;1;Group  ;
+                  CaptionML=[DEU=Optionen;
+                             ENU=Options;
+                             NLD=Opties;
+                             NOR=Alternativer;
+                             SVE=Alternativ] }
+
+      { 1   ;2   ;Field     ;
+                  Name=Allocation Target Budget Name;
+                  Lookup=Yes;
+                  CaptionML=[DEU=Verteilungszielbudgetname;
+                             ENU=Allocation Target Budget Name;
+                             NLD=Budget verdeeldoel;
+                             NOR=FordelingsmÜl - budsjettnavn];
+                  ToolTipML=[DEU=Gibt einen Finanzbudgetnamen an.;
+                             ENU=Specifies a general ledger budget name.;
+                             NLD=Hiermee wordt de naam opgegeven van een grootboekbudget.;
+                             NOR=Angir et navn pÜ finansbudsjettet.];
+                  ApplicationArea=#CostAccounting;
+                  SourceExpr=GLBudgetNameTarget.Name;
+                  TableRelation="G/L Budget Name" }
+
+      { 3   ;2   ;Field     ;
+                  Name=Amount multiplication factor;
+                  CaptionML=[DEU=Multiplikationsfaktor fÅr Betrag;
+                             ENU=Amount multiplication factor;
+                             NLD=Vermenigvuldigingsfactor bedrag;
+                             NOR=Belõpsmultiplikasjonsfaktor];
+                  ToolTipML=[DEU=Gibt den Multiplikationsfaktor fÅr den Betrag an. Geben Sie 1,00 ein, wenn die Werte 1:1 kopiert werden sollen. Der Wert 1,05 erhîht die Budgetzahlen um 5 Prozent.;
+                             ENU=Specifies the amount multiplication factor. Enter a 1.00 if you want to copy the values 1:1. The value 1.05 increases the budget figures by 5 percent.;
+                             NLD=Hiermee wordt de vermenigvuldigingsfactor opgegeven. Voer 1,00 in als u de waarden ÇÇn op ÇÇn wilt kopiâren. Met de waarde 1,05 worden de budgetcijfers met 5% verhoogd.;
+                             NOR=Angir multiplikasjonsfaktoren for belõpet. Angi 1,00 hvis du vil kopiere verdiene 1:1. Verdien 1,05 õker budsjettallene med 5 prosent.];
+                  ApplicationArea=#CostAccounting;
+                  SourceExpr=Factor }
+
+      { 8   ;2   ;Field     ;
+                  Name=No. of Copies;
+                  CaptionML=[DEU=Anzahl Kopien;
+                             ENU=No. of Copies;
+                             NLD=Aantal exemplaren;
+                             NOR=Antall eksemplarer;
+                             SVE=Antal kopior];
+                  ToolTipML=[DEU=Gibt an, wie oft das Kostenrechnungsbudget kopiert wird.;
+                             ENU=Specifies how many times the cost accounting budget is copied.;
+                             NLD=Hiermee wordt opgegeven hoe vaak het kostprijsboekhoudingsbudget wordt gekopieerd.;
+                             NOR=Angir hvor mange ganger kostregnskapsbudsjettet skal kopieres.];
+                  ApplicationArea=#CostAccounting;
+                  SourceExpr=NoOfCopies }
+
+      { 6   ;2   ;Field     ;
+                  Name=Date Change Formula;
+                  CaptionML=[DEU=Datumswechsel Formel;
+                             ENU=Date Change Formula;
+                             NLD=Datumformule;
+                             NOR=Endre datoformel;
+                             SVE=DatumÑndringsformel];
+                  ToolTipML=[DEU=Gibt an, wie die Datumsangaben der kopierten Posten geÑndert werden. Wenn Sie beispielsweise das Budget der letzten Woche in die laufende Woche kopieren mîchten, verwenden Sie die Formel 1W (eine Woche).;
+                             ENU=Specifies how the dates on the entries that are copied will be changed. For example, to copy last week's budget to this week, use the formula 1W, which is one week.;
+                             NLD=Hiermee wordt opgegeven hoe de datums van de gekopieerde posten worden gewijzigd. Als u bijvoorbeeld het budget van de vorige week wilt kopiâren naar deze week, gebruikt u de datumformule 1W, wat staat voor ÇÇn week.;
+                             NOR=Angir hvordan datoene pÜ postene som kopieres, blir endret. Hvis du for eksempel vil kopiere siste ukes budsjett til denne uken, bruker du formelen 1U, som er Çn uke.];
+                  ApplicationArea=#CostAccounting;
+                  DateFormula=Yes;
+                  SourceExpr=DateChange;
+                  OnValidate=BEGIN
+                               EVALUATE(DateFormula,DateChange);
+                             END;
+                              }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      GLBudgetEntryTarget@1000 : Record 96;
+      GLBudgetNameTarget@1001 : Record 95;
+      CostType@1002 : Record 1103;
+      GLAcc@1003 : Record 15;
+      CostAccSetup@1004 : Record 1108;
+      CostAccMgt@1005 : Codeunit 1100;
+      DimMgt@1006 : Codeunit 408;
+      Window@1007 : Dialog;
+      DateChange@1008 : Code[10];
+      DateFormula@1009 : DateFormula;
+      LastEntryNo@1010 : Integer;
+      NoOfCopies@1011 : Integer;
+      Factor@1012 : Decimal;
+      i@1013 : Integer;
+      NoSkipped@1014 : Integer;
+      NoInserted@1015 : Integer;
+      Text000@1016 : TextConst 'DEU=Der Multiplikationsfaktor darf nicht null oder kleiner null sein.;ENU=The multiplication factor must not be 0 or less than 0.;NLD=De vermenigvuldigingsfactor mag niet 0 of kleiner dan 0 zijn.;NOR=Multiplikasjonsfaktoren kan ikke vëre 0 eller lavere enn 0.';
+      Text001@1017 : TextConst 'DEU=Die Kopienanzahl muss mindestens 1 betragen.;ENU=Number of copies must be at least 1.;NLD=Aantal exemplaren moet ten minste 1 zijn.;NOR=Antall eksemplarer mÜ vëre minst 1.';
+      Text002@1018 : TextConst 'DEU=Bei Erstellung mehrerer Kopien muss eine Formel fÅr den Datumswechsel definiert werden.;ENU=If more than one copy is created, a formula for date change must be defined.;NLD=Als meerdere exemplaren worden gemaakt, moet een formule voor datumwijziging worden gedefinieerd.;NOR=Hvis flere eksemplarer opprettes, mÜ en formel for datoendring defineres.';
+      Text004@1020 : TextConst '@@@="%3=multiplication factor (decimal);%4=No of copies (integer)";DEU=Das Kostenbudget ''%1'' wird in das Finanzbudget ''%2'' kopiert. Die BudgetbetrÑge werden mit dem Faktor %3 multipliziert. \%4 Kopien werden erstellt, und die Buchung wird aus dem Bereich %5 auf %6 erhîht.\\Mîchten Sie das Budget kopieren?;ENU=Cost budget "%1" will be copied to G/L budget "%2". The budget amounts will be multiplied by factor %3. \%4 copies will be created and the posting will be increased from the range of "%5" to "%6".\\Do you want do copy the budget?;NLD=Kostenbudget %1 wordt gekopieerd naar grootboekbudget %2. De budgetbedragen worden vermenigvuldigd met factor %3. \%4 kopieân worden gemaakt en de boekingen worden verhoogd van bereik %5 naar %6.\\Wilt u het budget kopiâren?;NOR=Kostbudsjett %1 vil bli kopiert til finansbudsjett %2. Budsjettbelõpene vil bli multiplisert med faktoren %3. \%4 eksemplarer vil bli opprettet, og bokfõringen vil bli õkt fra omrÜdet %5 til %6.\\Vil du kopiere budsjettet?';
+      Text005@1021 : TextConst 'DEU=Budgetposten werden kopiert...\Postenanzahl #1#####\Kopienanzahl #2#####\Kopiert      #3#####;ENU=Copying budget entries\No of entries #1#####\No of copies  #2#####\Copied        #3#####;NLD=Budgetposten kopiâren\Aantal posten #1#####\Aantal exemplaren #2#####\Gekopieerd        #3#####;NOR=Kopierer budsjettposter\Antall poster #1#####\Antall eksemplarer  #2#####\Kopiert        #3#####';
+      Text006@1022 : TextConst '@@@=%1 - Budget Name.;DEU=Kopie des Kostenbudgets %1;ENU=Copy of cost budget %1;NLD=Kopie van kostenbudget %1;NOR=Kopi av kostbudsjett %1';
+      Text007@1023 : TextConst '@@@="%2=budget name;%3=integer value";DEU=Im Budget ''%2'' wurden %1 Posten generiert.\\%3 Posten wurden Åbersprungen, da entweder keine entsprechenden Sachkonten definiert waren.\\Budget kopieren?;ENU=%1 entries generated in budget %2.\\%3 entries were skipped because there were no corresponding G/L accounts defined.\\Copy entries?;NLD=%1 posten gegenereerd in budget %2.\\%3 posten zijn overgeslagen omdat er geen bijbehorende grootboekrekeningen waren gedefinieerd.\\Posten kopiâren?;NOR=%1 poster er generert i budsjettet %2.\\%3 poster ble hoppet over fordi det ikke fantes noen tilsvarende finanskonti definert.\\Vil du kopiere poster?';
+      Text008@1024 : TextConst 'DEU=Definieren Sie den Namen des Herkunftsbudgets.;ENU=Define name of source budget.;NLD=Definieer de naam van het bronbudget.;NOR=Definer navn pÜ kildebudsjett.';
+      Text009@1025 : TextConst 'DEU=Definieren Sie den Namen des Zielbudgets.;ENU=Define name of target budget.;NLD=Definieer de naam van het doelbudget.;NOR=Definer navn pÜ mÜlbudsjett.';
+      Text010@1026 : TextConst 'DEU=Keine EintrÑge kopiert. %1 Posten wurden Åbersprungen, da keine entsprechenden Sachkonten definiert waren.;ENU=No entries were copied. %1 entries were skipped because no corresponding general ledger accounts were defined.;NLD=Er zijn geen posten gekopieerd. %1 posten zijn overgeslagen omdat er geen bijbehorende grootboekrekeningen waren gedefinieerd.;NOR=Det ble ikke kopiert noen poster. %1 poster ble hoppet over fordi det ikke var definert noen tilsvarende finanskonti.';
+
+    LOCAL PROCEDURE UpdateBudgetDimensions@1(VAR GLBudgetEntry@1000 : Record 96);
+    VAR
+      GLSetup@1001 : Record 98;
+      GLBudgetName@1002 : Record 95;
+      DimSetEntry@1003 : Record 480;
+    BEGIN
+      GLSetup.GET;
+      WITH GLBudgetEntry DO BEGIN
+        GLBudgetName.GET("Budget Name");
+
+        "Global Dimension 1 Code" := '';
+        "Global Dimension 2 Code" := '';
+        "Budget Dimension 1 Code" := '';
+        "Budget Dimension 2 Code" := '';
+        "Budget Dimension 3 Code" := '';
+        "Budget Dimension 4 Code" := '';
+
+        IF DimSetEntry.GET("Dimension Set ID",GLSetup."Global Dimension 1 Code") THEN
+          "Global Dimension 1 Code" := DimSetEntry."Dimension Value Code";
+        IF DimSetEntry.GET("Dimension Set ID",GLSetup."Global Dimension 2 Code") THEN
+          "Global Dimension 2 Code" := DimSetEntry."Dimension Value Code";
+        IF DimSetEntry.GET("Dimension Set ID",GLBudgetName."Budget Dimension 1 Code") THEN
+          "Budget Dimension 1 Code" := DimSetEntry."Dimension Value Code";
+        IF DimSetEntry.GET("Dimension Set ID",GLBudgetName."Budget Dimension 2 Code") THEN
+          "Budget Dimension 2 Code" := DimSetEntry."Dimension Value Code";
+        IF DimSetEntry.GET("Dimension Set ID",GLBudgetName."Budget Dimension 3 Code") THEN
+          "Budget Dimension 3 Code" := DimSetEntry."Dimension Value Code";
+        IF DimSetEntry.GET("Dimension Set ID",GLBudgetName."Budget Dimension 4 Code") THEN
+          "Budget Dimension 4 Code" := DimSetEntry."Dimension Value Code";
+      END;
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterUpdateBudgetDimensions@2(VAR GLBudgetEntryTarget@1000 : Record 96);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

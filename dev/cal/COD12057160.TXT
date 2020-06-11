@@ -1,0 +1,614 @@
+OBJECT Codeunit 12057160 ExFlow 4PS
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=EXF420000,4PS;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Txt001@1000000000 : TextConst 'ENU=Budget sync is not active in ExFlow Setup;SVE=Budget synkronisering „r ej aktivt i ExFlow inst„llningar';
+      Txt002@1000000001 : TextConst 'ENU=Synconization complete;SVE=Synkronisering avslutad';
+      Txt003@1000000002 : TextConst 'ENU=Project and SO can not be used at the same time;SVE=Projekt och Serviceorder kan inte anv„ndas samtidigt';
+
+    PROCEDURE Validate4PSfields@1100285001(VAR ExflowPurchDocLine@1100285000 : Record 12013588;VAR PurchInvLine@1100285001 : Record 39;VAR PurchInvHeader@1100285002 : Record 38) : Boolean;
+    BEGIN
+      IF ExflowPurchDocLine."Shortcut Dimension 2 Code" = '' THEN
+        EXIT(FALSE);
+
+      IF (ExflowPurchDocLine."Job No." = '') AND (ExflowPurchDocLine."Service Order No." = '') THEN
+         EXIT(FALSE);
+
+      PurchInvLine.TRANSFERFIELDS(ExflowPurchDocLine);
+      PurchInvLine."Document Type" := PurchInvHeader."Document Type";
+      PurchInvLine."Document No." := PurchInvHeader."No.";
+      PurchInvLine."Line No." := ExflowPurchDocLine."Line No.";
+      PurchInvLine.VALIDATE("Buy-from Vendor No.",ExflowPurchDocLine."Buy-from Vendor No.");
+      PurchInvLine.Description := '';
+      IF ExflowPurchDocLine."Job No." <> '' THEN
+        PurchInvLine.VALIDATE("Job No.",ExflowPurchDocLine."Job No.");
+      IF ExflowPurchDocLine."Service Order No." <> '' THEN
+        PurchInvLine.VALIDATE("Service Order No.",ExflowPurchDocLine."Service Order No.");
+      PurchInvLine.VALIDATE("Shortcut Dimension 2 Code",ExflowPurchDocLine."Shortcut Dimension 2 Code");
+      PurchInvLine.VALIDATE(Quantity,ExflowPurchDocLine.Quantity);
+      PurchInvLine.VALIDATE("Direct Unit Cost",ExflowPurchDocLine."Direct Unit Cost");
+      PurchInvLine.VALIDATE("Line Amount",ExflowPurchDocLine."Line Amount");
+      PurchInvLine.VALIDATE("Extension Contract",ExflowPurchDocLine."Extension Contract");
+      PurchInvLine.VALIDATE("Gen. Prod. Posting Group",ExflowPurchDocLine."Gen. Prod. Posting Group");
+      PurchInvLine.VALIDATE("VAT Prod. Posting Group",ExflowPurchDocLine."VAT Prod. Posting Group");
+      PurchInvLine.VALIDATE("Shortcut Dimension 1 Code",ExflowPurchDocLine."Shortcut Dimension 1 Code");
+
+      IF ExflowPurchDocLine."Plot No." <> '' THEN
+        PurchInvLine.VALIDATE("Plot No.",ExflowPurchDocLine."Plot No.");
+
+      IF ExflowPurchDocLine."Extension Contract" <> '' THEN
+        PurchInvLine.VALIDATE("Extension Contract",ExflowPurchDocLine."Extension Contract");
+
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE Validate4PSfieldsOnCreateInvoice@1100285000(VAR ExflowPurchDocLine@1100285000 : Record 12013588;VAR PurchInvLine@1100285001 : Record 39);
+    BEGIN
+      IF ExflowPurchDocLine."Shortcut Dimension 2 Code" = '' THEN
+        EXIT;
+
+      IF (ExflowPurchDocLine."Job No." = '') AND (ExflowPurchDocLine."Service Order No." = '') THEN
+        EXIT;
+
+      PurchInvLine.SetFromExternalInvoice(TRUE);
+      PurchInvLine.VALIDATE("Job No.",ExflowPurchDocLine."Job No.");
+      PurchInvLine.VALIDATE("Service Order No.",ExflowPurchDocLine."Service Order No.");
+
+      PurchInvLine.Description := '';
+      PurchInvLine.VALIDATE("Shortcut Dimension 2 Code",ExflowPurchDocLine."Shortcut Dimension 2 Code");
+      PurchInvLine.VALIDATE(Quantity,ExflowPurchDocLine.Quantity);
+      PurchInvLine.VALIDATE("Direct Unit Cost",ExflowPurchDocLine."Direct Unit Cost");
+      PurchInvLine.VALIDATE("Line Amount",ExflowPurchDocLine."Line Amount");
+      PurchInvLine.VALIDATE("Gen. Prod. Posting Group",ExflowPurchDocLine."Gen. Prod. Posting Group");
+      PurchInvLine.VALIDATE("VAT Prod. Posting Group",ExflowPurchDocLine."VAT Prod. Posting Group");
+    END;
+
+    PROCEDURE GetCostObjDimCode@1101285000(VAR DimCode@1101285000 : Code[20]) Exist : Boolean;
+    VAR
+      ExColumn@1101285001 : Record 12013661;
+    BEGIN
+      ExColumn.RESET;
+      ExColumn.SETRANGE(Source,'DIM2');
+      IF NOT ExColumn.FINDFIRST THEN
+        EXIT(FALSE)
+      ELSE BEGIN
+        DimCode := ExColumn.Code;
+        EXIT(TRUE);
+      END;
+    END;
+
+    PROCEDURE GetServiceOrderNoCode@1101285001(VAR DimCode@1101285000 : Code[20]) Exist : Boolean;
+    VAR
+      ExColumn@1101285001 : Record 12013661;
+    BEGIN
+      ExColumn.RESET;
+      ExColumn.SETRANGE(Source,'SERVICEORDERNO');
+      IF NOT ExColumn.FINDFIRST THEN
+        EXIT(FALSE)
+      ELSE BEGIN
+        DimCode := ExColumn.Code;
+        EXIT(TRUE);
+      END;
+    END;
+
+    PROCEDURE ValidateChangeJnlNewLine@1101285002(VAR ChangeJournalLine@1101285000 : Record 12013618;VAR PurchLine@1101285004 : Record 39) Is4PSLine : Boolean;
+    VAR
+      DocLine@1101285001 : Record 12013609;
+      DocLineDim@1101285002 : Record 12013611;
+      cuExflow@1101285003 : Codeunit 12013601;
+      DimMgt@1101285006 : Codeunit 408;
+      DimVal2Rec@1101285005 : Record 349;
+    BEGIN
+      //This function is called from ExFlows change jnl when a new line was added on the web
+      //The 4PS specific fields needs to be updated and then ExFlow tables needs to be updated based on the result given by 4PS logic
+
+      IF ChangeJournalLine."New Cost Object"= '' THEN
+        EXIT(FALSE);
+
+      IF (ChangeJournalLine."New Job No." = '') AND (ChangeJournalLine."New Service Order No." = '') THEN
+        EXIT(FALSE);
+
+      //PurchLine."Cost Type" := PurchLine."Cost Type"::" ";
+      //PurchLine.VALIDATE("Shortcut Dimension 2 Code",ChangeJournalLine."New Cost Object");
+
+      IF ChangeJournalLine."New Job No." <> '' THEN
+        PurchLine.VALIDATE("Job No.",ChangeJournalLine."New Job No.");
+
+      IF ChangeJournalLine."New Service Order No." <> '' THEN
+        PurchLine.VALIDATE("Service Order No.",ChangeJournalLine."New Service Order No.");
+
+      PurchLine."Cost Type" := PurchLine."Cost Type"::" ";
+      PurchLine.VALIDATE("Shortcut Dimension 2 Code",ChangeJournalLine."New Cost Object");
+
+      DimMgt.GetDimValueRec(2, PurchLine."Shortcut Dimension 2 Code", DimVal2Rec, TRUE, PurchLine."Job No.");
+      IF PurchLine."Cost Type" <> DimVal2Rec."Cost Type" + 1 THEN BEGIN
+        PurchLine."Cost Type" := DimVal2Rec."Cost Type" + 1;
+        //4PS20200221
+        //PurchLine.Description := DimVal2Rec.Name;
+        //4PS20200221
+      END;
+
+      IF PurchLine."Cost Component" <> DimVal2Rec."Cost Component" THEN
+        PurchLine."Cost Component" := DimVal2Rec."Cost Component";
+
+      PurchLine.VALIDATE("Gen. Prod. Posting Group", ChangeJournalLine."Gen. Prod. Posting Group");
+      PurchLine.VALIDATE("VAT Prod. Posting Group", ChangeJournalLine."VAT Prod. Posting Group");
+      PurchLine.VALIDATE(Quantity,ChangeJournalLine."New Quantity");
+
+      DocLine.RetrieveRecord(DocLine,PurchLine."Document Type",PurchLine."Document No.",ChangeJournalLine."Line No.");
+      //4PS20200221
+      //DocLine.Description := PurchLine.Description;
+      //4PS20200221
+      DocLine."No." := PurchLine."No.";
+      DocLine."Job No." := PurchLine."Job No.";
+      DocLine."Service Order No." := PurchLine."Service Order No.";
+      DocLine.MODIFY;
+
+      EXIT(TRUE);
+
+      //cuExflow.AddExtraToExFlowDim('G_LACCOUNT',PurchLine);
+      //cuExflow.AddExtraToExFlowDim('SERVICEORDERNO.',PurchLine);
+      //cuExflow.AddExtraToExFlowDim('JOB',PurchLine);
+    END;
+
+    PROCEDURE ValidateChangeJnlModifedLine@1101285003(VAR ChangeJournalLine@1101285000 : Record 12013618;VAR PurchLine@1101285004 : Record 39;VAR PurchLineCopy@1101285003 : Record 39;VAR DocLine@1101285006 : Record 12013609);
+    VAR
+      DocLineDim@1101285002 : Record 12013611;
+      cuExflow@1101285001 : Codeunit 12013601;
+      DimMgt@1101285005 : Codeunit 408;
+      DimVal2Rec@1101285007 : Record 349;
+    BEGIN
+      //This function is called from ExFlows change jnl when a new line was modified on the web
+      //The 4PS specific fields needs to be updated and then ExFlow tables needs to be updated based on the result given by 4PS logic
+
+      PurchLine.SetFromExternalInvoice(TRUE); //WG 180329
+
+      IF ChangeJournalLine."New Cost Object"= '' THEN BEGIN
+        PurchLine."Cost Type" := PurchLine."Cost Type"::" ";
+        PurchLine.VALIDATE("Shortcut Dimension 2 Code",'');
+        PurchLine.VALIDATE("Job No.",'');
+        PurchLine.VALIDATE("Service Order No.",'');
+        PurchLine.VALIDATE(Element,'');
+        PurchLine.VALIDATE("Extension Contract",'');
+      END ELSE BEGIN
+        PurchLine."No." := '';
+        PurchLine."Cost Type" := PurchLine."Cost Type"::" ";
+        PurchLine.VALIDATE("Job No.",'');
+        PurchLine.VALIDATE("Service Order No.",'');
+        PurchLine.VALIDATE("Shortcut Dimension 2 Code",'');
+
+        IF ChangeJournalLine."New Job No." <> '' THEN BEGIN
+          IF PurchLineCopy."Service Order No." <> '' THEN
+            PurchLine.VALIDATE("Service Order No.",'');
+          PurchLine.VALIDATE("Job No.",ChangeJournalLine."New Job No.");
+        END;
+
+        IF ChangeJournalLine."New Service Order No." <> '' THEN BEGIN
+          IF PurchLineCopy."Job No."<> '' THEN
+            PurchLine.VALIDATE("Job No.",'');
+          PurchLine.VALIDATE("Service Order No.",ChangeJournalLine."New Service Order No.");
+        END;
+
+        PurchLine.Description := '';
+        PurchLine."Cost Type" := PurchLine."Cost Type"::" ";
+        PurchLine.VALIDATE("Shortcut Dimension 2 Code",'');
+        PurchLine."Cost Type" := PurchLine."Cost Type"::" ";
+        PurchLine.VALIDATE("Shortcut Dimension 2 Code",ChangeJournalLine."New Cost Object");
+
+        DimMgt.GetDimValueRec(2, PurchLine."Shortcut Dimension 2 Code", DimVal2Rec, TRUE, PurchLine."Job No.");
+
+        IF PurchLine."Cost Type" <> DimVal2Rec."Cost Type" + 1 THEN BEGIN
+          PurchLine."Cost Type" := DimVal2Rec."Cost Type" + 1;
+          //4PS20200221
+          //PurchLine.Description := DimVal2Rec.Name;
+          //4PS20200221
+        END;
+
+        IF PurchLine."Cost Component" <> DimVal2Rec."Cost Component" THEN
+          PurchLine."Cost Component" := DimVal2Rec."Cost Component";
+
+        //Avoid revalidation
+        PurchLineCopy."No." := PurchLine."No.";
+        //4PS20200221
+        //PurchLineCopy.Description := PurchLine.Description;
+        //4PS20200221
+        PurchLineCopy."Job No." := PurchLine."Job No.";
+
+        ChangeJournalLine."New No." := PurchLine."No.";
+        //4PS20200221
+        //ChangeJournalLine."New Description" := PurchLine.Description;
+        //4PS20200221
+        ChangeJournalLine."New Job No." := PurchLine."Job No.";
+
+        //Updated Exf With validated 4PS record
+        //4PS20200221
+        //DocLine.Description := PurchLine.Description;
+        //4PS20200221
+        DocLine."No." := PurchLine."No.";
+        DocLine."Job No." := PurchLine."Job No.";
+        DocLine."Service Order No." := PurchLine."Service Order No.";
+        DocLine.MODIFY;
+
+        //cuExflow.AddExtraToExFlowDim('SERVICEORDERNO.',PurchLine);
+        //cuExflow.AddExtraToExFlowDim('JOB',PurchLine);
+      END;
+    END;
+
+    PROCEDURE GetUserGrpForPersonResp4PS@1101285007(Job@1101285000 : Record 11072003) ExUserGrpCode : Code[20];
+    VAR
+      ExUserGrp@1101285001 : Record 12013606;
+      Employee@1101285002 : Record 5200;
+      ExUserComp@1101285003 : Record 12013641;
+      Uid@1000000000 : Code[50];
+    BEGIN
+      IF Job."Project Manager" = '' THEN
+        EXIT('');
+
+      IF ExUserGrp.GET(Job."Project Manager") THEN
+        EXIT(ExUserGrp.Code);
+
+      IF NOT Employee.GET(Job."Project Manager") THEN
+        EXIT('');
+
+      IF Employee."Company E-Mail" <> '' THEN BEGIN
+        ExUserComp.RESET;
+        ExUserComp.SETFILTER("E-mail ExFlow",'@'+ Employee."Company E-Mail");
+        IF ExUserComp.FINDFIRST THEN
+          Uid := ExUserComp."User ID";
+      END;
+
+      IF (Uid = '') AND (Employee."First Name" <> '') THEN BEGIN
+        ExUserComp.RESET;
+        ExUserComp.SETFILTER("User Name",'@'+ Employee."First Name");
+        IF ExUserComp.FINDFIRST THEN
+          Uid := ExUserComp."User ID";
+      END;
+
+      IF Uid = '' THEN
+        EXIT('');
+
+      IF NOT ExUserGrp.GET(Uid) THEN
+        EXIT('')
+      ELSE
+        EXIT(ExUserGrp.Code);
+    END;
+
+    [EventSubscriber(Table,11072003,OnAfterValidateEvent,"Budget Fixed",Skip,Skip)]
+    LOCAL PROCEDURE SyncBudgetAgainstCostFilter@1000000000(VAR Rec@1000000000 : Record 11072003;VAR xRec@1000000001 : Record 11072003;CurrFieldNo@1000000002 : Integer);
+    VAR
+      CostObjFilter@1000000004 : Record 12057160;
+    BEGIN
+      IF Rec.ISTEMPORARY THEN
+        EXIT;
+
+      IF CurrFieldNo <> Rec.FIELDNO("Budget Fixed") THEN
+        EXIT;
+
+      IF Rec."No." = '' THEN
+        EXIT;
+
+      IF NOT CheckBudgetSyncIsActive THEN
+        EXIT;
+
+      IF CostObjFilter.GET(Rec."No.") THEN
+        CostObjFilter.DELETE(TRUE);
+
+      IF Rec."Budget Fixed" THEN
+        CreateCostFilterFromBudget(Rec."No.")
+    END;
+
+    LOCAL PROCEDURE CreateCostFilterFromBudget@1000000001(JobNo@1000000000 : Code[20]);
+    VAR
+      CostObjFilter@1000000001 : Record 12057160;
+      CostObjFilterLine@1000000002 : Record 12057161;
+      BudgetLine@1000000003 : Record 11012001;
+    BEGIN
+      BudgetLine.SETRANGE("Project No.",JobNo);
+      BudgetLine.SETFILTER("Cost Object",'<>%1','');
+      IF BudgetLine.FINDSET THEN BEGIN
+        CostObjFilter.INIT;
+        CostObjFilter."Job No." := JobNo;
+        CostObjFilter.Enabled := TRUE;
+        CostObjFilter.INSERT;
+        REPEAT
+          CostObjFilterLine.INIT;
+          CostObjFilterLine."Job No." := JobNo;
+          CostObjFilterLine."Cost Object Code" := BudgetLine."Cost Object";
+          CostObjFilterLine.Visible := TRUE;
+          IF CostObjFilterLine.INSERT THEN;
+        UNTIL BudgetLine.NEXT = 0;
+        CostObjFilter.CreateFilter;
+        CostObjFilter.MODIFY;
+      END;
+    END;
+
+    PROCEDURE SyncAllCostFilters@1000000002();
+    VAR
+      Job@1000000000 : Record 11072003;
+      CostObjFilter@1000000001 : Record 12057160;
+    BEGIN
+      IF NOT CheckBudgetSyncIsActive THEN
+        ERROR(Txt001);
+
+      CostObjFilter.DELETEALL(TRUE);
+
+      Job.RESET;
+      Job.SETFILTER("No.",'<>%1','');
+      Job.SETFILTER("Project Status",'%1|%2|%3|%4',Job."Project Status"::Estimation,Job."Project Status"::Preparation,Job."Project Status"::Production,Job."Project Status"::"Technical Finished");
+      Job.SETRANGE(Blocked,Job.Blocked::" ");
+      Job.SETRANGE("Budget Fixed",TRUE);
+      IF Job.FINDSET THEN
+        REPEAT
+          CreateCostFilterFromBudget(Job."No.");
+        UNTIL Job.NEXT = 0;
+
+      MESSAGE(Txt002);
+    END;
+
+    LOCAL PROCEDURE CheckBudgetSyncIsActive@1000000003() : Boolean;
+    VAR
+      ExFlowSetup@1000000000 : Record 12013601;
+    BEGIN
+      IF NOT ExFlowSetup.GET THEN
+        EXIT(FALSE);
+
+      EXIT(ExFlowSetup."Budget Cost Filter Synch 4PS");
+    END;
+
+    LOCAL PROCEDURE CheckCreateCodingRule@1100285024(VAR CodingRuleID@1000000000 : Integer);
+    VAR
+      ExCodingRule@1100285003 : Record 12013660;
+      ExCodingRuleLine@1100285004 : Record 12013663;
+      ExFlow@1100285005 : Codeunit 12013601;
+    BEGIN
+      IF CodingRuleID <> 0 THEN BEGIN
+        ExCodingRule.GET(CodingRuleID);
+        IF NOT ExCodingRule.AutoCreated THEN
+          CodingRuleID := 0;
+        EXIT;
+      END;
+
+      ExCodingRule.INIT;
+      ExCodingRule.Name := 'Auto Generated';
+      ExCodingRule.AutoCreated := TRUE;
+      ExCodingRule."Is Subset" := TRUE;
+      ExCodingRule.Active := TRUE;
+      ExCodingRule.INSERT(TRUE);
+
+      ExCodingRuleLine.RESET;
+      ExCodingRuleLine.SETRANGE(ID, ExCodingRule.ID);
+      IF ExCodingRuleLine.FINDSET THEN
+        REPEAT
+          ExCodingRuleLine.VALIDATE(All, TRUE);
+          ExCodingRuleLine.MODIFY;
+        UNTIL ExCodingRuleLine.NEXT = 0;
+
+      CodingRuleID := ExCodingRule.ID;
+    END;
+
+    PROCEDURE SyncCodingRules@1000000004();
+    VAR
+      ExUserCompany@1000000000 : Record 12013641;
+    BEGIN
+      ExUserCompany.RESET;
+      IF ExUserCompany.FINDSET THEN
+        REPEAT
+          CheckCreateCodingRule(ExUserCompany."Coding Rule ID");
+          IF ExUserCompany."Coding Rule ID" <> 0 THEN BEGIN
+            ExUserCompany.MODIFY;
+            UpdateCodingRule(ExUserCompany);
+          END;
+        UNTIL ExUserCompany.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateCodingRule@1000000005(ExUserCompany@1000000000 : Record 12013641);
+    VAR
+      ExCodingRuleLine@1000000001 : Record 12013663;
+      TemplateRule@1000000002 : Record 12013645;
+      TemplateRuleLine@1000000003 : Record 12013603;
+      FilterStrJob@1000000004 : Text;
+      FilterStrCC@1000000007 : Text;
+      TempTemplateRuleJob@1000000005 : TEMPORARY Record 12013645;
+      TempTemplateRuleCC@1000000006 : TEMPORARY Record 12013645;
+      ExflowSetup@1000000008 : Record 12013601;
+      ExCodingRuleExpLine@1100285000 : Record 12057162;
+    BEGIN
+      TemplateRuleLine.SETRANGE("Approver Group",ExUserCompany."User ID");
+      IF TemplateRuleLine.FINDSET THEN
+        REPEAT
+          TemplateRule.GET(TemplateRuleLine.Code);
+          IF NOT TemplateRule.Disabled THEN BEGIN
+            IF (TemplateRule.JobTag) AND (TemplateRule."Job Filter" <> '') THEN BEGIN
+              TempTemplateRuleJob.INIT;
+              TempTemplateRuleJob.TRANSFERFIELDS(TemplateRule);
+              IF TempTemplateRuleJob.INSERT THEN;
+            END;
+            IF (TemplateRule."Dimension 1") AND (TemplateRule."Dimension Code 1" = 'KOSTNADSSTŽLLE') AND (TemplateRule."Dimension Value 1 Filter" <>'') THEN BEGIN
+              TempTemplateRuleCC.INIT;
+              TempTemplateRuleCC.TRANSFERFIELDS(TemplateRule);
+              IF TempTemplateRuleCC.INSERT THEN;
+            END ELSE IF (TemplateRule."Dimension 2") AND (TemplateRule."Dimension Code 2" = 'KOSTNADSSTŽLLE') AND (TemplateRule."Dimension Value 2 Filter" <> '') THEN BEGIN
+              TempTemplateRuleCC.INIT;
+              TempTemplateRuleCC.TRANSFERFIELDS(TemplateRule);
+              TempTemplateRuleCC."Dimension Value 1 Filter" := TempTemplateRuleCC."Dimension Value 2 Filter";
+              IF TempTemplateRuleCC.INSERT THEN;
+            END
+          END;
+        UNTIL TemplateRuleLine.NEXT = 0;
+
+      TempTemplateRuleJob.RESET;
+      IF TempTemplateRuleJob.FINDSET THEN
+        REPEAT
+          FilterStrJob := FilterStrJob + TempTemplateRuleJob."Job Filter" + '|';
+        UNTIL TempTemplateRuleJob.NEXT = 0;
+
+      IF FilterStrJob <> '' THEN
+        FilterStrJob := DELSTR(FilterStrJob,STRLEN(FilterStrJob),1);
+
+      TempTemplateRuleCC.RESET;
+      IF TempTemplateRuleCC.FINDSET THEN
+        REPEAT
+          FilterStrCC := FilterStrCC + TempTemplateRuleCC."Dimension Value 1 Filter" + '|';
+        UNTIL TempTemplateRuleCC.NEXT = 0;
+
+      IF FilterStrCC <> '' THEN
+        FilterStrCC := DELSTR(FilterStrCC,STRLEN(FilterStrCC),1);
+
+      ExflowSetup.GET;
+      IF ExflowSetup."Job Coding Sync" = ExflowSetup."Job Coding Sync"::JobCC THEN BEGIN
+        IF (FilterStrCC <> '') AND (FilterStrJob <> '') THEN
+          FilterStrCC := FilterStrCC + '|' + FilterStrJob
+        ELSE IF (FilterStrCC = '') AND (FilterStrJob <> '') THEN
+          FilterStrCC := FilterStrJob;
+      END;
+
+      ExCodingRuleLine.RESET;
+      ExCodingRuleLine.SETRANGE(ID, ExUserCompany."Coding Rule ID");
+      ExCodingRuleLine.SETRANGE("Column Code",'JOB');
+      IF ExCodingRuleLine.FINDFIRST THEN BEGIN
+        IF STRLEN(FilterStrJob) = 0 THEN BEGIN
+          ExCodingRuleLine.All := FALSE;
+          ExCodingRuleLine."Text Range" := '';
+          ExCodingRuleLine.VALIDATE(Empty,TRUE);
+        END ELSE IF STRLEN(FilterStrJob) > 250 THEN BEGIN
+          ExCodingRuleLine.Empty := FALSE;
+          //4PS20200221
+          ExCodingRuleLine.All := FALSE;
+          ExCodingRuleExpLine.UpdateExpressions(ExCodingRuleLine,FilterStrJob);
+          //ExCodingRuleLine."Text Range" := '';
+          //ExCodingRuleLine.VALIDATE(All,TRUE);
+          //4PS20200221
+        END ELSE BEGIN
+          ExCodingRuleLine.Empty := FALSE;
+          ExCodingRuleLine.All := FALSE;
+          ExCodingRuleLine.VALIDATE("Text Range",FilterStrJob);
+        END;
+      END;
+
+      ExCodingRuleLine.RESET;
+      ExCodingRuleLine.SETRANGE(ID, ExUserCompany."Coding Rule ID");
+      ExCodingRuleLine.SETRANGE("Column Code",'KOSTNADSSTŽLLE');
+      IF ExCodingRuleLine.FINDFIRST THEN BEGIN
+        IF STRLEN(FilterStrCC) = 0 THEN BEGIN
+          ExCodingRuleLine.All := FALSE;
+          ExCodingRuleLine."Text Range" := '';
+          ExCodingRuleLine.VALIDATE(Empty,TRUE);
+        END ELSE IF STRLEN(FilterStrCC) > 250 THEN BEGIN
+          ExCodingRuleLine.Empty := FALSE;
+          //4PS20200221
+          ExCodingRuleLine.All := FALSE;
+          ExCodingRuleExpLine.UpdateExpressions(ExCodingRuleLine,FilterStrCC);
+          //ExCodingRuleLine."Text Range" := '';
+          //ExCodingRuleLine.VALIDATE(All,TRUE);
+          //4PS20200221
+        END ELSE BEGIN
+          ExCodingRuleLine.Empty := FALSE;
+          ExCodingRuleLine.All := FALSE;
+          ExCodingRuleLine.VALIDATE("Text Range",FilterStrCC);
+        END;
+      END;
+    END;
+
+    [EventSubscriber(Table,12013603,OnAfterModifyEvent,"",Skip,Skip)]
+    LOCAL PROCEDURE OnAfterModifyTemplateRuleLine@1000000006(VAR Rec@1000000000 : Record 12013603;VAR xRec@1000000001 : Record 12013603;RunTrigger@1000000002 : Boolean);
+    VAR
+      ExFlowSetup@1000000003 : Record 12013601;
+    BEGIN
+      IF Rec.ISTEMPORARY THEN
+        EXIT;
+
+      IF NOT ExFlowSetup.GET THEN
+        EXIT;
+
+      IF ExFlowSetup."Job Coding Sync" = 0 THEN
+        EXIT;
+
+      SyncCodingRules;
+    END;
+
+    PROCEDURE Get4PsWipAcc@1000000007(CostObjectCode@1000000000 : Code[20];ProjectCode@1000000001 : Code[20];ServiceOrderNo@1000000002 : Code[20];VendNo@1000000004 : Code[20]) AccNo : Code[20];
+    VAR
+      CostObjDim@1000000003 : Record 349;
+    BEGIN
+      IF CostObjectCode = '' THEN
+        EXIT;
+
+      IF (ProjectCode = '') AND (ServiceOrderNo = '') THEN
+        EXIT;
+
+      IF (ProjectCode <> '') AND (ServiceOrderNo <> '') THEN
+        ERROR(Txt003);
+
+      CostObjDim.SETRANGE(Code,CostObjectCode);
+      CostObjDim.SETRANGE("Global Dimension No.",2);
+      CostObjDim.FINDFIRST;
+
+      IF (ProjectCode <> '') THEN
+        EXIT(Get4PsWipAccFromProject(CostObjDim,ProjectCode,VendNo));
+
+      //Add SO sync
+    END;
+
+    LOCAL PROCEDURE Get4PsWipAccFromProject@1000000008(CostObjDim@1000000000 : Record 349;ProjectCode@1000000001 : Code[20];VendNo@1000000002 : Code[20]) AccNo : Code[20];
+    VAR
+      Project@1000000004 : Record 11072003;
+      ProjTypeRec@1000000006 : Record 11012009;
+      ICProjSetupRec@1000000005 : Record 315;
+    BEGIN
+      ICProjSetupRec.GET;
+      Project.GET(ProjectCode);
+      Project.TESTFIELD("Project Type");
+      ProjTypeRec.GET(Project."Project Type");
+      EXIT(ProjTypeRec.GetWipAcc(ProjTypeRec.Code,CostObjDim."Cost Type",Project."Project Status",ICProjSetupRec."Provisions at Closure",COMPANYNAME,CostObjDim."Cost Type", VendNo,''));
+    END;
+
+    PROCEDURE ExApproverCommentsExists@1000000009(DocType@1000000002 : 'Invoice,Memo';DocNo@1000000001 : Code[20]) Exist : Boolean;
+    VAR
+      ExPostedDocument@1000000000 : Record 12013626;
+    BEGIN
+      CASE DocType OF
+        DocType::Invoice: IF NOT ExPostedDocument.RetrieveRecord(ExPostedDocument,ExPostedDocument."Document Type"::"Posted Invoice",DocNo) THEN EXIT(FALSE);
+        DocType::Memo: IF NOT ExPostedDocument.RetrieveRecord(ExPostedDocument,ExPostedDocument."Document Type"::"Posted Credit Memo",DocNo) THEN EXIT(FALSE);
+      END;
+
+      EXIT(ExPostedDocument."Approver Comments".HASVALUE);
+    END;
+
+    PROCEDURE GetApproverCommentsExists@1000000010(DocType@1000000002 : 'Invoice,Memo';DocNo@1000000001 : Code[20];VAR TempBlob@1000000004 : Record 99008535);
+    VAR
+      ExPostedDocument@1000000000 : Record 12013626;
+    BEGIN
+      CASE DocType OF
+        DocType::Invoice: IF NOT ExPostedDocument.RetrieveRecord(ExPostedDocument,ExPostedDocument."Document Type"::"Posted Invoice",DocNo) THEN EXIT;
+        DocType::Memo: IF NOT ExPostedDocument.RetrieveRecord(ExPostedDocument,ExPostedDocument."Document Type"::"Posted Credit Memo",DocNo) THEN EXIT;
+      END;
+
+      IF NOT ExPostedDocument."Approver Comments".HASVALUE THEN
+        EXIT;
+
+      ExPostedDocument.CALCFIELDS("Approver Comments");
+      TempBlob.Blob := ExPostedDocument."Approver Comments";
+    END;
+
+    BEGIN
+    {
+      180824 ORANGO.WG #14776 Receipt No. error combintation exflow
+      4PS20200221 Removed Description handling in 4 ChangeJnlValidations (handled properly there instead), Call to Expression Line
+    }
+    END.
+  }
+}
+

@@ -1,0 +1,918 @@
+OBJECT Codeunit 11012498 CTRL Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      CTRLSetup@1100528300 : Record 11125686;
+      BulkSyncTxt@1100528305 : TextConst 'ENU=bulk-sync';
+      ChangeTypeErrorTxt@1100528302 : TextConst 'ENU=ChangeType %1 is not valid.';
+      CommonSyncTxt@1100528306 : TextConst 'ENU=synccommondata';
+      DebugTxt@1100528303 : Text;
+      CantDetermineImage@1100528307 : TextConst 'ENU=Can''t determine the Image for Table %1.';
+      EnsureUserTxt@1100527802 : TextConst 'ENU=ensure-user';
+      FeatureTogglesSyncTxt@1100528308 : TextConst 'ENU=syncfeatures';
+      MailTemplateErrorTxt@1100528301 : TextConst 'ENU=%1 %2 is not a valid %1.;SVE=%1 %2 „r inte ett giltigt %1.';
+      SyncTxt@1100528304 : TextConst 'ENU=sync';
+      WrongInputVarTxt@1100527801 : TextConst 'ENU=Wrong Input Variable for %1.';
+
+    PROCEDURE BulkImportCommonData@1100528326();
+    VAR
+      GenericProcessQueue@1100528304 : Record 11229430;
+      CTRLProcessManagement@1100527800 : Codeunit 11012495;
+      RecId@1100528300 : RecordID;
+    BEGIN
+      CheckCtrlSetup;
+      GenericProcessQueue.AddProcessQueueEntry(CTRLProcessManagement.GetSendTriggerTxt, COMPANYNAME, RecId);
+      GenericProcessQueue.AddParameter(0, 0, CTRLProcessManagement.GetInsertTxt);
+      GenericProcessQueue.AddParameter(0, 2, GetCommonSyncUrl(GenericProcessQueue));
+    END;
+
+    PROCEDURE BulkImportContact@1100528329(ContactNo@1100528301 : Code[20]);
+    VAR
+      Contact@1100528300 : Record 5050;
+      GenericProcessQueue@1100528304 : Record 11229430;
+      CTRLProcessManagement@1100528302 : Codeunit 11012495;
+    BEGIN
+      CheckCtrlSetup;
+      IF (NOT Contact.GET(ContactNo)) THEN
+        Contact.INIT;
+      Contact.TESTFIELD("Available for Control", TRUE);
+
+      GenericProcessQueue.AddProcessQueueEntry(CTRLProcessManagement.GetSendTriggerTxt, COMPANYNAME, Contact.RECORDID);
+      GenericProcessQueue.AddParameter(0, 0, CTRLProcessManagement.GetInsertTxt);
+      GenericProcessQueue.AddParameter(0, 1, Contact.TABLENAME);
+      GenericProcessQueue.AddParameter(0, 2, GetBulkSyncUrl(GenericProcessQueue));
+    END;
+
+    PROCEDURE BulkImportFeatureToggles@1100527801();
+    VAR
+      GenericProcessQueue@1100528304 : Record 11229430;
+      CTRLProcessManagement@1100528302 : Codeunit 11012495;
+      RecId@1100527800 : RecordID;
+    BEGIN
+      IF (CtrlIsActive) THEN BEGIN
+        GenericProcessQueue.AddProcessQueueEntry(CTRLProcessManagement.GetSendTriggerTxt, COMPANYNAME, RecId);
+        GenericProcessQueue.AddParameter(0, 0, CTRLProcessManagement.GetInsertTxt);
+        GenericProcessQueue.AddParameter(0, 2, GetFeatureTogglesSyncUrl(GenericProcessQueue));
+      END;
+    END;
+
+    PROCEDURE CheckCtrlSetup@1100528311();
+    BEGIN
+      CTRLSetup.GET;
+      CTRLSetup.TESTFIELD(Active, TRUE);
+      CTRLSetup.TESTFIELD("Trigger Url");
+      CTRLSetup.TESTFIELD("Access Token");
+      CTRLSetup.TESTFIELD("Tenant Id");
+    END;
+
+    PROCEDURE CreateQuoteRequestSites@1100527803(ProjectPurchaseAction@1100527800 : Record 11012026);
+    VAR
+      Contact@1100527803 : Record 5050;
+      GenericProcessQueue@1100527802 : Record 11229430;
+      VendorsbyPurchaseAction@1100527801 : Record 11012068;
+      CTRLProcessManagement@1100527804 : Codeunit 11012495;
+    BEGIN
+      CheckCtrlSetup;
+      ProjectPurchaseAction.TESTFIELD(Status, ProjectPurchaseAction.Status::Definitive);
+
+      VendorsbyPurchaseAction.SETRANGE(Source, VendorsbyPurchaseAction.Source::Project);
+      VendorsbyPurchaseAction.SETRANGE("Project No.", ProjectPurchaseAction."Project No.");
+      VendorsbyPurchaseAction.SETRANGE("Purchase Action", ProjectPurchaseAction.Code);
+      IF (NOT VendorsbyPurchaseAction.FINDSET) THEN
+        EXIT;
+
+      REPEAT
+        GetContactFromVendorsbyPurchaseAction(VendorsbyPurchaseAction, Contact);
+        GenericProcessQueue.AddProcessQueueEntry(CTRLProcessManagement.GetSendTriggerTxt, COMPANYNAME,
+          Contact.RECORDID);
+        GenericProcessQueue.AddParameter(0, 0, CTRLProcessManagement.GetInsertTxt);
+        GenericProcessQueue.AddParameter(0, 1, Contact.TABLENAME);
+        GenericProcessQueue.AddParameter(0, 2, GetBulkSyncUrl(GenericProcessQueue));
+        GenericProcessQueue.AddParameter(0, 9, STRSUBSTNO('%1_-_%2', ProjectPurchaseAction."Project No.", ProjectPurchaseAction.Code));
+
+        Contact.VALIDATE("Available for Control", TRUE);
+        Contact.MODIFY;
+
+        UpdateDocLinksForVendorPurchaseAction(VendorsbyPurchaseAction, 1); //Add
+        UpdateDocPropsPublishInCtrlForVendorPurchaseAction(VendorsbyPurchaseAction, Contact."Available for Control");
+      UNTIL (VendorsbyPurchaseAction.NEXT = 0);
+    END;
+
+    PROCEDURE CtrlIsActive@1100528324() : Boolean;
+    BEGIN
+      IF (NOT CTRLSetup.GET) THEN EXIT(FALSE);
+      EXIT(CTRLSetup.Active);
+    END;
+
+    PROCEDURE DeleteQuoteRequestSites@1100527813(ProjectPurchaseAction@1100527800 : Record 11012026);
+    VAR
+      Contact@1100527801 : Record 5050;
+      VendorsbyPurchaseAction@1100527802 : Record 11012068;
+    BEGIN
+      CheckCtrlSetup;
+
+      VendorsbyPurchaseAction.SETRANGE(Source, VendorsbyPurchaseAction.Source::Project);
+      VendorsbyPurchaseAction.SETRANGE("Project No.", ProjectPurchaseAction."Project No.");
+      VendorsbyPurchaseAction.SETRANGE("Purchase Action", ProjectPurchaseAction.Code);
+      IF (NOT VendorsbyPurchaseAction.FINDSET) THEN
+        EXIT;
+
+      REPEAT
+        GetContactFromVendorsbyPurchaseAction(VendorsbyPurchaseAction, Contact);
+        UpdateDocLinksForVendorPurchaseAction(VendorsbyPurchaseAction, 2); //Delete
+        UpdateDocPropsPublishInCtrlForVendorPurchaseAction(VendorsbyPurchaseAction, Contact."Available for Control");
+      UNTIL (VendorsbyPurchaseAction.NEXT = 0);
+    END;
+
+    PROCEDURE GetAppCodeCNT@1100525000() : Code[10];
+    BEGIN
+      EXIT('CNT');
+    END;
+
+    PROCEDURE GetBulkSyncTxt@1100527804() : Text;
+    BEGIN
+      EXIT(BulkSyncTxt);
+    END;
+
+    PROCEDURE GetBulkSyncUrl@1100528330(GenericProcessQueue@1100528300 : Record 11229430) : Text;
+    VAR
+      TriggerUrl@1100528301 : Text;
+    BEGIN
+      CheckCtrlSetup;
+      EXIT(GetTriggerUrl(GetBulkSyncTxt, GenericProcessQueue));
+    END;
+
+    PROCEDURE GetChangeType@1100528312(GenericProcessQueue@1100528301 : Record 11229430) : Text;
+    VAR
+      ChangeType@1100528300 : Text;
+    BEGIN
+      ChangeType := GenericProcessQueue.GetParameter(0, 0);
+      IF (ChangeType = '') THEN
+        ERROR(ChangeTypeErrorTxt, ChangeType);
+      EXIT(ChangeType);
+    END;
+
+    PROCEDURE GetCommonSyncTxt@1100527810() : Text;
+    BEGIN
+      EXIT(CommonSyncTxt);
+    END;
+
+    PROCEDURE GetCommonSyncUrl@1100528331(GenericProcessQueue@1100528300 : Record 11229430) : Text;
+    VAR
+      TriggerUrl@1100528301 : Text;
+    BEGIN
+      CheckCtrlSetup;
+      EXIT(GetTriggerUrl(GetCommonSyncTxt, GenericProcessQueue));
+    END;
+
+    PROCEDURE GetContactFromVendorsbyPurchaseAction@1100528335(VendorsbyPurchaseAction@1100528300 : Record 11012068;VAR Contact@1100528301 : Record 5050);
+    BEGIN
+      IF (VendorsbyPurchaseAction.Type = VendorsbyPurchaseAction.Type::Vendor) THEN
+        Contact.GetContactByVendor(VendorsbyPurchaseAction."Vendor No.", Contact, TRUE)
+      ELSE
+        Contact.GET(VendorsbyPurchaseAction."Vendor No.");
+    END;
+
+    PROCEDURE GetEnsureUserTxt@1100527808() : Text;
+    BEGIN
+      EXIT(EnsureUserTxt);
+    END;
+
+    PROCEDURE GetEnsureUserUrl@1100527806(GenericProcessQueue@1100527800 : Record 11229430) : Text;
+    BEGIN
+      CheckCtrlSetup;
+      EXIT(GetTriggerEnsureUserUrl(GetEnsureUserTxt, GenericProcessQueue));
+    END;
+
+    PROCEDURE GetEntityType@1100528336(TableName@1100528300 : Text) : Text;
+    BEGIN
+      EXIT(DELCHR(TableName, '<=>', '(). -_&/'));
+    END;
+
+    PROCEDURE GetEntityTypeParam@1100528305(GenericProcessQueue@1100528300 : Record 11229430) : Text;
+    BEGIN
+      EXIT(GenericProcessQueue.GetParameter(0, 1));
+    END;
+
+    PROCEDURE GetFeatureTogglesSyncUrl@1100527800(GenericProcessQueue@1100528300 : Record 11229430) : Text;
+    VAR
+      TriggerUrl@1100528301 : Text;
+    BEGIN
+      CheckCtrlSetup;
+      EXIT(GetTriggerUrl(FeatureTogglesSyncTxt, GenericProcessQueue));
+    END;
+
+    PROCEDURE GetImage@1100528332(TableVariant@1100528300 : Variant;VAR ImageText@1100528301 : Text;VAR MimeType@1100528303 : Text);
+    VAR
+      TempBuffer@1100528302 : TEMPORARY Record 18;
+      Contact@1100528308 : Record 5050;
+      Customer@1100528307 : Record 18;
+      Employee@1100528310 : Record 5200;
+      SalespersonPurchaser@1100528309 : Record 13;
+      ServiceLocation@1100528306 : Record 11012801;
+      ResourceWOP@1100528305 : Record 11229278;
+      DataTypeManagement@1100527800 : Codeunit 701;
+      RecRef@1100528304 : RecordRef;
+    BEGIN
+      DataTypeManagement.GetRecordRef(TableVariant, RecRef);
+      IF (NOT TableVariant.ISRECORD) THEN ERROR(CantDetermineImage, RecRef.CAPTION);
+      CLEAR(ImageText);
+      CLEAR(MimeType);
+      TempBuffer.INIT;
+
+      CASE RecRef.NUMBER OF
+        DATABASE::Contact: BEGIN
+          Contact := TableVariant;
+          TempBuffer.Image := Contact.Image;
+        END;
+        DATABASE::Customer: BEGIN
+          Customer := TableVariant;
+          TempBuffer.Image := Customer.Image;
+        END;
+        DATABASE::Employee: BEGIN
+          Employee := TableVariant;
+          TempBuffer.Image := Employee.Image;
+        END;
+        DATABASE::"Salesperson/Purchaser": BEGIN
+          SalespersonPurchaser := TableVariant;
+          TempBuffer.Image := SalespersonPurchaser.Image;
+        END;
+        DATABASE::"Service Location": BEGIN
+          ServiceLocation := TableVariant;
+          TempBuffer.Image := ServiceLocation.Image;
+        END;
+        DATABASE::"Resource (WOP)": BEGIN
+          ResourceWOP := TableVariant;
+          TempBuffer.Image := ResourceWOP.Image;
+        END;
+        ELSE ERROR(CantDetermineImage, RecRef.CAPTION);
+      END;
+
+      IF (NOT TempBuffer.Image.HASVALUE) THEN EXIT;
+      GetImageOfTable(TempBuffer, ImageText, MimeType);
+    END;
+
+    PROCEDURE GetImageHashValue@1100528333(TableVariant@1100528301 : Variant) : Text;
+    VAR
+      Contact@1100528302 : Record 5050;
+      Customer@1100528303 : Record 18;
+      Employee@1100528306 : Record 5200;
+      SalespersonPurchaser@1100528307 : Record 13;
+      ServiceLocation@1100528304 : Record 11012801;
+      ResourceWOP@1100528305 : Record 11229278;
+      Vendor@1100527801 : Record 23;
+      DataTypeManagement@1100527800 : Codeunit 701;
+      RecRef@1100528300 : RecordRef;
+    BEGIN
+      DataTypeManagement.GetRecordRef(TableVariant, RecRef);
+      IF (NOT TableVariant.ISRECORD) THEN ERROR(CantDetermineImage, RecRef.CAPTION);
+
+      CASE RecRef.NUMBER OF
+        DATABASE::Contact: BEGIN
+          Contact := TableVariant;
+          EXIT(GetImageHashValueOfTable(Contact.RECORDID, Contact.FIELDNO(Image)));
+        END;
+        DATABASE::Customer: BEGIN
+          Customer := TableVariant;
+          EXIT(GetImageHashValueOfTable(Customer.RECORDID, Customer.FIELDNO(Image)));
+        END;
+        DATABASE::Employee: BEGIN
+          Employee := TableVariant;
+          EXIT(GetImageHashValueOfTable(Employee.RECORDID, Employee.FIELDNO(Image)));
+        END;
+        DATABASE::"Salesperson/Purchaser": BEGIN
+          SalespersonPurchaser := TableVariant;
+          EXIT(GetImageHashValueOfTable(SalespersonPurchaser.RECORDID, SalespersonPurchaser.FIELDNO(Image)));
+        END;
+        DATABASE::"Service Location": BEGIN
+          ServiceLocation := TableVariant;
+          EXIT(GetImageHashValueOfTable(ServiceLocation.RECORDID, ServiceLocation.FIELDNO(Image)));
+        END;
+        DATABASE::"Resource (WOP)": BEGIN
+          ResourceWOP := TableVariant;
+          EXIT(GetImageHashValueOfTable(ResourceWOP.RECORDID, ResourceWOP.FIELDNO(Image)));
+        END;
+        DATABASE::Vendor: BEGIN
+          Vendor := TableVariant;
+          EXIT(GetImageHashValueOfTable(Customer.RECORDID, Vendor.FIELDNO(Image)));
+        END;
+      END;
+      ERROR(CantDetermineImage, RecRef.CAPTION);
+    END;
+
+    PROCEDURE GetSyncTxt@1100527809() : Text;
+    BEGIN
+      EXIT(SyncTxt);
+    END;
+
+    PROCEDURE GetSyncUrl@1100528310(GenericProcessQueue@1100528300 : Record 11229430) : Text;
+    BEGIN
+      IF (COMPANYNAME <> GenericProcessQueue."Company Name") THEN
+        CTRLSetup.CHANGECOMPANY(GenericProcessQueue."Company Name");
+      CheckCtrlSetup;
+      EXIT(GetTriggerUrl(GetSyncTxt, GenericProcessQueue));
+    END;
+
+    PROCEDURE GetWebServiceTag@1100528316(TagNameIn@1100528300 : Text) : Text;
+    BEGIN
+      EXIT(CONVERTSTR(DELCHR(TagNameIn, '<=>', '.-()'), ' ', '_'));
+    END;
+
+    PROCEDURE HasOnlyValidRelationLinks@1100528314(RecVariant@1100528300 : Variant;RecId@1100528302 : RecordID) : Boolean;
+    BEGIN
+      IF (NOT CtrlIsActive) THEN EXIT(FALSE);
+      CASE TRUE OF
+        RecVariant.ISCODE: EXIT(IsValidContact(RecVariant));
+        RecVariant.ISRECORD: BEGIN
+          CASE RecId.TABLENO OF
+            DATABASE::Contact: EXIT(IsValidContact(RecVariant));
+            DATABASE::"Contract Object": EXIT(IsValidContractObject(RecVariant));
+            DATABASE::Customer: EXIT(IsValidCustomer(RecVariant));
+            DATABASE::"Debrief Text Rubric": EXIT(IsValidDebriefTextRubric(RecVariant));
+            DATABASE::"Document Properties": EXIT(IsValidDocument(RecVariant, RecId));
+            DATABASE::Job: EXIT(IsValidJob(RecVariant));
+            DATABASE::"Preferred Employee": EXIT(IsValidPreferredEmployee(RecVariant));
+            DATABASE::"Purchase Header": EXIT(IsValidPurchaseHeader(RecVariant));
+            DATABASE::"Purchase Line": EXIT(IsValidPurchaseLine(RecVariant));
+            DATABASE::"Service Call": EXIT(IsValidServiceCall(RecVariant));
+            DATABASE::"Service-Contract": EXIT(IsValidServiceContract(RecVariant));
+            DATABASE::"Service Location": EXIT(IsValidServiceLocation(RecVariant));
+            DATABASE::"Service-Object": EXIT(IsValidServiceObject(RecVariant));
+            DATABASE::"Service Order": EXIT(IsValidServiceOrder(RecVariant));
+            DATABASE::"Work Order": EXIT(IsValidWorkOrder(RecVariant));
+          END;
+        END;
+      END;
+      EXIT(FALSE);
+    END;
+
+    PROCEDURE IsValidContact@1100528315(ContactVariant@1100528300 : Variant) : Boolean;
+    VAR
+      Contact@1100528301 : Record 5050;
+    BEGIN
+      IF (NOT CtrlIsActive) THEN EXIT(FALSE);
+      CASE TRUE OF
+        ContactVariant.ISCODE: IF (NOT Contact.GET(ContactVariant)) THEN Contact.INIT;
+        ContactVariant.ISRECORD: Contact.COPY(ContactVariant);
+        ELSE EXIT(FALSE);
+      END;
+      IF (NOT Contact.IsCompany) THEN
+        EXIT(FALSE);
+      EXIT(Contact."Available for Control");
+    END;
+
+    PROCEDURE IsValidContactForCompany@1100528308(ContactVariant@1100528300 : Variant;CompName@1100528302 : Text) : Boolean;
+    VAR
+      Contact@1100528301 : Record 5050;
+    BEGIN
+      IF (NOT CtrlIsActive) THEN EXIT(FALSE);
+      IF (NOT Contact.CHANGECOMPANY(CompName)) THEN EXIT;
+
+      CASE TRUE OF
+        ContactVariant.ISCODE: IF (NOT Contact.GET(ContactVariant)) THEN Contact.INIT;
+        ContactVariant.ISRECORD: Contact.COPY(ContactVariant);
+        ELSE EXIT(FALSE);
+      END;
+      IF (NOT Contact.IsCompany) THEN
+        EXIT(FALSE);
+      EXIT(Contact."Available for Control");
+    END;
+
+    PROCEDURE IsValidContractObject@1100528318(ContractObjectVariant@1100528300 : Variant) : Boolean;
+    VAR
+      ContractObject@1100528301 : Record 11071702;
+    BEGIN
+      IF (NOT CtrlIsActive) THEN EXIT(FALSE);
+      CASE TRUE OF
+        ContractObjectVariant.ISCODE: IF (NOT ContractObject.GET(ContractObjectVariant)) THEN ContractObject.INIT;
+        ContractObjectVariant.ISRECORD: ContractObject.COPY(ContractObjectVariant);
+        ELSE EXIT(FALSE);
+      END;
+      EXIT(IsValidServiceContract(ContractObject."Service Contract No."));
+    END;
+
+    PROCEDURE IsValidCustomer@1100528317(CustomerVariant@1100528300 : Variant) : Boolean;
+    VAR
+      Contact@1100528303 : Record 5050;
+      Customer@1100528301 : Record 18;
+    BEGIN
+      IF (NOT CtrlIsActive) THEN EXIT(FALSE);
+
+      CASE TRUE OF
+        CustomerVariant.ISCODE: IF (NOT Customer.GET(CustomerVariant)) THEN Customer.INIT;
+        CustomerVariant.ISRECORD: Customer.COPY(CustomerVariant);
+        ELSE EXIT(FALSE);
+      END;
+      IF (NOT Contact.GetContactByCustomer(Customer."No.", Contact, FALSE)) THEN Contact.INIT;
+      EXIT(IsValidContact(Contact));
+    END;
+
+    PROCEDURE IsValidDebriefTextRubric@1100528338(DebriefTextRubricVariant@1100528300 : Variant) : Boolean;
+    VAR
+      DebriefTextRubric@1100528302 : Record 11012885;
+    BEGIN
+      IF (NOT CtrlIsActive) THEN EXIT(FALSE);
+      CASE TRUE OF
+        DebriefTextRubricVariant.ISCODE: IF (NOT DebriefTextRubric.GET(DebriefTextRubricVariant)) THEN DebriefTextRubric.INIT;
+        DebriefTextRubricVariant.ISRECORD: DebriefTextRubric.COPY(DebriefTextRubricVariant);
+        ELSE EXIT(FALSE);
+      END;
+      EXIT(DebriefTextRubric."Publish on Subcontr. Portal");
+    END;
+
+    [External]
+    PROCEDURE IsValidDocument@1100528319(DocumentVariant@1100528300 : Variant;RecId@1100528304 : RecordID) : Boolean;
+    VAR
+      Contact@1100528303 : Record 5050;
+      Customer@1100528305 : Record 18;
+      DocumentLink@1100528301 : Record 11012747;
+      DocumentProperties@1100528302 : Record 11012746;
+      ValidDocument@1100528306 : Boolean;
+    BEGIN
+      IF (NOT CtrlIsActive) THEN EXIT(FALSE);
+      CASE TRUE OF
+        DocumentVariant.ISCODE:
+          IF (NOT DocumentProperties.GET(DocumentVariant)) THEN DocumentProperties.INIT;
+        DocumentVariant.ISRECORD: BEGIN
+          CASE RecId.TABLENO OF
+            DATABASE::"Document Link": BEGIN
+              DocumentLink.COPY(DocumentVariant);
+              IF (NOT DocumentProperties.GET(DocumentLink."Document No.")) THEN DocumentProperties.INIT;
+            END;
+            DATABASE::"Document Properties": DocumentProperties.COPY(DocumentVariant);
+            ELSE EXIT(FALSE);
+          END;
+        END;
+        ELSE EXIT(FALSE);
+      END;
+      IF (DocumentProperties."Contact No." <> '') AND (NOT IsValidContactForCompany(DocumentProperties."Contact No.", DocumentProperties."Internal Company")) THEN
+        EXIT(FALSE);
+
+      DocumentLink.SETRANGE("Document No.", DocumentProperties."No.");
+      DocumentLink.SETRANGE("Table No.", DATABASE::Contact);
+
+      IF (DocumentLink.FINDSET) THEN BEGIN
+        REPEAT
+          Contact.CHANGECOMPANY(DocumentLink."Internal Company");
+          IF (NOT Contact.GET(DocumentLink."Record ID")) THEN Contact.INIT;
+          IF (NOT IsValidContactForCompany(Contact,DocumentLink."Internal Company")) THEN EXIT(FALSE);
+        UNTIL (DocumentLink.NEXT = 0);
+      END ELSE
+        IF (DocumentProperties."Contact No." = '' ) THEN EXIT(FALSE);
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE IsValidJob@1100528313(JobVariant@1100528300 : Variant) : Boolean;
+    VAR
+      Job@1100528302 : Record 11072003;
+      ProjectPrincipal@1100528301 : Record 11012005;
+    BEGIN
+      IF (NOT CtrlIsActive) THEN EXIT(FALSE);
+      CASE TRUE OF
+        JobVariant.ISCODE: IF (NOT Job.GET(JobVariant)) THEN Job.INIT;
+        JobVariant.ISRECORD: Job.COPY(JobVariant);
+        ELSE EXIT(FALSE);
+      END;
+
+      ProjectPrincipal.SETRANGE("Project No.", Job."No.");
+      IF (NOT ProjectPrincipal.FINDSET) THEN EXIT(FALSE);
+      REPEAT
+        IF (NOT IsValidCustomer(ProjectPrincipal.Principal)) THEN EXIT(FALSE);
+      UNTIL (ProjectPrincipal.NEXT = 0);
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE IsValidPreferredEmployee@1100528320(PreferredEmployee@1100528300 : Record 11012843) : Boolean;
+    VAR
+      Contact@1100528302 : Record 5050;
+    BEGIN
+      IF (NOT CtrlIsActive) THEN EXIT(FALSE);
+      EXIT(IsValidServiceContract(PreferredEmployee."Service Contract No."));
+    END;
+
+    PROCEDURE IsValidPurchaseHeader@1100528309(PurchaseHeaderVariant@1100528300 : Variant) : Boolean;
+    VAR
+      Contact@1100528302 : Record 5050;
+      PurchaseHeader@1100528301 : Record 38;
+    BEGIN
+      IF (NOT CtrlIsActive) THEN EXIT(FALSE);
+      CASE TRUE OF
+        PurchaseHeaderVariant.ISCODE: IF (NOT PurchaseHeader.GET(PurchaseHeaderVariant)) THEN PurchaseHeader.INIT;
+        PurchaseHeaderVariant.ISRECORD: PurchaseHeader.COPY(PurchaseHeaderVariant);
+        ELSE EXIT(FALSE);
+      END;
+
+      IF (PurchaseHeader."Document Type" <> PurchaseHeader."Document Type"::Order) THEN EXIT;
+      IF (PurchaseHeader."Purchase Order Type" <> PurchaseHeader."Purchase Order Type"::"Purchase Order") THEN EXIT;
+
+      EXIT(IsValidVendor(PurchaseHeader."Buy-from Vendor No."));
+    END;
+
+    PROCEDURE IsValidPurchaseLine@1100528337(PurchaseLineVariant@1100528300 : Variant) : Boolean;
+    VAR
+      PurchaseLine@1100528301 : Record 39;
+    BEGIN
+      CASE TRUE OF
+        PurchaseLineVariant.ISCODE: IF (NOT PurchaseLine.GET(PurchaseLineVariant)) THEN PurchaseLine.INIT;
+        PurchaseLineVariant.ISRECORD: PurchaseLine.COPY(PurchaseLineVariant);
+        ELSE EXIT(FALSE);
+      END;
+      EXIT(IsValidPurchaseHeader(PurchaseLine."Document No."));
+    END;
+
+    PROCEDURE IsValidResourceWOP@1100528301(ResourceWOPVariant@1100528300 : Variant) : Boolean;
+    VAR
+      ResourceWOP@1100528301 : Record 11229278;
+      Contact@1100528302 : Record 5050;
+    BEGIN
+      CASE TRUE OF
+        ResourceWOPVariant.ISCODE: IF (NOT ResourceWOP.GET(ResourceWOPVariant)) THEN ResourceWOP.INIT;
+        ResourceWOPVariant.ISRECORD: ResourceWOP.COPY(ResourceWOPVariant);
+        ELSE EXIT(FALSE);
+      END;
+
+      IF (ResourceWOP.Type = ResourceWOP.Type::Subcontractor) THEN BEGIN
+        IF (Contact.GetContactByVendorWithCompany(ResourceWOP."Source No.", ResourceWOP.Company)) THEN
+          EXIT (IsValidContact(Contact));
+      END;
+    END;
+
+    PROCEDURE IsValidServiceCall@1100528321(ServiceCallVariant@1100528300 : Variant) : Boolean;
+    VAR
+      ServiceCall@1100528301 : Record 11012822;
+    BEGIN
+      IF (NOT CtrlIsActive) THEN EXIT(FALSE);
+      CASE TRUE OF
+        ServiceCallVariant.ISCODE: IF (NOT ServiceCall.GET(ServiceCallVariant)) THEN ServiceCall.INIT;
+        ServiceCallVariant.ISRECORD: ServiceCall.COPY(ServiceCallVariant);
+        ELSE EXIT(FALSE);
+      END;
+      EXIT(IsValidCustomer(ServiceCall."Customer No."));
+    END;
+
+    PROCEDURE IsValidServiceContract@1100528322(ServiceContractVariant@1100528300 : Variant) : Boolean;
+    VAR
+      ServiceContract@1100528301 : Record 11012812;
+    BEGIN
+      IF (NOT CtrlIsActive) THEN EXIT(FALSE);
+      CASE TRUE OF
+        ServiceContractVariant.ISCODE: IF (NOT ServiceContract.GET(ServiceContractVariant)) THEN ServiceContract.INIT;
+        ServiceContractVariant.ISRECORD: ServiceContract.COPY(ServiceContractVariant);
+        ELSE EXIT(FALSE);
+      END;
+      EXIT(IsValidCustomer(ServiceContract."Customer No."));
+    END;
+
+    PROCEDURE IsValidServiceLocation@1100528323(ServiceLocationVariant@1100528300 : Variant) : Boolean;
+    VAR
+      ServiceLocation@1100528301 : Record 11012801;
+    BEGIN
+      IF (NOT CtrlIsActive) THEN EXIT(FALSE);
+      CASE TRUE OF
+        ServiceLocationVariant.ISCODE: IF (NOT ServiceLocation.GET(ServiceLocationVariant)) THEN ServiceLocation.INIT;
+        ServiceLocationVariant.ISRECORD: ServiceLocation.COPY(ServiceLocationVariant);
+        ELSE EXIT(FALSE);
+      END;
+      EXIT(IsValidCustomer(ServiceLocation."Customer No."));
+    END;
+
+    LOCAL PROCEDURE IsValidServiceObject@1100528325(ServiceObjectVariant@1100528300 : Variant) : Boolean;
+    VAR
+      ServiceObject@1100528301 : Record 11071691;
+    BEGIN
+      IF (NOT CtrlIsActive) THEN EXIT(FALSE);
+      CASE TRUE OF
+        ServiceObjectVariant.ISCODE: IF (NOT ServiceObject.GET(ServiceObjectVariant)) THEN ServiceObject.INIT;
+        ServiceObjectVariant.ISRECORD: ServiceObject.COPY(ServiceObjectVariant);
+        ELSE EXIT(FALSE);
+      END;
+      EXIT(IsValidServiceLocation(ServiceObject."Service Location No."));
+    END;
+
+    PROCEDURE IsValidServiceOrder@1100528328(ServiceOrderVariant@1100528300 : Variant) : Boolean;
+    VAR
+      ServiceOrder@1100528301 : Record 11012823;
+    BEGIN
+      IF (NOT CtrlIsActive) THEN EXIT(FALSE);
+      CASE TRUE OF
+        ServiceOrderVariant.ISCODE: IF (NOT ServiceOrder.GET(ServiceOrderVariant)) THEN ServiceOrder.INIT;
+        ServiceOrderVariant.ISRECORD: ServiceOrder.COPY(ServiceOrderVariant);
+        ELSE EXIT(FALSE);
+      END;
+      EXIT(IsValidCustomer(ServiceOrder."Customer No."));
+    END;
+
+    PROCEDURE IsValidServiceOrderForSubcontractor@1100527807(ServiceOrderVariant@1100528300 : Variant) : Boolean;
+    VAR
+      ServiceOrder@1100528301 : Record 11012823;
+    BEGIN
+      IF (NOT CtrlIsActive) THEN EXIT(FALSE);
+      CASE TRUE OF
+        ServiceOrderVariant.ISCODE: IF (NOT ServiceOrder.GET(ServiceOrderVariant)) THEN ServiceOrder.INIT;
+        ServiceOrderVariant.ISRECORD: ServiceOrder.COPY(ServiceOrderVariant);
+        ELSE EXIT(FALSE);
+      END;
+      EXIT(IsValidSubcontractor(ServiceOrder.Subcontractor));
+    END;
+
+    PROCEDURE IsValidSubcontractor@1100527805(ResourceWopVariant@1100527801 : Variant) : Boolean;
+    VAR
+      ResourceWOP@1100527800 : Record 11229278;
+    BEGIN
+      IF (NOT CtrlIsActive) THEN EXIT(FALSE);
+      CASE TRUE OF
+        ResourceWopVariant.ISCODE: IF (NOT ResourceWOP.GET(ResourceWopVariant)) THEN ResourceWOP.INIT;
+        ResourceWopVariant.ISRECORD: ResourceWOP.COPY(ResourceWopVariant);
+        ELSE EXIT(FALSE);
+      END;
+
+      IF (ResourceWOP.Type <> ResourceWOP.Type::Subcontractor) THEN EXIT(FALSE);
+      EXIT(IsValidVendor(ResourceWOP."Source No."))
+    END;
+
+    PROCEDURE IsValidVendor@1100527811(VendorVariant@1100527800 : Variant) : Boolean;
+    VAR
+      Vendor@1100527801 : Record 23;
+      Contact@1100527802 : Record 5050;
+    BEGIN
+      IF (NOT CtrlIsActive) THEN EXIT(FALSE);
+      CASE TRUE OF
+        VendorVariant.ISCODE: IF (NOT Vendor.GET(VendorVariant)) THEN Vendor.INIT;
+        VendorVariant.ISRECORD: Vendor.COPY(VendorVariant);
+        ELSE EXIT(FALSE);
+      END;
+
+      IF (NOT Contact.GetContactByVendor(Vendor."No.", Contact, FALSE)) THEN Contact.INIT;
+      EXIT(IsValidContact(Contact));
+    END;
+
+    PROCEDURE IsValidWorkOrder@1100527802(WorkOrderVariant@1100527800 : Variant) : Boolean;
+    VAR
+      WorkOrder@1100527801 : Record 11229279;
+    BEGIN
+      IF (NOT CtrlIsActive) THEN EXIT(FALSE);
+      CASE TRUE OF
+        WorkOrderVariant.ISCODE: IF (NOT WorkOrder.GET(WorkOrderVariant)) THEN WorkOrder.INIT;
+        WorkOrderVariant.ISRECORD: WorkOrder.COPY(WorkOrderVariant);
+        ELSE EXIT(FALSE);
+      END;
+
+      IF (WorkOrder."Source Type" <> WorkOrder."Source Type"::ServiceOrder) THEN EXIT(FALSE);
+      IF (IsValidServiceOrder(WorkOrder."Source No.")) THEN EXIT(TRUE);
+      IF (IsValidResourceWOP(WorkOrder."Resource No.")) THEN EXIT(TRUE);
+
+      EXIT(FALSE);
+    END;
+
+    PROCEDURE QuoteDocumentDownloaded@1100528306(ContactNo@1100527800 : Code[20];DocumentNo@1100527801 : Code[20]);
+    VAR
+      DocumentLink@1100527802 : Record 11012747;
+      DocumentProperties@1100528300 : Record 11012746;
+      ProjectPurchaseAction@1100527806 : Record 11012026;
+      RecId@1100527804 : RecordID;
+    BEGIN
+      DocumentLink.SETRANGE("Document No.", DocumentNo);
+      DocumentLink.SETRANGE("Internal Company", COMPANYNAME);
+      IF (DocumentLink.FINDSET) THEN BEGIN
+        REPEAT
+          RecId := DocumentLink."Record ID";
+          IF (RecId.TABLENO = DATABASE::"Project Purchase Action") THEN BEGIN
+            DocumentProperties.GET(DocumentLink."Document No.");
+            IF (DocumentProperties."Contact No." <> '') AND (NOT DocumentProperties."External Document") THEN BEGIN
+              ProjectPurchaseAction.GET(RecId);
+              UpdateVendorPurchaseAction(ContactNo, DocumentNo, ProjectPurchaseAction, 2); //Download
+            END;
+          END;
+        UNTIL (DocumentLink.NEXT = 0);
+      END;
+    END;
+
+    PROCEDURE QuoteDocumentUploaded@1100528304(ContactNo@1100528301 : Code[20];DocumentNo@1100528300 : Code[20]);
+    VAR
+      DocumentLink@1100527802 : Record 11012747;
+      ProjectPurchaseAction@1100527806 : Record 11012026;
+      RecId@1100528302 : RecordID;
+    BEGIN
+      DocumentLink.SETRANGE("Document No.", DocumentNo);
+      DocumentLink.SETRANGE("Internal Company", COMPANYNAME);
+      IF (DocumentLink.FINDSET) THEN BEGIN
+        REPEAT
+          RecId := DocumentLink."Record ID";
+          IF (RecId.TABLENO = DATABASE::"Project Purchase Action") THEN BEGIN
+            ProjectPurchaseAction.GET(RecId);
+            UpdateVendorPurchaseAction(ContactNo, DocumentNo, ProjectPurchaseAction, 1); //Upload
+          END;
+        UNTIL (DocumentLink.NEXT = 0);
+      END;
+    END;
+
+    PROCEDURE SendDocumentLinkTriggers@1100527818(RecId@1100527800 : RecordID);
+    VAR
+      DocumentLink@1100527801 : Record 11012747;
+    BEGIN
+      DocumentLink.SETRANGE("Record ID", RecId);
+      IF (NOT DocumentLink.FINDSET(TRUE)) THEN
+        EXIT;
+
+      REPEAT
+        DocumentLink.MODIFY(TRUE); //sent CTRL trigger
+      UNTIL (DocumentLink.NEXT = 0);
+    END;
+
+    PROCEDURE UpdateDocLinksForVendorPurchaseAction@1100527814(VendorsbyPurchaseAction@1100527803 : Record 11012068;LinkAction@1100527802 : ',Add,Delete');
+    VAR
+      Contact@1100527807 : Record 5050;
+      DocumentLink@1100527805 : Record 11012747;
+      DocumentProperties@1100527808 : Record 11012746;
+      ProjectPurchaseAction@1100527804 : Record 11012026;
+      PurchActionDocumentRel@1100527806 : Record 11012071;
+      RecIdContact@1100527800 : RecordID;
+      RecIdPurchAction@1100527801 : RecordID;
+    BEGIN
+      ProjectPurchaseAction.GET(VendorsbyPurchaseAction."Project No.", VendorsbyPurchaseAction."Purchase Action");
+      RecIdPurchAction := ProjectPurchaseAction.RECORDID;
+
+      GetContactFromVendorsbyPurchaseAction(VendorsbyPurchaseAction, Contact);
+      RecIdContact := Contact.RECORDID;
+
+      DocumentLink.SETRANGE("Record ID", RecIdPurchAction);
+      IF (DocumentLink.FINDSET) THEN BEGIN
+        REPEAT
+          IF (DocumentProperties.GET(DocumentLink."Document No.")) THEN BEGIN
+            IF (DocumentProperties."Contact No." = '') THEN
+              UpdateDocumentLink(DocumentLink."Document No.", LinkAction, RecIdContact);
+          END;
+        UNTIL (DocumentLink.NEXT = 0);
+      END;
+
+      PurchActionDocumentRel.SETRANGE(Source, PurchActionDocumentRel.Source::Project);
+      PurchActionDocumentRel.SETRANGE("Project No.", VendorsbyPurchaseAction."Project No.");
+      PurchActionDocumentRel.SETRANGE("Purchase Action", VendorsbyPurchaseAction."Purchase Action");
+      IF (PurchActionDocumentRel.FINDSET) THEN BEGIN
+        REPEAT
+          UpdateDocumentLink(PurchActionDocumentRel."Related Document No.", LinkAction, RecIdContact);
+          IF (LinkAction = LinkAction::Add) THEN
+            UpdateDocumentLink(PurchActionDocumentRel."Related Document No.", LinkAction, RecIdPurchAction);
+        UNTIL (PurchActionDocumentRel.NEXT = 0);
+      END;
+    END;
+
+    PROCEDURE UpdateDocPropsPublishInCtrlForVendorPurchaseAction@1100527812(VendorsbyPurchaseAction@1100527803 : Record 11012068;AvailableInControl@1100527802 : Boolean);
+    VAR
+      DocumentLink@1100527801 : Record 11012747;
+      DocumentProperties@1100527805 : Record 11012746;
+      ProjectPurchaseAction@1100527804 : Record 11012026;
+      PurchActionDocumentRel@1100527806 : Record 11012071;
+      RecId@1100527800 : RecordID;
+    BEGIN
+      ProjectPurchaseAction.GET(VendorsbyPurchaseAction."Project No.", VendorsbyPurchaseAction."Purchase Action");
+      RecId := ProjectPurchaseAction.RECORDID;
+      DocumentLink.SETRANGE("Record ID", RecId);
+      IF (DocumentLink.FINDSET) THEN BEGIN
+        REPEAT
+          IF (DocumentProperties.GET(DocumentLink."Document No.")) THEN BEGIN
+            DocumentProperties.VALIDATE("Publish on Service Portal", AvailableInControl);
+            DocumentProperties.MODIFY;
+          END;
+        UNTIL (DocumentLink.NEXT = 0);
+      END;
+
+      PurchActionDocumentRel.SETRANGE(Source, PurchActionDocumentRel.Source::Project);
+      PurchActionDocumentRel.SETRANGE("Project No.", VendorsbyPurchaseAction."Project No.");
+      PurchActionDocumentRel.SETRANGE("Purchase Action", VendorsbyPurchaseAction."Purchase Action");
+      IF (PurchActionDocumentRel.FINDSET) THEN BEGIN
+        REPEAT
+          IF (DocumentProperties.GET(PurchActionDocumentRel."Related Document No.")) THEN BEGIN
+            DocumentProperties.VALIDATE("Publish on Service Portal", AvailableInControl);
+            DocumentProperties.MODIFY;
+          END;
+        UNTIL (PurchActionDocumentRel.NEXT = 0);
+      END;
+    END;
+
+    LOCAL PROCEDURE "---Locals---"@1100528300();
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE GetImageOfTable@1100528303(VAR TempBuffer@1100528303 : TEMPORARY Record 18;VAR ImageBase64@1100528302 : Text;VAR MimeType@1100528304 : Text);
+    VAR
+      TenantMedia@1100528309 : Record 2000000184;
+      ResizeImage@1100528301 : Codeunit 11125359;
+      Base64EncodedContent@1100528306 : BigText;
+      Bytes@1100528300 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Array";
+      Convert@1100528307 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Convert";
+      ImageStream@1100528308 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.MemoryStream";
+      ResizedStream@1100528305 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.MemoryStream";
+      ResizeValue@1100528310 : Integer;
+    BEGIN
+      TenantMedia.GET(TempBuffer.Image.MEDIAID);
+
+      ImageStream := ImageStream.MemoryStream;
+      TempBuffer.Image.EXPORTSTREAM(ImageStream);
+      ImageStream.Position := 0;
+      ResizedStream := ResizedStream.MemoryStream;
+      ResizeValue := TenantMedia.Height;
+      IF (TenantMedia.Width > TenantMedia.Height) THEN
+        ResizeValue := TenantMedia.Width;
+      ResizeImage.CompressPictureStream(ImageStream, ResizedStream, ResizeValue);
+      Bytes := ResizedStream.ToArray();
+      Base64EncodedContent.ADDTEXT(Convert.ToBase64String(Bytes));
+      Base64EncodedContent.GETSUBTEXT(ImageBase64, 1);
+      TenantMedia.GET(TempBuffer.Image.MEDIAID);
+      MimeType := TenantMedia."Mime Type";
+    END;
+
+    LOCAL PROCEDURE GetImageHashValueOfTable@1100528302(RecId@1100528301 : RecordID;FieldNo@1100528302 : Integer) : Text;
+    VAR
+      FieldChecksum@1100528300 : Record 11229419;
+    BEGIN
+      EXIT(FieldChecksum.GetHashValue(RecId, FieldNo));
+    END;
+
+    LOCAL PROCEDURE GetTriggerEnsureUserUrl@1100527816(SyncTxt@1100528300 : Text;GenericProcessQueue@1100528301 : Record 11229430) : Text;
+    BEGIN
+      EXIT(STRSUBSTNO('%1/api/%2/%3', CTRLSetup."Trigger Url", SyncTxt, CTRLSetup."Tenant Id"));
+    END;
+
+    LOCAL PROCEDURE GetTriggerUrl@1100528327(SyncTxt@1100528300 : Text;GenericProcessQueue@1100528301 : Record 11229430) : Text;
+    BEGIN
+      EXIT(STRSUBSTNO('%1/api/%2/%3/%4', CTRLSetup."Trigger Url", SyncTxt, CTRLSetup."Tenant Id",
+        GetEntityTypeParam(GenericProcessQueue)));
+    END;
+
+    LOCAL PROCEDURE SendQuoteUploadMail@1100528334(VendorsbyPurchaseAction@1100528300 : Record 11012068);
+    VAR
+      Contact@1100528301 : Record 5050;
+      CTRLProcessManagement@1100528308 : Codeunit 11012495;
+      MailTemplateNo@1100528303 : Integer;
+    BEGIN
+      MailTemplateNo := 199;
+      CTRLProcessManagement.AddMailEvent(VendorsbyPurchaseAction.RECORDID, MailTemplateNo);
+    END;
+
+    LOCAL PROCEDURE UpdateDocumentLink@1100527815(DocumentNo@1100527800 : Code[20];LinkAction@1100527804 : Option;RecId@1100527803 : RecordID);
+    VAR
+      DocumentLink@1100527801 : Record 11012747;
+      DocumentProperties@1100527802 : Record 11012746;
+      DocumentLinkManagement@1100527805 : Codeunit 11012401;
+    BEGIN
+      //LinkAction: ,Add,Delete
+      DocumentLink.SETRANGE("Document No.", DocumentNo);
+      DocumentLink.SETRANGE("Record ID", RecId);
+      CASE TRUE OF
+        (LinkAction = 1) AND (DocumentLink.ISEMPTY): BEGIN
+          IF (DocumentProperties.GET(DocumentNo)) THEN
+            DocumentLinkManagement.CreateOneDocumentLink(DocumentProperties, RecId);
+        END;
+        (LinkAction = 2) AND (NOT DocumentLink.ISEMPTY): BEGIN
+          DocumentLink.DELETEALL;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateVendorPurchaseAction@1100528307(ContactNo@1100527801 : Code[20];DocumentNo@1100527800 : Code[20];ProjectPurchaseAction@1100527802 : Record 11012026;Direction@1100528300 : ',Upload,Download');
+    VAR
+      Contact@1100527804 : Record 5050;
+      VendorsbyPurchaseAction@1100527803 : Record 11012068;
+    BEGIN
+      VendorsbyPurchaseAction.SETRANGE("Project No.", ProjectPurchaseAction."Project No.");
+      VendorsbyPurchaseAction.SETRANGE("Purchase Action", ProjectPurchaseAction.Code);
+      IF (NOT VendorsbyPurchaseAction.FINDSET(TRUE)) THEN
+        EXIT;
+
+      REPEAT
+        GetContactFromVendorsbyPurchaseAction(VendorsbyPurchaseAction, Contact);
+        IF (Contact."No." = ContactNo) THEN BEGIN
+          CASE Direction OF
+            Direction::Download:
+              VendorsbyPurchaseAction."Downloaded in Control" := TRUE;
+            Direction::Upload: BEGIN
+              UpdateDocumentLink(DocumentNo, 0, Contact.RECORDID);
+              UpdateDocPropsPublishInCtrlForVendorPurchaseAction(VendorsbyPurchaseAction, Contact."Available for Control");
+              VendorsbyPurchaseAction."Quote Received in Control" := TRUE;
+              SendQuoteUploadMail(VendorsbyPurchaseAction);
+            END;
+          END;
+          VendorsbyPurchaseAction.MODIFY;
+        END;
+      UNTIL (VendorsbyPurchaseAction.NEXT = 0);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

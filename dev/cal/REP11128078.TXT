@@ -1,0 +1,345 @@
+OBJECT Report 11128078 VP Feedback CAMT054
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=PE8.08 (12048865),4PSSE;
+  }
+  PROPERTIES
+  {
+    CaptionML=[ENU=Reconciliation CAMT054;
+               SVE=èterrapportering CAMT054];
+    ProcessingOnly=Yes;
+    OnInitReport=BEGIN
+                   CurrReport.USEREQUESTPAGE := gFileMgt.CanRunDotNetOnClient;
+                 END;
+
+    OnPostReport=BEGIN
+                   ReadFile;
+                 END;
+
+  }
+  DATASET
+  {
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      SaveValues=Yes;
+    }
+    CONTROLS
+    {
+      { 1000000000;;Container;
+                  Name=Cont;
+                  ContainerType=ContentArea }
+
+      { 1100570001;1;Group  ;
+                  CaptionML=[ENU=Options;
+                             NOR=Alternativer;
+                             SVE=Alternativ];
+                  GroupType=Group }
+
+      { 12047958;2;Field    ;
+                  CaptionML=[ENU=File Name;
+                             NOR=Filnavn;
+                             SVE=Filnamn];
+                  SourceExpr=gFileName;
+                  OnAssistEdit=BEGIN
+                                 gFileName := gFileMgt.OpenFileDialog(PEB004,gFileName,PEB003);
+                               END;
+                                }
+
+      { 12047959;2;Field    ;
+                  CaptionML=[ENU=Bank Charge Account;
+                             SVE="Kontonr fîr bankkostnad "];
+                  SourceExpr=GLAccount."No.";
+                  TableRelation="G/L Account" }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      gFileName@12047960 : Text;
+      PEB001@12047959 : TextConst 'ENU=%1, %2 is not supported;SVE=%1, %2 stîds inte';
+      PEB002@12047967 : TextConst 'ENU=The amount in the file is not correct for EndToEndID %1;SVE=Beloppet i filen stÑmmer inte fîr EndToEndID %1';
+      PEB003@1070000 : TextConst 'ENU=All files|*.*|TXT-files (*.txt)|*.txt|WRI-files (*.wri)|*.wri;SVE=Alla filer|*.*|TXT-filer (*.txt)|*.txt|WRI-filer (*.wri)|*.wri';
+      PEB004@1000000008 : TextConst 'ENU=Import CAMT054;NOR=Importer CAMT054;SVE=Import CAMT054';
+      gFileMgt@12047958 : Codeunit 419;
+      gGenJournalLine@12047965 : Record 81;
+      gXGenJournalLine@12047966 : Record 81;
+      gDocumentNo@12047961 : Code[20];
+      PEB005@12047962 : TextConst 'ENU=Can Not Find: %1;SVE=Hittar inte: %1';
+      PEB006@12047963 : TextConst 'ENU=%1 is not a valid value of type %2;SVE=%1 Ñr inte ett giltigt vÑrde av typen %2';
+      XMLReader@12047964 : Codeunit 11128078;
+      PEB007@12047968 : TextConst 'ENU=Currency is different in the File and the Entry for EndToEbdId %1;SVE=Valutan Ñr olika i filen och reskontran pÜ EndToEndId %1';
+      GLAccount@12047969 : Record 15;
+
+    LOCAL PROCEDURE ReadFile@12047960();
+    VAR
+      DocNode@12047959 : Integer;
+      DocNode2@12047962 : Integer;
+      DocNode3@12047972 : Integer;
+      ServerFileName@12047960 : Text;
+      VPPack@12047963 : Record 11128079;
+      VPPackEntry@12047964 : Record 11128063;
+      FromIBAN@12047967 : Text;
+      EndToEndId@12047966 : Text;
+      MsgId@12047968 : Text;
+      PayAmount@12047969 : Decimal;
+      PayCurrency@12047971 : Code[10];
+      FromAmount@12047970 : Decimal;
+      FromCurrency@12047965 : Code[10];
+      FromBankAmount@12047973 : Decimal;
+      PostingDate@12047974 : Date;
+      VendLedgEntry@12047977 : Record 25;
+      TotalAmount@12047975 : Decimal;
+      VPGiroType@12047976 : Record 11128061;
+      VPCurrencyAccount@12047978 : Record 11128073;
+      AccountType@12047980 : 'G/L Account,Customer,Vendor,Bank Account,Fixed Asset';
+      BankAccountNo@12047979 : Code[20];
+      CurrencyFactor@12047981 : Decimal;
+      TempattrValue@12047982 : Text;
+      DocNodeAttrib@12047983 : Integer;
+      PayCompanyName@12047984 : Text;
+      SubFmlyCd@12047961 : Text;
+    BEGIN
+      IF gFileMgt.CanRunDotNetOnClient THEN
+        ServerFileName := gFileMgt.UploadFileSilent(gFileName)
+      ELSE
+        ServerFileName := gFileMgt.UploadFile(PEB004, gFileName);
+
+      IF ServerFileName = '' THEN
+        CurrReport.QUIT;
+
+      XMLReader.SetNameSpace('x','urn:iso:std:iso:20022:tech:xsd:camt.054.001.02');
+
+      DocNode := XMLReader.LoadFromFile(ServerFileName,'/x:Document/x:BkToCstmrDbtCdtNtfctn/x:Ntfctn');
+
+      WHILE XMLReader.GetNextNode(DocNode) DO BEGIN
+        FromIBAN := XMLReader.GetValue(DocNode, 'x:Acct/x:Id/x:IBAN');
+        FromCurrency := XMLReader.GetValue(DocNode, 'x:Acct/x:Ccy');
+
+        // Account Level
+        DocNode2 := XMLReader.SelectNodes(DocNode,'x:Ntry');
+        WHILE XMLReader.GetNextNode(DocNode2) DO BEGIN
+          FromBankAmount := XMLReader.GetValueDec(DocNode2,'x:Amt');
+
+          IF NOT EVALUATE(PostingDate,XMLReader.GetValue(DocNode2,'x:BookgDt/x:Dt'),9) THEN
+            ERROR(PEB006,XMLReader.GetValue(DocNode2,'x:BookgDt/x:Dt'),'Date');
+
+          SubFmlyCd := XMLReader.GetValue(DocNode2,'x:BkTxCd/x:Domn/x:Fmly/x:SubFmlyCd');
+
+          // Vendor Entries Level
+          DocNode3 := XMLReader.SelectNodes(DocNode2,'x:NtryDtls/x:TxDtls');
+          WHILE XMLReader.GetNextNode(DocNode3) DO BEGIN
+            EndToEndId := XMLReader.GetValue(DocNode3, 'x:Refs/x:EndToEndId');
+            IF SubFmlyCd <> 'CHRG' THEN BEGIN
+              MsgId := XMLReader.GetValue(DocNode3, 'x:Refs/x:MsgId');
+              MsgId := GetMsgIdIfBlank(MsgId,EndToEndId);
+            END ELSE
+              MsgId := '';
+
+            PayAmount := XMLReader.GetValueDec(DocNode3,'x:AmtDtls/x:InstdAmt/x:Amt');
+            FromAmount := XMLReader.GetValueDec(DocNode3,'x:AmtDtls/x:TxAmt/x:Amt');
+            PayCurrency := GetCurrencyCode(GetAttributeValue(DocNode3,'x:AmtDtls/x:InstdAmt/x:Amt','Ccy'));
+            PayCompanyName := XMLReader.GetValue(DocNode3, 'x:RltdPties/x:Cdtr/x:Nm');
+            IF PayAmount = 0 THEN BEGIN
+              PayAmount := FromAmount;
+              CurrencyFactor :=  1;
+            END ELSE
+              CurrencyFactor :=  FromAmount / PayAmount;
+
+            VPPack.SETRANGE("SEPA Reference",COPYSTR(MsgId,1,20));
+            IF (MsgId <> '') AND VPPack.FINDFIRST THEN BEGIN
+              VPGiroType.GET(VPPack."Giro Type Code");
+              VPGiroType.TESTFIELD("Account No. Feedback");
+
+              VPCurrencyAccount.SETRANGE("VP Giro Type Code",VPGiroType.Code);
+              VPCurrencyAccount.SETRANGE("Currency Code",FromCurrency);
+              VPCurrencyAccount.SETRANGE(IBAN,FromIBAN);
+              IF VPCurrencyAccount.FINDFIRST THEN BEGIN
+                VPCurrencyAccount.TESTFIELD("Account No. Feedback");
+                WITH VPCurrencyAccount DO BEGIN
+                  CASE "Account Type Feedback" OF
+                    "Account Type Feedback"::"G/L Account": AccountType := AccountType::"G/L Account";
+                    "Account Type Feedback"::"Bank Account": AccountType := AccountType::"Bank Account";
+                    ELSE
+                      ERROR(PEB001,FIELDCAPTION("Account Type Feedback"),"Account Type Feedback");
+                  END;
+                  BankAccountNo := "Account No. Feedback";
+                END;
+              END ELSE BEGIN
+                WITH VPGiroType DO BEGIN
+                  CASE "Account Type Feedback" OF
+                    "Account Type Feedback"::"G/L Account": AccountType := AccountType::"G/L Account";
+                    "Account Type Feedback"::"Bank Account": AccountType := AccountType::"Bank Account";
+                    ELSE
+                      ERROR(PEB001,FIELDCAPTION("Account Type Feedback"),"Account Type Feedback");
+                  END;
+                  BankAccountNo := "Account No. Feedback";
+                END;
+
+              END;
+            END ELSE
+              CLEAR(VPPack);
+
+            TotalAmount := 0;
+
+            VPPackEntry.SETRANGE("Pack Entry No.",VPPack."Entry No.");
+            VPPackEntry.SETRANGE(Type,VPPackEntry.Type::Vendor);
+            VPPackEntry.SETRANGE("SEPA Line Reference",COPYSTR(EndToEndId,1,30));
+            IF VPPackEntry.FINDSET THEN BEGIN
+              REPEAT
+                gXGenJournalLine := gGenJournalLine;
+                gGenJournalLine.INIT;
+                gGenJournalLine."Line No." += 10000;
+                SetUpNewLine;
+                gGenJournalLine.VALIDATE("Posting Date",PostingDate);
+
+                VendLedgEntry.GET(VPPackEntry."Ledger Entry No.");
+                VendLedgEntry.TESTFIELD(Open,TRUE);
+                VendLedgEntry.CALCFIELDS("Remaining Amount","Remaining Amt. (LCY)");
+                TotalAmount += VendLedgEntry."Remaining Amount";
+                IF GetCurrencyCode(VendLedgEntry."Currency Code") <> PayCurrency THEN
+                  ERROR(PEB007,EndToEndId);
+      //>>4PSSE
+                gGenJournalLine.VALIDATE("Document Type",gGenJournalLine."Document Type"::Payment);
+      //<<4PSSE
+                gGenJournalLine.VALIDATE("Account Type",gGenJournalLine."Account Type"::Vendor);
+                gGenJournalLine.VALIDATE("Applies-to Doc. No.",VendLedgEntry."Document No.");
+
+                IF CurrencyFactor <> 1 THEN
+                  gGenJournalLine.VALIDATE("Amount (LCY)",ROUND(gGenJournalLine.Amount * CurrencyFactor));
+
+                gGenJournalLine."External Document No." :=  VendLedgEntry."External Document No.";
+                gGenJournalLine.INSERT;
+              UNTIL VPPackEntry.NEXT = 0;
+
+              IF TotalAmount <> -PayAmount THEN
+                ERROR(PEB002,EndToEndId);
+            END ELSE BEGIN
+              gXGenJournalLine := gGenJournalLine;
+              gGenJournalLine.INIT;
+              gGenJournalLine."Line No." += 10000;
+              SetUpNewLine;
+              gGenJournalLine.VALIDATE("Posting Date",PostingDate);
+              IF SubFmlyCd = 'CHRG' THEN BEGIN
+                gGenJournalLine.VALIDATE("Account Type",gGenJournalLine."Account Type"::"G/L Account");
+                gGenJournalLine.VALIDATE("Account No.",GLAccount."No.");
+              END;
+              gGenJournalLine.VALIDATE("Document Type",gGenJournalLine."Document Type"::Payment);
+              gGenJournalLine.VALIDATE("Currency Code",PayCurrency);
+              gGenJournalLine.VALIDATE(Amount,FromAmount);
+              IF gGenJournalLine."Account No." = '' THEN
+                gGenJournalLine.Description := COPYSTR(STRSUBSTNO(PEB005,PayCompanyName),1,50);
+              gGenJournalLine.INSERT;
+            END;
+
+          END;
+
+          gXGenJournalLine := gGenJournalLine;
+          gGenJournalLine.INIT;
+          gGenJournalLine."Line No." += 10000;
+          SetUpNewLine;
+          gGenJournalLine.VALIDATE("Posting Date",PostingDate);
+          gGenJournalLine.VALIDATE("Account Type",AccountType);
+          gGenJournalLine.VALIDATE("Account No.",BankAccountNo);
+          gGenJournalLine.VALIDATE("Document Type",gGenJournalLine."Document Type"::Payment);
+          gGenJournalLine.VALIDATE(Amount,-FromBankAmount);
+          gGenJournalLine.INSERT;
+        END;
+      END;
+    END;
+
+    PROCEDURE SetGenJournal@1070001(InGenJournalLine@1070000 : Record 81);
+    BEGIN
+      gGenJournalLine := InGenJournalLine;
+    END;
+
+    PROCEDURE SetUpNewLine@9();
+    VAR
+      GenJnlTemplate@12047958 : Record 80;
+      GenJnlBatch@12047959 : Record 232;
+      NoSeriesMgt@12047960 : Codeunit 396;
+    BEGIN
+      GenJnlTemplate.GET(gGenJournalLine."Journal Template Name");
+      GenJnlBatch.GET(gGenJournalLine."Journal Template Name",gGenJournalLine."Journal Batch Name");
+
+      IF gDocumentNo = '' THEN BEGIN
+        IF GenJnlBatch."No. Series" <> '' THEN BEGIN
+          CLEAR(NoSeriesMgt);
+          gDocumentNo := NoSeriesMgt.GetNextNo(GenJnlBatch."No. Series",WORKDATE,FALSE);
+          gGenJournalLine."Document No." := gDocumentNo;
+        END;
+      END ELSE
+        gGenJournalLine."Document No." := gDocumentNo;
+
+      gGenJournalLine."Source Code" := GenJnlTemplate."Source Code";
+      gGenJournalLine."Reason Code" := GenJnlBatch."Reason Code";
+      gGenJournalLine."Posting No. Series" := GenJnlBatch."Posting No. Series";
+      gGenJournalLine."Bal. Account Type" := GenJnlBatch."Bal. Account Type";
+    END;
+
+    LOCAL PROCEDURE GetMsgIdIfBlank@12047958(MsgId@12047959 : Text;EndToEndID@12047960 : Text) : Text;
+    VAR
+      VPPackEntry@12047958 : Record 11128063;
+      VPPack@12047961 : Record 11128079;
+    BEGIN
+      IF MsgId <> '' THEN
+        EXIT(MsgId);
+      VPPackEntry.SETCURRENTKEY("Pack Entry No.",Type,"SEPA Line Reference");
+      VPPackEntry.SETRANGE("SEPA Line Reference",COPYSTR(EndToEndID,1,30));
+      IF NOT VPPackEntry.FINDFIRST THEN
+        EXIT('');
+
+      VPPack.GET(VPPackEntry."Pack Entry No.");
+      EXIT(VPPack."SEPA Reference");
+    END;
+
+    LOCAL PROCEDURE GetAttributeValue@12047961(pParentRecSetNo@12047958 : Integer;pXPath@12047959 : Text;pAttribName@12047960 : Text) : Text;
+    VAR
+      DocNodeAttrib@12047961 : Integer;
+      DocNodeValue@12047962 : Text;
+    BEGIN
+      DocNodeAttrib := XMLReader.SelectNodes(pParentRecSetNo,pXPath);
+      IF XMLReader.GetNextNode(DocNodeAttrib) THEN
+        DocNodeValue := XMLReader.GetValue(DocNodeAttrib,'@' + pAttribName)
+      ELSE
+        CLEAR(DocNodeValue);
+      XMLReader.CloseNode(DocNodeAttrib);
+      EXIT(DocNodeValue);
+    END;
+
+    LOCAL PROCEDURE GetCurrencyCode@12047959(CurrCode@12047958 : Code[10]) : Code[10];
+    VAR
+      GeneralLedgerSetup@12047959 : Record 98;
+    BEGIN
+      GeneralLedgerSetup.GET;
+      GeneralLedgerSetup.TESTFIELD("LCY Code");
+      IF GeneralLedgerSetup."LCY Code" = CurrCode THEN
+        EXIT('')
+      ELSE
+        EXIT(CurrCode);
+    END;
+
+    BEGIN
+    {
+      PEB *** Begin ***
+      PEB0065 BG-Max
+      PEB
+      PEB *** End ***
+      190212 ORANGO.DL upgrade to PE8.08
+    }
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

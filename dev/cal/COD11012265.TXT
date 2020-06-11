@@ -1,0 +1,685 @@
+OBJECT Codeunit 11012265 Internal Charge Mgt
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00,4PSSE;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      gInternalCounter@1210190005 : Integer;
+      NextLineNo@1210190014 : Integer;
+      gInsertFirst@1100409001 : Boolean;
+      UseCostObjectRelIC@1100529000 : Boolean;
+      UseOrigCostObject@1100529003 : Boolean;
+      CostObjectInternChargeRev@1100529002 : Code[20];
+      CostObjectInternChargeCost@1100529001 : Code[20];
+
+    PROCEDURE GetNumInternalCharges@1210190002() : Integer;
+    BEGIN
+      EXIT(gInternalCounter);
+    END;
+
+    PROCEDURE ShowSourceTypeInternalCharge@1210190003(iSourceType@1210190005 : Integer;iProject@1210190000 : Code[20]);
+    VAR
+      ProjRec@1210190003 : Record 11072003;
+      ServOrderRec@1210190001 : Record 11012823;
+      ServOrderExtensionRec@1210190002 : Record 11071727;
+    BEGIN
+      // Input 'iProject' is the current ProjectNo, if this is a Master Project then the internal projects (or Service Orders) of
+      // this Master Project will be shown.
+      // Note (DP00847): Only for projects (SO's) that are in the same company as the Master Project .
+      IF iSourceType = 1 THEN BEGIN
+        ProjRec.SETRANGE("Internal Project", TRUE);
+        ProjRec.SETRANGE("Master Project", iProject);
+        PAGE.RUNMODAL(0, ProjRec);
+      END;
+      //IF iSourceType = 2 THEN BEGIN  // '2' Not used since Service Objects
+      IF iSourceType = 3 THEN BEGIN
+        ServOrderExtensionRec.SETRANGE("Master Project", iProject);
+        IF ServOrderExtensionRec.FINDSET THEN BEGIN
+          REPEAT
+            IF ServOrderRec.GET(ServOrderExtensionRec."Service Order No.") THEN
+              ServOrderRec.MARK(TRUE);
+          UNTIL ServOrderExtensionRec.NEXT = 0;
+          //ServOrderRec.MARKEDONLY(TRUE);
+        END;
+        ServOrderRec.MARKEDONLY(TRUE);
+        PAGE.RUNMODAL(0, ServOrderRec);
+      END;
+    END;
+
+    PROCEDURE InsertTempGLEntry@1100409000(iRunType@1100529008 : 'Project,Service,InternalChargePlantSO';iOrigNo@1210190011 : Code[20];iDescription@1100525000 : Text[100];iDescription2@1210190007 : Text[50];iQuantity@1100525004 : Decimal;iAmount@1100525002 : Decimal;iCostObject@1210190000 : Code[20];iCostComponent@1210190016 : Code[20];iElement@1100525001 : Code[20];iUnitOfMeasure@1100528600 : Code[10];iComment@1100528601 : Text[50];VAR TempGenJnlLine@1100409000 : TEMPORARY Record 81;VAR TmpIcEntry@1100529009 : TEMPORARY Record 11012058;CostPlusLineNo@1100529609 : Integer;ChargeToPlantLocation@1100529611 : Boolean);
+    VAR
+      ProjSetup@1210190004 : Record 315;
+      ServSetup@1210190017 : Record 11012800;
+      DestProjRec@1210190001 : Record 11072003;
+      DestElemRec@1210190024 : Record 11012010;
+      OrigProjRec@1210190006 : Record 11072003;
+      OrigServOrderRec@1210190022 : Record 11071727;
+      ServiceOrder@1100529601 : Record 11012823;
+      IcRel@1100529001 : Record 11012057;
+      DimValRec@1210190013 : Record 349;
+      DimMgt@1210190019 : Codeunit 408;
+      CostObjectMaster@1100529007 : Code[20];
+      MasterProject@1100529000 : Code[20];
+      MasterElement@1100529003 : Code[20];
+      MasterCompany@1100529002 : Text[30];
+      MasterExtensionContract@1100527300 : Code[10];
+      PlantLocationCode@1100529607 : Code[20];
+      PlantTypeCode@1100529602 : Code[20];
+      PlantNumberCode@1100529603 : Code[10];
+      PlantCostCompPostingSetup@1100529600 : Record 11012570;
+      PlantType@1100529604 : Record 11012551;
+      PlantNumber@1100529605 : Record 11012552;
+      PlantLocation@1100529606 : Record 11012554;
+      CostComponentPlantCode@1100529610 : Code[10];
+    BEGIN
+      IF NOT gInsertFirst THEN BEGIN
+        ProjSetup.GET;
+
+        CASE iRunType OF
+          iRunType::Project:
+            BEGIN
+              ProjSetup.TESTFIELD("Cost Object Intern Charge Rev");
+              IF NOT ProjSetup."Orig.Cost Object Intern Charge" THEN
+                ProjSetup.TESTFIELD("Cost Object Intern Charge Cost");
+              CostObjectInternChargeCost := ProjSetup."Cost Object Intern Charge Cost";
+              CostObjectInternChargeRev := ProjSetup."Cost Object Intern Charge Rev";
+              UseOrigCostObject := ProjSetup."Orig.Cost Object Intern Charge";
+            END;
+          iRunType::Service:
+            BEGIN
+              ServSetup.GET;
+              ServSetup.TESTFIELD("Cost Object Intern Charge Rev");
+              IF NOT ServSetup."Orig.Cost Object Intern Charge" THEN
+                ServSetup.TESTFIELD("Cost Object Intern Charge Cost");
+              CostObjectInternChargeCost := ServSetup."Cost Object Intern Charge Cost";
+              CostObjectInternChargeRev := ServSetup."Cost Object Intern Charge Rev";
+              UseOrigCostObject := ServSetup."Orig.Cost Object Intern Charge";
+            END;
+          iRunType::InternalChargePlantSO:
+            BEGIN
+              ServSetup.GET;
+              ServSetup.TESTFIELD("CO Intern Charge Rev SO Plant");
+              CostObjectInternChargeRev := ServSetup."CO Intern Charge Rev SO Plant";
+            END;
+        END;
+        UseCostObjectRelIC := ProjSetup."Use C.Obj. Rel. S-P Int.Charge";  //DP00847.n
+        NextLineNo := 1;
+        gInsertFirst := TRUE;
+      END;
+
+      CASE iRunType OF
+        iRunType::Project:
+          BEGIN
+            OrigProjRec.GET(iOrigNo);
+            IF OrigProjRec."Cost Object Inter Project Cost" <> '' THEN
+              CostObjectInternChargeCost := OrigProjRec."Cost Object Inter Project Cost";
+            IF OrigProjRec."Cost Object Inter Project Rev" <> '' THEN
+              CostObjectInternChargeRev := OrigProjRec."Cost Object Inter Project Rev";
+          END;
+        iRunType::Service:
+          OrigServOrderRec.GET(iOrigNo);
+        iRunType::InternalChargePlantSO:
+          BEGIN
+            IF NOT OrigServOrderRec.GET(iOrigNo) THEN
+              CLEAR(OrigServOrderRec);
+            ServiceOrder.GET(iOrigNo);
+          END;
+      END;
+
+      CostObjectMaster := CostObjectInternChargeCost;
+      IF UseOrigCostObject AND (iCostObject <> '') THEN BEGIN
+        DimMgt.GetDimValueRec(2, iCostObject, DimValRec, TRUE, '');
+        IF DimValRec."Cost Type" <> DimValRec."Cost Type"::Revenue THEN
+          CostObjectMaster := iCostObject;
+      END;
+
+      WITH TempGenJnlLine DO BEGIN
+        CLEAR(TempGenJnlLine);
+
+        //Fill Debit Line
+        "Line No." := NextLineNo;
+        "Account Type" := "Account Type"::"G/L Account";
+        CASE iRunType OF
+          iRunType::Project:
+            BEGIN
+              "Job No." := iOrigNo;
+              Element := iElement;
+              "Shortcut Dimension 2 Code" := CostObjectInternChargeRev;
+              "Origin Type" := "Origin Type"::Project;
+            END;
+          iRunType::Service,iRunType::InternalChargePlantSO:
+            BEGIN
+              "Service Order No." := iOrigNo;
+              "Cost Plus Line No." := CostPlusLineNo;
+              "Shortcut Dimension 2 Code" := CostObjectInternChargeRev;
+              "Origin Type" := "Origin Type"::Service;
+            END;
+        END;
+
+        Description := iDescription;
+        "Description 2" := iDescription2;
+        //>> 150622 ITERO.SB IME-360
+        DimMgt.GetDimValueRec(2, CostObjectInternChargeRev, DimValRec, TRUE, '');
+        IF DimValRec."Cost Component"<>'' THEN
+          "Cost Component" := DimValRec."Cost Component";
+        //IF iCostComponent <> '' THEN
+        //  "Cost Component" := iCostComponent;
+        //<<
+
+        "System-Created Entry" := TRUE;
+        "Posting Date" := WORKDATE;
+        "Gen. Prod. Posting Group" := '';
+        "Gen. Bus. Posting Group" := '';
+        "VAT Prod. Posting Group" :='';
+        "VAT Bus. Posting Group" := '';
+        "Gen. Posting Type" := 0;
+
+        "Interest Date" := "Posting Date";
+        IF iRunType IN [iRunType::Service, iRunType::InternalChargePlantSO] THEN BEGIN
+          Quantity := iQuantity;
+          "Unit of Measure Code" := iUnitOfMeasure;
+        END;
+        Amount := iAmount * -1;
+        Amount := Amount * iQuantity;
+
+        TempGenJnlLine.INSERT;
+
+        //Fill Credit Line
+        NextLineNo := NextLineNo + 1;
+        "Line No." := NextLineNo;
+        "Account Type" := "Account Type"::"G/L Account";
+
+        //DP00847.sn
+        "Job No." := '';
+        Element := '';
+        "Service Order No." := '';
+        "Service Contract No." := '';
+        "Service Location No." := '';
+        MasterCompany := '';  // If Master Company filled then IC
+        MasterProject := '';
+        MasterElement := '';
+        //DP00847.en
+        CLEAR(DestProjRec);
+        CLEAR(DestElemRec);
+        CLEAR(PlantType);
+        CLEAR(PlantNumber);
+        CLEAR(PlantLocation);
+        PlantTypeCode := '';
+        PlantNumberCode := '';
+        PlantLocationCode := '';
+        "Plant Type" := '';
+        "Plant No." := '';
+        "Plant Location" := '';
+
+        CASE iRunType OF
+          iRunType::Project:
+            BEGIN
+              OrigProjRec.TESTFIELD("Master Project");
+              //"Job No." := OrigProjRec."Master Project";  //DP00847.o
+              //Element := OrigProjRec."Master Element";    //DP00847.o
+              //DP00847.sn
+              IF (OrigProjRec."Master Company" <> '') AND (OrigProjRec."Master Company" <> COMPANYNAME) THEN BEGIN
+                MasterCompany := OrigProjRec."Master Company";
+                // Do not fill JobNo and Element in TempGenJnlLine because MasterProject/Element not in this company!
+              END ELSE BEGIN
+                "Job No." := OrigProjRec."Master Project";
+                Element := OrigProjRec."Master Element";
+              END;
+              MasterProject := OrigProjRec."Master Project";
+              MasterElement := OrigProjRec."Master Element";
+              //DP00847.en
+              "Shortcut Dimension 2 Code" := CostObjectMaster;
+              "Origin Type" := "Origin Type"::Project;
+            END;
+
+          iRunType::Service:
+            BEGIN
+              OrigServOrderRec.TESTFIELD("Master Project");
+              IF (OrigServOrderRec."Master Company" <> '') AND (OrigServOrderRec."Master Company" <> COMPANYNAME) THEN BEGIN
+                MasterCompany := OrigServOrderRec."Master Company";
+                // Do not fill JobNo and Element in TempGenJnlLine because MasterProject/Element not in this company!
+              END ELSE BEGIN
+                "Job No." := OrigServOrderRec."Master Project";
+                Element := OrigServOrderRec."Master Element";
+                "Extension Contract" := OrigServOrderRec."Master Extension Contract";
+              END;
+              MasterProject := OrigServOrderRec."Master Project";  //DP00847.n
+              MasterElement := OrigServOrderRec."Master Element";  //DP00847.n
+              MasterExtensionContract := OrigServOrderRec."Master Extension Contract";
+              "Shortcut Dimension 2 Code" := CostObjectMaster;
+              "Origin Type" := "Origin Type"::Project;
+              Comment := iComment;
+            END;
+
+          iRunType::InternalChargePlantSO:
+            BEGIN
+              IF (ServiceOrder."Plant Company" <> '' ) AND (ServiceOrder."Plant Company" <> COMPANYNAME) THEN BEGIN
+                OrigServOrderRec.TESTFIELD("Master Company", '');
+                OrigServOrderRec.TESTFIELD("Master Project", '');
+                MasterCompany := ServiceOrder."Plant Company";
+              END ELSE BEGIN
+                IF ChargeToPlantLocation THEN
+                  "Plant Location" := ServiceOrder."Plant Location";
+                "Plant Type" := ServiceOrder."Plant Type";
+                "Plant No." := ServiceOrder."Plant Number";
+                "Cost Component Plant" := ServiceOrder."Cost Component Plant";
+                IF ServiceOrder."Plant Type" <> '' THEN BEGIN
+                  PlantType.GET(ServiceOrder."Plant Type");
+                  PlantCostCompPostingSetup.GET(PlantType.PlantPostingGrp(ServiceOrder."Plant Number", '', ''),
+                                                '', ServiceOrder."Cost Component Plant");
+                  PlantCostCompPostingSetup.TESTFIELD("Plant Cost Account");
+                  VALIDATE("Account No.", PlantCostCompPostingSetup."Plant Cost Account");
+                  IF ServiceOrder."Plant Number" <> '' THEN BEGIN
+                    PlantNumber.GET(ServiceOrder."Plant Type", ServiceOrder."Plant Number");
+                    "Shortcut Dimension 1 Code" := PlantNumber."Department Code";
+                  END;
+                  IF "Shortcut Dimension 1 Code" = '' THEN
+                    "Shortcut Dimension 1 Code" := PlantType."Department Code";
+                END ELSE
+                  "Shortcut Dimension 2 Code" := iCostObject;
+                "Service Order No." := iOrigNo;
+              END;
+              IF ChargeToPlantLocation THEN
+                PlantLocationCode :=  ServiceOrder."Plant Location";
+              PlantTypeCode := ServiceOrder."Plant Type";
+              PlantNumberCode := ServiceOrder."Plant Number";
+              CostComponentPlantCode := ServiceOrder."Cost Component Plant";
+              "Origin Type" := "Origin Type"::Service;
+              "Source Type" := "Source Type"::Customer;
+              "Source No." := ServiceOrder."Customer No.";
+            END;
+        END;
+
+        //DP00847.sn
+        IF MasterCompany <> '' THEN BEGIN
+          IcRel.GET(COMPANYNAME, MasterCompany);
+          IcRel.TESTFIELD("Supplying Company IC Account");
+          IcRel.TESTFIELD("Receiving Company IC Account");
+          DestProjRec.CHANGECOMPANY(MasterCompany);
+          DestElemRec.CHANGECOMPANY(MasterCompany);
+          PlantType.CHANGECOMPANY(MasterCompany);
+          PlantNumber.CHANGECOMPANY(MasterCompany);
+          PlantLocation.CHANGECOMPANY(MasterCompany);
+        END;
+        //DP00847.en
+
+        IF MasterProject <> '' THEN BEGIN
+          DestProjRec.GET(MasterProject);  // "Job No." is not filled if IC
+          DestProjRec.TESTFIELD("Project Type");
+          IF DestProjRec."Posting Element Mandatory" AND (Element  = '') THEN
+            CASE iRunType OF
+              iRunType::Project:
+                OrigProjRec.TESTFIELD("Master Element");
+              iRunType::Service:
+                OrigServOrderRec.TESTFIELD("Master Element");
+            END;
+          IF Element <> '' THEN
+            DestElemRec.GET("Job No.", Element);
+        END;
+
+        IF PlantTypeCode <> '' THEN
+          PlantType.GET(PlantTypeCode);
+        IF (NOT PlantType.Bulk) AND (PlantNumberCode <> '') THEN
+          PlantNumber.GET(PlantTypeCode, PlantNumberCode);
+        IF PlantLocationCode <> '' THEN
+          PlantLocation.GET(PlantLocationCode);
+
+        Description := iDescription;
+        "Description 2" := iDescription2;
+
+        //>> 150622 ITERO.SB IME-360
+        DimMgt.GetDimValueRec(2, CostObjectMaster, DimValRec, TRUE, '');
+        IF DimValRec."Cost Component"<>'' THEN
+          "Cost Component" := DimValRec."Cost Component";
+        //IF iCostComponent <> '' THEN
+        //  "Cost Component" := iCostComponent;
+        //<<
+        "System-Created Entry" := TRUE;
+        "Posting Date" := WORKDATE;
+        "Gen. Prod. Posting Group" := '';
+        "Gen. Bus. Posting Group" := '';
+        "VAT Prod. Posting Group" :='';
+        "VAT Bus. Posting Group" := '';
+        "Gen. Posting Type" := 0;
+        "Bal. Account No." := '';
+        Amount := iAmount;
+        Amount := Amount * iQuantity;
+        "Interest Date" := "Posting Date";
+
+        IF iRunType IN [iRunType::Service, iRunType::InternalChargePlantSO] THEN BEGIN
+          Quantity := iQuantity;
+          "Job Unit Price" := iAmount;
+          "Unit of Measure Code" := iUnitOfMeasure;
+        END;
+
+        //DP00847.sn
+        IF MasterCompany <> '' THEN
+          CreateICEntry(TempGenJnlLine, DestProjRec, MasterCompany, MasterProject, MasterElement, MasterExtensionContract,
+                        IcRel, TmpIcEntry, PlantType, PlantNumber, PlantLocationCode, CostComponentPlantCode,
+                        iRunType IN [iRunType::Service, iRunType::InternalChargePlantSO]);
+        //DP00847.en
+        TempGenJnlLine.INSERT;
+
+        gInternalCounter := gInternalCounter + 1;
+        NextLineNo := NextLineNo + 1;
+      END;
+    END;
+
+    PROCEDURE PostBatch@1100409001(iRunType@1100529002 : 'Project,Service';VAR TempGenJnlLine@1100409000 : TEMPORARY Record 81;VAR TmpIcEntry@1100529003 : TEMPORARY Record 11012058;VAR DocumentNo@1100528600 : Code[20]);
+    VAR
+      ProjSetup@1210190004 : Record 315;
+      ServSetup@1210190017 : Record 11012800;
+      GenJnlTemplate@1210190005 : Record 80;
+      GenJnlBatch@1210190008 : Record 232;
+      GenJnlLine@1210190003 : Record 81;
+      IntercompanyRelation@1100529400 : Record 11012057;
+      NoSeriesMgt@1210190020 : Codeunit 396;
+      JnlTemplateName@1100529001 : Text[30];
+      JnlBatchName@1100529000 : Text[30];
+    BEGIN
+      ProjSetup.GET;
+      CASE iRunType OF
+        iRunType::Project:
+          BEGIN
+            JnlTemplateName := ProjSetup."Intern Charge Journal Template";
+            JnlBatchName := ProjSetup."Intern Charge Journal Batch";
+          END;
+        iRunType::Service:
+          BEGIN
+            ServSetup.GET;
+            JnlTemplateName := ServSetup."Intern Charge Journal Template";
+            JnlBatchName := ServSetup."Intern Charge Journal Batch";
+          END;
+      END;
+
+      GenJnlTemplate.GET(JnlTemplateName);
+      GenJnlBatch.GET(JnlTemplateName, JnlBatchName);
+      GenJnlBatch.TESTFIELD("No. Series");
+      CLEAR(NoSeriesMgt);
+      DocumentNo := NoSeriesMgt.GetNextNo(GenJnlBatch."No. Series", WORKDATE, FALSE);
+
+      GenJnlLine.LOCKTABLE;
+      GenJnlLine.SETRANGE("Journal Template Name", JnlTemplateName);
+      GenJnlLine.SETRANGE("Journal Batch Name", JnlBatchName);
+      IF GenJnlLine.FINDLAST THEN
+        NextLineNo := GenJnlLine."Line No." + 1
+      ELSE
+        NextLineNo := 1;
+
+      WITH GenJnlLine DO BEGIN
+        IF TempGenJnlLine.FINDSET THEN BEGIN
+          REPEAT
+            CLEAR(GenJnlLine);
+
+            "Line No." := TempGenJnlLine."Line No.";
+            "Account Type" := TempGenJnlLine."Account Type";
+            VALIDATE("Journal Template Name", JnlTemplateName);
+            VALIDATE("Journal Batch Name", JnlBatchName);
+            "Document No." := DocumentNo;
+            IF TempGenJnlLine."Job No." <> '' THEN BEGIN
+              VALIDATE("Job No.", TempGenJnlLine."Job No.");
+              Element := TempGenJnlLine.Element;
+              "Extension Contract" := TempGenJnlLine."Extension Contract";
+            END;
+            IF (TempGenJnlLine."Service Order No." <> '') OR (TempGenJnlLine."Service Contract No." <> '') THEN BEGIN
+              IF TempGenJnlLine."Service Order No." <> '' THEN
+                VALIDATE("Service Order No.", TempGenJnlLine."Service Order No.")
+              ELSE
+                VALIDATE("Service Contract No.", TempGenJnlLine."Service Contract No.");
+            END;
+
+            //T007402.sn
+            "Dimension Set ID" := TempGenJnlLine."Dimension Set ID"; //T007402.n
+            VALIDATE("Shortcut Dimension 2 Code", TempGenJnlLine."Shortcut Dimension 2 Code");
+            //T007402.en
+
+            IF TempGenJnlLine."Plant Type" <> '' THEN BEGIN
+              VALIDATE("Account No.", TempGenJnlLine."Account No.");
+              "Source Type" := TempGenJnlLine."Source Type";
+              "Source No." := TempGenJnlLine."Source No.";
+              "Service Order No." := '';
+              "Service Category" := '';
+              VALIDATE("Shortcut Dimension 1 Code", TempGenJnlLine."Shortcut Dimension 1 Code");
+              TempGenJnlLine."Source Code" := GenJnlTemplate."Source Code";
+              TempGenJnlLine."Document No." := "Document No.";
+              PostPlant(TempGenJnlLine);
+            END;
+
+            //DP00847.sn
+            IF TmpIcEntry.GET(TempGenJnlLine."Line No.") THEN BEGIN
+              "Account No." := TmpIcEntry.GetICAccountNoOfCurrentCompany;    //Is the "Intercompany Account"
+              PostICEntry(TmpIcEntry, DocumentNo);
+              //T007402.sn
+              IntercompanyRelation.GET(COMPANYNAME,TmpIcEntry."Receiving Company");
+              IntercompanyRelation.AddICRelationDimsOfCurrentCompany("Dimension Set ID","Shortcut Dimension 1 Code","Shortcut Dimension 2 Code");
+              //T007402.en
+            END;
+            //DP00847.en
+
+            //VALIDATE("Shortcut Dimension 2 Code", TempGenJnlLine."Shortcut Dimension 2 Code"); //T007402.o
+
+            "Origin Type" := TempGenJnlLine."Origin Type";
+            "Source Code" := GenJnlTemplate."Source Code";
+
+            Description := TempGenJnlLine.Description;
+            "Description 2" := TempGenJnlLine."Description 2";
+            IF TempGenJnlLine."Cost Component" <> '' THEN
+              "Cost Component" := TempGenJnlLine."Cost Component";
+
+            "System-Created Entry" := TempGenJnlLine."System-Created Entry";
+            "Posting Date" := TempGenJnlLine."Posting Date";
+            "Interest Date" := TempGenJnlLine."Interest Date";
+
+            IF GenJnlBatch."Bal. Account No." <> '' THEN BEGIN
+              "Bal. Account Type" := "Bal. Account Type"::"G/L Account";
+              "Bal. Account No." := GenJnlBatch."Bal. Account No.";
+            END;
+
+            "Gen. Prod. Posting Group" := TempGenJnlLine."Gen. Prod. Posting Group";
+            "Gen. Bus. Posting Group" := TempGenJnlLine."Gen. Bus. Posting Group";
+            "VAT Prod. Posting Group" := TempGenJnlLine."VAT Prod. Posting Group";
+            "VAT Bus. Posting Group" := TempGenJnlLine."VAT Bus. Posting Group";
+            "Gen. Posting Type" := TempGenJnlLine."Gen. Posting Type";
+            "Cost Plus Line No." := TempGenJnlLine."Cost Plus Line No.";
+
+            IF iRunType = iRunType::Service THEN BEGIN
+              Quantity := TempGenJnlLine.Quantity;
+              "Unit of Measure Code" := TempGenJnlLine."Unit of Measure Code";
+            END;
+
+            VALIDATE(Amount, TempGenJnlLine.Amount);
+            Comment := TempGenJnlLine.Comment;
+
+            INSERT(TRUE);
+            TempGenJnlLine.DELETE;
+          UNTIL TempGenJnlLine.NEXT = 0;
+        END;
+
+        SETRANGE("Journal Template Name", JnlTemplateName);
+        SETRANGE("Journal Batch Name", JnlBatchName);
+        SETRANGE("Document No.", DocumentNo);
+        IF FINDSET THEN
+          CODEUNIT.RUN(CODEUNIT::"Gen. Jnl.-Post Batch", GenJnlLine);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateICEntry@1100529001(GenJnlLine@1100529001 : Record 81;DestProj@1100529006 : Record 11072003;MasterCompany@1100529003 : Text[30];MasterProject@1100529004 : Code[20];MasterElement@1100529005 : Code[20];MasterExtensionContract@1100527300 : Code[10];IntercompanyRelation@1100529000 : Record 11012057;VAR TmpIcEntry@1100529010 : TEMPORARY Record 11012058;PlantType@1100529601 : Record 11012551;PlantNumber@1100529600 : Record 11012552;PlantLocationCode@1100529602 : Code[20];CostComponentPlant@1100529603 : Code[10];CopyQuantityAndUOM@1100529606 : Boolean);
+    VAR
+      GLSetup@1100529607 : Record 98;
+      ProjSetup@1100529007 : Record 315;
+      ProjectType@1100529008 : Record 11012009;
+      CostObjectRelation@1100529009 : Record 11020243;
+      DimVal@1100529002 : Record 349;
+      PlantCostCompPostingSetup@1100529604 : Record 11012570;
+      DoInternalOrExternalMode@1100529605 : Code[1];
+    BEGIN
+      //DP00847
+      DimVal.CHANGECOMPANY(MasterCompany);
+      IF MasterProject <> '' THEN BEGIN
+        ProjSetup.CHANGECOMPANY(MasterCompany);
+        ProjectType.CHANGECOMPANY(MasterCompany);
+
+        ProjSetup.GET;
+        ProjectType.GET(DestProj."Project Type");
+      END;
+
+      WITH GenJnlLine DO BEGIN
+        TmpIcEntry.INIT;
+        TmpIcEntry."Line No." := "Line No.";  // Fill with LineNo of (Temp)GenJnlLine
+        TmpIcEntry."Post in Company" := MasterCompany;
+        TmpIcEntry."Supplying Company" := COMPANYNAME;
+        TmpIcEntry."Receiving Company" := MasterCompany;
+        TmpIcEntry."Posting Date" := "Posting Date";
+        TmpIcEntry."Interest Date" := "Interest Date";
+        TmpIcEntry."Account Type" := TmpIcEntry."Account Type"::"G/L Account";
+        TmpIcEntry."Account No." := IntercompanyRelation."Receiving Company IC Account";
+        IF MasterProject <> '' THEN
+          TmpIcEntry."Global Dimension 1 Code" := DestProj."Global Dimension 1 Code"
+        ELSE
+          IF PlantNumber."No." = '' THEN
+            TmpIcEntry."Global Dimension 1 Code" := PlantType."Department Code"
+          ELSE
+            TmpIcEntry."Global Dimension 1 Code" := PlantNumber."Department Code";
+
+        TmpIcEntry."Cost Object" := "Shortcut Dimension 2 Code";
+        IF UseCostObjectRelIC THEN
+          TmpIcEntry."Cost Object" := CostObjectRelation.ConvertCostObject(TmpIcEntry."Cost Object", MasterCompany);
+        TmpIcEntry.TESTFIELD("Cost Object");
+        DimVal.SETCURRENTKEY(Code, "Global Dimension No.");
+        DimVal.SETRANGE(Code, TmpIcEntry."Cost Object");
+        DimVal.SETRANGE("Global Dimension No.", 2);
+        DimVal.FINDFIRST;
+
+        IF MasterProject <> '' THEN
+          TmpIcEntry."Bal. Account No." := ProjectType.GetWipAccByPostingGrp(
+            DestProj."Project Type", DimVal."Cost Type", DestProj."Project Status",
+            ProjSetup."Provisions at Closure", MasterCompany, DimVal."Cost Type", '', 0, '','')
+        ELSE BEGIN
+          PlantCostCompPostingSetup.CHANGECOMPANY(MasterCompany);
+          PlantCostCompPostingSetup.GET(PlantType.PlantPostingGrp("Plant No.", MasterCompany, DoInternalOrExternalMode),
+                                        '', CostComponentPlant);
+          TmpIcEntry."Bal. Account No." := PlantCostCompPostingSetup."Plant Cost Account";
+          TmpIcEntry."Plant Invoice Origin" := TmpIcEntry."Plant Invoice Origin"::"Service order";
+        END;
+
+        TmpIcEntry."Project No." := MasterProject;
+        TmpIcEntry.Element := MasterElement;
+        TmpIcEntry."Extension Contract" := MasterExtensionContract;
+        TmpIcEntry."Cost Component" := "Cost Component";
+        TmpIcEntry."Plant Location" := PlantLocationCode;
+        TmpIcEntry."Plant Type" := PlantType.Code;
+        TmpIcEntry."Plant No." := PlantNumber."No.";
+        TmpIcEntry."Cost Component Plant" := CostComponentPlant;
+
+        TmpIcEntry.Description := Description;
+        TmpIcEntry."Description 2" := "Description 2";
+        IF CopyQuantityAndUOM THEN BEGIN
+          TmpIcEntry."Unit of Measure Code" := "Unit of Measure Code";
+          IF Quantity <> 0 THEN BEGIN
+            GLSetup.GET;
+            TmpIcEntry.Quantity := Quantity;
+            TmpIcEntry.Price := ROUND(Amount / Quantity, GLSetup."Unit-Amount Rounding Precision");
+          END ELSE
+            TmpIcEntry.Price := Amount;
+        END ELSE BEGIN
+          TmpIcEntry.Quantity := 1;
+          TmpIcEntry.Price := Amount;
+        END;
+        TmpIcEntry.Amount := Amount;
+
+        TmpIcEntry.TESTFIELD("Account No.");
+        TmpIcEntry.TESTFIELD("Bal. Account No.");
+        TmpIcEntry.TESTFIELD("Cost Object");
+        IF MasterProject <> '' THEN BEGIN
+          TmpIcEntry.CheckProjStatusReceivingComp();
+          IF TmpIcEntry.Element <> '' THEN
+            TmpIcEntry.CheckProjElemBlockedRecComp();
+        END;
+        TmpIcEntry.INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE PostICEntry@1100529000(VAR TmpIcEntry@1100529010 : TEMPORARY Record 11012058;DocumentNo@1100529001 : Code[20]);
+    VAR
+      IcEntry@1100529000 : Record 11012058;
+      IcEntry2@1100529002 : Record 11012058;
+      IntercompanyRelation@1100529400 : Record 11012057;
+    BEGIN
+      //DP00847
+      IcEntry := TmpIcEntry;
+      IcEntry."Document No." := DocumentNo;
+      IF IcEntry."Global Dimension 1 Code" <> '' THEN
+        IcEntry.VALIDATE("Global Dimension 1 Code" );
+      IcEntry.VALIDATE("Cost Object" );
+
+      IntercompanyRelation.GET(IcEntry."Supplying Company",IcEntry."Receiving Company");
+      IcEntry.AddICRelationDims(IntercompanyRelation);
+
+      IF IcEntry2.FINDLAST THEN
+        IcEntry."Line No." := IcEntry2."Line No." + 1
+      ELSE
+        IcEntry."Line No." := 1;
+      IcEntry.INSERT(TRUE);
+      TmpIcEntry.DELETE;
+    END;
+
+    LOCAL PROCEDURE PostPlant@11012001(GenJournalLine@1100525001 : Record 81);
+    VAR
+      ServiceOrder@1100529601 : Record 11012823;
+      PlantLocation@1100525004 : Record 11012554;
+      PlantLedgerEntry@1100525003 : Record 11012572;
+      PlantJnlPostLine@1100529600 : Codeunit 11012569;
+    BEGIN
+      IF NOT ServiceOrder.GET(GenJournalLine."Service Order No.") THEN
+        EXIT;
+      IF (GenJournalLine."Plant Location" = '') OR (NOT PlantLocation.GET(GenJournalLine."Plant Location")) THEN
+        PlantLocation.INIT;
+
+      PlantLedgerEntry.INIT;
+      PlantLedgerEntry."Service Order No." := GenJournalLine."Service Order No.";
+      PlantLedgerEntry."Customer No." := ServiceOrder."Customer No.";
+      PlantLedgerEntry."Document No." := GenJournalLine."Document No.";
+      PlantLedgerEntry."Posting Date" := GenJournalLine."Posting Date";
+      PlantLedgerEntry."Document Date" := GenJournalLine."Document Date";
+      PlantLedgerEntry."Account No." := GenJournalLine."Account No.";
+      PlantLedgerEntry.Quantity := GenJournalLine.Quantity;
+      PlantLedgerEntry."Total Cost" := GenJournalLine.Amount;
+      PlantLedgerEntry."Direct Unit Cost" := GenJournalLine."Job Unit Price";
+      PlantLedgerEntry."Unit Cost" := PlantLedgerEntry."Direct Unit Cost";
+      PlantLedgerEntry."Cost Component" := GenJournalLine."Cost Component Plant";
+      PlantLedgerEntry."Plant Location" := GenJournalLine."Plant Location";
+      PlantLedgerEntry."Plant Type" := GenJournalLine."Plant Type";
+      PlantLedgerEntry."Plant No." := GenJournalLine."Plant No.";
+      PlantLedgerEntry."Plant Invoice Origin" := PlantLedgerEntry."Plant Invoice Origin"::"Service Order";
+      PlantLedgerEntry.Description := GenJournalLine.Description;
+      PlantLedgerEntry."Description 2" := GenJournalLine."Description 2";
+      PlantLedgerEntry."Employee No." := GenJournalLine."Employee No.";
+      PlantLedgerEntry."Unit of Measure Code" := GenJournalLine."Unit of Measure Code";
+      PlantLedgerEntry."Department Code" := GenJournalLine."Shortcut Dimension 1 Code";
+      PlantLedgerEntry."Cost Object" := GenJournalLine."Shortcut Dimension 2 Code";
+      PlantLedgerEntry."Dimension Set ID" := GenJournalLine."Dimension Set ID";
+      PlantLedgerEntry."Source Code" := GenJournalLine."Source Code";
+      PlantLedgerEntry."Relate to" := PlantLedgerEntry."Relate to"::"Job Order";
+
+      PlantJnlPostLine.RUN(PlantLedgerEntry);
+    END;
+
+    BEGIN
+    {
+      150622 ITERO.SB IME-360 Wrong cost component for credit line for internal charge
+    }
+    END.
+  }
+}
+

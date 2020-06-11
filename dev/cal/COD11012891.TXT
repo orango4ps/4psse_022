@@ -1,0 +1,427 @@
+OBJECT Codeunit 11012891 Parse CUF XML-Doc. Serv (GWW)
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      XMLDOMMgt@1100485001 : Codeunit 11020220;
+      Text001@1100525010 : TextConst 'DEU=Kostenart %1 stimmt nicht berein mit Kostentr„ger %2;ENU=Cost type %1 does not match Cost Object %2;NLD=Kostensoort %1 komt niet overeen met kostendrager %2;NOR=Kostnadstype %1 matcher ikke kostnadsobjekt %2;SVE=Kostnadstypen %1 matchar inte kostnadsobjektet %2';
+      XMLFormat@1100525011 : Codeunit 11020221;
+      NewBudgetLineNo@1100525009 : Integer;
+      Text002@1100409002 : TextConst 'DEU=%1 %2 ist %3;ENU=%1 %2 is %3;NLD=%1 %2 is %3;SVE=%1 %2 „r %3';
+      Text003@1100409003 : TextConst 'DEU=%1 kann nicht bestimmt werden;ENU=%1 can not be determined;NLD=%1 kan niet bepaald worden';
+      Text013@1210190000 : TextConst 'DEU=Kostentr„ger %1 ist gesperrt worden;ENU=Cost Object %1 is blocked;NLD=Kostendrager %1 is geblokkeerd;NOR=Kostrnadsobjekt %1 er blokkert;SVE=Kostnadsobjekt %1 „r blockerad';
+      Text999@1100525012 : TextConst 'DEU=%1 %2 nicht vorhanden;ENU=%1 %2 not present;NLD=%1 %2 niet aanwezig;NOR=%1 %2 finnes ikke;SVE=%1 %2 finns inte';
+      LevelCount@1100525025 : Integer;
+      CodingSystemCostObject@1100528900 : Code[20];
+      ServiceOrderNo@1100525030 : Code[20];
+
+    PROCEDURE ProcessFile@1100485001(VAR ITempBlob@1100485002 : TEMPORARY Record 99008535);
+    VAR
+      XMLDoc@1100525001 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+    BEGIN
+      XMLDoc := XMLDoc.XmlDocument;
+      XMLDOMMgt.LoadXMLFromBlob(XMLDoc, ITempBlob, TRUE);
+      ParseMessage(XMLDoc);
+    END;
+
+    LOCAL PROCEDURE ParseMessage@1100485000(XMLDocIn@1100525001 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument") : Boolean;
+    VAR
+      RootNode@1100525006 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      LineNodeList@1100525005 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      LineNode@1100525004 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      I@1100525000 : Integer;
+      BudgetLine@1100525002 : Record 11012001;
+    BEGIN
+      RootNode := XMLDocIn.DocumentElement;
+
+      // Check if used sort codes (= coding systems) exists
+      XMLDOMMgt.FindNodes(RootNode,'SORTEERCODES',LineNodeList);
+      IF NOT ISNULL(LineNodeList) THEN BEGIN
+        FOR I := 0 TO (LineNodeList.Count - 1) DO BEGIN
+          LineNode := LineNodeList.Item(I);
+          CheckCodingSystem(LineNode);
+          ProcessSORTEERCODES(LineNode);
+        END;
+      END;
+
+      //process budget lines
+      XMLDOMMgt.FindNodes(RootNode,'BEGROTING/BEGROTINGSREGEL',LineNodeList);
+      IF NOT ISNULL(LineNodeList) THEN
+        FOR I := 0 TO (LineNodeList.Count - 1) DO BEGIN
+          LineNode := LineNodeList.Item(I);
+          ProcessBEGROTINGSREGEL(LineNode);
+        END;
+
+      // Process bundles
+      XMLDOMMgt.FindNodes(RootNode,'BEGROTING/BUNDELING', LineNodeList);
+      IF NOT ISNULL(LineNodeList) THEN BEGIN
+        FOR I := 0 TO (LineNodeList.Count - 1) DO BEGIN
+          LineNode := LineNodeList.Item(I);
+          LevelCount := 0;
+          ProcessBUNDELING(LineNode);
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE ProcessBUNDELING@1100525000(LineNode@1100525001 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode");
+    VAR
+      LineNodeList@1100525004 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      LineNode2@1100525000 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      I@1100525002 : Integer;
+      ServiceOrderBudgetLine@1100525003 : Record 11012875;
+    BEGIN
+      XMLDOMMgt.FindNodes(LineNode, 'BUNDELING', LineNodeList);
+      IF NOT ISNULL(LineNodeList) THEN BEGIN
+        FOR I := 0 TO (LineNodeList.Count - 1) DO BEGIN
+          LineNode2 := LineNodeList.Item(I);
+          LevelCount += 1;
+          ProcessBUNDELING(LineNode2);
+        END;
+      END;
+
+      XMLDOMMgt.FindNodes(LineNode, 'BEGROTINGSREGEL', LineNodeList);
+      IF NOT ISNULL(LineNodeList) THEN BEGIN
+        FOR I := 0 TO (LineNodeList.Count - 1) DO BEGIN
+          LineNode2 := LineNodeList.Item(I);
+          IF LevelCount > 0 THEN
+            ProcessBEGROTINGSREGEL(LineNode2);
+        END;
+      END;
+
+      LevelCount -= 1;
+    END;
+
+    LOCAL PROCEDURE ProcessBEGROTINGSREGEL@1100525001(LineNode@1100525000 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode");
+    VAR
+      ServiceOrderBudgetLine@1100525002 : Record 11012875;
+    BEGIN
+      InitBudgetLine(ServiceOrderBudgetLine, LineNode);
+      CreateBudgetHeader(ServiceOrderBudgetLine, LineNode);
+
+      ProcessMAMOREGEL(ServiceOrderBudgetLine, LineNode);
+    END;
+
+    LOCAL PROCEDURE ProcessMAMOREGEL@1100409002(VAR ServiceOrderBudgetLine@1100409001 : Record 11012875;LineNode@1100409002 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode");
+    VAR
+      ServiceOrderBudgetLine2@1100409003 : Record 11012875;
+      LineNodeList@1100525000 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      I@1100525001 : Integer;
+    BEGIN
+      XMLDOMMgt.FindNodes(LineNode, 'MAMO_REGEL', LineNodeList);
+
+      IF NOT ISNULL(LineNodeList) THEN BEGIN
+        FOR I := 0 TO (LineNodeList.Count - 1) DO BEGIN
+          LineNode := LineNodeList.Item(I);
+
+          ServiceOrderBudgetLine2 := ServiceOrderBudgetLine;
+          InitBudgetLine(ServiceOrderBudgetLine, LineNode);
+
+          CreateBudgetLine(ServiceOrderBudgetLine, LineNode);
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE ProcessSORTEERCODES@1100409001(LineNode@1100525000 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode");
+    VAR
+      LineNodeList@1100525001 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      LineNode2@1100525003 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      I@1100525002 : Integer;
+      CodingSystemCode@1100525004 : Code[20];
+    BEGIN
+      XMLDOMMgt.FindNodes(LineNode, 'SORTEERCODE_REGEL', LineNodeList);
+      IF NOT ISNULL(LineNodeList) THEN BEGIN
+        FOR I := 0 TO (LineNodeList.Count - 1) DO BEGIN
+          LineNode2 := LineNodeList.Item(I);
+          CodingSystemCode := XMLDOMMgt.GetAttributeValue(LineNode, 'SORTERING');
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckCodingSystem@1100525003(LineNode@1100525004 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode");
+    VAR
+      CodingSystem@1100525002 : Record 11012088;
+      CodingSystemCode@1100525001 : Code[10];
+      CodingSystemDesc@1100525003 : Text[50];
+    BEGIN
+      CodingSystemCode := COPYSTR(XMLDOMMgt.GetAttributeValue(LineNode, 'SORTERING'), 1, 10);
+      CodingSystemDesc := COPYSTR(XMLDOMMgt.GetAttributeValue(LineNode, 'FUNCTIE'), 1, 50);
+      IF NOT CodingSystem.GET(CodingSystemCode) THEN
+        StoreMessage(CodingSystemDesc, STRSUBSTNO(Text999, CodingSystem.FIELDCAPTION("Coding System"), CodingSystemCode));
+    END;
+
+    LOCAL PROCEDURE FillCostObject@1100525008(LineNode@1100525002 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";VAR ServiceOrderBudgetLine@1100525000 : Record 11012875);
+    VAR
+      DimensionValue@1100525007 : Record 349;
+      DimMgt@1100525006 : Codeunit 408;
+      SameType@1100525008 : Boolean;
+      CostType@1100525001 : Code[20];
+      BudgetCode@1100525003 : Code[20];
+    BEGIN
+      WITH ServiceOrderBudgetLine DO BEGIN
+        CostType := XMLDOMMgt.GetAttributeValue(LineNode, 'KOSTENSOORT');
+        CASE CostType OF
+          'LOON': "Cost Type" := "Cost Type"::Labor;
+          'MATERIAAL': "Cost Type" := "Cost Type"::Material;
+          'ONDERAANNEMING': "Cost Type" := "Cost Type"::Subcontracting;
+          'MATERIEEL': "Cost Type" := "Cost Type"::Plant;
+          'OVERIG': "Cost Type" := "Cost Type"::Sundry;
+        ELSE
+          "Cost Type" := "Cost Type"::Sundry;
+        END;
+        //
+        IF CodingSystemCostObject <> '' THEN
+          BudgetCode := FillCostObjectByCodingSystem(LineNode)
+        ELSE
+          BudgetCode := XMLDOMMgt.GetAttributeValue(LineNode, 'CODE');
+        //
+        CheckAdmiSubstituteCostObject(BudgetCode, "Cost Type");
+        DimMgt.GetDimValueRec(2, BudgetCode, DimensionValue, FALSE, '');
+        IF DimensionValue.Code = '' THEN BEGIN
+          BudgetCode := '';
+          CheckAdmiSubstituteCostObject(BudgetCode, "Cost Type");  //get absence value
+        END;
+        "Cost Object" := BudgetCode;
+        //
+        DimMgt.GetDimValueRec(2, "Cost Object", DimensionValue, FALSE, '');
+        //
+        CASE "Cost Type" OF
+          "Cost Type"::Labor: SameType := DimensionValue."Cost Type" = DimensionValue."Cost Type"::Labor;
+          "Cost Type"::Material: SameType := DimensionValue."Cost Type" = DimensionValue."Cost Type"::Material;
+          "Cost Type"::Subcontracting: SameType := DimensionValue."Cost Type" = DimensionValue."Cost Type"::Subcontracting;
+          "Cost Type"::Plant: SameType := DimensionValue."Cost Type" = DimensionValue."Cost Type"::Plant;
+          "Cost Type"::Sundry: SameType := DimensionValue."Cost Type" = DimensionValue."Cost Type"::Sundry;
+        END;
+        //
+        IF (DimensionValue.Code <> '') AND (NOT SameType) THEN
+          StoreMessage(Description,STRSUBSTNO(Text001,DimensionValue."Cost Type",DimensionValue.Code));
+        IF (DimensionValue.Code <> '') AND DimensionValue.Blocked THEN
+          StoreMessage(Description, STRSUBSTNO(Text013,"Cost Object"));
+        IF DimensionValue.Code = '' THEN
+          StoreMessage(Description,STRSUBSTNO(Text999,FIELDCAPTION("Cost Object"),"Cost Object"));
+      END;
+    END;
+
+    LOCAL PROCEDURE FillCostObjectByCodingSystem@1100528900(LineNode@1100528900 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode") BudgetCode : Code[20];
+    VAR
+      LineNodeList@1100528905 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      I@1100528904 : Integer;
+      LineNode3@1100528903 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      CodingSystemCode@1100528902 : Code[20];
+    BEGIN
+      XMLDOMMgt.FindNodes(LineNode, 'SORTEERCODE', LineNodeList);
+      IF NOT ISNULL(LineNodeList) THEN BEGIN
+        FOR I := 0 TO (LineNodeList.Count - 1) DO BEGIN
+          LineNode3 := LineNodeList.Item(I);
+          CodingSystemCode := XMLDOMMgt.GetAttributeValue(LineNode3, 'SORTERING');
+          IF CodingSystemCode = CodingSystemCostObject THEN
+            BudgetCode := COPYSTR(XMLDOMMgt.GetAttributeValue(LineNode3, 'WAARDE'), 1, MAXSTRLEN(BudgetCode));
+        END;
+      END;
+      EXIT(BudgetCode);
+    END;
+
+    LOCAL PROCEDURE InitBudgetLine@1100525002(VAR ServiceOrderBudgetLine@1100525000 : Record 11012875;LineNode@1100525005 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode");
+    VAR
+      OptionRec@1100525001 : Record 11012502;
+    BEGIN
+      WITH ServiceOrderBudgetLine DO BEGIN
+        INIT;
+        "Service Order No." := ServiceOrderNo;
+        "Budget Type" := "Budget Type"::Order;
+        "Line No." := NewBudgetLineNo;
+
+        GetServOrder(FALSE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateBudgetLine@1100525007(VAR ServiceOrderBudgetLine@1100525000 : Record 11012875;LineNode@1100525001 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode");
+    VAR
+      UoM@1100409001 : Record 204;
+      UnitOfMeasure@1100409002 : Code[10];
+      Maatwerk@1100525003 : Text;
+    BEGIN
+      WITH ServiceOrderBudgetLine DO BEGIN
+        "Line No." := NewBudgetLineNo;
+        Description := COPYSTR(XMLDOMMgt.GetAttributeValue(LineNode, 'OMSCHRIJVING'), 1, MAXSTRLEN(Description));
+        FillCostObject(LineNode, ServiceOrderBudgetLine);
+        CASE "Cost Type" OF
+          "Cost Type"::Labor:
+            BEGIN
+              XMLFormat.EvaluateDecimal(XMLDOMMgt.GetAttributeValue(LineNode, 'AANTAL'), Quantity);
+              //XMLFormat.EvaluateDecimal(XMLDOMMgt.GetAttributeValue(LineNode, 'UUR_NORM'), Norm);
+              XMLFormat.EvaluateDecimal(XMLDOMMgt.GetAttributeValue(LineNode, 'HOEVEELHEID'), Norm);
+              XMLFormat.EvaluateDecimal(XMLDOMMgt.GetAttributeValue(LineNode, 'HOEVEELHEID'), Hours);
+              XMLFormat.EvaluateDecimal(XMLDOMMgt.GetAttributeValue(LineNode, 'PRIJS'), Rate);
+              Maatwerk := XMLDOMMgt.GetAttributeValue(LineNode, 'KOSTPRIJS');
+              IF Maatwerk <> '' THEN
+                XMLFormat.EvaluateDecimal(XMLDOMMgt.GetAttributeValue(LineNode, 'KOSTPRIJS'), Rate);
+            END;
+
+          "Cost Type"::Material,
+          "Cost Type"::Subcontracting,
+          "Cost Type"::Plant,
+          "Cost Type"::Sundry:
+             BEGIN
+               XMLFormat.EvaluateDecimal(XMLDOMMgt.GetAttributeValue(LineNode, 'HOEVEELHEID'), Quantity);
+               XMLFormat.EvaluateDecimal(XMLDOMMgt.GetAttributeValue(LineNode, 'PRIJS'), Price);
+               Maatwerk := XMLDOMMgt.GetAttributeValue(LineNode, 'KOSTPRIJS');
+               IF Maatwerk <> '' THEN
+                 XMLFormat.EvaluateDecimal(XMLDOMMgt.GetAttributeValue(LineNode, 'KOSTPRIJS'), Price);
+             END;
+        END;
+
+        UnitOfMeasure := COPYSTR(XMLDOMMgt.GetAttributeValue(LineNode, 'HOEVEELHEID_EENHEID'), 1, MAXSTRLEN("Unit of Measure"));
+        IF NOT UoM.GET(UnitOfMeasure) THEN
+          StoreMessage(FIELDCAPTION("Unit of Measure"), STRSUBSTNO(Text999, FIELDCAPTION("Unit of Measure"), UnitOfMeasure));
+
+        "Unit of Measure" := UnitOfMeasure;
+        "Cost Component" := DefaultCostComponent("Cost Object",'');
+
+        CalcTotals();
+        INSERT(FALSE);
+        UpdateCostControlStatus(0);
+        NewBudgetLineNo += 10000;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateBudgetHeader@1100525012(VAR ServiceOrderBudgetLine@1100525000 : Record 11012875;LineNode@1100525001 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode");
+    VAR
+      UoM@1100409001 : Record 204;
+      UnitOfMeasure@1100409002 : Code[10];
+      ProjectCurrencyExchangeRate@1100525002 : Record 11020628;
+    BEGIN
+      WITH ServiceOrderBudgetLine DO BEGIN
+        "Line No." := NewBudgetLineNo;
+        Description := COPYSTR(XMLDOMMgt.GetAttributeValue(LineNode, 'OMSCHRIJVING'), 1, MAXSTRLEN(Description));
+        "Time Quantity":= 0;  //disable any total if price/norm will be assigned later on
+        XMLFormat.EvaluateDecimal(XMLDOMMgt.GetAttributeValue(LineNode, 'HOEVEELHEID'), Quantity);
+        UnitOfMeasure := COPYSTR(XMLDOMMgt.GetAttributeValue(LineNode, 'HOEVEELHEID_EENHEID'), 1, MAXSTRLEN("Unit of Measure"));
+        IF NOT UoM.GET(UnitOfMeasure) THEN
+          IF UnitOfMeasure <> '' THEN
+            StoreMessage(FIELDCAPTION("Unit of Measure"), STRSUBSTNO(Text999, FIELDCAPTION("Unit of Measure"), UnitOfMeasure));
+        "Unit of Measure" := UnitOfMeasure;
+        INSERT(FALSE);
+        UpdateCostControlStatus(0);
+        NewBudgetLineNo += 10000;
+      END;
+    END;
+
+    PROCEDURE DefaultCostComponent@1100525006(lvCostObject@1100485000 : Code[20];lvProject@1100485001 : Code[20]) lvCostComponent : Code[20];
+    VAR
+      lvDimValRec@1100485002 : Record 349;
+      DimMgt@1100525000 : Codeunit 408;
+    BEGIN
+      lvCostComponent := '';
+      IF lvCostObject <> '' THEN BEGIN
+        DimMgt.GetDimValueRec(2, lvCostObject, lvDimValRec, FALSE, lvProject);
+        IF NOT lvDimValRec.Blocked THEN
+          lvCostComponent := lvDimValRec."Cost Component";
+      END;
+    END;
+
+    PROCEDURE StoreMessage@5(DescTxt@11012000 : Text[100];ErrorMsg@11012001 : Text[80]);
+    VAR
+      ErrorRec@1210190000 : Record 11012051;
+      LineNo@11012002 : Integer;
+    BEGIN
+      WITH ErrorRec DO BEGIN
+        SETRANGE("User ID", USERID);
+        SETRANGE("Source Type", "Source Type"::"Import Budget");
+        IF FINDLAST THEN
+          LineNo := "Line No." + 1
+        ELSE
+          LineNo := 1;
+
+        INIT;
+        "User ID" := USERID;
+        "Source Type" := "Source Type"::"Import Budget";
+        "Line No." := LineNo;
+        "Service Order No." := ServiceOrderNo;
+        "Error message" := ErrorMsg;
+        Description := DescTxt;
+        INSERT(FALSE);
+      END;
+    END;
+
+    PROCEDURE SetSelectionService@1100525013(iServiceOrder@11012000 : Code[20];iCodingSystemCostObject@1100525001 : Code[20]);
+    VAR
+      ServiceOrderBudgetLine@1100525000 : Record 11012875;
+    BEGIN
+      ServiceOrderNo := iServiceOrder;
+      CodingSystemCostObject := iCodingSystemCostObject;
+
+      ServiceOrderBudgetLine.SETRANGE("Service Order No.",ServiceOrderNo);
+      IF ServiceOrderBudgetLine.FINDLAST THEN
+        NewBudgetLineNo := ServiceOrderBudgetLine."Line No." + 10000;
+    END;
+
+    PROCEDURE CheckAdmiSubstituteCostObject@1100485002(VAR VarAdmicde@1100485000 : Code[20];VAR CostTypeOpt@1100485001 : Option);
+    VAR
+      AdmiRec@1100525000 : Record 11012390;
+      DimValRec@1100525001 : Record 349;
+    BEGIN
+      IF AdmiRec.GET(VarAdmicde) THEN BEGIN
+        IF AdmiRec."Admi Related Cost Type" AND (VarAdmicde <> '') THEN BEGIN
+          IF AdmiRec."Cost Object Labor" <> '' THEN BEGIN
+            CostTypeOpt := DimValRec."Cost Type"::Labor;
+            VarAdmicde := AdmiRec."Cost Object Labor";
+          END;
+          IF AdmiRec."Cost Object Material" <> '' THEN BEGIN
+            CostTypeOpt := DimValRec."Cost Type"::Material;
+            VarAdmicde := AdmiRec."Cost Object Material";
+          END;
+          IF AdmiRec."Cost Object Plant" <> '' THEN BEGIN
+            CostTypeOpt := DimValRec."Cost Type"::Plant;
+            VarAdmicde := AdmiRec."Cost Object Plant";
+          END;
+          IF AdmiRec."Cost Object Subcontracting" <> '' THEN BEGIN
+            CostTypeOpt := DimValRec."Cost Type"::Subcontracting;
+            VarAdmicde := AdmiRec."Cost Object Subcontracting";
+          END;
+          IF AdmiRec."Cost Object Sundry" <> '' THEN BEGIN
+            CostTypeOpt := DimValRec."Cost Type"::Sundry;
+            VarAdmicde := AdmiRec."Cost Object Sundry";
+          END;
+          EXIT;
+        END;
+
+        CASE CostTypeOpt OF
+          DimValRec."Cost Type"::Labor:
+            IF AdmiRec."Cost Object Labor" <> '' THEN
+              VarAdmicde := AdmiRec."Cost Object Labor";
+          DimValRec."Cost Type"::Material:
+            IF AdmiRec."Cost Object Material" <> '' THEN
+              VarAdmicde := AdmiRec."Cost Object Material";
+          DimValRec."Cost Type"::Plant:
+            IF AdmiRec."Cost Object Plant" <> '' THEN
+              VarAdmicde := AdmiRec."Cost Object Plant";
+          DimValRec."Cost Type"::Subcontracting:
+            IF AdmiRec."Cost Object Subcontracting" <> '' THEN
+              VarAdmicde := AdmiRec."Cost Object Subcontracting";
+          DimValRec."Cost Type"::Sundry:
+            IF AdmiRec."Cost Object Sundry" <> '' THEN
+              VarAdmicde := AdmiRec."Cost Object Sundry";
+        END;
+      END;
+    END;
+
+    BEGIN
+    {
+      DP01702: derived from codeunit 11012393 (project-version)
+    }
+    END.
+  }
+}
+

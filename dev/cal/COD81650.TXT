@@ -1,0 +1,246 @@
+OBJECT Codeunit 81650 pre Calc.JobFigures
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PSSE;
+  }
+  PROPERTIES
+  {
+    OnRun=VAR
+            Job@1100285100 : Record 11072003;
+            dialwin@1100285101 : Dialog;
+          BEGIN
+            Job.SETRANGE("Project Status",0,Job."Project Status"::"Administrative Finished");
+            IF GUIALLOWED THEN
+              dialwin.OPEN('kontrollerar projekt #1#############################');
+            IF Job.FINDSET(FALSE) THEN
+            REPEAT
+              IF GUIALLOWED THEN
+                dialwin.UPDATE(1,Job."No.");
+
+              CalcJob(Job,WORKDATE);
+            UNTIL Job.NEXT=0;
+            IF GUIALLOWED THEN
+              dialwin.CLOSE;
+          END;
+
+  }
+  CODE
+  {
+
+    PROCEDURE CalcJob@1100285100(pJob@1100285101 : Record 11072003;toDate@1100285102 : Date);
+    VAR
+      SubProject@1100285100 : Record 11072003;
+      JobLedgEntry@1100285103 : Record 11072005;
+      lJobProjectStatus@1100285104 : Record 11072003;
+      CostContMgt@1100285105 : Codeunit 11012006;
+      PrognosisRec@1100285106 : Record 11012034;
+      PrognosisSubRec@1100285107 : Record 11012034;
+      lJob@1100285108 : Record 11072003;
+      lPostedHourLine@1101285000 : Record 11012085;
+      l_CalcRevenues@1100285109 : Decimal;
+      l_CalcRealCosts@1100285110 : Decimal;
+      l_CalcHourstotals@1100285111 : Decimal;
+      l_CalcPrognosisBalance@1100285112 : Decimal;
+      PrognTotRevenue@1100285113 : Decimal;
+      PrognTotCostDec@1100285114 : Decimal;
+      FoundPrognosis@1100285115 : Boolean;
+      lJobProjectStatusOK@1100285116 : Boolean;
+      l_lastInvDate@1100285117 : Date;
+      l_lastCostDate@1100285118 : Date;
+      l_CalcWorkHourstotals@1100285119 : Decimal;
+      l_NotInvoicedHoursFound@1101285001 : Boolean;
+    BEGIN
+      IF pJob."Single/Main/Sub Project" <> pJob."Single/Main/Sub Project"::"Main Project" THEN
+        pJob.SETRANGE("Project Filter", pJob."No.")
+      ELSE
+        pJob.SETRANGE("Project Filter");
+      pJob.SETRANGE("Cumulation Filter",0D,toDate);
+
+      //>>160727
+      l_lastInvDate := 0D;
+      l_lastCostDate := 0D;
+      //<<160727
+      l_NotInvoicedHoursFound := FALSE; // 191009
+
+      l_CalcRevenues := 0;
+      JobLedgEntry.RESET;
+      JobLedgEntry.SETCURRENTKEY("Job No.");
+      IF pJob."Single/Main/Sub Project" = pJob."Single/Main/Sub Project"::"Main Project" THEN
+        JobLedgEntry.SETRANGE("Main Project No.",pJob."No.")
+      ELSE
+        JobLedgEntry.SETRANGE("Job No.",pJob."No.");
+      JobLedgEntry.SETRANGE("Posting Date",0D,toDate);
+      //JobLedgEntry.SETRANGE("Entry Type",JobLedgEntry."Entry Type"::Sale);
+      JobLedgEntry.SETFILTER("Entry Type",'%1|%2',JobLedgEntry."Entry Type"::Sale,JobLedgEntry."Entry Type"::Usage);
+      IF JobLedgEntry.FINDSET(FALSE) THEN REPEAT
+
+        lJobProjectStatusOK := TRUE;
+        IF  lJobProjectStatus."No." <> JobLedgEntry."Job No." THEN
+          lJobProjectStatus.GET(JobLedgEntry."Job No.");
+        lJobProjectStatusOK := (lJobProjectStatus."Project Status" IN [0..lJobProjectStatus."Project Status"::"Administrative Finished"]);
+
+        IF lJobProjectStatusOK THEN
+      //>>160727
+          //l_CalcRevenues -= JobLedgEntry."Total Price (LCY)";
+          CASE JobLedgEntry."Entry Type" OF
+            JobLedgEntry."Entry Type"::Sale:
+              BEGIN
+                l_CalcRevenues -= JobLedgEntry."Total Price (LCY)";
+                IF JobLedgEntry."Posting Date" > l_lastInvDate THEN
+                  l_lastInvDate := JobLedgEntry."Posting Date";
+              END;
+            JobLedgEntry."Entry Type"::Usage:
+              BEGIN
+                l_CalcRealCosts += JobLedgEntry."Total Cost (LCY)";
+                IF JobLedgEntry."Posting Date" > l_lastCostDate THEN
+                  IF JobLedgEntry."Cost Type" <> JobLedgEntry."Cost Type"::Labor THEN // 191009
+                    l_lastCostDate := JobLedgEntry."Posting Date";
+                //>> 170425 ITERO.SB RFC-101.2
+                IF JobLedgEntry."Cost Component" = '3K' THEN
+                  l_CalcWorkHourstotals += JobLedgEntry.Quantity;
+                //<<
+              END;
+          END;
+      //<<160727
+      UNTIL JobLedgEntry.NEXT = 0;
+
+      //>> 191009
+      lPostedHourLine.SETRANGE("Project No.", pJob."No.");
+      lPostedHourLine.SETRANGE("Cost Plus Entry Created", FALSE);
+      lPostedHourLine.SETRANGE(Chargeable, TRUE);
+      IF NOT lPostedHourLine.ISEMPTY THEN
+        l_NotInvoicedHoursFound := TRUE;
+      //<< 191009
+
+      //l_CalcRealCosts := CostContMgt.TotCostProject(pJob,TRUE);  //TotCostDec  //160727
+      l_CalcHourstotals := CostContMgt.TotHoursProject(pJob,TRUE); //TotHoursDec
+
+      PrognTotRevenue :=0;
+      PrognTotCostDec :=0;
+      FoundPrognosis := FALSE;  //**4PS Call 19184
+      PrognosisRec.RESET;
+      PrognosisRec.SETRANGE("Project No.", pJob."No.");
+      PrognosisRec.SETRANGE("Prognosis Date", 0D, toDate);
+      IF PrognosisRec.FINDLAST THEN BEGIN
+        FoundPrognosis := TRUE;  //**4PS Call 19184
+        IF PrognosisRec."Prognosis Level" = PrognosisRec."Prognosis Level"::Rough THEN
+          PrognTotRevenue := PrognosisRec."Rough Prognosis Total Revenues"
+        ELSE BEGIN
+          IF pJob."Forecast Level" = pJob."Forecast Level"::"Cost Component" THEN BEGIN
+            PrognosisRec.CALCFIELDS("Prognosis Total Revenue CC","Prognosis Total Cost CC");
+            PrognTotRevenue := PrognosisRec."Prognosis Total Revenue CC";
+            PrognTotCostDec := PrognosisRec."Prognosis Total Cost CC";
+          END ELSE BEGIN
+            PrognosisRec.CALCFIELDS("Prognosis Revenue","Prognosis Total Cost");
+            PrognTotRevenue := PrognosisRec."Project Invoiced" + PrognosisRec."Prognosis Revenue";
+            PrognTotCostDec := PrognosisRec."Prognosis Total Cost";
+          END;
+        END;
+      END ELSE BEGIN
+        IF pJob."Single/Main/Sub Project" = pJob."Single/Main/Sub Project"::"Main Project" THEN BEGIN
+          //This part speeds up situations in which no prognoses are made
+          PrognosisSubRec.SETCURRENTKEY("Main Project No.","Prognosis Date");
+          PrognosisSubRec.SETRANGE("Main Project No.", pJob."No.");
+          PrognosisSubRec.SETRANGE("Prognosis Date",0D,toDate);
+          IF NOT PrognosisSubRec.ISEMPTY THEN BEGIN
+            FoundPrognosis := TRUE;  //**4PS Call 19184
+            SubProject.SETCURRENTKEY("Main Project");
+            SubProject.SETRANGE("Main Project", pJob."Main Project");
+            IF SubProject.FINDSET THEN
+              REPEAT
+                PrognosisSubRec.RESET;
+                PrognosisSubRec.SETRANGE("Project No.", SubProject."No.");
+                PrognosisSubRec.SETRANGE("Prognosis Date", 0D, toDate);
+                IF PrognosisSubRec.FINDLAST THEN BEGIN
+                  IF PrognosisSubRec."Prognosis Level" = PrognosisSubRec."Prognosis Level"::Rough THEN
+                    PrognTotRevenue := PrognTotRevenue + PrognosisSubRec."Rough Prognosis Total Revenues"
+                  ELSE BEGIN
+                    IF pJob."Forecast Level" = pJob."Forecast Level"::"Cost Component" THEN BEGIN
+                      PrognosisRec.CALCFIELDS("Prognosis Total Revenue CC","Prognosis Total Cost CC");
+                      PrognTotRevenue := PrognosisRec."Prognosis Total Revenue CC";
+                      PrognTotCostDec := PrognosisRec."Prognosis Total Cost CC";
+                    END ELSE BEGIN
+                      PrognosisRec.CALCFIELDS("Prognosis Revenue","Prognosis Total Cost");
+                      PrognTotRevenue := PrognosisRec."Project Invoiced" + PrognosisRec."Prognosis Revenue";
+                      PrognTotCostDec := PrognosisRec."Prognosis Total Cost";
+                    END;
+                  END;
+                END;
+              UNTIL SubProject.NEXT = 0;
+          END;
+        END;
+      END;
+
+      l_CalcPrognosisBalance := PrognTotRevenue - PrognTotCostDec;
+
+      IF SaveJobYesNo(pJob."No.",l_CalcRevenues,l_CalcRealCosts,l_CalcHourstotals,l_CalcPrognosisBalance,l_lastInvDate,l_lastCostDate,l_CalcWorkHourstotals, l_NotInvoicedHoursFound) THEN BEGIN
+        lJob.GET(pJob."No.");
+        lJob."preCalc. DateTime" := CURRENTDATETIME;
+        lJob."preCalc. Revenues" := l_CalcRevenues;
+        lJob."preCalc. Real Costs" := l_CalcRealCosts;
+        lJob."preCalc. Balance" := l_CalcRevenues - l_CalcRealCosts;
+        lJob."preCalc. Prognosis Balance" := l_CalcPrognosisBalance;
+        lJob."preCalc. Hours totals" := l_CalcHourstotals;
+        //>>160727
+        lJob."preCalc. LastInvDate" := l_lastInvDate;
+        //lJob."preCalc. NewCostFound" := l_lastInvDate < l_lastCostDate;
+        lJob."preCalc. NewCostFound" := (l_lastInvDate < l_lastCostDate) OR l_NotInvoicedHoursFound; //191009
+        //<<160727
+        lJob."preCalc. Working Hours" := l_CalcWorkHourstotals; //170425 ITERO.SB RFC-101.2
+        lJob.MODIFY(FALSE);
+        COMMIT;
+      END;
+    END;
+
+    LOCAL PROCEDURE SaveJobYesNo@1000000000(JobNo@1000000005 : Code[20];l_CalcRevenues@1000000003 : Decimal;l_CalcRealCosts@1000000002 : Decimal;l_CalcHourstotals@1000000001 : Decimal;l_CalcPrognosisBalance@1000000000 : Decimal;l_lastInvDate@1100285100 : Date;l_lastCostDate@1100285101 : Date;l_CalcWorkHourstotals@1100285102 : Decimal;l_NotInvoicedHoursFound@1101285000 : Boolean) : Boolean;
+    VAR
+      lJob@1000000004 : Record 11072003;
+    BEGIN
+      lJob.GET(JobNo);
+      IF (lJob."preCalc. Revenues" <> l_CalcRevenues) THEN
+        EXIT(TRUE);
+
+      IF (lJob."preCalc. Real Costs" <> l_CalcRealCosts) THEN
+        EXIT(TRUE);
+
+      IF (lJob."preCalc. Prognosis Balance" <> l_CalcPrognosisBalance) THEN
+        EXIT(TRUE);
+
+      IF (lJob."preCalc. Hours totals" <> l_CalcHourstotals) THEN
+        EXIT(TRUE);
+
+      //>>160727
+      IF (lJob."preCalc. LastInvDate" <> l_lastInvDate) THEN
+        EXIT(TRUE);
+
+      IF (lJob."preCalc. NewCostFound" <> (l_lastInvDate < l_lastCostDate)) THEN
+        EXIT(TRUE);
+      //<<160727
+
+      //>> 170425 ITERO.SB RFC-101.2
+      IF (lJob."preCalc. Working Hours" <> l_CalcWorkHourstotals) THEN
+        EXIT(TRUE);
+      //<<
+
+      //>>191009
+      IF l_NotInvoicedHoursFound THEN
+        EXIT(TRUE);
+      //<<191009
+
+      EXIT(FALSE);
+    END;
+
+    BEGIN
+    {
+      160517 ITERO.DL RFC101
+      160727 ITERO.DL RFC101b (fas 2)
+      170425 ITERO.SB RFC-101.2 Added hours for cost component 3K
+      191009 ORANGO.FH RFC-1239 Changed so calculation of "preCalc. NewCostFound" looks in "Posted Hour Line" for hours instead of "Job Ledger Entry"
+    }
+    END.
+  }
+}
+

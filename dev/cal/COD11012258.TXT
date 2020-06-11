@@ -1,0 +1,598 @@
+OBJECT Codeunit 11012258 Release Retention Lines
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    TableNo=11020636;
+    OnRun=VAR
+            RetLedgEntry@1000000000 : Record 11020636;
+            PurchHeader@1100528500 : Record 38;
+            SalesHeader@1100528503 : Record 36;
+            NewSalesLineNo@1100528501 : Integer;
+            NewPurchLineNo@1100528504 : Integer;
+          BEGIN
+            IF (BatchRetReleaseBuffer."Related No." = '') THEN
+              EXIT;
+
+            SETRANGE("Subcontract Type",BatchRetReleaseBuffer."Subcontract Type");
+            SETRANGE("Related No.",BatchRetReleaseBuffer."Related No.");
+            SETRANGE("Sell-to/Buy-from No.",BatchRetReleaseBuffer."Sell-to/Buy-from No.");
+
+            IF NOT FINDSET(TRUE) THEN
+              EXIT;
+
+            SalesSetup.GET;
+            PurchSetup.GET;
+
+            HeaderCreated := FALSE;
+
+            IF BatchRetReleaseBuffer."Subcontract Type" = BatchRetReleaseBuffer."Subcontract Type"::Vendor THEN BEGIN
+              REPEAT
+                RetLedgEntry.GET("Entry No.");
+
+                IF NOT HeaderCreated THEN BEGIN
+                  CreatePurchHeader(RetLedgEntry,PurchHeader);
+                  HeaderCreated := TRUE;
+                END;
+
+                RetLedgEntry."Applies-to ID" := FORMAT("Entry No.");
+                CreatePurchLine(PurchHeader,RetLedgEntry,NewPurchLineNo);
+
+                PurchHeader.CALCFIELDS("Amount Including VAT");
+                PurchHeader."Amount incl. VAT" := PurchHeader."Amount Including VAT";
+                PurchHeader.MODIFY;
+
+                IF PurchHeader."Document Type" = PurchHeader."Document Type"::"Credit Memo" THEN
+                  RetLedgEntry."Applied Document Type" := RetLedgEntry."Applied Document Type"::"Credit Memo"
+                ELSE
+                  RetLedgEntry."Applied Document Type" := RetLedgEntry."Applied Document Type"::Invoice;
+                RetLedgEntry."Applied Document No." := PurchHeader."No.";
+                RetLedgEntry."Applied Line No." := NewPurchLineNo;
+                CLEAR(RetLedgEntry.Comment);
+                RetLedgEntry.MODIFY;
+                Rec := RetLedgEntry;
+              UNTIL NEXT = 0;
+            END;
+
+            IF BatchRetReleaseBuffer."Subcontract Type" = BatchRetReleaseBuffer."Subcontract Type"::Customer THEN BEGIN
+              REPEAT
+                RetLedgEntry.GET("Entry No.");
+
+                IF NOT HeaderCreated THEN BEGIN
+                  CreateSalesHeader(RetLedgEntry,SalesHeader);
+                  HeaderCreated := TRUE;
+                END;
+
+                RetLedgEntry."Applies-to ID" := FORMAT("Entry No.");
+
+                CreateSalesLine(SalesHeader,RetLedgEntry,NewSalesLineNo);
+
+                IF SalesHeader."Document Type" = SalesHeader."Document Type"::"Credit Memo" THEN
+                  RetLedgEntry."Applied Document Type" := RetLedgEntry."Applied Document Type"::"Credit Memo"
+                ELSE
+                  RetLedgEntry."Applied Document Type" := RetLedgEntry."Applied Document Type"::Invoice;
+                RetLedgEntry."Applied Document No." := SalesHeader."No.";
+                RetLedgEntry."Applied Line No." := NewSalesLineNo;
+                CLEAR(RetLedgEntry.Comment);
+                RetLedgEntry.MODIFY;
+                Rec := RetLedgEntry;
+              UNTIL NEXT = 0;
+            END;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      PurchSetup@1210190000 : Record 312;
+      BatchRetReleaseBuffer@1000000007 : TEMPORARY Record 11020638;
+      NoSeriesMgt@1210190001 : Codeunit 396;
+      SalesSetup@10009003 : Record 311;
+      Cust@1100528500 : Record 18;
+      HeaderCreated@10009005 : Boolean;
+
+    LOCAL PROCEDURE CreatePurchHeader@1100528504(RetLedgEntry@1000000000 : Record 11020636;VAR PurchHeader@1100528501 : Record 38);
+    VAR
+      PurchInvHeader@1210190000 : Record 122;
+      PurchCrMemoHeader@1210190001 : Record 124;
+      SubcontractorContract@1100528500 : Record 11020635;
+    BEGIN
+      CheckJobBlocked(RetLedgEntry."Job No.");
+
+      IF RetLedgEntry."Subcontract No." <> '' THEN
+        SubcontractorContract.GET(RetLedgEntry."Related No.", RetLedgEntry."Subcontract No.");
+
+      PurchHeader.INIT;
+      PurchHeader."No." := '';
+      IF PurchSetup."Retention Invoice Nos." <> '' THEN BEGIN
+        PurchHeader."No." := NoSeriesMgt.GetNextNo(PurchSetup."Retention Invoice Nos.",WORKDATE,TRUE);
+        PurchHeader."No. Series" := PurchSetup."Retention Invoice Nos.";
+      END;
+
+      IF BatchRetReleaseBuffer."Retention Amt" > 0 THEN
+        PurchHeader."Document Type" := PurchHeader."Document Type"::"Credit Memo"
+      ELSE
+        PurchHeader."Document Type" := PurchHeader."Document Type"::Invoice;
+
+      PurchHeader."Subcontracting Invoice" := TRUE;
+      PurchHeader.INSERT(TRUE);
+
+      PurchHeader.VALIDATE("Buy-from Vendor No.",RetLedgEntry."Sell-to/Buy-from No.");
+      IF PurchHeader."Pay-to Vendor No." <> RetLedgEntry."Related No." THEN
+        PurchHeader.VALIDATE("Pay-to Vendor No.",RetLedgEntry."Related No.");
+      IF RetLedgEntry."Currency Code" <> PurchHeader."Currency Code" THEN
+        PurchHeader.VALIDATE("Currency Code", RetLedgEntry."Currency Code");
+
+      IF RetLedgEntry."Subcontract No." <> '' THEN
+        PurchHeader.VALIDATE("Job No.",RetLedgEntry."Job No.");
+      PurchHeader.VALIDATE("Subcontract No.",RetLedgEntry."Subcontract No.");
+
+      IF PurchSetup."Retention Posted Invoice Nos." <> '' THEN
+        PurchHeader."Posting No. Series" := PurchSetup."Retention Posted Invoice Nos."
+      ELSE
+        PurchHeader."Posting No. Series" := PurchSetup."Posted Invoice Nos.";
+
+      PurchHeader."Vendor Invoice No." := PurchHeader."No.";
+      PurchHeader."Invoice Lines Input" := TRUE;
+      PurchHeader."Amounts only" := FALSE;
+
+      IF PurchHeader."Document Type" = PurchHeader."Document Type"::Invoice THEN BEGIN
+        IF PurchInvHeader.GET(RetLedgEntry."Document No.") THEN BEGIN
+          PurchHeader."Tax Area Code" := PurchInvHeader."Tax Area Code";
+          PurchHeader."Tax Liable" := PurchInvHeader."Tax Liable";
+          PurchHeader."VAT Bus. Posting Group" := PurchInvHeader."VAT Bus. Posting Group";
+          PurchHeader."Gen. Bus. Posting Group" := PurchInvHeader."Gen. Bus. Posting Group";
+        END;
+      END ELSE
+        IF PurchCrMemoHeader.GET(RetLedgEntry."Document No.") THEN BEGIN
+          PurchHeader."Tax Area Code" := PurchCrMemoHeader."Tax Area Code";
+          PurchHeader."Tax Liable" := PurchCrMemoHeader."Tax Liable";
+          PurchHeader."VAT Bus. Posting Group" := PurchCrMemoHeader."VAT Bus. Posting Group";
+          PurchHeader."Gen. Bus. Posting Group" := PurchCrMemoHeader."Gen. Bus. Posting Group";
+        END;
+
+      PurchHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchLine@1100528503(PurchHeader@1100528500 : Record 38;RetLedgEntry@1000000000 : Record 11020636;VAR NewLineNo@1100525001 : Integer);
+    VAR
+      GLAcc@1100525000 : Record 15;
+      PurchInvLine@10009000 : Record 123;
+      PurchCrMemoLine@10009001 : Record 125;
+      PurchLine@1100528501 : Record 39;
+      Currency@1100525002 : Record 4;
+      CurrExchRate@1100525004 : Record 330;
+      DirectUnitCost@1100525003 : Decimal;
+    BEGIN
+      PurchSetup.GET;
+
+      PurchLine.SETRANGE("Document Type",PurchHeader."Document Type");
+      PurchLine.SETRANGE("Document No.",PurchHeader."No.");
+      IF PurchLine.FINDLAST THEN
+        NewLineNo := PurchLine."Line No." + 10000
+      ELSE
+        NewLineNo := 10000;
+
+      PurchLine.INIT;
+      PurchLine."Document Type" := PurchHeader."Document Type";
+      PurchLine."Document No." := PurchHeader."No.";
+      PurchLine."Line No." := NewLineNo;
+      //PurchLine."Job No." := PurchHeader."Job No."; //DP01406.o
+      PurchLine.INSERT(TRUE);
+
+      PurchLine.Type := PurchLine.Type::"G/L Account";
+      PurchLine."Applies-to Retention ID" := RetLedgEntry."Entry No.";
+      PurchLine.FillSystemCreatedEntry; //T007259.n
+      PurchLine.VALIDATE("No.",VendRetentionSuspenseAccount(PurchHeader."Vendor Posting Group"));
+      IF NOT PurchHeader."Amounts only" THEN
+        PurchLine.VALIDATE(Quantity,1);
+
+      IF PurchHeader."Currency Code" = RetLedgEntry."Currency Code" THEN BEGIN
+        RetLedgEntry.CALCFIELDS("Remaining Amount");
+        DirectUnitCost := RetLedgEntry."Remaining Amount";
+      END ELSE BEGIN
+        RetLedgEntry.CALCFIELDS("Remaining Amt. (LCY)");
+        IF PurchLine."Order Date" = 0D THEN
+          PurchLine."Order Date" := WORKDATE;
+        Currency.InitRoundingPrecision;
+        DirectUnitCost :=
+          ROUND(CurrExchRate.ExchangeAmtLCYToFCY(
+            1,'',PurchLine."Order Date",PurchHeader."Currency Code",
+            RetLedgEntry."Remaining Amt. (LCY)", CurrExchRate.ExchangeRate(1,'',PurchLine.GetDate,PurchHeader."Currency Code",FALSE),FALSE),
+            Currency."Unit-Amount Rounding Precision");
+      END;
+
+      IF PurchLine."Document Type" = PurchLine."Document Type"::"Credit Memo" THEN
+        PurchLine.VALIDATE("Direct Unit Cost",DirectUnitCost)
+      ELSE
+        PurchLine.VALIDATE("Direct Unit Cost",-DirectUnitCost);
+
+      IF PurchHeader."Amounts only" THEN BEGIN
+        PurchLine.UpdateAmounts;
+        PurchLine.VALIDATE("Line Amount");
+      END;
+
+      IF RetLedgEntry."Global Dimension 2 Code" <> '' THEN
+        PurchLine.VALIDATE("Shortcut Dimension 2 Code",RetLedgEntry."Global Dimension 2 Code");
+
+      IF RetLedgEntry."Purchase Order" <> '' THEN BEGIN
+        GLAcc.GET(PurchLine."No.");
+        PurchLine."VAT Bus. Posting Group" := GLAcc."VAT Bus. Posting Group";
+        PurchLine.VALIDATE("VAT Prod. Posting Group",GLAcc."VAT Prod. Posting Group");
+      END ELSE BEGIN
+        IF PurchHeader."Document Type" = PurchHeader."Document Type"::Invoice THEN BEGIN
+          PurchInvLine.SETRANGE("Document No.",RetLedgEntry."Document No.");
+          PurchInvLine.SETRANGE(Type,PurchInvLine.Type::"G/L Account");
+          IF PurchInvLine.FINDFIRST THEN BEGIN
+            PurchLine."VAT Bus. Posting Group" := PurchInvLine."VAT Bus. Posting Group";
+            PurchLine.VALIDATE("VAT Prod. Posting Group",PurchInvLine."VAT Prod. Posting Group");
+            PurchLine."Gen. Bus. Posting Group" := PurchInvLine."Gen. Bus. Posting Group";
+            PurchLine."Gen. Prod. Posting Group" := PurchInvLine."Gen. Prod. Posting Group";
+            PurchLine."Tax Area Code" := PurchInvLine."Tax Area Code";
+            PurchLine."Tax Group Code" := PurchInvLine."Tax Group Code";
+            PurchLine.VALIDATE("Tax Liable",PurchInvLine."Tax Liable");
+          END;
+        END ELSE BEGIN
+          PurchCrMemoLine.SETRANGE("Document No.",RetLedgEntry."Document No.");
+          PurchCrMemoLine.SETRANGE(Type,PurchCrMemoLine.Type::"G/L Account");
+          IF PurchCrMemoLine.FINDFIRST THEN BEGIN
+            PurchLine."VAT Bus. Posting Group" := PurchCrMemoLine."VAT Bus. Posting Group";
+            PurchLine.VALIDATE("VAT Prod. Posting Group",PurchCrMemoLine."VAT Prod. Posting Group");
+            PurchLine."Gen. Bus. Posting Group" := PurchCrMemoLine."Gen. Bus. Posting Group";
+            PurchLine."Gen. Prod. Posting Group" := PurchCrMemoLine."Gen. Prod. Posting Group";
+            PurchLine."Tax Area Code" := PurchCrMemoLine."Tax Area Code";
+            PurchLine."Tax Group Code" := PurchCrMemoLine."Tax Group Code";
+            PurchLine.VALIDATE("Tax Liable",PurchCrMemoLine."Tax Liable");
+          END;
+        END;
+      END;
+
+      IF PurchSetup."Retention Line Release Desc." <> '' THEN
+        PurchLine.Description := PurchSetup."Retention Line Release Desc.";
+
+      PurchLine.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetBatchRetReleaseBuffer@1100528500(VAR BatchRetReleaseBufferIn@1000000000 : TEMPORARY Record 11020638);
+    BEGIN
+      BatchRetReleaseBuffer := BatchRetReleaseBufferIn;
+    END;
+
+    LOCAL PROCEDURE CreateSalesHeader@1000000006(RetLedgEntry@1000000000 : Record 11020636;VAR SalesHeader@1100528501 : Record 36);
+    VAR
+      SalesInvoiceHeader@10009000 : Record 112;
+      SalesCreditMemo@10009001 : Record 114;
+      SubcontractorContract@1100528500 : Record 11020635;
+    BEGIN
+      //**4PS
+      IF BatchRetReleaseBuffer."Retention Amt" < 0 THEN
+        SalesHeader."Document Type" := SalesHeader."Document Type"::"Credit Memo"
+      ELSE
+        SalesHeader."Document Type" := SalesHeader."Document Type"::Invoice;
+
+      GetCust(RetLedgEntry."Related No.",SalesHeader);
+      IF Cust."Bill-to Customer No." <> '' THEN
+        GetCust(Cust."Bill-to Customer No.",SalesHeader);
+
+      CheckJobBlocked(RetLedgEntry."Job No.");
+
+      IF RetLedgEntry."Subcontract No." <> '' THEN
+        SubcontractorContract.GET(RetLedgEntry."Related No.", RetLedgEntry."Subcontract No.");
+
+      SalesHeader.INIT;
+      SalesHeader."No." := '';
+      IF SalesSetup."Retention Invoice Nos." <> '' THEN BEGIN
+        SalesHeader."No." := NoSeriesMgt.GetNextNo(SalesSetup."Retention Invoice Nos.",WORKDATE,TRUE);
+        SalesHeader."No. Series" := SalesSetup."Retention Invoice Nos.";
+      END;
+
+      IF BatchRetReleaseBuffer."Retention Amt" < 0 THEN
+        SalesHeader."Document Type" := SalesHeader."Document Type"::"Credit Memo"
+      ELSE
+        SalesHeader."Document Type" := SalesHeader."Document Type"::Invoice;
+
+      SalesHeader.INSERT(TRUE);
+
+      SalesHeader.VALIDATE("Sell-to Customer No.",RetLedgEntry."Sell-to/Buy-from No.");
+      IF SalesHeader."Bill-to Customer No." <> RetLedgEntry."Related No." THEN BEGIN
+        SalesHeader."Bill-to Customer No." := RetLedgEntry."Related No.";
+        SalesHeader.VALIDATE("Bill-to Customer No.");
+      END;
+      IF RetLedgEntry."Currency Code" <> SalesHeader."Currency Code" THEN
+        SalesHeader.VALIDATE("Currency Code", RetLedgEntry."Currency Code");
+
+      IF RetLedgEntry."Job No." <> '' THEN
+        SalesHeader.VALIDATE("Job No.",RetLedgEntry."Job No.");
+
+      IF SalesSetup."Retention Posted Invoice Nos." <> '' THEN
+        SalesHeader."Posting No. Series" := SalesSetup."Retention Posted Invoice Nos."
+      ELSE
+        SalesHeader."Posting No. Series" := SalesSetup."Posted Invoice Nos.";
+
+      SalesHeader."External Document No." := SalesHeader."No.";
+
+      IF SalesHeader."Document Type" = SalesHeader."Document Type"::Invoice THEN BEGIN
+        IF SalesInvoiceHeader.GET(RetLedgEntry."Document No.") THEN BEGIN
+          SalesHeader."Tax Area Code" := SalesInvoiceHeader."Tax Area Code";
+          SalesHeader."Tax Liable" := SalesInvoiceHeader."Tax Liable";
+          SalesHeader."VAT Bus. Posting Group" := SalesInvoiceHeader."VAT Bus. Posting Group";
+          SalesHeader."Gen. Bus. Posting Group" := SalesInvoiceHeader."Gen. Bus. Posting Group";
+        END;
+      END ELSE
+        IF SalesCreditMemo.GET(RetLedgEntry."Document No.") THEN BEGIN
+          SalesHeader."Tax Area Code" := SalesCreditMemo."Tax Area Code";
+          SalesHeader."Tax Liable" := SalesCreditMemo."Tax Liable";
+          SalesHeader."VAT Bus. Posting Group" := SalesCreditMemo."VAT Bus. Posting Group";
+          SalesHeader."Gen. Bus. Posting Group" := SalesCreditMemo."Gen. Bus. Posting Group";
+        END;
+
+      SalesHeader.MODIFY;
+    END;
+
+    LOCAL PROCEDURE CreateSalesLine@1000000004(SalesHeader@1100528501 : Record 36;RetLedgEntry@1000000000 : Record 11020636;VAR NewLineNo@1100528502 : Integer);
+    VAR
+      GLAcc@10009000 : Record 15;
+      SalesInvLine@10009001 : Record 113;
+      SalesCrMemoLine@10009002 : Record 115;
+      SalesLine@1100528500 : Record 37;
+    BEGIN
+      //**4PS
+      SalesLine.SETRANGE("Document Type",SalesHeader."Document Type");
+      SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+      IF SalesLine.FINDLAST THEN
+        NewLineNo := SalesLine."Line No." + 10000
+      ELSE
+        NewLineNo := 10000;
+
+      SalesLine.INIT;
+      SalesLine."Document Type" := SalesHeader."Document Type";
+      SalesLine."Document No." := SalesHeader."No.";
+      SalesLine."Line No." := NewLineNo;
+      SalesLine."Job No." := SalesHeader."Job No.";
+      SalesLine.INSERT(TRUE);
+
+      IF RetLedgEntry."Global Dimension 2 Code" <> '' THEN
+        SalesLine.VALIDATE("Shortcut Dimension 2 Code",RetLedgEntry."Global Dimension 2 Code");
+
+      SalesLine.Type := SalesLine.Type::"G/L Account";
+      SalesLine.FillSystemCreatedEntry; //T007259.n
+      SalesLine.VALIDATE("No.",CustRetentionSuspenseAccount(SalesHeader."Customer Posting Group"));
+      SalesLine.VALIDATE(Quantity,1);
+      RetLedgEntry.CALCFIELDS("Remaining Amount");
+      IF SalesLine."Document Type" = SalesLine."Document Type"::"Credit Memo" THEN
+        SalesLine.VALIDATE("Unit Price",-RetLedgEntry."Remaining Amount")
+      ELSE
+        SalesLine.VALIDATE("Unit Price",RetLedgEntry."Remaining Amount");
+      SalesLine."Applies-to Retention ID" := RetLedgEntry."Entry No.";
+
+      IF RetLedgEntry."Purchase Order" <> '' THEN BEGIN
+        GLAcc.GET(SalesLine."No.");
+        SalesLine."VAT Bus. Posting Group" := GLAcc."VAT Bus. Posting Group";
+        SalesLine.VALIDATE("VAT Prod. Posting Group", GLAcc."VAT Prod. Posting Group");
+      END ELSE BEGIN
+        IF SalesHeader."Document Type" = SalesHeader."Document Type"::Invoice THEN BEGIN
+          SalesInvLine.SETRANGE("Document No.",RetLedgEntry."Document No.");
+          SalesInvLine.SETRANGE(Type,SalesInvLine.Type::"G/L Account");
+          IF SalesInvLine.FINDFIRST THEN BEGIN
+            SalesLine.VALIDATE("VAT Prod. Posting Group",SalesInvLine."VAT Prod. Posting Group");
+            SalesLine."VAT Bus. Posting Group" := SalesInvLine."VAT Bus. Posting Group";
+            SalesLine."Gen. Bus. Posting Group" := SalesInvLine."Gen. Bus. Posting Group";
+            SalesLine."Gen. Prod. Posting Group" := SalesInvLine."Gen. Prod. Posting Group";
+            SalesLine."Tax Area Code" := SalesInvLine."Tax Area Code";
+            SalesLine."Tax Group Code" := SalesInvLine."Tax Group Code";
+            SalesLine.VALIDATE("Tax Liable",SalesInvLine."Tax Liable");
+          END;
+        END ELSE BEGIN
+          SalesCrMemoLine.SETRANGE("Document No.",RetLedgEntry."Document No.");
+          SalesCrMemoLine.SETRANGE(Type,SalesCrMemoLine.Type::"G/L Account");
+          IF SalesCrMemoLine.FINDFIRST THEN BEGIN
+            SalesLine."VAT Bus. Posting Group" := SalesCrMemoLine."VAT Bus. Posting Group";
+            SalesLine.VALIDATE("VAT Prod. Posting Group",SalesCrMemoLine."VAT Prod. Posting Group");
+            SalesLine."Gen. Bus. Posting Group" := SalesCrMemoLine."Gen. Bus. Posting Group";
+            SalesLine.VALIDATE("Gen. Prod. Posting Group",SalesCrMemoLine."Gen. Prod. Posting Group");
+            SalesLine."Tax Area Code" := SalesCrMemoLine."Tax Area Code";
+            SalesLine."Tax Group Code" := SalesCrMemoLine."Tax Group Code";
+            SalesLine.VALIDATE("Tax Liable",SalesCrMemoLine."Tax Liable");
+          END;
+        END;
+      END;
+      IF SalesSetup."Retention Line Release Desc." <> '' THEN
+        SalesLine.Description := SalesSetup."Retention Line Release Desc.";
+
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    PROCEDURE GetRetentionLinePurchLine@1100528502(PurchHeader@1100525000 : Record 38);
+    VAR
+      RetentionLedgerEntry@1100525001 : Record 11020636;
+      NewPurchLineNo@1100528500 : Integer;
+    BEGIN
+      //DP01406
+      SetFiltersRetentionLedgerEntry(RetentionLedgerEntry,PurchHeader."Buy-from Vendor No.");
+      IF NOT (PAGE.RUNMODAL(0,RetentionLedgerEntry) = ACTION::LookupOK) THEN
+        EXIT;
+      CheckSelectedRetentionLedgerEntry(RetentionLedgerEntry,PurchHeader."Buy-from Vendor No.");
+      CreatePurchLine(PurchHeader,RetentionLedgerEntry,NewPurchLineNo);
+      UpdateRetentionLedgerEntry(RetentionLedgerEntry,PurchHeader."No.",NewPurchLineNo);
+    END;
+
+    PROCEDURE GetRetentionLinePurchLineCreditMemo@1100525001(PurchHeader@1100525000 : Record 38);
+    VAR
+      RetentionLedgerEntry@1100525001 : Record 11020636;
+      NewPurchLineNo@1100528500 : Integer;
+    BEGIN
+      //DP01406
+      IF PurchHeader."Applies-to Doc. No." = '' THEN
+        EXIT;
+
+      SetFiltersRetentionLedgerEntry(RetentionLedgerEntry,PurchHeader."Buy-from Vendor No.");
+      RetentionLedgerEntry.SETRANGE("Document Type",PurchHeader."Applies-to Doc. Type");
+      RetentionLedgerEntry.SETRANGE("Document No.",PurchHeader."Applies-to Doc. No.");
+      IF RetentionLedgerEntry.FINDSET(TRUE,FALSE) THEN
+        REPEAT
+          CreatePurchLine(PurchHeader,RetentionLedgerEntry,NewPurchLineNo);
+          UpdateRetentionLedgerEntry(RetentionLedgerEntry,PurchHeader."No.",NewPurchLineNo);
+        UNTIL RetentionLedgerEntry.NEXT = 0;
+    END;
+
+    PROCEDURE GetRetentionLinePurchInvoiceApproval@1100525000(PurchInvHeader@1100525000 : Record 122);
+    VAR
+      RetentionLedgerEntry@1100525001 : Record 11020636;
+      NewApprovalLineNo@1100528500 : Integer;
+    BEGIN
+      //DP01406
+      SetFiltersRetentionLedgerEntry(RetentionLedgerEntry,PurchInvHeader."Buy-from Vendor No.");
+      IF NOT (PAGE.RUNMODAL(0,RetentionLedgerEntry) = ACTION::LookupOK) THEN
+        EXIT;
+      CheckSelectedRetentionLedgerEntry(RetentionLedgerEntry,PurchInvHeader."Buy-from Vendor No.");
+      CreateInvoiceApprovalLine(PurchInvHeader,RetentionLedgerEntry,NewApprovalLineNo);
+      UpdateRetentionLedgerEntry(RetentionLedgerEntry,PurchInvHeader."No.",NewApprovalLineNo);
+    END;
+
+    LOCAL PROCEDURE SetFiltersRetentionLedgerEntry@1100525003(VAR RetentionLedgerEntry@1100525000 : Record 11020636;BuyFromVendorNo@1100525001 : Code[20]);
+    BEGIN
+      //DP01406
+      RetentionLedgerEntry.SETRANGE("Subcontract Type",RetentionLedgerEntry."Subcontract Type"::Vendor);
+      RetentionLedgerEntry.SETRANGE("Related No.",BuyFromVendorNo);;
+      RetentionLedgerEntry.SETRANGE("Sell-to/Buy-from No.",BuyFromVendorNo);
+      RetentionLedgerEntry.SETRANGE("Purchase Order",'');
+      RetentionLedgerEntry.SETRANGE(Open,TRUE);
+    END;
+
+    LOCAL PROCEDURE CheckSelectedRetentionLedgerEntry@1100525004(RetentionLedgerEntry@1100525000 : Record 11020636;BuyFromVendorNo@1100525001 : Code[20]);
+    BEGIN
+      //DP01406
+      RetentionLedgerEntry.TESTFIELD("Subcontract Type",RetentionLedgerEntry."Subcontract Type"::Vendor);
+      RetentionLedgerEntry.TESTFIELD("Related No.",BuyFromVendorNo);
+      RetentionLedgerEntry.TESTFIELD("Sell-to/Buy-from No.",BuyFromVendorNo);
+      RetentionLedgerEntry.TESTFIELD("Purchase Order",'');
+      RetentionLedgerEntry.TESTFIELD("On Hold",'');
+    END;
+
+    LOCAL PROCEDURE UpdateRetentionLedgerEntry@1100525005(VAR RetentionLedgerEntry@1100525000 : Record 11020636;AppliedDocumentNo@1100525001 : Code[20];AppliedLineNo@1100525002 : Integer);
+    BEGIN
+      //DP01406
+      RetentionLedgerEntry."Applies-to ID" := FORMAT(RetentionLedgerEntry."Entry No.");
+      RetentionLedgerEntry."Applied Document Type" := RetentionLedgerEntry."Applied Document Type"::Invoice;
+      RetentionLedgerEntry."Applied Document No." := AppliedDocumentNo;
+      RetentionLedgerEntry."Applied Line No." := AppliedLineNo;
+      RetentionLedgerEntry.MODIFY;
+    END;
+
+    LOCAL PROCEDURE CreateInvoiceApprovalLine@1100525002(PurchInvHeader@1100525001 : Record 122;RetentionLedgerEntry@1100525002 : Record 11020636;VAR NewLineNo@1100528501 : Integer);
+    VAR
+      PurchInvLine@1100525005 : Record 123;
+      InvoiceApprovalLine@1100525000 : Record 11012032;
+      Currency@1100525006 : Record 4;
+      CurrExchRate@1100525004 : Record 330;
+      Price@1100525003 : Decimal;
+    BEGIN
+      //DP01406
+      PurchSetup.GET;
+
+      InvoiceApprovalLine.RESET;
+      InvoiceApprovalLine.SETRANGE("Journal Template Name",PurchInvHeader."Journal Template");
+      InvoiceApprovalLine.SETRANGE("Document Type",InvoiceApprovalLine."Document Type"::"Purchase Invoice");
+      InvoiceApprovalLine.SETRANGE("Document No.",PurchInvHeader."No.");
+      IF InvoiceApprovalLine.FINDLAST THEN
+        NewLineNo := InvoiceApprovalLine."Line No." + 10000
+      ELSE
+        NewLineNo := 10000;
+
+      InvoiceApprovalLine.INIT;
+      InvoiceApprovalLine."Journal Template Name" := PurchInvHeader."Journal Template";
+      InvoiceApprovalLine."Document Type" := InvoiceApprovalLine."Document Type"::"Purchase Invoice";
+      InvoiceApprovalLine."Document No." := PurchInvHeader."No.";
+      InvoiceApprovalLine."Line No." := NewLineNo;
+      InvoiceApprovalLine.INSERT(TRUE);
+
+      InvoiceApprovalLine."Applies-to Retention ID" := RetentionLedgerEntry."Entry No.";
+      InvoiceApprovalLine.FillSystemCreatedEntry;
+      InvoiceApprovalLine.Type := InvoiceApprovalLine.Type::"G/L Account";
+      InvoiceApprovalLine.VALIDATE("Account No.",VendRetentionSuspenseAccount(PurchInvHeader."Vendor Posting Group"));
+      IF NOT PurchInvHeader."Amounts only" THEN
+        InvoiceApprovalLine.VALIDATE(Quantity,1);
+
+
+      IF PurchInvHeader."Currency Code" = RetentionLedgerEntry."Currency Code" THEN BEGIN
+        RetentionLedgerEntry.CALCFIELDS("Remaining Amount");
+        Price := RetentionLedgerEntry."Remaining Amount";
+      END ELSE BEGIN
+        RetentionLedgerEntry.CALCFIELDS("Remaining Amt. (LCY)");
+        Currency.InitRoundingPrecision;
+        Price :=
+          ROUND(CurrExchRate.ExchangeAmtLCYToFCY(
+            1,'',InvoiceApprovalLine."Posting Date",PurchInvHeader."Currency Code",
+            RetentionLedgerEntry."Remaining Amt. (LCY)",PurchInvHeader."Currency Factor",FALSE),
+            Currency."Unit-Amount Rounding Precision");
+      END;
+
+      InvoiceApprovalLine.VALIDATE(Price,-Price);
+      IF RetentionLedgerEntry."Global Dimension 2 Code" <> '' THEN
+        InvoiceApprovalLine.VALIDATE("Shortcut Dimension 2 Code",RetentionLedgerEntry."Global Dimension 2 Code");
+
+      PurchInvLine.SETRANGE("Document No.",RetentionLedgerEntry."Document No.");
+      PurchInvLine.SETRANGE("Generated Retention Line",TRUE);
+      IF PurchInvLine.FINDFIRST THEN BEGIN
+        InvoiceApprovalLine.VALIDATE("VAT Prod. Posting Group",PurchInvLine."VAT Prod. Posting Group");
+        InvoiceApprovalLine."VAT Bus. Posting Group" := PurchInvLine."VAT Bus. Posting Group";
+        InvoiceApprovalLine."Gen. Bus. Posting Group" := PurchInvLine."Gen. Bus. Posting Group";
+        InvoiceApprovalLine."Gen. Prod. Posting Group" := PurchInvLine."Gen. Prod. Posting Group";
+      END;
+
+      IF PurchSetup."Retention Line Release Desc." <> '' THEN
+        InvoiceApprovalLine.Description := PurchSetup."Retention Line Release Desc.";
+
+      InvoiceApprovalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE GetCust@1000000003(CustNo@1000 : Code[20];SalesHeader@1100528500 : Record 36);
+    BEGIN
+      //**4PS
+      IF CustNo <> Cust."No." THEN BEGIN
+        Cust.GET(CustNo);
+        Cust.CheckBlockedCustOnDocs(Cust,SalesHeader."Document Type"::Invoice,FALSE,FALSE);
+        Cust.TESTFIELD("Gen. Bus. Posting Group");
+        Cust.TESTFIELD("Customer Posting Group");
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckJobBlocked@1100528501(JobNo@1000000000 : Code[20]);
+    VAR
+      Job@1100528500 : Record 11072003;
+    BEGIN
+      Job.GET(JobNo);
+      IF Job.Blocked <> Job.Blocked::" " THEN
+        Job.FIELDERROR(Blocked);
+    END;
+
+    LOCAL PROCEDURE VendRetentionSuspenseAccount@1100528505(VendorPostingGroupCode@1100528500 : Code[10]) : Code[20];
+    VAR
+      VendPostingGrp@1100528501 : Record 93;
+    BEGIN
+      //DP01406
+      VendPostingGrp.GET(VendorPostingGroupCode);
+      VendPostingGrp.TESTFIELD("Retention Suspense Acc.");
+      EXIT(VendPostingGrp."Retention Suspense Acc.");
+    END;
+
+    LOCAL PROCEDURE CustRetentionSuspenseAccount@1100528512(CustPostingGroupCode@1100528500 : Code[10]) : Code[20];
+    VAR
+      CustPostingGrp@1100528501 : Record 92;
+    BEGIN
+      //DP01406
+      CustPostingGrp.GET(CustPostingGroupCode);
+      CustPostingGrp.TESTFIELD("Retention Suspense Acc.");
+      EXIT(CustPostingGrp."Retention Suspense Acc.");
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

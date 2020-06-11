@@ -1,0 +1,219 @@
+OBJECT Report 81691 ReBuild Analysis by dimensions
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PSSE;
+  }
+  PROPERTIES
+  {
+    CaptionML=ENU=ReBuild Analysis by dimensions;
+    ProcessingOnly=Yes;
+    OnInitReport=BEGIN
+                   //RebuildAll := TRUE;  //request page default
+                 END;
+
+    OnPreReport=VAR
+                  GLEntry@1100285100 : Record 17;
+                BEGIN
+                  CorrDate := CALCDATE('<-90D>',WORKDATE);
+                  VarVolgnr := 0;
+
+                  GLEntry.RESET;
+                  IF GLEntry.ISEMPTY THEN
+                    CurrReport.QUIT;
+
+                  //get period from setup, if 0 then rebuild all
+                  SESetup.GET(SESetup."Line type"::Setup,'ANALYSIS','UPDATE') ;
+                  IF SESetup."Value (int)"<>0 THEN
+                    CorrDate := CALCDATE(STRSUBSTNO('<-%1D>',SESetup."Value (int)"),WORKDATE)
+                  ELSE
+                    RebuildAll := TRUE;
+
+                  //cleanup logging, only last exection is saved
+                  IF SESetup."Value (bool)" THEN BEGIN
+                    ActivityLog.SETRANGE("Table No Filter",81691);
+                    ActivityLog.DELETEALL(FALSE);
+                    ActivityLog.RESET;
+                    IF ActivityLog.FINDLAST THEN
+                      ActivityLogID := ActivityLog.ID;
+                  END;
+                  ActLogLine('start of report 81691',ActivityLogID);
+                  ActLogLine('RebuildAll := '+FORMAT(RebuildAll),ActivityLogID);
+
+                  IF NOT RebuildAll THEN
+                    ActLogLine('Period := '+FORMAT(CorrDate)+'..'+FORMAT(WORKDATE)+' ('+STRSUBSTNO('-%1D',SESetup."Value (int)")+')',ActivityLogID);
+
+                  //find first GLentry in begining of period to rebuild
+                  IF NOT RebuildAll THEN BEGIN
+                    GLEntry.RESET;
+                    GLEntry.FINDLAST;
+                    ActLogLine('Last Entry No. '+FORMAT(GLEntry."Entry No."),ActivityLogID);
+                    GLEntry.SETCURRENTKEY("Posting Date");
+                    GLEntry.SETRANGE("Posting Date",CorrDate,WORKDATE);
+                    IF GLEntry.FINDFIRST THEN
+                      VarVolgnr := GLEntry."Entry No.";
+
+                    ActLogLine('First Entry No. '+FORMAT(VarVolgnr),ActivityLogID);
+                  END;
+                END;
+
+    OnPostReport=BEGIN
+                   ActLogLine('end of report 81691',ActivityLogID);
+                 END;
+
+  }
+  DATASET
+  {
+    { 1100525000;;DataItem;                  ;
+               DataItemTable=Table363;
+               DataItemTableView=SORTING(Code)
+                                 ORDER(Ascending)
+                                 WHERE(Blocked=CONST(No));
+               OnAfterGetRecord=VAR
+                                  lvAnalysisViewEntry@1100525000 : Record 365;
+                                  lvRebuildAll@1100285100 : Boolean;
+                                BEGIN
+                                  ActLogLine('start '+Code+' '+"Analysis View".FIELDCAPTION("Date Compression")+' '+FORMAT("Analysis View"."Date Compression"),ActivityLogID);
+
+                                  AVCode := Code;
+                                  lvRebuildAll := RebuildAll;
+
+                                  //remove old entries to be rebuild
+                                  lvAnalysisViewEntry.SETRANGE("Analysis View Code", AVCode);
+
+                                  IF VarVolgnr <> 0 THEN BEGIN
+                                    lvAnalysisViewEntry.SETFILTER("Entry No.",'%1..',VarVolgnr);
+                                    IF lvAnalysisViewEntry.FINDSET THEN
+                                      lvAnalysisViewEntry.DELETEALL;
+                                  END;
+                                  lvAnalysisViewEntry.SETRANGE("Entry No.");
+
+                                  IF NOT lvRebuildAll THEN
+                                    lvAnalysisViewEntry.SETRANGE("Posting Date",CalculatePeriodStart(CorrDate,"Date Compression"),WORKDATE);
+                                  IF lvAnalysisViewEntry.FINDSET THEN
+                                    lvAnalysisViewEntry.DELETEALL;
+                                  lvAnalysisViewEntry.SETRANGE("Posting Date");
+
+                                  IF (NOT lvRebuildAll) AND lvAnalysisViewEntry.ISEMPTY THEN
+                                    lvRebuildAll := TRUE;
+
+                                  IF lvRebuildAll <> RebuildAll THEN
+                                    ActLogLine('RebuildThis := '+FORMAT(lvRebuildAll),ActivityLogID);
+
+                                  AnalysisViewRec.GET(AVCode);
+                                  AnalysisViewRec."Last Entry No." := 0;
+                                  AnalysisViewRec."Starting Date" := 0D;
+                                  IF NOT lvRebuildAll THEN BEGIN
+                                    AnalysisViewRec."Last Entry No." := VarVolgnr -1;
+                                    AnalysisViewRec."Starting Date" := CalculatePeriodStart(CorrDate,AnalysisViewRec."Date Compression");
+                                  END;
+                                  AnalysisViewRec.MODIFY;
+                                  COMMIT; //MS has removed commit from cod410
+
+                                  UpdateAnCU.SetDontReplacePostingDate(TRUE);
+                                  UpdateAnCU.RUN(AnalysisViewRec);
+                                  UpdateAnCU.SetDontReplacePostingDate(FALSE);
+
+                                  ActLogLine('end '+Code,ActivityLogID);
+                                END;
+                                 }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+    }
+    CONTROLS
+    {
+      { 1100285100;;Container;
+                  Name=root;
+                  ContainerType=ContentArea }
+
+      { 1100285101;1;Field  ;
+                  CaptionML=ENU=Rebuild All data;
+                  SourceExpr=RebuildAll }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      AnalysisViewRec@1100525005 : Record 363;
+      UpdateAnCU@1100525004 : Codeunit 410;
+      AVCode@1100525003 : Code[10];
+      CorrDate@1100525002 : Date;
+      VarVolgnr@1100525000 : Integer;
+      Text001@1100525007 : TextConst;
+      Text002@1100525006 : TextConst;
+      ActivityLog@1100285100 : Record 710;
+      ActivityLogID@1100285101 : Integer;
+      RebuildAll@1100285102 : Boolean;
+      SESetup@1101285000 : Record 11128004;
+
+    LOCAL PROCEDURE ActLogLine@1100285101(descr@1100285100 : Text;VAR ActivityLogID@1100285101 : Integer);
+    BEGIN
+      IF NOT SESetup."Value (bool)" THEN
+        EXIT;
+
+      ActivityLog.INIT;
+      ActivityLogID +=10;
+      ActivityLog.ID := ActivityLogID;
+      ActivityLog."Activity Date" := CURRENTDATETIME;
+      ActivityLog.Description := descr;
+      ActivityLog."Table No Filter" := 81691;
+      ActivityLog.INSERT;
+    END;
+
+    LOCAL PROCEDURE CalculatePeriodStart@4(PostingDate@1000 : Date;DateCompression@1001 : Integer) : Date;
+    VAR
+      AccountingPeriod@1002 : Record 50;
+      AnalysisView@1100285100 : Record 363;
+    BEGIN
+      //copied from cod410
+      IF PostingDate = CLOSINGDATE(PostingDate) THEN
+        EXIT(PostingDate);
+
+      CASE DateCompression OF
+        AnalysisView."Date Compression"::Week:
+          PostingDate := CALCDATE('<CW+1D-1W>',PostingDate);
+        AnalysisView."Date Compression"::Month:
+          PostingDate := CALCDATE('<CM+1D-1M>',PostingDate);
+        AnalysisView."Date Compression"::Quarter:
+          PostingDate := CALCDATE('<CQ+1D-1Q>',PostingDate);
+        AnalysisView."Date Compression"::Year:
+          PostingDate := CALCDATE('<CY+1D-1Y>',PostingDate);
+      //  AnalysisView."Date Compression"::Period:
+      //    BEGIN
+      //      IF PostingDate <> PrevPostingDate THEN BEGIN
+      //        PrevPostingDate := PostingDate;
+      //        AccountingPeriod.SETRANGE("Starting Date",0D,PostingDate);
+      //        IF AccountingPeriod.FINDLAST THEN BEGIN
+      //          PrevCalculatedPostingDate := AccountingPeriod."Starting Date"
+      //        END ELSE
+      //          PrevCalculatedPostingDate := PostingDate;
+      //      END;
+      //      PostingDate := PrevCalculatedPostingDate;
+      //    END;
+      END;
+      EXIT(PostingDate);
+    END;
+
+    BEGIN
+    {
+      4PS 28-07-2016 UKR-C24728 DKRO: Created according request in ticket 0024728: RFC-041 Schedule Analysis view update
+      160816 ITERO.AC RFC041 Change of date filter in order to rebuild the Analysis Views completely and added a report caption
+      171004 ITERO.DL pure274810 major rebuild to update only a period or all
+    }
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

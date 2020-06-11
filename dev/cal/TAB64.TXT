@@ -1,0 +1,581 @@
+OBJECT Table 64 Merge Duplicates Buffer
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.03;
+  }
+  PROPERTIES
+  {
+    ReplicateData=No;
+    CaptionML=[ENU=Merge Duplicates Buffer;
+               NOR=Sl† sammen buffer for duplikater];
+  }
+  FIELDS
+  {
+    { 1   ;   ;Table ID            ;Integer       ;OnValidate=BEGIN
+                                                                CalcTableName;
+                                                              END;
+
+                                                   DataClassification=SystemMetadata;
+                                                   CaptionML=[ENU=Table ID;
+                                                              NOR=Tabell-ID;
+                                                              SVE=Tabell-ID] }
+    { 2   ;   ;Duplicate           ;Code20        ;TableRelation=IF (Table ID=CONST(18)) Customer
+                                                                 ELSE IF (Table ID=CONST(23)) Vendor
+                                                                 ELSE IF (Table ID=CONST(5050)) Contact;
+                                                   OnValidate=BEGIN
+                                                                TESTFIELD(Duplicate);
+                                                                IF Current = Duplicate THEN
+                                                                  FIELDERROR(Duplicate);
+                                                                CollectData;
+                                                              END;
+
+                                                   DataClassification=SystemMetadata;
+                                                   CaptionML=[ENU=Duplicate;
+                                                              NOR=Duplikat;
+                                                              SVE=Dubblett] }
+    { 3   ;   ;Current             ;Code20        ;TableRelation=IF (Table ID=CONST(18)) Customer;
+                                                   DataClassification=SystemMetadata;
+                                                   CaptionML=[ENU=Current;
+                                                              NOR=Gjeldende;
+                                                              SVE=L”pande (innevarande)] }
+    { 4   ;   ;Table Name          ;Text30        ;DataClassification=SystemMetadata;
+                                                   CaptionML=[ENU=Table Name;
+                                                              NOR=Tabellnavn;
+                                                              SVE=Tabellnamn];
+                                                   Editable=No }
+    { 5   ;   ;Conflicts           ;Integer       ;DataClassification=SystemMetadata;
+                                                   CaptionML=[ENU=Conflicts;
+                                                              NOR=Konflikter] }
+    { 6   ;   ;Duplicate Record ID ;RecordID      ;OnValidate=BEGIN
+                                                                CollectData;
+                                                              END;
+
+                                                   DataClassification=SystemMetadata;
+                                                   CaptionML=[ENU=Duplicate Record ID;
+                                                              NOR=ID for duplikat post] }
+    { 7   ;   ;Current Record ID   ;RecordID      ;OnValidate=VAR
+                                                                RecID@1000 : RecordID;
+                                                              BEGIN
+                                                                RecID := "Current Record ID";
+                                                                VALIDATE("Table ID",RecID.TABLENO);
+                                                              END;
+
+                                                   DataClassification=SystemMetadata;
+                                                   CaptionML=[ENU=Current Record ID;
+                                                              NOR=ID for gjeldende post] }
+    { 8   ;   ;Conflict Field ID   ;Integer       ;DataClassification=SystemMetadata;
+                                                   CaptionML=[ENU=Conflict Field ID;
+                                                              NOR=ID for konfliktfelt] }
+  }
+  KEYS
+  {
+    {    ;Table ID                                ;Clustered=Yes }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+    VAR
+      RenameErr@1000 : TextConst '@@@=%1 - Customer/Vendor, %2 - old No., %3 - new No.;ENU=%1 has not been renamed to %3.;NOR=%1 har ikke f†tt det nye navnet %3.';
+      RecNotExistErr@1001 : TextConst '@@@="%1 - table name; %2 - primary key value";ENU=%1 %2 does not exist.;NOR=%1 %2 eksisterer ikke.;SVE=%1 %2 finns inte.';
+      TempMergeDuplicatesLineBuffer@1002 : TEMPORARY Record 65;
+      TempMergeDuplicatesConflict@1003 : TEMPORARY Record 66;
+      ConflictsErr@1004 : TextConst '@@@=%1 - number of conflicts;ENU=There are conflicts (%1) to resolve prior merge.;NOR=Det finnes konflikter (%1) † l›se f›r sammensl†ing.';
+      ConfirmMergeTxt@1005 : TextConst 'ENU=Are you sure you want to merge the two records? This step cannot be undone.;NOR=Er du sikker p† at du vil sl† sammen de to postene? Dette trinnet kan ikke angres.';
+      ConfirmRenameTxt@1006 : TextConst '@@@=%1 - values of the primary key fields;ENU=Are you sure you want to rename record %1?;NOR=Er du sikker p† at du vil gi nytt navn til posten %1?';
+      ConfirmRemoveTxt@1007 : TextConst '@@@=%1 - values of the primary key fields;ENU=Are you sure you want to remove record %1?;NOR=Er du sikker p† at du vil fjerne posten %1?';
+      CurrRecordErr@1008 : TextConst 'ENU=The current record is not set.;NOR=Den gjeldende posten er ikke angitt.';
+      ModifyPKeyFieldErr@1009 : TextConst 'ENU=You must modify one of the primary key fields.;NOR=Du m† endre ett av prim‘rn›kkelfeltene.';
+      RestorePKeyFieldErr@1010 : TextConst 'ENU=You must restore the modified primary key field.;NOR=Du m† gjenopprette det endrede prim‘rn›kkelfeltet.';
+
+    LOCAL PROCEDURE CalcTableName@7();
+    VAR
+      RecordRef@1000 : RecordRef;
+    BEGIN
+      RecordRef.OPEN("Table ID");
+      "Table Name" := COPYSTR(RecordRef.CAPTION,1,MAXSTRLEN("Table Name"));
+      RecordRef.CLOSE;
+    END;
+
+    LOCAL PROCEDURE ClearData@16();
+    BEGIN
+      TempMergeDuplicatesLineBuffer.RESET;
+      TempMergeDuplicatesLineBuffer.DELETEALL;
+      TempMergeDuplicatesConflict.RESET;
+      TempMergeDuplicatesConflict.DELETEALL;
+      Conflicts := 0;
+    END;
+
+    LOCAL PROCEDURE CollectData@11();
+    BEGIN
+      ClearData;
+      CollectFieldData;
+      IF NOT IsConflict THEN
+        CollectRelatedTables;
+    END;
+
+    LOCAL PROCEDURE CollectFieldData@4();
+    VAR
+      TempPKInt@1000 : TEMPORARY Record 2000000026;
+      RecordRef@1001 : ARRAY [2] OF RecordRef;
+      Index@1003 : Integer;
+      FoundDuplicateRecord@1005 : Boolean;
+    BEGIN
+      FindRecords(RecordRef,FoundDuplicateRecord);
+      TempMergeDuplicatesLineBuffer.GetPrimaryKeyFields(RecordRef[1],TempPKInt);
+      FOR Index := 1 TO RecordRef[1].FIELDCOUNT DO
+        TempMergeDuplicatesLineBuffer.AddFieldData(RecordRef,"Conflict Field ID",Index,FoundDuplicateRecord,TempPKInt);
+      RecordRef[1].CLOSE;
+      IF FoundDuplicateRecord THEN
+        RecordRef[2].CLOSE;
+    END;
+
+    LOCAL PROCEDURE CollectRelatedTables@9();
+    VAR
+      TempTableRelationsMetadata@1002 : TEMPORARY Record 2000000141;
+    BEGIN
+      IF FindRelatedFields(TempTableRelationsMetadata) THEN
+        REPEAT
+          TempMergeDuplicatesLineBuffer.AddTableData(
+            Rec,TempTableRelationsMetadata."Table ID",TempTableRelationsMetadata."Field No.");
+        UNTIL TempTableRelationsMetadata.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE FindConflicts@14() : Boolean;
+    VAR
+      xConflicts@1000 : Integer;
+    BEGIN
+      TempMergeDuplicatesLineBuffer.RESET;
+      TempMergeDuplicatesLineBuffer.SETRANGE("In Primary Key",TempMergeDuplicatesLineBuffer."In Primary Key"::Yes);
+      TempMergeDuplicatesLineBuffer.SETFILTER("Duplicate Count",'>0');
+      IF TempMergeDuplicatesLineBuffer.FINDSET THEN
+        REPEAT
+          xConflicts := TempMergeDuplicatesLineBuffer.Conflicts;
+          IF TempMergeDuplicatesLineBuffer.FindConflicts(Duplicate,Current,TempMergeDuplicatesConflict) <> xConflicts THEN
+            TempMergeDuplicatesLineBuffer.MODIFY;
+        UNTIL TempMergeDuplicatesLineBuffer.NEXT = 0;
+      Conflicts := TempMergeDuplicatesConflict.COUNT;
+      MODIFY;
+      TempMergeDuplicatesLineBuffer.RESET;
+      EXIT(Conflicts > 0);
+    END;
+
+    LOCAL PROCEDURE FindRecord@6(PKey@1000 : Code[20];VAR RecordRef@1001 : RecordRef) : Boolean;
+    VAR
+      FieldRef@1003 : FieldRef;
+      KeyRef@1002 : KeyRef;
+    BEGIN
+      RecordRef.OPEN("Table ID");
+      KeyRef := RecordRef.KEYINDEX(1);
+      FieldRef := KeyRef.FIELDINDEX(1);
+      FieldRef.SETRANGE(PKey);
+      EXIT(RecordRef.FINDFIRST);
+    END;
+
+    LOCAL PROCEDURE FindRecords@20(VAR RecordRef@1000 : ARRAY [2] OF RecordRef;VAR FoundDuplicateRecord@1001 : Boolean);
+    BEGIN
+      IF (Current = '') AND (FORMAT("Current Record ID") = '') THEN
+        ERROR(CurrRecordErr);
+      IF Current <> '' THEN BEGIN
+        IF NOT FindRecord(Current,RecordRef[1]) THEN
+          ERROR(RecNotExistErr,"Table Name",Current);
+        FoundDuplicateRecord := FindRecord(Duplicate,RecordRef[2]);
+      END ELSE BEGIN
+        RecordRef[1].OPEN("Table ID");
+        IF NOT RecordRef[1].GET("Current Record ID") THEN
+          ERROR(RecNotExistErr,'',"Current Record ID");
+        RecordRef[2].OPEN("Table ID");
+        FoundDuplicateRecord := RecordRef[2].GET("Duplicate Record ID");
+      END;
+    END;
+
+    LOCAL PROCEDURE FindRelatedFields@10(VAR TempTableRelationsMetadata@1000 : TEMPORARY Record 2000000141) : Boolean;
+    VAR
+      Field@1002 : Record 2000000041;
+      TableRelationsMetadata@1001 : Record 2000000141;
+    BEGIN
+      TempTableRelationsMetadata.RESET;
+      TempTableRelationsMetadata.DELETEALL;
+      TableRelationsMetadata.SETRANGE("Related Table ID","Table ID");
+      TableRelationsMetadata.SETRANGE("Related Field No.",GetKeyFieldNo("Table ID"));
+      IF TableRelationsMetadata.FINDSET THEN
+        REPEAT
+          Field.GET(TableRelationsMetadata."Table ID",TableRelationsMetadata."Field No.");
+          IF (Field.Class = Field.Class::Normal) AND (Field.ObsoleteState <> Field.ObsoleteState::Removed) THEN
+            IF (TempTableRelationsMetadata."Table ID" <> TableRelationsMetadata."Table ID") OR
+               (TempTableRelationsMetadata."Field No." <> TableRelationsMetadata."Field No.")
+            THEN BEGIN
+              TempTableRelationsMetadata := TableRelationsMetadata;
+              TempTableRelationsMetadata.INSERT;
+            END;
+        UNTIL TableRelationsMetadata.NEXT = 0;
+      IncludeDefaultDimTable(TempTableRelationsMetadata);
+      OnAfterFindRelatedFields(TempTableRelationsMetadata);
+      EXIT(TempTableRelationsMetadata.FINDSET);
+    END;
+
+    PROCEDURE GetConflictsMsg@13() : Text;
+    BEGIN
+      IF Conflicts = 0 THEN
+        EXIT('');
+      EXIT(STRSUBSTNO(ConflictsErr,Conflicts));
+    END;
+
+    LOCAL PROCEDURE GetKeyFieldNo@12(TableNo@1000 : Integer) FieldNo : Integer;
+    VAR
+      RecRef@1001 : RecordRef;
+      KeyRef@1002 : KeyRef;
+      FieldRef@1003 : FieldRef;
+    BEGIN
+      RecRef.OPEN(TableNo);
+      KeyRef := RecRef.KEYINDEX(1);
+      FieldRef := KeyRef.FIELDINDEX(KeyRef.FIELDCOUNT);
+      FieldNo := FieldRef.NUMBER;
+      RecRef.CLOSE;
+    END;
+
+    LOCAL PROCEDURE GetKeyValues@19(RecordRef@1001 : RecordRef;VAR KeyValue@1000 : ARRAY [16] OF Variant) Index : Integer;
+    VAR
+      KeyRef@1002 : KeyRef;
+      FieldRef@1003 : FieldRef;
+    BEGIN
+      KeyRef := RecordRef.KEYINDEX(1);
+      FOR Index := 1 TO KeyRef.FIELDCOUNT DO BEGIN
+        FieldRef := KeyRef.FIELDINDEX(Index);
+        KeyValue[Index] := FieldRef.VALUE;
+      END;
+    END;
+
+    [External]
+    PROCEDURE GetLines@5(VAR TempMergeDuplicatesLineBuf@1000 : TEMPORARY Record 65;VAR TempMergeDuplicatesConflictBuf@1001 : TEMPORARY Record 66);
+    BEGIN
+      TempMergeDuplicatesLineBuf.COPY(TempMergeDuplicatesLineBuffer,TRUE);
+      TempMergeDuplicatesConflictBuf.COPY(TempMergeDuplicatesConflict,TRUE);
+    END;
+
+    LOCAL PROCEDURE IncludeDefaultDimTable@8(VAR TempTableRelationsMetadata@1000 : TEMPORARY Record 2000000141);
+    VAR
+      DefaultDimension@1004 : Record 352;
+      TempAllObjWithCaption@1002 : TEMPORARY Record 2000000058;
+      DimMgt@1001 : Codeunit 408;
+    BEGIN
+      DimMgt.DefaultDimObjectNoList(TempAllObjWithCaption);
+      IF TempAllObjWithCaption.GET(TempAllObjWithCaption."Object Type"::Table,"Table ID") THEN BEGIN
+        TempTableRelationsMetadata.INIT;
+        TempTableRelationsMetadata."Table ID" := DATABASE::"Default Dimension";
+        TempTableRelationsMetadata."Field No." := DefaultDimension.FIELDNO("No.");
+        TempTableRelationsMetadata.INSERT;
+      END;
+    END;
+
+    PROCEDURE InsertFromConflict@29(MergeDuplicatesConflict@1000 : Record 66);
+    BEGIN
+      INIT;
+      "Conflict Field ID" := MergeDuplicatesConflict."Field ID";
+      VALIDATE("Current Record ID",MergeDuplicatesConflict.Current);
+      VALIDATE("Duplicate Record ID",MergeDuplicatesConflict.Duplicate);
+      INSERT;
+    END;
+
+    PROCEDURE IsConflict@28() : Boolean;
+    BEGIN
+      EXIT("Conflict Field ID" <> 0);
+    END;
+
+    PROCEDURE FindModifiedKeyFields@26() : Boolean;
+    BEGIN
+      IF IsConflict THEN
+        EXIT(TempMergeDuplicatesLineBuffer.HasModifiedField);
+    END;
+
+    [External]
+    PROCEDURE Show@1(TableID@1000 : Integer;CurrentKey@1001 : Code[20]);
+    VAR
+      MergeDuplicate@1002 : Page 702;
+    BEGIN
+      VALIDATE("Table ID",TableID);
+      Current := CurrentKey;
+      MergeDuplicate.Set(Rec);
+      MergeDuplicate.RUN;
+    END;
+
+    [External]
+    PROCEDURE ShowConflicts@15();
+    VAR
+      MergeDuplicateConflicts@1000 : Page 704;
+    BEGIN
+      MergeDuplicateConflicts.Set(TempMergeDuplicatesConflict);
+      MergeDuplicateConflicts.RUNMODAL;
+      FindConflicts;
+    END;
+
+    PROCEDURE Merge@2() : Boolean;
+    VAR
+      ConfirmManagement@1000 : Codeunit 27;
+    BEGIN
+      IF FindConflicts THEN
+        EXIT(FALSE);
+      IF NOT ConfirmManagement.ConfirmProcess(ConfirmMergeTxt,TRUE) THEN
+        EXIT(FALSE);
+      CASE "Table ID" OF
+        DATABASE::Contact:
+          MergeContacts;
+        DATABASE::Customer:
+          MergeCustomers;
+        DATABASE::Vendor:
+          MergeVendors;
+      END;
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE MergeContacts@31();
+    VAR
+      Contact@1000 : ARRAY [2] OF Record 5050;
+    BEGIN
+      Contact[2].GET(Current);
+      Contact[1].GET(Duplicate);
+      MergeRecords(Contact[1].RECORDID,Contact[2].RECORDID,0);
+    END;
+
+    LOCAL PROCEDURE MergeCustomers@33();
+    VAR
+      Customer@1000 : ARRAY [2] OF Record 18;
+    BEGIN
+      Customer[1].GET(Duplicate);
+      Customer[2].GET(Current);
+      MergeRecords(Customer[1].RECORDID,Customer[2].RECORDID,Customer[1].FIELDNO(Id));
+    END;
+
+    LOCAL PROCEDURE MergeVendors@27();
+    VAR
+      Vendor@1000 : ARRAY [2] OF Record 23;
+    BEGIN
+      Vendor[2].GET(Current);
+      Vendor[1].GET(Duplicate);
+      MergeRecords(Vendor[1].RECORDID,Vendor[2].RECORDID,Vendor[1].FIELDNO(Id));
+    END;
+
+    LOCAL PROCEDURE MergeRecords@3(DuplicateRecID@1003 : RecordID;CurrentRecID@1004 : RecordID;IdFieldId@1005 : Integer);
+    VAR
+      IntegrationRecord@1001 : ARRAY [2] OF Record 5151;
+      IntegrationManagement@1007 : Codeunit 5150;
+      RecordRef@1002 : ARRAY [2] OF RecordRef;
+      KeyValue@1000 : ARRAY [16] OF Variant;
+      KeyFieldCount@1006 : Integer;
+    BEGIN
+      RecordRef[2].GET(CurrentRecID);
+      RecordRef[1].GET(DuplicateRecID);
+      IF IntegrationManagement.IsIntegrationActivated THEN BEGIN
+        IntegrationRecord[2].FindByRecordId(RecordRef[2].RECORDID);
+        IF IntegrationRecord[1].FindByRecordId(RecordRef[1].RECORDID) THEN
+          IntegrationRecord[1].DELETE;
+      END;
+
+      OverrideSelectedFields(RecordRef[2],RecordRef[1],FALSE);
+
+      RecordRef[2].DELETE;
+      RestoreIntegrationRecordDeletion(IntegrationRecord[2]."Integration ID",RecordRef[2].RECORDID,IntegrationRecord[2]);
+      KeyFieldCount := GetKeyValues(RecordRef[2],KeyValue);
+      IF NOT RenameRecord(RecordRef[1],KeyFieldCount,KeyValue) THEN
+        ERROR(RenameErr,RecordRef[1].RECORDID,RecordRef[2].RECORDID);
+      IF IntegrationManagement.IsIntegrationActivated THEN BEGIN
+        UpdateIDs(
+          RecordRef[1].NUMBER,IdFieldId,IntegrationRecord[1]."Integration ID",IntegrationRecord[2]."Integration ID");
+        IntegrationRecord[1]."Deleted On" := CURRENTDATETIME;
+        IntegrationRecord[1].INSERT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE OverrideSelectedFields@17(FromRecRef@1000 : RecordRef;VAR ToRecRef@1001 : RecordRef;PickedFieldsOnly@1004 : Boolean) : Boolean;
+    VAR
+      FieldRef@1003 : ARRAY [2] OF FieldRef;
+    BEGIN
+      TempMergeDuplicatesLineBuffer.RESET;
+      TempMergeDuplicatesLineBuffer.SETRANGE(Type,TempMergeDuplicatesLineBuffer.Type::Field);
+      IF PickedFieldsOnly THEN
+        TempMergeDuplicatesLineBuffer.SETRANGE(Override,TRUE)
+      ELSE BEGIN
+        TempMergeDuplicatesLineBuffer.SETRANGE("In Primary Key",TempMergeDuplicatesLineBuffer."In Primary Key"::No);
+        TempMergeDuplicatesLineBuffer.SETRANGE(Override,FALSE);
+      END;
+      IF TempMergeDuplicatesLineBuffer.FINDSET THEN BEGIN
+        REPEAT
+          FieldRef[1] := FromRecRef.FIELD(TempMergeDuplicatesLineBuffer.ID);
+          FieldRef[2] := ToRecRef.FIELD(TempMergeDuplicatesLineBuffer.ID);
+          FieldRef[2].VALUE(FieldRef[1].VALUE);
+        UNTIL TempMergeDuplicatesLineBuffer.NEXT = 0;
+        EXIT(TRUE);
+      END;
+      EXIT(FALSE);
+    END;
+
+    PROCEDURE RemoveConflictingRecord@21() Result : Boolean;
+    VAR
+      ConfirmManagement@1000 : Codeunit 27;
+      RecordRef@1001 : ARRAY [2] OF RecordRef;
+    BEGIN
+      IF FindModifiedKeyFields THEN
+        ERROR(RestorePKeyFieldErr);
+
+      IF NOT ConfirmManagement.ConfirmProcess(STRSUBSTNO(ConfirmRemoveTxt,"Duplicate Record ID"),TRUE) THEN
+        EXIT(FALSE);
+
+      RecordRef[1].GET("Current Record ID");
+      RecordRef[2].GET("Duplicate Record ID");
+      IF OverrideSelectedFields(RecordRef[2],RecordRef[1],TRUE) THEN
+        RecordRef[1].MODIFY;
+      RecordRef[1].CLOSE;
+      Result := RecordRef[2].DELETE(TRUE);
+      RecordRef[2].CLOSE;
+    END;
+
+    PROCEDURE RenameConflictingRecord@24() : Boolean;
+    VAR
+      ConfirmManagement@1000 : Codeunit 27;
+      RecordRef@1001 : RecordRef;
+      KeyRef@1003 : KeyRef;
+      FieldRef@1004 : FieldRef;
+      KeyValue@1006 : Variant;
+      VariantKeyValue@1002 : ARRAY [16] OF Variant;
+      Index@1005 : Integer;
+    BEGIN
+      IF NOT FindModifiedKeyFields THEN
+        ERROR(ModifyPKeyFieldErr);
+
+      IF NOT ConfirmManagement.ConfirmProcess(STRSUBSTNO(ConfirmRenameTxt,"Duplicate Record ID"),TRUE) THEN
+        EXIT(FALSE);
+
+      RecordRef.GET("Duplicate Record ID");
+      KeyRef := RecordRef.KEYINDEX(1);
+      FOR Index := 1 TO KeyRef.FIELDCOUNT DO BEGIN
+        FieldRef := KeyRef.FIELDINDEX(Index);
+        KeyValue := FieldRef.VALUE;
+        IF FORMAT(FieldRef.TYPE) IN ['Text','Code'] THEN BEGIN
+          TempMergeDuplicatesLineBuffer.GET(TempMergeDuplicatesLineBuffer.Type::Field,"Table ID",FieldRef.NUMBER);
+          IF FORMAT(FieldRef.VALUE) <> TempMergeDuplicatesLineBuffer."Duplicate Value" THEN
+            KeyValue := TempMergeDuplicatesLineBuffer."Duplicate Value";
+        END;
+        VariantKeyValue[Index] := KeyValue;
+      END;
+
+      IF RenameRecord(RecordRef,Index,VariantKeyValue) THEN
+        EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE RenameRecord@23(VAR RecordRef@1002 : RecordRef;Index@1001 : Integer;KeyValue@1000 : ARRAY [16] OF Variant) : Boolean;
+    BEGIN
+      CASE Index OF
+        1:
+          EXIT(RecordRef.RENAME(KeyValue[1]));
+        2:
+          EXIT(RecordRef.RENAME(KeyValue[1],KeyValue[2]));
+        3:
+          EXIT(RecordRef.RENAME(KeyValue[1],KeyValue[2],KeyValue[3]));
+        4:
+          EXIT(RecordRef.RENAME(KeyValue[1],KeyValue[2],KeyValue[3],KeyValue[4]));
+        5:
+          EXIT(RecordRef.RENAME(KeyValue[1],KeyValue[2],KeyValue[3],KeyValue[4],KeyValue[5]));
+        6:
+          EXIT(RecordRef.RENAME(KeyValue[1],KeyValue[2],KeyValue[3],KeyValue[4],KeyValue[5],KeyValue[6]));
+        7:
+          EXIT(RecordRef.RENAME(KeyValue[1],KeyValue[2],KeyValue[3],KeyValue[4],KeyValue[5],KeyValue[6],KeyValue[7]));
+        8:
+          EXIT(RecordRef.RENAME(KeyValue[1],KeyValue[2],KeyValue[3],KeyValue[4],KeyValue[5],KeyValue[6],KeyValue[7],KeyValue[8]));
+        9:
+          EXIT(
+            RecordRef.RENAME(
+              KeyValue[1],KeyValue[2],KeyValue[3],KeyValue[4],KeyValue[5],KeyValue[6],KeyValue[7],KeyValue[8],KeyValue[9]));
+        10:
+          EXIT(
+            RecordRef.RENAME(
+              KeyValue[1],KeyValue[2],KeyValue[3],KeyValue[4],KeyValue[5],KeyValue[6],KeyValue[7],KeyValue[8],KeyValue[9],
+              KeyValue[10]));
+        11:
+          EXIT(
+            RecordRef.RENAME(
+              KeyValue[1],KeyValue[2],KeyValue[3],KeyValue[4],KeyValue[5],KeyValue[6],KeyValue[7],KeyValue[8],KeyValue[9],
+              KeyValue[10],KeyValue[11]));
+        12:
+          EXIT(
+            RecordRef.RENAME(
+              KeyValue[1],KeyValue[2],KeyValue[3],KeyValue[4],KeyValue[5],KeyValue[6],KeyValue[7],KeyValue[8],KeyValue[9],
+              KeyValue[10],KeyValue[11],KeyValue[12]));
+        13:
+          EXIT(
+            RecordRef.RENAME(
+              KeyValue[1],KeyValue[2],KeyValue[3],KeyValue[4],KeyValue[5],KeyValue[6],KeyValue[7],KeyValue[8],KeyValue[9],
+              KeyValue[10],KeyValue[11],KeyValue[12],KeyValue[13]));
+        14:
+          EXIT(
+            RecordRef.RENAME(
+              KeyValue[1],KeyValue[2],KeyValue[3],KeyValue[4],KeyValue[5],KeyValue[6],KeyValue[7],KeyValue[8],KeyValue[9],
+              KeyValue[10],KeyValue[11],KeyValue[12],KeyValue[13],KeyValue[14]));
+        15:
+          EXIT(
+            RecordRef.RENAME(
+              KeyValue[1],KeyValue[2],KeyValue[3],KeyValue[4],KeyValue[5],KeyValue[6],KeyValue[7],KeyValue[8],KeyValue[9],
+              KeyValue[10],KeyValue[11],KeyValue[12],KeyValue[13],KeyValue[14],KeyValue[15]));
+        16:
+          EXIT(
+            RecordRef.RENAME(
+              KeyValue[1],KeyValue[2],KeyValue[3],KeyValue[4],KeyValue[5],KeyValue[6],KeyValue[7],KeyValue[8],KeyValue[9],
+              KeyValue[10],KeyValue[11],KeyValue[12],KeyValue[13],KeyValue[14],KeyValue[15],KeyValue[16]));
+      END;
+    END;
+
+    LOCAL PROCEDURE RestoreIntegrationRecordDeletion@45(IntegrationID@1002 : GUID;RecID@1000 : RecordID;VAR IntegrationRecord@1001 : Record 5151);
+    VAR
+      IntegrationManagement@1003 : Codeunit 5150;
+    BEGIN
+      IF NOT IntegrationManagement.IsIntegrationActivated THEN
+        EXIT;
+
+      IntegrationRecord.FindByIntegrationId(IntegrationID);
+      IntegrationRecord."Record ID" := RecID;
+      CLEAR(IntegrationRecord."Deleted On");
+      IntegrationRecord.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateIDs@18(TableNo@1000 : Integer;IdFieldNo@1001 : Integer;OldID@1002 : GUID;NewID@1003 : GUID);
+    VAR
+      TableRelationsMetadata@1004 : Record 2000000141;
+      IntegrationManagement@1007 : Codeunit 5150;
+      RecRef@1005 : RecordRef;
+      FieldRef@1006 : FieldRef;
+    BEGIN
+      IF IdFieldNo = 0 THEN
+        EXIT;
+
+      IF NOT IntegrationManagement.IsIntegrationActivated THEN
+        EXIT;
+
+      TableRelationsMetadata.SETRANGE("Related Table ID",TableNo);
+      TableRelationsMetadata.SETRANGE("Related Field No.",IdFieldNo);
+      IF TableRelationsMetadata.FINDSET THEN
+        REPEAT
+          RecRef.OPEN(TableRelationsMetadata."Table ID");
+          FieldRef := RecRef.FIELD(TableRelationsMetadata."Field No.");
+          FieldRef.SETRANGE(OldID);
+          IF RecRef.FINDSET THEN
+            REPEAT
+              FieldRef.VALUE(NewID);
+              RecRef.MODIFY;
+            UNTIL RecRef.NEXT = 0;
+          RecRef.CLOSE;
+        UNTIL TableRelationsMetadata.NEXT = 0;
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterFindRelatedFields@22(VAR TempTableRelationsMetadata@1000 : TEMPORARY Record 2000000141);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

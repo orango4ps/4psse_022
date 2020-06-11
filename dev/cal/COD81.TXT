@@ -1,0 +1,245 @@
+OBJECT Codeunit 81 Sales-Post (Yes/No)
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.03,4PS14.00;
+  }
+  PROPERTIES
+  {
+    TableNo=36;
+    EventSubscriberInstance=Manual;
+    OnRun=VAR
+            SalesHeader@1000 : Record 36;
+          BEGIN
+            IF NOT FIND THEN
+              ERROR(NothingToPostErr);
+
+            SalesHeader.COPY(Rec);
+            Code(SalesHeader,FALSE);
+            Rec := SalesHeader;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ShipInvoiceQst@1000 : TextConst 'ENU=&Ship,&Invoice,Ship &and Invoice;NOR=&Lever,F&akturer,Lever &og fakturer;SVE=&Leverera,&Fakturera,Leverera &och fakturera';
+      PostConfirmQst@1001 : TextConst '@@@="%1 = Document Type";ENU=Do you want to post the %1?;NOR=Vil du bokf›re %1?;SVE=Vill du bokf”ra %1?';
+      ReceiveInvoiceQst@1002 : TextConst 'ENU=&Receive,&Invoice,Receive &and Invoice;NOR=&Motta,F&akturer,Motta &og fakturer;SVE=&Inleverera,&Fakturera,Inleverera &och fakturera';
+      NothingToPostErr@1006 : TextConst 'ENU=There is nothing to post.;NOR=Det finnes ingenting † bokf›re.;SVE=Det finns inget att bokf”ra.';
+      Text11012001@1100485000 : TextConst 'ENU=Do you want to provisionally Invoice the %1? Invoice;NOR=Vil du provisorisk fakturere %1? Faktura;SVE=Vill du bokf”ra %1 prelimin„rt? Faktura';
+      Text11012002@1100528800 : TextConst 'ENU=It is only possible to post released Invoices;NOR=Det er kun mulig † bokf›re frigitte fakturaer;SVE=Det „r endast m”jligt att bokf”ra sl„ppta fakturor';
+      Text11012003@1100528801 : TextConst 'ENU=It is only possible to post released Orders;NOR=Det er kun mulig † bokf›re frigitte ordre;SVE=Det „r bara m”jligt att bokf”ra sl„ppta ordrar';
+      Text11012004@1100529900 : TextConst 'ENU=Do you want to post the %1?;NOR=Vil du bokf›re %1?;SVE=Vill du bokf”ra %1?';
+      PostingHasBeenDone@1100528400 : Boolean;
+
+    PROCEDURE PostAndSend@10(VAR SalesHeader@1000 : Record 36);
+    VAR
+      SalesHeaderToPost@1001 : Record 36;
+    BEGIN
+      SalesHeaderToPost.COPY(SalesHeader);
+      Code(SalesHeaderToPost,TRUE);
+      SalesHeader := SalesHeaderToPost;
+    END;
+
+    LOCAL PROCEDURE Code@1(VAR SalesHeader@1001 : Record 36;PostAndSend@1005 : Boolean);
+    VAR
+      SalesSetup@1002 : Record 311;
+      SalesPostViaJobQueue@1000 : Codeunit 88;
+      HideDialog@1003 : Boolean;
+      IsHandled@1004 : Boolean;
+      DefaultOption@1006 : Integer;
+      SalesPost@1100525000 : Codeunit 80;
+    BEGIN
+      HideDialog := FALSE;
+      IsHandled := FALSE;
+      PostingHasBeenDone := FALSE; //**4PS.n
+      DefaultOption := 3;
+      OnBeforeConfirmSalesPost(SalesHeader,HideDialog,IsHandled,DefaultOption,PostAndSend);
+      IF IsHandled THEN
+        EXIT;
+
+      IF NOT HideDialog THEN
+        IF NOT ConfirmPost(SalesHeader,DefaultOption) THEN
+          EXIT;
+
+      OnAfterConfirmPost(SalesHeader);
+
+      SalesSetup.GET;
+      IF SalesSetup."Post with Job Queue" AND NOT PostAndSend THEN
+        SalesPostViaJobQueue.EnqueueSalesDoc(SalesHeader)
+      ELSE
+        //**4PS.sn
+        IF SalesHeader.PostPlantInvoiceProposalViaIC THEN
+          SalesPost.PostInvoiceProposalviaIC(SalesHeader)
+        ELSE
+        //**4PS.en
+          CODEUNIT.RUN(CODEUNIT::"Sales-Post",SalesHeader);
+
+      OnAfterPost(SalesHeader);
+    END;
+
+    LOCAL PROCEDURE ConfirmPost@4(VAR SalesHeader@1000 : Record 36;DefaultOption@1003 : Integer) : Boolean;
+    VAR
+      ConfirmManagement@1002 : Codeunit 27;
+      Selection@1001 : Integer;
+      SalesSetup@11012000 : Record 311;
+    BEGIN
+      IF DefaultOption > 3 THEN
+        DefaultOption := 3;
+      IF DefaultOption <= 0 THEN
+        DefaultOption := 1;
+
+      SalesSetup.GET; //**4PS.n
+
+      WITH SalesHeader DO BEGIN
+        CASE "Document Type" OF
+          "Document Type"::Order:
+            BEGIN
+            //Selection := STRMENU(ShipInvoiceQst,DefaultOption); //**4PS.o
+
+              //**4PS.sn
+              IF SalesSetup."Release Sales Orders Required" THEN BEGIN
+                IF SalesHeader.Status = SalesHeader.Status::Open THEN BEGIN
+                  MESSAGE(Text11012003);
+                  EXIT(FALSE);
+                END;
+              END;
+
+              IF "Sales Document Type" = "Sales Document Type"::"Sales Logistics Separated" THEN BEGIN
+                IF NOT CONFIRM(Text11012001, FALSE, "Document Type") THEN
+                  EXIT(FALSE)
+                ELSE
+                  Selection := 2;
+              END ELSE BEGIN
+                IF SalesSetup."Invoice Sales Orders" <> SalesSetup."Invoice Sales Orders"::No THEN
+                  Selection := STRMENU(ShipInvoiceQst,1)
+                ELSE BEGIN
+                  IF NOT CONFIRM(PostConfirmQst, FALSE, "Document Type") THEN
+                    EXIT(FALSE)
+                  ELSE
+                    Selection := 1;
+                END;
+              END;
+              //**4PS.en
+
+              Ship := Selection IN [1,3];
+              Invoice := Selection IN [2,3];
+              IF Selection = 0 THEN
+                EXIT(FALSE);
+
+              UpdatePostingAndDocDateFromSetup(WORKDATE); //**4PS.n
+            END;
+          "Document Type"::"Return Order":
+            BEGIN
+            //Selection := STRMENU(ReceiveInvoiceQst,DefaultOption);  //**4PS.o
+
+              //**4PS.sn
+              IF SalesSetup."Invoice Return Orders" <> SalesSetup."Invoice Return Orders"::No THEN
+                Selection := STRMENU(ReceiveInvoiceQst,1)
+              ELSE BEGIN
+                IF NOT CONFIRM(PostConfirmQst, FALSE, "Document Type") THEN
+                  EXIT(FALSE)
+                ELSE
+                  Selection := 1;
+              END;
+              //**4PS.en
+
+              IF Selection = 0 THEN
+                EXIT(FALSE);
+              Receive := Selection IN [1,3];
+              Invoice := Selection IN [2,3];
+            END;
+          //**4PS.sn
+          "Document Type"::"Invoice Proposal":
+            IF NOT CONFIRM(Text11012004,FALSE,LOWERCASE(FORMAT("Document Type"))) THEN
+              EXIT(FALSE);
+          //**4PS.en
+          ELSE
+          BEGIN //**4PS.n
+            IF NOT ConfirmManagement.ConfirmProcess(
+                 STRSUBSTNO(PostConfirmQst,LOWERCASE(FORMAT("Document Type"))),TRUE)
+            THEN
+              EXIT;
+
+            //**4PS.sn
+            IF "Document Type" IN ["Document Type"::Invoice, "Document Type"::"Credit Memo"] THEN BEGIN
+              IF SalesSetup."Post only released Invoices" THEN BEGIN
+                IF SalesHeader.Status = SalesHeader.Status::Open THEN BEGIN
+                  MESSAGE(Text11012002);
+                  EXIT(FALSE);
+                END;
+              END;
+              UpdatePostingAndDocDateFromSetup(WORKDATE);
+            END;
+          END;
+          //**4PS.en
+        END;
+        "Print Posted Documents" := FALSE;
+      END;
+      PostingHasBeenDone := TRUE; //**4PS.n
+      EXIT(TRUE);
+    END;
+
+    [External]
+    PROCEDURE Preview@2(VAR SalesHeader@1000 : Record 36);
+    VAR
+      SalesPostYesNo@1001 : Codeunit 81;
+      GenJnlPostPreview@1002 : Codeunit 19;
+    BEGIN
+      BINDSUBSCRIPTION(SalesPostYesNo);
+      GenJnlPostPreview.Preview(SalesPostYesNo,SalesHeader);
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterPost@6(VAR SalesHeader@1000 : Record 36);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterConfirmPost@7(VAR SalesHeader@1000 : Record 36);
+    BEGIN
+    END;
+
+    [EventSubscriber(Codeunit,19,OnRunPreview)]
+    LOCAL PROCEDURE OnRunPreview@3(VAR Result@1000 : Boolean;Subscriber@1001 : Variant;RecVar@1002 : Variant);
+    VAR
+      SalesHeader@1004 : Record 36;
+      SalesPost@1003 : Codeunit 80;
+    BEGIN
+      WITH SalesHeader DO BEGIN
+        COPY(RecVar);
+        Receive := "Document Type" = "Document Type"::"Return Order";
+        Ship := "Document Type" = "Document Type"::Order;
+        Invoice := TRUE;
+      END;
+
+      OnRunPreviewOnAfterSetPostingFlags(SalesHeader);
+
+      SalesPost.SetPreviewMode(TRUE);
+      Result := SalesPost.RUN(SalesHeader);
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnRunPreviewOnAfterSetPostingFlags@8(VAR SalesHeader@1000 : Record 36);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeConfirmSalesPost@5(VAR SalesHeader@1000 : Record 36;VAR HideDialog@1001 : Boolean;VAR IsHandled@1002 : Boolean;VAR DefaultOption@1003 : Integer;VAR PostAndSend@1004 : Boolean);
+    BEGIN
+    END;
+
+    PROCEDURE GetPostingHasBeenDone@1100528400() : Boolean;
+    BEGIN
+      //**4PS
+      EXIT(PostingHasBeenDone);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

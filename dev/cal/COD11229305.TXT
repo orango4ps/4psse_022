@@ -1,0 +1,247 @@
+OBJECT Codeunit 11229305 Generic Process Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      GenericProcessSetup@1100528301 : Record 11229409;
+      CallStackTxt@1100528300 : TextConst 'DEU=Aufrufliste:;ENU=Call Stack:;NLD=Callstack:';
+      ErrorTxt@1100528302 : TextConst 'DEU=Fehler:\\%1;ENU=Error:\\%1;NLD=Foutmelding:\\%1';
+
+    PROCEDURE DeleteCompletedQueueEntries@1100528304();
+    VAR
+      GenericProcessQueue@1100525000 : Record 11229430;
+    BEGIN
+      GenericProcessSetup.GET;
+      IF (GenericProcessSetup."Delete Completed Tasks (Days)" = 0) THEN
+        EXIT;
+
+      GenericProcessQueue.SETRANGE(Status, GenericProcessQueue.Status::Processed);
+      GenericProcessQueue.SETRANGE("Modified On", 0DT, CREATEDATETIME(CALCDATE(STRSUBSTNO('<-%1D>', GenericProcessSetup."Delete Completed Tasks (Days)"),TODAY),TIME));
+      IF GenericProcessQueue.FINDSET THEN BEGIN
+        GenericProcessQueue.DELETEALL;
+      END;
+    END;
+
+    PROCEDURE GetCodeunitId@1100528306(GenericProcessQueue@1100528301 : Record 11229430) : Integer;
+    VAR
+      GenericProcessStep@1100528300 : Record 11229408;
+    BEGIN
+      GenericProcessStep.GET(GenericProcessQueue."Step Name");
+      EXIT(GenericProcessStep."Codeunit Id");
+    END;
+
+    PROCEDURE GetQueueParameter@1100528307(GenericProcessQueue@1100528300 : Record 11229430;TableNo@1100528302 : Integer;FieldNo@1100528303 : Integer) : Text;
+    VAR
+      GenProcessQueueParameter@1100528301 : Record 11229431;
+    BEGIN
+      EXIT(GenericProcessQueue.GetParameter(TableNo, FieldNo));
+    END;
+
+    PROCEDURE InitJobQueue@1100528320(Parameter@1100528303 : Text;MinutesBetweenRuns@1100528302 : Integer;CodeunitId@1100528305 : Integer);
+    VAR
+      JobQueueCategory@1100528300 : Record 471;
+      GenericProcessQueue@1100528304 : Record 11229430;
+      CategoryCode@1100528301 : Text;
+    BEGIN
+      CategoryCode := COPYSTR(DELCHR(GenericProcessQueue.TABLENAME, '<=>'), 1, MAXSTRLEN(JobQueueCategory.Code));
+      IF (NOT JobQueueCategory.GET(CategoryCode)) THEN BEGIN
+        JobQueueCategory.INIT;
+        JobQueueCategory.Code := CategoryCode;
+        JobQueueCategory.Description := GenericProcessQueue.TABLECAPTION;
+        JobQueueCategory.INSERT(TRUE);
+      END;
+      InitJobQueueEntry(JobQueueCategory.Code, Parameter, MinutesBetweenRuns, CodeunitId);
+    END;
+
+    PROCEDURE ProcessQueueEntry@1100528305(EntryNo@1100525000 : BigInteger);
+    VAR
+      GenericProcessQueue@1100528300 : Record 11229430;
+    BEGIN
+      IF (NOT GenericProcessQueue.GET(EntryNo)) THEN
+        EXIT;
+      IF (GenericProcessQueue.Status = GenericProcessQueue.Status::Cancelled) OR
+         (GenericProcessQueue.Status = GenericProcessQueue.Status::Processed)
+      THEN
+        EXIT;
+      CLEARLASTERROR;
+      COMMIT;
+
+      IF (CODEUNIT.RUN(GetCodeunitId(GenericProcessQueue), GenericProcessQueue)) THEN BEGIN
+        GenericProcessQueue.GET(EntryNo);
+        ProcessResult(GenericProcessQueue, 1); //Processed
+        UpdateNotifyUsers(GenericProcessQueue, 1);
+      END ELSE BEGIN
+        GenericProcessQueue.GET(EntryNo);
+        ProcessResult(GenericProcessQueue, 2); //Failed
+        UpdateNotifyUsers(GenericProcessQueue, 2);
+      END;
+
+      GenericProcessQueue."Try No." += 1;
+      GenericProcessQueue.MODIFY(TRUE);
+      COMMIT;
+    END;
+
+    PROCEDURE SetQueueStepStatusForStep@1100528303(GenericProcessQueueIn@1100528301 : Record 11229430;StepName@1100528300 : Text;NewStatus@1100528302 : Option);
+    VAR
+      GenericProcessQueue@1100528303 : Record 11229430;
+    BEGIN
+      GenericProcessQueue.SETFILTER("Entry No.", '<>%1', GenericProcessQueueIn."Entry No.");
+      GenericProcessQueue.SETRANGE("Step Name", StepName);
+      GenericProcessQueue.SETRANGE("Company Name", GenericProcessQueueIn."Company Name");
+      GenericProcessQueue.SETRANGE("Source Record Id", GenericProcessQueueIn."Source Record Id");
+      IF (NOT GenericProcessQueue.FINDFIRST) THEN
+        EXIT;
+
+      REPEAT
+        GenericProcessQueue.Status := NewStatus;
+        GenericProcessQueue.MODIFY(TRUE);
+      UNTIL (GenericProcessQueue.NEXT = 0);
+    END;
+
+    PROCEDURE UpdateQueueParameterForStep@1100528311(GenericProcessQueueIn@1100528300 : Record 11229430;StepName@1100528302 : Text;TableNo@1100528305 : Integer;FieldNo@1100528304 : Integer;FieldValue@1100528301 : Text);
+    VAR
+      GenericProcessQueue@1100528307 : Record 11229430;
+      GenProcessQueueParameter@1100528303 : Record 11229431;
+    BEGIN
+      GenericProcessQueue.SETFILTER("Entry No.", '<>%1', GenericProcessQueueIn."Entry No.");
+      GenericProcessQueue.SETRANGE("Step Name", StepName);
+      GenericProcessQueue.SETRANGE("Company Name", GenericProcessQueueIn."Company Name");
+      GenericProcessQueue.SETRANGE("Source Record Id", GenericProcessQueueIn."Source Record Id");
+      IF (NOT GenericProcessQueue.FINDFIRST) THEN
+        EXIT;
+
+      REPEAT
+        GenericProcessQueue.AddParameter(TableNo, FieldNo, FieldValue);
+      UNTIL (GenericProcessQueue.NEXT = 0);
+    END;
+
+    PROCEDURE UpdateQueueStepRecIdForStep@1100528302(GenericProcessQueueIn@1100528300 : Record 11229430;StepName@1100528301 : Text;StepRecId@1100528306 : RecordID);
+    VAR
+      GenericProcessQueue@1100528307 : Record 11229430;
+      GenericProcessStep@1100528302 : Record 11229408;
+    BEGIN
+      GenericProcessQueue.SETFILTER("Entry No.", '<>%1', GenericProcessQueueIn."Entry No.");
+      GenericProcessQueue.SETRANGE("Step Name", StepName);
+      GenericProcessQueue.SETRANGE("Company Name", GenericProcessQueueIn."Company Name");
+      GenericProcessQueue.SETRANGE("Source Record Id", GenericProcessQueueIn."Source Record Id");
+      IF (NOT GenericProcessQueue.FINDFIRST) THEN
+        EXIT;
+
+      REPEAT
+        GenericProcessQueue."Step Record Id" := StepRecId;
+        GenericProcessQueue.MODIFY(TRUE);
+      UNTIL (GenericProcessQueue.NEXT = 0);
+    END;
+
+    PROCEDURE HasDefaultCompanySet@1100527800();
+    BEGIN
+      GenericProcessSetup.GET;
+      GenericProcessSetup.TESTFIELD("Default Company");
+    END;
+
+    LOCAL PROCEDURE "---Locals---"@1100528300();
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE InitJobQueueEntry@1100528318(CategoryCode@1100528302 : Code[10];Parameter@1100528301 : Text;MinutesBetweenRuns@1100528300 : Integer;CodeunitId@1100528305 : Integer);
+    VAR
+      JobQueueEntry@1100528303 : Record 472;
+      GenericProcessQueue@1100528304 : Record 11229430;
+    BEGIN
+      JobQueueEntry.SETRANGE("Job Queue Category Code", CategoryCode);
+      JobQueueEntry.SETFILTER("Parameter String", '*'+Parameter+'*');
+      IF (JobQueueEntry.FINDFIRST) THEN
+        EXIT;
+
+      JobQueueEntry.INIT;
+      JobQueueEntry.Description := GenericProcessQueue.TABLECAPTION;
+      JobQueueEntry."Job Queue Category Code" := CategoryCode;
+      JobQueueEntry."Maximum No. of Attempts to Run" := 999;
+      IF (CodeunitId <> 0) THEN
+        JobQueueEntry."Object ID to Run" := CodeunitId
+      ELSE
+        JobQueueEntry."Object ID to Run" := CODEUNIT::"Generic Process Job Queue";
+      JobQueueEntry."Object Type to Run" := JobQueueEntry."Object Type to Run"::Codeunit;
+      JobQueueEntry."Parameter String" := Parameter;
+      JobQueueEntry."Recurring Job" := TRUE;
+      JobQueueEntry."No. of Minutes between Runs" := MinutesBetweenRuns;
+      JobQueueEntry."Run on Fridays" := TRUE;
+      JobQueueEntry."Run on Mondays" := TRUE;
+      JobQueueEntry."Run on Thursdays" := TRUE;
+      JobQueueEntry."Run on Tuesdays" := TRUE;
+      JobQueueEntry."Run on Wednesdays" := TRUE;
+      JobQueueEntry."Starting Time" := 073000T;
+      JobQueueEntry."Ending Time" := 173000T;
+      JobQueueEntry.Status := JobQueueEntry.Status::"On Hold";
+      JobQueueEntry.INSERT(TRUE);
+    END;
+
+    LOCAL PROCEDURE ProcessResult@1100528301(VAR GenericProcessQueue@1100528300 : Record 11229430;StatusOption@1100528301 : Option);
+    VAR
+      OStream@1100528302 : OutStream;
+    BEGIN
+      GenericProcessQueue.FIND;
+      GenericProcessQueue."Error Text" := '';
+      CLEAR(GenericProcessQueue."Full Error");
+
+      CASE StatusOption OF
+        1: BEGIN //Processed:
+          GenericProcessQueue.Status := StatusOption;
+        END;
+        2: BEGIN //Failed:
+          GenericProcessQueue."Error Text" := COPYSTR(GETLASTERRORTEXT, 1, MAXSTRLEN(GenericProcessQueue."Error Text"));
+          GenericProcessQueue."Full Error".CREATEOUTSTREAM(OStream, TEXTENCODING::Windows);
+          OStream.WRITETEXT(GETLASTERRORTEXT);
+          OStream.WRITETEXT(STRSUBSTNO('\\%1\', CallStackTxt));
+          OStream.WRITETEXT(GETLASTERRORCALLSTACK);
+          GenericProcessQueue.Status := StatusOption;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateNotifyUsers@1100528500(GenericProcessQueue@1100528500 : Record 11229430;StatusOption@1100528503 : Option);
+    VAR
+      GenericProcStepNotifyUser@1100528501 : Record 11229429;
+      GenericProcessStep@1100528300 : Record 11229408;
+      RecordLink@1100528505 : Record 2000000068;
+      GenericProcessQueuePage@1100528504 : Page 11129894;
+      RecordLinkManagement@1100528502 : Codeunit 447;
+      RecRef@1100528506 : RecordRef;
+    BEGIN
+      GenericProcessStep.GET(GenericProcessQueue."Step Name");
+      GenericProcStepNotifyUser.SETRANGE("Step Name", GenericProcessQueue."Step Name");
+      IF (NOT GenericProcStepNotifyUser.FINDSET) THEN
+        EXIT;
+
+      REPEAT
+        RecRef.GETTABLE(GenericProcessQueue);
+        CASE StatusOption OF
+          1: BEGIN
+            RecordLink.SETRANGE("Record ID", GenericProcessQueue.RECORDID);
+            RecordLink.DELETEALL;
+          END;
+          2: BEGIN
+            IF (GenericProcessStep."Notify Users On Error") THEN
+              RecordLinkManagement.CreateNote(RecRef, GenericProcessQueuePage.OBJECTID(FALSE), GETLASTERRORTEXT, GenericProcStepNotifyUser."User ID");
+          END;
+        END;
+      UNTIL (GenericProcStepNotifyUser.NEXT = 0);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

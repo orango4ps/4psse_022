@@ -1,0 +1,532 @@
+OBJECT Codeunit 81612 Handyman WS
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PSSE.HM;
+  }
+  PROPERTIES
+  {
+    TableNo=81624;
+    OnRun=VAR
+            tradeitem@1100285000 : Record 11012317;
+            tims2@1100285500 : Time;
+          BEGIN
+            CLEAR(cuHandymanMgmt);
+            CASE Type OF
+              Type::Project:    cuHandymanMgmt.ProcessProject(Rec);
+              Type::Comment:    cuHandymanMgmt.ProcessComment(Rec);
+              Type::Timesheet:  cuHandymanMgmt.ProcessTimesheet(Rec);
+              Type::Material:   cuHandymanMgmt.ProcessMaterialList(Rec);
+              Type::File:       cuHandymanMgmt.ImportFileToBuffer(Rec);
+            END;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      CustomerRec@1100285502 : Record 18;
+      txtBlockedCustomer@1100285504 : TextConst 'ENU=Customer %1 is blocked.;NOR=Kunde %1 er blokkert;SVE=Kund %1 „r blockerad.';
+      EmployeeRec@1100285505 : Record 5200;
+      SalespersonPurchaser@1100285506 : Record 13;
+      txtNoSalesPerson@1100285507 : TextConst 'ENU=Employee %1 is not a Salesperson;NOR=Ansatt %1 er ikke en salgsperson;SVE=Anst„llningsnr %1 „r inte en s„ljare.';
+      cuHandymanMgmt@1100285508 : Codeunit 81609;
+      HandymanImportBuffer@1100285000 : Record 81624;
+      HandymanSetupThisComp@1100285001 : Record 81609;
+      txtProjectNotFound@1100285002 : TextConst 'ENU=Project %1 was not found in any company.;NOR=Prosjekt %1 ble ikke funnet i noe selskap;SVE=Projekt %1 hittades inte i n†got f”retag.';
+      txtNoCustomer@1100285003 : TextConst 'ENU=Customer %1 does not exist.;NOR=Kunde %1 finnes ikke;SVE=Kund %1 kan inte hittas.';
+      HandymanSetupOtherComp@1100285100 : Record 81609;
+      txtNoSeriesNotFound@1101285000 : TextConst 'ENU=Can not find correct No. Series for Department ''%1''';
+      txtNoDeptAuthorization@1101285001 : TextConst 'ENU=User ''%1'' do not have the correct Department Authoriz.';
+      txtProjectStatus@1101285002 : TextConst 'ENU=Project ''%1'' must have Project Status ''%2'', ''%3'' or ''%4''';
+
+    PROCEDURE CreateProject@1100285500(CostCentre@1100285500 : Text;MainProject@1100285501 : Text;Customer@1100285502 : Text;Employee@1100285503 : Text) : Code[30];
+    VAR
+      lvCompany@1100285000 : Record 2000000006;
+      lvBreakNow@1100285001 : Boolean;
+      lvCompanyFound@1100285002 : Boolean;
+      lvJob@1100285005 : Record 11072003;
+      JobToRecRef@1100285007 : Record 11072003;
+      RecRef@1100285006 : RecordRef;
+      Job@1100285100 : Record 11072003;
+    BEGIN
+      IF NOT Job.GET(MainProject) THEN BEGIN
+        lvCompany.SETFILTER(Name, '<>%1', COMPANYNAME);
+        lvBreakNow := FALSE;
+        lvCompanyFound := FALSE;
+        IF lvCompany.FINDSET(FALSE) THEN
+        REPEAT
+          Job.CHANGECOMPANY(lvCompany.Name);
+          IF Job.GET(MainProject) THEN BEGIN
+            lvBreakNow := TRUE;
+            lvCompanyFound := TRUE;
+          END;
+          IF NOT lvBreakNow THEN
+            IF lvCompany.NEXT = 0 THEN
+              lvBreakNow := TRUE;
+        UNTIL lvBreakNow;
+
+        IF NOT lvCompanyFound THEN
+          ERROR(txtProjectNotFound, MainProject);
+
+        EXIT(CallCreateProjectForCompany(lvCompany.Name, CostCentre, MainProject, Customer, Employee));
+      END;
+
+      // 140819 <<
+      lvJob.GET(MainProject);
+      IF lvJob."Bill-to Customer No." <> '' THEN
+        Customer := lvJob."Bill-to Customer No.";
+      IF NOT CustomerRec.GET(Customer) THEN
+        ERROR(txtNoCustomer, Customer);
+      // 140819 >>
+
+      IF CustomerRec.Blocked <> CustomerRec.Blocked::" " THEN
+        ERROR(txtBlockedCustomer, Customer);
+      IF (NOT EmployeeRec.GET(Employee)) OR (NOT SalespersonPurchaser.GET(Employee)) THEN
+        ERROR(txtNoSalesPerson, Employee);
+
+      // RFC 015 ***** <<
+      // Moved all code to Handyman Mgmt
+      cuHandymanMgmt.CreateSubProjectFromMainProject_Handyman(Job, MainProject, CustomerRec."No.", Employee, FALSE, '', '', 0, '', '', '', '', 0D, 0D);
+      // RFC 015 ***** >>
+
+      // IME229
+      Job."Time Last Modified" := Job."Time Last Modified" - 1000 * 60 * 5; // Change modify-parameter to 5 mins before
+      Job.MODIFY;
+
+      EXIT(Job."No.");
+    END;
+
+    PROCEDURE CreateProject2@1100285001(MainProject@1100285002 : Text;Customer@1100285001 : Text;Employee@1100285000 : Text) : Text;
+    BEGIN
+      EXIT(CreateProject('123', MainProject, Customer, Employee));
+    END;
+
+    PROCEDURE TestWS@1100285000(TestVar@1100285000 : Text) : Text;
+    BEGIN
+      EXIT(TestVar + ' ok!');
+    END;
+
+    PROCEDURE CallCreateProjectForCompany@1100285501(NavCompanyName@1100285504 : Text;CostCentre@1100285503 : Text;MainProject@1100285502 : Text;Customer@1100285501 : Text;Employee@1100285500 : Text) : Text;
+    VAR
+      xmldoc@1100285509 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      XMLElement@1100285508 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlElement";
+      XMLNode@1100285510 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      XMLTextElement@1100285507 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlText";
+      XMLUnderElement@1100285506 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlElement";
+      XmlProcessingInstruction@1100285511 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlProcessingInstruction";
+      HttpWebRequest@1100285514 : DotNet "'System, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebRequest";
+      HttpWebResponse@1100285513 : DotNet "'System, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.WebResponse";
+      Credential@1100285517 : DotNet "'System, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.NetworkCredential";
+      MemoryStream@1100285512 : DotNet "'mscorlib, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.MemoryStream";
+      soapAction@1100285515 : Text;
+      iPos@1100285516 : Integer;
+      NavSchema@1100285518 : Text;
+    BEGIN
+      // Calls Webservice for other NAV company.
+      IF NavCompanyName = COMPANYNAME THEN
+        ERROR('Call from same company.');
+
+      GetHandymanSetupOther(NavCompanyName);
+      // lvHandymanSetup.CHANGECOMPANY(NavCompanyName);
+      // lvHandymanSetup.GET();
+      IF HandymanSetupOtherComp."WS Path Handyman" = '' THEN
+        ERROR('No Handyman-WS path for company ' + NavCompanyName);
+
+      iPos := STRPOS(LOWERCASE(HandymanSetupOtherComp."WS Path Handyman"), 'codeunit');
+      IF iPos = 0 THEN
+        ERROR('Wrong WS-URL to NAV');
+
+      soapAction := 'urn:microsoft-dynamics-schemas/codeunit' + COPYSTR(HandymanSetupOtherComp."WS Path Handyman", iPos + 8) + ':CreateProject'; // 150611 Added :CreateProject'
+      NavSchema  := 'urn:microsoft-dynamics-schemas/codeunit' + COPYSTR(HandymanSetupOtherComp."WS Path Handyman", iPos + 8);
+
+      CLEAR(xmldoc);
+      xmldoc := xmldoc.XmlDocument;
+
+      XmlProcessingInstruction := xmldoc.CreateProcessingInstruction('xml','version="1.0" encoding="UTF-8"');
+      xmldoc.AppendChild(XmlProcessingInstruction);
+
+      XMLElement := xmldoc.CreateElement('soap', 'Envelope', 'http://schemas.xmlsoap.org/soap/envelope/');
+      xmldoc.AppendChild(XMLElement);
+      XMLUnderElement := xmldoc.CreateElement('soap', 'Body', 'http://schemas.xmlsoap.org/soap/envelope/');
+      XMLElement.AppendChild(XMLUnderElement);
+
+      XMLElement := xmldoc.CreateElement('Nav', 'CreateProject', NavSchema);
+      XMLUnderElement.AppendChild(XMLElement);
+
+      XMLUnderElement := xmldoc.CreateElement('Nav', 'costCentre', NavSchema);
+      XMLTextElement := xmldoc.CreateTextNode(CostCentre);
+      XMLUnderElement.AppendChild(XMLTextElement);
+      XMLElement.AppendChild(XMLUnderElement);
+
+      XMLUnderElement := xmldoc.CreateElement('Nav', 'mainProject', NavSchema);
+      XMLTextElement := xmldoc.CreateTextNode(MainProject);
+      XMLUnderElement.AppendChild(XMLTextElement);
+      XMLElement.AppendChild(XMLUnderElement);
+
+      XMLUnderElement := xmldoc.CreateElement('Nav', 'customer', NavSchema);
+      XMLTextElement := xmldoc.CreateTextNode(Customer);
+      XMLUnderElement.AppendChild(XMLTextElement);
+      XMLElement.AppendChild(XMLUnderElement);
+
+      XMLUnderElement := xmldoc.CreateElement('Nav', 'employee', NavSchema);
+      XMLTextElement := xmldoc.CreateTextNode(Employee);
+      XMLUnderElement.AppendChild(XMLTextElement);
+      XMLElement.AppendChild(XMLUnderElement);
+      HttpWebRequest := HttpWebRequest.Create(HandymanSetupOtherComp."WS Path Handyman");
+      HttpWebRequest.Timeout := 30000;
+
+      HttpWebRequest.UseDefaultCredentials(FALSE);
+
+      Credential := Credential.NetworkCredential;
+      Credential.UserName := HandymanSetupOtherComp."WS User Name";
+      Credential.Password := HandymanSetupOtherComp."WS Password";
+
+      HttpWebRequest.Credentials := Credential;
+      HttpWebRequest.Method := 'POST';
+      HttpWebRequest.ContentType := 'text/xml; charset=utf-8';
+      HttpWebRequest.Accept := 'text/xml';
+      HttpWebRequest.Headers.Add('SOAPAction', soapAction);
+      MemoryStream := HttpWebRequest.GetRequestStream;
+      //xmldoc.Save('\\app04.iteroab.local\navintegration\imtech\Handyman\Production\soap.xml');
+      xmldoc.Save(MemoryStream);
+      MemoryStream.Flush;
+      MemoryStream.Close;
+
+      //error(HandymanSetupOtherComp."WS Path Handyman");
+
+      HttpWebResponse := HttpWebRequest.GetResponse;
+      MemoryStream := HttpWebResponse.GetResponseStream;
+      xmldoc.Load(MemoryStream);
+      MemoryStream.Flush;
+      MemoryStream.Close;
+
+      // Get project no.
+      XMLNode := xmldoc.SelectSingleNode('child::*/child::*/child::*/child::*');
+      EXIT(XMLNode.InnerText);
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE GetHandymanSetupThis@1100285100();
+    BEGIN
+      HandymanSetupThisComp.GET;
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE GetHandymanSetupOther@1100285104(CompanyName@1100285100 : Text[30]);
+    BEGIN
+      HandymanSetupOtherComp.CHANGECOMPANY(CompanyName);
+      HandymanSetupOtherComp.GET;
+    END;
+
+    PROCEDURE CreateOrUpdateSingelProject@1101322069(XmlDoc@1101322000 : BigText) ReturnValue : Code[20];
+    VAR
+      HandymanSingelProject@1101322006 : XMLport 81649;
+      Object@1101322003 : Record 2000000001;
+      IStream@1101322004 : InStream;
+      OStream@1101322005 : OutStream;
+      SettlementMothodInt@1100285102 : Integer;
+      ProjectStatusInt@1100285101 : Integer;
+      ProjBuffer@1100285103 : Record 81649;
+      Job@1100285104 : Record 11072003;
+      JobsSetup@1100285105 : Record 315;
+      NoSeriesMgt@1100285106 : Codeunit 396;
+      NewNo@1100285107 : Code[20];
+      NewNoSeries@1100285108 : Code[20];
+      lvComment@1100285112 : Text[50];
+      lvAdress@1100285115 : Text;
+      NewProject@1100285116 : Boolean;
+      lvDisciplin@1100285117 : Text[20];
+      Job2@1100285100 : Record 11072003;
+      SymbrioFunctions@1100285109 : Codeunit 11127975;
+    BEGIN
+      CLEARLASTERROR;
+
+      Object.CALCFIELDS("BLOB Reference");
+      Object."BLOB Reference".CREATEOUTSTREAM(OStream);
+      XmlDoc.WRITE(OStream);
+      Object."BLOB Reference".CREATEINSTREAM(IStream);
+      HandymanSingelProject.SETSOURCE(IStream);
+
+      IF NOT HandymanSingelProject.IMPORT THEN
+        ERROR(GETLASTERRORTEXT);
+
+      GetStrings(XmlDoc,lvComment,lvAdress,lvDisciplin);
+
+      ProjBuffer.SETRANGE(Status, ProjBuffer.Status::Unprocessed);
+      IF ProjBuffer.FINDSET THEN REPEAT
+        ProjBuffer.Status := ProjBuffer.Status::Error;
+        ProjBuffer.MODIFY(FALSE);
+        //>>180208
+        COMMIT;
+
+        FixStrings(XmlDoc,ProjBuffer,'Description');
+        FixStrings(XmlDoc,ProjBuffer,'Adress');
+        FixStrings(XmlDoc,ProjBuffer,'Adress2');
+        FixStrings(XmlDoc,ProjBuffer,'City');
+        //<<180208
+
+        IF NOT Job.GET(ProjBuffer.ProjectNo) THEN BEGIN
+          GetProjectNo(ProjBuffer."Cost Center",NewNo);
+
+          IF NewNo = '' THEN BEGIN
+            JobsSetup.GET;
+            JobsSetup.TESTFIELD("Job Nos.");
+            NoSeriesMgt.InitSeriesAltUser(JobsSetup."Job Nos.",'',0D,NewNo,NewNoSeries, ProjBuffer."Modified By");
+          END;
+
+          Job.INIT;
+          Job."No." := NewNo;
+          Job.VALIDATE("Creation Date", ProjBuffer."Create Date");
+          Job.INSERT(TRUE);
+      //>>191104
+          Job2.GET(Job."No.");
+          Job2.VALIDATE("Project Type",            ProjBuffer."Project Type");
+          Job2.VALIDATE("Global Dimension 1 Code", ProjBuffer."Cost Center");
+          Job2.VALIDATE("Created by",              ProjBuffer."Modified By");
+          Job2.VALIDATE("Creation Date",           ProjBuffer."Create Date");
+          Job2.VALIDATE(Description,               lvComment);
+          EVALUATE(ProjectStatusInt,               ProjBuffer."Project Status");
+          Job2.VALIDATE("Project Status",          ProjectStatusInt);
+          Job2.VALIDATE("Project Manager",         ProjBuffer."Project Manager");
+          Job2.MODIFY(TRUE);
+          SymbrioFunctions.fnMarkJobForExportToSymbrio(Job2,Job);
+          Job.GET(Job."No.");
+      //<<191104
+          NewProject := TRUE;
+        END;
+
+        IF NOT NewProject THEN BEGIN
+          CheckProjectStatus(ProjBuffer.ProjectNo);
+          CheckDepartmentAuthorization(ProjBuffer."Modified By", Job."Global Dimension 1 Code");
+        END;
+
+        CheckDepartmentAuthorization(ProjBuffer."Modified By",ProjBuffer."Cost Center");
+
+        EVALUATE(SettlementMothodInt,   ProjBuffer."Settlement Method");
+        EVALUATE(ProjectStatusInt,      ProjBuffer."Project Status");
+        Job.VALIDATE(Description,       lvComment);
+        Job.InsertProjPrincipalExt(     ProjBuffer.Principal, TRUE);
+        Job."Bill-to Customer No." :=   ProjBuffer.Principal;
+        Job.Address :=                  lvAdress;
+        Job."Address 2" :=              ProjBuffer.Adress2;
+        Job.City :=                     ProjBuffer.City;
+        Job.VALIDATE("Post Code",       ProjBuffer."Post Code");
+        Job."Settlement Method" :=      SettlementMothodInt;
+        Job.VALIDATE("Project Status",  ProjectStatusInt);
+        Job.Discipline :=               lvDisciplin;
+        Job.VALIDATE("Project Manager", ProjBuffer."Project Manager");
+        Job.VALIDATE("Starting Date",   ProjBuffer."Start Date");
+        Job.VALIDATE("Ending Date",     ProjBuffer."End Date");
+        Job."Forecast Level" :=         ProjBuffer."Prognisis Level";
+        Job.VALIDATE("Modified by",     ProjBuffer."Modified By");
+        Job."Delivery Address Note":=   ProjBuffer.DeliveryAddressNote; //200220
+        IF ProjBuffer.LineType <> '' THEN
+          Job.VALIDATE(Type, ProjBuffer.LineType);  //RFC-235B
+
+        Job.MODIFY(TRUE);
+
+        IF ProjBuffer.Principal <> '' THEN
+          ContractAmountToPrincipal(Job."No.", ProjBuffer.Principal, ProjBuffer."Contract Amount");
+
+        SetContactFeatureType(Job."No.", ProjBuffer.FIELDNO("Contract Type"),ProjBuffer."Contract Type");
+        SetContactFeatureType(Job."No.", ProjBuffer.FIELDNO("Procurement Form"),ProjBuffer."Procurement Form");
+        SetContactFeatureType(Job."No.", ProjBuffer.FIELDNO("Object Type"),ProjBuffer."Object Type");
+
+        Job."Last Date Modified" :=             ProjBuffer."Create Date";
+        Job."Modified by" := ProjBuffer."Modified By";
+        Job.MODIFY(FALSE);
+
+        ProjBuffer.Status := ProjBuffer.Status::Prossesed;
+        ProjBuffer.MODIFY(FALSE);
+
+      UNTIL ProjBuffer.NEXT = 0;
+
+      ProjBuffer.SETRANGE(Status, ProjBuffer.Status::Prossesed);
+      IF ProjBuffer.FINDSET(TRUE) THEN
+        ProjBuffer.DELETEALL;
+
+      ReturnValue := Job."No.";
+    END;
+
+    LOCAL PROCEDURE GetProjectNo@1100285110(DepCode@1100285101 : Code[10];VAR ProjectNo@1100285107 : Code[20]);
+    VAR
+      NoSeriesMgt@1100285103 : Codeunit 396;
+      NewNo@1100285106 : Code[20];
+      NewNoSeries@1100285105 : Code[20];
+      NoSeries@1100285102 : Record 308;
+      JobsSetup@1100285109 : Record 315;
+      NoSeriesPrefix@1100285110 : Code[20];
+    BEGIN
+      JobsSetup.GET;
+      NoSeriesPrefix := DELCHR(JobsSetup."Job Nos.",'=','1234567890');
+
+      NoSeries.SETRANGE("Department Code", DepCode);
+      NoSeries.SETFILTER(Code, STRSUBSTNO('%1*', NoSeriesPrefix));
+      IF NoSeries.FINDFIRST THEN BEGIN
+        NoSeriesMgt.InitSeries(NoSeries.Code,'',0D,NewNo,NewNoSeries);
+        ProjectNo := NewNo;
+      END ELSE BEGIN
+        ERROR(txtNoSeriesNotFound, DepCode);
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckDepartmentAuthorization@1100285114("Modified By"@1100285100 : Code[50];DepartmentCode@1100285102 : Code[20]);
+    VAR
+      UserSetup@1100285101 : Record 91;
+      DepartmentAuthorizationMgt@1100285103 : Codeunit 11012783;
+    BEGIN
+      IF DepartmentCode = '' THEN
+        EXIT;
+      IF UserSetup.GET("Modified By") THEN
+        IF DepartmentAuthorizationMgt.CodeInFilter(DepartmentCode, UserSetup."Department Code Filter") OR NOT UserSetup."Department Authoriz. Active" THEN
+          EXIT;
+      ERROR(txtNoDeptAuthorization, "Modified By");
+    END;
+
+    LOCAL PROCEDURE CheckProjectStatus@1100285116("Project No."@1100285100 : Code[20]);
+    VAR
+      Job@1100285101 : Record 11072003;
+    BEGIN
+       IF Job.GET("Project No.") THEN BEGIN
+        IF NOT (Job."Project Status" IN [ Job."Project Status"::Estimation,
+                                          Job."Project Status"::Preparation,
+                                          Job."Project Status"::Production]) THEN BEGIN
+          ERROR(txtProjectStatus , "Project No.",
+                         Job."Project Status"::Estimation,
+                         Job."Project Status"::Preparation,
+                         Job."Project Status"::Production);
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE GetStrings@1100285101(XmlDoc@1100285103 : BigText;VAR lvComment@1100285102 : Text[50];VAR lvAdress@1100285101 : Text;VAR lvDisciplin@1100285100 : Text[20]);
+    VAR
+      Pos1@1100285108 : Integer;
+      ValueLen@1100285107 : Integer;
+      StartTag@1100285106 : Text[15];
+      EndTag@1100285105 : Text[15];
+      Discipline@1100285104 : Record 11020204;
+    BEGIN
+       StartTag := '<Description>';
+       EndTag := '</Description>';
+       Pos1 := XmlDoc.TEXTPOS(StartTag) + STRLEN(StartTag);
+       ValueLen := XmlDoc.TEXTPOS(EndTag) - Pos1;
+       XmlDoc.GETSUBTEXT(lvComment, Pos1, ValueLen);
+
+       StartTag := '<Adress>';
+       EndTag := '</Adress>';
+       Pos1 := XmlDoc.TEXTPOS(StartTag) + STRLEN(StartTag);
+       ValueLen := XmlDoc.TEXTPOS(EndTag) - Pos1;
+       //>>180110
+       lvAdress := '';
+       IF ValueLen > 0 THEN // no adress like '<Adress/>' gives negative Pos2
+       //<<180110
+         XmlDoc.GETSUBTEXT(lvAdress, Pos1, ValueLen);
+
+       StartTag := '<Disciplin>';
+       EndTag := '</Disciplin>';
+       Pos1 := XmlDoc.TEXTPOS(StartTag) + STRLEN(StartTag);
+       ValueLen := XmlDoc.TEXTPOS(EndTag) - Pos1;
+       XmlDoc.GETSUBTEXT(lvDisciplin, Pos1, ValueLen);
+
+       Discipline.GET(lvDisciplin);
+    END;
+
+    LOCAL PROCEDURE FixStrings@1100285167(inBigText@1100285100 : BigText;VAR ProjBuffer@1100285107 : Record 81649;inStr@1100285101 : Text);
+    VAR
+      Pos1@1100285106 : Integer;
+      ValueLen@1100285105 : Integer;
+      StartTag@1100285104 : Text[15];
+      EndTag@1100285103 : Text[15];
+      gotValue@1100285102 : Text;
+    BEGIN
+      //180208
+      StartTag := '<'+inStr+'>';
+      EndTag := '</'+inStr+'>';
+      Pos1 := inBigText.TEXTPOS(StartTag) + STRLEN(StartTag);
+      ValueLen := inBigText.TEXTPOS(EndTag) - Pos1;
+      IF ValueLen = 0 THEN // no adress like '<Adress/>' gives negative Pos2
+        EXIT;
+
+      gotValue := '';
+      inBigText.GETSUBTEXT(gotValue, Pos1, ValueLen);
+
+      IF gotValue = '' THEN
+        EXIT;
+
+      CASE inStr OF
+        'Description': ProjBuffer.Description := gotValue;
+        'Adress': ProjBuffer.Adress := gotValue;
+        'Adress2': ProjBuffer.Adress2 := gotValue;
+        'City': ProjBuffer.City := gotValue;
+      END;
+    END;
+
+    LOCAL PROCEDURE SetContactFeatureType@1100285102("Project No."@1100285100 : Code[20];FieldNo@1100285103 : Integer;ContactFeatureCode@1100285104 : Code[20]);
+    VAR
+      ContactFeatureType@1100285102 : Record 11012753;
+      ContactFeature@1100285101 : Record 11012752;
+      GLSetup@1100285105 : Record 98;
+    BEGIN
+      IF ContactFeatureCode = '' THEN
+        EXIT;
+
+      GLSetup.GET;
+      IF NOT GLSetup."Norwegian Localization Active" THEN BEGIN
+        CASE FieldNo OF
+          17:ContactFeatureType.SETFILTER("Feature Group", 'Objektstyp');
+          22:ContactFeatureType.SETFILTER("Feature Group", 'Kontraktstyp');
+          23:ContactFeatureType.SETFILTER("Feature Group", 'Upphandlingsform');
+        END;
+      END ELSE BEGIN
+        CASE FieldNo OF
+          17:ContactFeatureType.SETFILTER("Feature Group", 'Objektstype');
+          22:ContactFeatureType.SETFILTER("Feature Group", 'Kontraktstype');
+          23:ContactFeatureType.SETFILTER("Feature Group", 'Entrepriseform');
+        END;
+      END;
+
+      ContactFeatureType.SETRANGE("Relation Type", ContactFeatureType."Relation Type"::Job);
+      ContactFeatureType.SETRANGE(Code,"Project No.");
+      IF ContactFeatureType.FINDFIRST THEN BEGIN
+        ContactFeature.GET(ContactFeatureType."Feature Group", ContactFeatureCode);
+        ContactFeatureType.VALIDATE(Feature, ContactFeature.Code);
+        ContactFeatureType.MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE ContractAmountToPrincipal@1100285108(ProjectNo@1100285103 : Code[20];PrincipalNo@1100285100 : Code[20];ContractAmount@1100285101 : Decimal);
+    VAR
+      Principal@1100285102 : Record 11012005;
+    BEGIN
+      IF Principal.GET(ProjectNo, PrincipalNo) THEN BEGIN
+        Principal.VALIDATE("Contract Amount", ContractAmount);
+        Principal.MODIFY
+      END;
+    END;
+
+    BEGIN
+    {
+      140613  ITERO.MH Added responsible person when creating order in from WS.
+      140819  ITERO.MH Bug Adjustments
+      141116  ITERO.MH IME202, IME214 Corrections
+      141125  ITERO.MH IME229
+      150109  ITERO.MH IME248 No change
+      150413  ITERO.MH Added Symbrio export
+      150611  ITERO.MH Added extra SoapAction on WS call between 2 companies.
+      150612  ITERO.MH IME-289 Commented Price List validation and Bill-to Customer No. if not the same
+      150929  ITERO.MH RFC015 Moved ProjectCreation to Handyman Mgmt to make all calls use same code.
+      171026  ITERO.FH RFC235 Added function CreateOrUpdateSingelProject
+      180110  ITERO.DL RFC235 handle empty <Adress/>
+      180208  ITERO.DL RFC235B handle Encoding on selected fields
+      180511 ORANGO.FH RFC235C New function ContractAmountToPrincipal
+      200114 ORANGO.DL moved Symbrio-calls to Events in cod11127975
+      200220 ORANGO.FH RFC1297 Added field "DeliveryAddressNote" to function "CreateOrUpdateSingelProject"
+    }
+    END.
+  }
+}
+

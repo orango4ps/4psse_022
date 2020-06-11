@@ -1,0 +1,661 @@
+OBJECT Codeunit 6153 API Webhook Notification Mgt.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.00;
+  }
+  PROPERTIES
+  {
+    SingleInstance=Yes;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      TypeHelper@1010 : Codeunit 10;
+      IntegrationManagement@1008 : Codeunit 5150;
+      APIWebhookCategoryLbl@1001 : TextConst '@@@={Locked};ENU=AL API Webhook;NOR=AL API Webhook';
+      JobQueueCategoryCodeLbl@1015 : TextConst '@@@={Locked};ENU=APIWEBHOOK;NOR=APIWEBHOOK';
+      JobQueueCategoryDescLbl@1016 : TextConst 'ENU=Send API Webhook Notifications;NOR=Send API Webhook-varslinger';
+      CreateNotificationMsg@1002 : TextConst '@@@={Locked};ENU=Create new notification. Subscription expiration time: %1. Source table: %2. Last modified time: %3. Change type: %4. Notification ID: %5.;NOR=Create new notification. Subscription expiration time: %1. Source table: %2. Last modified time: %3. Change type: %4. Notification ID: %5.';
+      CannotCreateNotificationErr@1017 : TextConst '@@@={Locked};ENU=Cannot create new notification. Subscription expiration time: %1. Source table: %2. Last modified time: %3. Change type: %4.;NOR=Cannot create new notification. Subscription expiration time: %1. Source table: %2. Last modified time: %3. Change type: %4.';
+      FilterMatchingMsg@1021 : TextConst '@@@={Locked};ENU=The record in table %1 is matching the filter in %2 %3.;NOR=The record in table %1 is matching the filter in %2 %3.';
+      FilterMismatchingMsg@1020 : TextConst '@@@={Locked};ENU=The record in table %1 is mismatching the filter in %2 %3.;NOR=The record in table %1 is mismatching the filter in %2 %3.';
+      DeleteSubscriptionMsg@1019 : TextConst '@@@={Locked};ENU=Delete subscription. Subscription expiration time: %1. Source table: %2.;NOR=Delete subscription. Subscription expiration time: %1. Source table: %2.';
+      DeleteObsoleteOrUnsupportedSubscriptionMsg@1004 : TextConst '@@@={Locked};ENU=Delete subscription for an obsolete or unsupported entity.;NOR=Delete subscription for an obsolete or unsupported entity.';
+      UnsupportedFieldTypeErr@1007 : TextConst '@@@={Locked};ENU=The %1 field in the %2 table is of an unsupported type.;NOR=The %1 field in the %2 table is of an unsupported type.';
+      ChangeTypeOption@1006 : 'Created,Updated,Deleted,Collection';
+      CachedApiSubscriptionEnabled@1023 : Boolean;
+      FindingEntityMsg@1022 : TextConst '@@@={Locked};ENU=Finding entity for subscription. Subscription expiration time: %1. Source table: %2.;NOR=Finding entity for subscription. Subscription expiration time: %1. Source table: %2.';
+      CannotFindEntityErr@1000 : TextConst '@@@={Locked};ENU=Cannot find entity. Table: %1.;NOR=Cannot find entity. Table: %1.';
+      TemporarySourceTableErr@1009 : TextConst '@@@={Locked};ENU=No support for entities with a temporary source table. Table: %1.;NOR=No support for entities with a temporary source table. Table: %1.';
+      CompositeEntityKeyErr@1003 : TextConst '@@@={Locked};ENU=No support for entities with a composite key. Fields: %1. Table: %2.;NOR=No support for entities with a composite key. Fields: %1. Table: %2.';
+      IncorrectEntityKeyErr@1018 : TextConst '@@@={Locked};ENU=Incorrect entity key. Fields: %1. Table: %2.;NOR=Incorrect entity key. Fields: %1. Table: %2.';
+      ScheduleJobMsg@1024 : TextConst '@@@={Locked};ENU=Schedule job. Processing time: %1. Earliest start time: %2.;NOR=Schedule job. Processing time: %1. Earliest start time: %2.';
+      ReadyJobExistsMsg@1027 : TextConst '@@@={Locked};ENU=Ready job exists. Earliest start time: %1.;NOR=Ready job exists. Earliest start time: %1.';
+      CreateJobCategoryMsg@1012 : TextConst '@@@={Locked};ENU=Create new job category.;NOR=Create new job category.';
+      CreateJobMsg@1011 : TextConst '@@@={Locked};ENU=Create new job. Earliest start time: %1.;NOR=Create new job. Earliest start time: %1.';
+      UseCachedApiSubscriptionEnabled@1005 : Boolean;
+      TooManyJobsMsg@1013 : TextConst '@@@={Locked};ENU=New job is not created. Count of jobs cannot exceed %1.;NOR=New job is not created. Count of jobs cannot exceed %1.';
+      FieldTok@1030 : TextConst '@@@={Locked};ENU=Field;NOR=Field';
+      EqConstTok@1029 : TextConst '@@@={Locked};ENU="=CONST(";NOR="=CONST("';
+      EqFilterTok@1028 : TextConst '@@@={Locked};ENU="=FILTER(";NOR="=FILTER("';
+
+    PROCEDURE OnDatabaseInsert@2(VAR RecRef@1000 : RecordRef);
+    BEGIN
+      ProcessSubscriptions(RecRef,ChangeTypeOption::Created);
+    END;
+
+    PROCEDURE OnDatabaseModify@3(VAR RecRef@1000 : RecordRef);
+    BEGIN
+      ProcessSubscriptions(RecRef,ChangeTypeOption::Updated);
+    END;
+
+    PROCEDURE OnDatabaseDelete@4(VAR RecRef@1000 : RecordRef);
+    BEGIN
+      ProcessSubscriptions(RecRef,ChangeTypeOption::Deleted);
+    END;
+
+    PROCEDURE OnDatabaseRename@5(VAR RecRef@1000 : RecordRef;VAR xRecRef@1001 : RecordRef);
+    BEGIN
+      ProcessSubscriptionsOnRename(RecRef,xRecRef);
+    END;
+
+    LOCAL PROCEDURE ProcessSubscriptions@1(VAR RecRef@1001 : RecordRef;ChangeType@1005 : Option);
+    VAR
+      APIWebhookSubscription@1000 : Record 2000000095;
+      ScheduleJobQueue@1003 : Boolean;
+      EarliestStartDateTime@1002 : DateTime;
+    BEGIN
+      IF RecRef.ISTEMPORARY THEN
+        EXIT;
+
+      IF NOT GetSubscriptions(APIWebhookSubscription,RecRef.NUMBER) THEN
+        EXIT;
+
+      REPEAT
+        IF ProcessSubscription(RecRef,APIWebhookSubscription,ChangeType) THEN
+          ScheduleJobQueue := TRUE;
+      UNTIL APIWebhookSubscription.NEXT = 0;
+
+      IF ScheduleJobQueue THEN BEGIN
+        EarliestStartDateTime := CURRENTDATETIME + GetDelayTime;
+        ScheduleJob(EarliestStartDateTime);
+      END;
+    END;
+
+    LOCAL PROCEDURE ProcessSubscription@13(VAR RecRef@1000 : RecordRef;VAR APIWebhookSubscription@1001 : Record 2000000095;ChangeType@1003 : Option) : Boolean;
+    VAR
+      ApiWebhookEntity@1002 : Record 2000000097;
+    BEGIN
+      IF NOT GetEntity(APIWebhookSubscription,ApiWebhookEntity) THEN BEGIN
+        SENDTRACETAG('000024M',APIWebhookCategoryLbl,VERBOSITY::Warning,DeleteObsoleteOrUnsupportedSubscriptionMsg,
+          DATACLASSIFICATION::SystemMetadata);
+        EXIT(FALSE);
+      END;
+
+      IF CheckTableFilters(ApiWebhookEntity,RecRef) THEN
+        EXIT(RegisterNotification(ApiWebhookEntity,APIWebhookSubscription,RecRef,ChangeType));
+
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE ProcessSubscriptionsOnRename@21(VAR RecRef@1001 : RecordRef;VAR xRecRef@1002 : RecordRef);
+    VAR
+      APIWebhookSubscription@1000 : Record 2000000095;
+      ScheduleJobQueue@1003 : Boolean;
+      EarliestStartDateTime@1004 : DateTime;
+    BEGIN
+      IF RecRef.ISTEMPORARY THEN
+        EXIT;
+
+      IF NOT GetSubscriptions(APIWebhookSubscription,RecRef.NUMBER) THEN
+        EXIT;
+
+      REPEAT
+        IF ProcessSubscriptionOnRename(RecRef,xRecRef,APIWebhookSubscription) THEN
+          ScheduleJobQueue := TRUE;
+      UNTIL APIWebhookSubscription.NEXT = 0;
+
+      IF ScheduleJobQueue THEN BEGIN
+        EarliestStartDateTime := CURRENTDATETIME + GetDelayTime;
+        ScheduleJob(EarliestStartDateTime);
+      END;
+    END;
+
+    LOCAL PROCEDURE ProcessSubscriptionOnRename@19(VAR RecRef@1000 : RecordRef;VAR xRecRef@1004 : RecordRef;VAR APIWebhookSubscription@1001 : Record 2000000095) : Boolean;
+    VAR
+      ApiWebhookEntity@1002 : Record 2000000097;
+      RegisteredNotificationDeleted@1005 : Boolean;
+      RegisteredNotificationCreated@1006 : Boolean;
+    BEGIN
+      IF NOT GetEntity(APIWebhookSubscription,ApiWebhookEntity) THEN BEGIN
+        SENDTRACETAG('000024N',APIWebhookCategoryLbl,VERBOSITY::Warning,DeleteObsoleteOrUnsupportedSubscriptionMsg,
+          DATACLASSIFICATION::SystemMetadata);
+        EXIT(FALSE);
+      END;
+
+      IF ApiWebhookEntity."OData Key Specified" THEN BEGIN
+        IF NOT CheckTableFilters(ApiWebhookEntity,RecRef) THEN
+          EXIT(FALSE);
+        EXIT(RegisterNotification(ApiWebhookEntity,APIWebhookSubscription,RecRef,ChangeTypeOption::Updated));
+      END;
+
+      IF CheckTableFilters(ApiWebhookEntity,xRecRef) THEN
+        RegisteredNotificationDeleted :=
+          RegisterNotification(ApiWebhookEntity,APIWebhookSubscription,xRecRef,ChangeTypeOption::Deleted);
+      IF CheckTableFilters(ApiWebhookEntity,RecRef) THEN
+        RegisteredNotificationCreated :=
+          RegisterNotification(ApiWebhookEntity,APIWebhookSubscription,RecRef,ChangeTypeOption::Created);
+      EXIT(RegisteredNotificationDeleted OR RegisteredNotificationCreated);
+    END;
+
+    LOCAL PROCEDURE GetSubscriptions@7(VAR APIWebhookSubscription@1000 : Record 2000000095;TableId@1001 : Integer) : Boolean;
+    BEGIN
+      IF NOT IsApiSubscriptionEnabled THEN
+        EXIT(FALSE);
+
+      IF APIWebhookSubscription.ISEMPTY THEN
+        EXIT(FALSE);
+
+      APIWebhookSubscription.SETFILTER("Expiration Date Time",'>%1',CURRENTDATETIME);
+      APIWebhookSubscription.SETFILTER("Company Name",'%1|%2',COMPANYNAME,'');
+      APIWebhookSubscription.SETRANGE("Source Table Id",TableId);
+      EXIT(APIWebhookSubscription.FINDSET);
+    END;
+
+    [EventSubscriber(Codeunit,5150,OnEnabledDatabaseTriggersSetup)]
+    LOCAL PROCEDURE EnabledDatabaseTriggersSetup@23(TableID@1000 : Integer;VAR Enabled@1002 : Boolean);
+    VAR
+      APIWebhookSubscription@1001 : Record 2000000095;
+      GraphMgtGeneralTools@1003 : Codeunit 5465;
+    BEGIN
+      IF NOT GraphMgtGeneralTools.IsApiSubscriptionEnabled THEN BEGIN
+        Enabled := FALSE;
+        EXIT;
+      END;
+
+      APIWebhookSubscription.SETFILTER("Expiration Date Time",'>%1',CURRENTDATETIME);
+      APIWebhookSubscription.SETFILTER("Company Name",'%1|%2',COMPANYNAME,'');
+      APIWebhookSubscription.SETRANGE("Source Table Id",TableID);
+      Enabled := NOT APIWebhookSubscription.ISEMPTY;
+    END;
+
+    PROCEDURE GetEntity@14(VAR APIWebhookSubscription@1000 : Record 2000000095;VAR ApiWebhookEntity@1002 : Record 2000000097) : Boolean;
+    BEGIN
+      SENDTRACETAG('00006ZN',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(FindingEntityMsg,DateTimeToString(APIWebhookSubscription."Expiration Date Time"),
+          APIWebhookSubscription."Source Table Id"),
+        DATACLASSIFICATION::SystemMetadata);
+      ApiWebhookEntity.SETRANGE(Publisher,APIWebhookSubscription."Entity Publisher");
+      ApiWebhookEntity.SETRANGE(Group,APIWebhookSubscription."Entity Group");
+      ApiWebhookEntity.SETRANGE(Version,APIWebhookSubscription."Entity Version");
+      ApiWebhookEntity.SETRANGE(Name,APIWebhookSubscription."Entity Set Name");
+      ApiWebhookEntity.SETRANGE("Table No.",APIWebhookSubscription."Source Table Id");
+      IF NOT ApiWebhookEntity.FINDFIRST THEN BEGIN
+        SENDTRACETAG('000029S',APIWebhookCategoryLbl,VERBOSITY::Warning,
+          STRSUBSTNO(CannotFindEntityErr,APIWebhookSubscription."Source Table Id"),DATACLASSIFICATION::SystemMetadata);
+        EXIT(FALSE);
+      END;
+      IF ApiWebhookEntity."Table Temporary" THEN BEGIN
+        SENDTRACETAG('000029T',APIWebhookCategoryLbl,VERBOSITY::Warning,
+          STRSUBSTNO(TemporarySourceTableErr,ApiWebhookEntity."Table No."),
+          DATACLASSIFICATION::SystemMetadata);
+        EXIT(FALSE);
+      END;
+      IF STRPOS(ApiWebhookEntity."Key Fields",',') > 0 THEN BEGIN
+        SENDTRACETAG('000029U',APIWebhookCategoryLbl,VERBOSITY::Warning,
+          STRSUBSTNO(CompositeEntityKeyErr,ApiWebhookEntity."Key Fields",ApiWebhookEntity."Table No."),
+          DATACLASSIFICATION::SystemMetadata);
+        EXIT(FALSE);
+      END;
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE CheckTableFilters@93(VAR ApiWebhookEntity@1002 : Record 2000000097;VAR RecRef@1001 : RecordRef) : Boolean;
+    VAR
+      TempRecRef@1010 : RecordRef;
+      TableFilters@1000 : Text;
+    BEGIN
+      TableFilters := TypeHelper.GetBlobString(ApiWebhookEntity,ApiWebhookEntity.FIELDNO("Table Filters"));
+      IF TableFilters <> '' THEN BEGIN
+        TempRecRef.OPEN(RecRef.NUMBER,TRUE);
+        TempRecRef.INIT;
+        CopyPrimaryKeyFields(RecRef,TempRecRef);
+        CopyFilterFields(RecRef,TempRecRef,TableFilters);
+        TempRecRef.INSERT;
+        TempRecRef.SETVIEW(TableFilters);
+        IF TempRecRef.ISEMPTY THEN BEGIN
+          SENDTRACETAG('00006ZO',APIWebhookCategoryLbl,VERBOSITY::Normal,
+            STRSUBSTNO(FilterMismatchingMsg,RecRef.NUMBER,ApiWebhookEntity."Object Type",ApiWebhookEntity."Object ID"),
+            DATACLASSIFICATION::SystemMetadata);
+          EXIT(FALSE);
+        END;
+      END;
+      SENDTRACETAG('00006ZP',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(FilterMatchingMsg,RecRef.NUMBER,ApiWebhookEntity."Object Type",ApiWebhookEntity."Object ID"),
+        DATACLASSIFICATION::SystemMetadata);
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE CopyPrimaryKeyFields@53(VAR FromRecRef@1012 : RecordRef;VAR ToRecRef@1013 : RecordRef);
+    VAR
+      KeyRef@1001 : KeyRef;
+      FromFieldRef@1017 : FieldRef;
+      I@1006 : Integer;
+    BEGIN
+      KeyRef := FromRecRef.KEYINDEX(1);
+      FOR I := 1 TO KeyRef.FIELDCOUNT DO BEGIN
+        FromFieldRef := KeyRef.FIELDINDEX(I);
+        CopyFieldValue(FromFieldRef,ToRecRef);
+      END;
+    END;
+
+    LOCAL PROCEDURE CopyFilterFields@28(VAR FromRecRef@1012 : RecordRef;VAR ToRecRef@1013 : RecordRef;TableFilters@1001 : Text);
+    VAR
+      FromFieldRef@1017 : FieldRef;
+      RemainingTableFilters@1000 : Text;
+      FieldNoTxt@1002 : Text;
+      FieldNo@1003 : Integer;
+      FieldTokLen@1004 : Integer;
+      Pos@1005 : Integer;
+      EqPos@1008 : Integer;
+      I@1006 : Integer;
+      N@1007 : Integer;
+    BEGIN
+      FieldTokLen := STRLEN(FieldTok);
+      N := STRLEN(TableFilters);
+      RemainingTableFilters := TableFilters;
+      FOR I := 0 TO N DO
+        IF STRLEN(RemainingTableFilters) > 0 THEN BEGIN
+          Pos := STRPOS(RemainingTableFilters,FieldTok);
+          IF Pos > 0 THEN BEGIN
+            RemainingTableFilters := COPYSTR(RemainingTableFilters,Pos + FieldTokLen);
+            EqPos := STRPOS(RemainingTableFilters,EqConstTok);
+            // At least one digit must be before "=" sign
+            IF EqPos < 2 THEN
+              EqPos := STRPOS(RemainingTableFilters,EqFilterTok);
+            // Integer max value is 2,147,483,647 so no more then Text[10]
+            IF (EqPos > 1) AND (EqPos < 12) THEN BEGIN
+              FieldNoTxt := COPYSTR(RemainingTableFilters,1,EqPos - 1);
+              IF EVALUATE(FieldNo,FieldNoTxt) THEN
+                IF FieldNo <= ToRecRef.FIELDCOUNT THEN BEGIN
+                  FromFieldRef := FromRecRef.FIELD(FieldNo);
+                  CopyFieldValue(FromFieldRef,ToRecRef);
+                END;
+            END;
+          END;
+        END ELSE
+          I := N;
+    END;
+
+    LOCAL PROCEDURE CopyFieldValue@60(VAR FromFieldRef@1000 : FieldRef;VAR ToRecordRef@1013 : RecordRef);
+    VAR
+      ToFieldRef@1001 : FieldRef;
+    BEGIN
+      IF FORMAT(FromFieldRef.CLASS) = 'Normal' THEN BEGIN
+        ToFieldRef := ToRecordRef.FIELD(FromFieldRef.NUMBER);
+        ToFieldRef.VALUE := FromFieldRef.VALUE;
+      END;
+    END;
+
+    PROCEDURE DeleteSubscription@30(VAR APIWebhookSubscription@1000 : Record 2000000095);
+    VAR
+      APIWebhookNotification@1001 : Record 2000000096;
+      APIWebhookNotificationAggr@1002 : Record 2000000098;
+    BEGIN
+      SENDTRACETAG('00006ZQ',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(DeleteSubscriptionMsg,
+          DateTimeToString(APIWebhookSubscription."Expiration Date Time"),APIWebhookSubscription."Source Table Id"),
+        DATACLASSIFICATION::SystemMetadata);
+      APIWebhookNotification.SETRANGE("Subscription ID",APIWebhookSubscription."Subscription Id");
+      IF NOT APIWebhookNotification.ISEMPTY THEN
+        APIWebhookNotification.DELETEALL(TRUE);
+
+      APIWebhookNotificationAggr.SETRANGE("Subscription ID",APIWebhookSubscription."Subscription Id");
+      IF NOT APIWebhookNotificationAggr.ISEMPTY THEN
+        APIWebhookNotificationAggr.DELETEALL(TRUE);
+
+      IF NOT APIWebhookSubscription.DELETE THEN ;
+    END;
+
+    LOCAL PROCEDURE RegisterNotification@33(VAR ApiWebhookEntity@1002 : Record 2000000097;VAR APIWebhookSubscription@1000 : Record 2000000095;VAR RecRef@1001 : RecordRef;ChangeType@1005 : Option) : Boolean;
+    VAR
+      APIWebhookNotification@1004 : Record 2000000096;
+      FieldRef@1006 : FieldRef;
+      FieldValue@1003 : Text;
+    BEGIN
+      IF TryGetEntityKeyValue(ApiWebhookEntity,RecRef,FieldValue) THEN BEGIN
+        APIWebhookNotification.ID := CREATEGUID;
+        APIWebhookNotification."Subscription ID" := APIWebhookSubscription."Subscription Id";
+        APIWebhookNotification."Created By User SID" := USERSECURITYID;
+        APIWebhookNotification."Change Type" := ChangeType;
+        IF APIWebhookNotification."Change Type" = APIWebhookNotification."Change Type"::Deleted THEN
+          APIWebhookNotification."Last Modified Date Time" := CURRENTDATETIME
+        ELSE
+          APIWebhookNotification."Last Modified Date Time" := GetLastModifiedDateTime(RecRef,FieldRef);
+        APIWebhookNotification."Entity Key Value" := COPYSTR(FieldValue,1,MAXSTRLEN(APIWebhookNotification."Entity Key Value"));
+        IF APIWebhookNotification.INSERT(TRUE) THEN BEGIN
+          SENDTRACETAG('000024P',APIWebhookCategoryLbl,VERBOSITY::Normal,
+            STRSUBSTNO(CreateNotificationMsg,
+              DateTimeToString(APIWebhookSubscription."Expiration Date Time"),APIWebhookSubscription."Source Table Id",
+              DateTimeToString(APIWebhookNotification."Last Modified Date Time"),
+              APIWebhookNotification."Change Type",APIWebhookNotification.ID),
+            DATACLASSIFICATION::SystemMetadata);
+          EXIT(TRUE);
+        END;
+      END;
+
+      SENDTRACETAG('000029L',APIWebhookCategoryLbl,VERBOSITY::Error,
+        STRSUBSTNO(CannotCreateNotificationErr,
+          DateTimeToString(APIWebhookSubscription."Expiration Date Time"),APIWebhookSubscription."Source Table Id",
+          DateTimeToString(APIWebhookNotification."Last Modified Date Time"),APIWebhookNotification."Change Type"),
+        DATACLASSIFICATION::SystemMetadata);
+      EXIT(FALSE);
+    END;
+
+    PROCEDURE TryGetEntityKeyField@6(VAR ApiWebhookEntity@1004 : Record 2000000097;VAR RecRef@1000 : RecordRef;VAR FieldRef@1005 : FieldRef) : Boolean;
+    VAR
+      ErrorMessage@1001 : Text;
+      FieldNo@1006 : Integer;
+    BEGIN
+      IF STRPOS(ApiWebhookEntity."Key Fields",',') > 0 THEN BEGIN
+        ErrorMessage := STRSUBSTNO(CompositeEntityKeyErr,ApiWebhookEntity."Key Fields",RecRef.NUMBER);
+        SENDTRACETAG('000029M',APIWebhookCategoryLbl,VERBOSITY::Warning,ErrorMessage,DATACLASSIFICATION::SystemMetadata);
+        EXIT(FALSE);
+      END;
+
+      IF NOT EVALUATE(FieldNo,ApiWebhookEntity."Key Fields") THEN BEGIN
+        ErrorMessage := STRSUBSTNO(IncorrectEntityKeyErr,ApiWebhookEntity."Key Fields",RecRef.NUMBER);
+        SENDTRACETAG('000029N',APIWebhookCategoryLbl,VERBOSITY::Error,ErrorMessage,DATACLASSIFICATION::SystemMetadata);
+        EXIT(FALSE);
+      END;
+
+      FieldRef := RecRef.FIELD(FieldNo);
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE TryGetEntityKeyValue@82(VAR ApiWebhookEntity@1004 : Record 2000000097;VAR RecRef@1000 : RecordRef;VAR FieldValue@1002 : Text) : Boolean;
+    VAR
+      FieldRef@1010 : FieldRef;
+    BEGIN
+      IF NOT TryGetEntityKeyField(ApiWebhookEntity,RecRef,FieldRef) THEN
+        EXIT(FALSE);
+
+      IF NOT GetRawFieldValue(FieldRef,FieldValue) THEN
+        EXIT(FALSE);
+
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE GetRawFieldValue@44(VAR FieldRef@1000 : FieldRef;VAR Value@1003 : Text) : Boolean;
+    VAR
+      Date@1005 : Date;
+      Time@1002 : Time;
+      DateTime@1006 : DateTime;
+      BigInt@1001 : BigInteger;
+      Decimal@1011 : Decimal;
+      Bool@1004 : Boolean;
+      Guid@1008 : GUID;
+      ErrorMessage@1007 : Text;
+    BEGIN
+      CASE FORMAT(FieldRef.TYPE) OF
+        'GUID':
+          BEGIN
+            Guid := FieldRef.VALUE;
+            Value := LOWERCASE(IntegrationManagement.GetIdWithoutBrackets(Guid));
+          END;
+        'Code','Text':
+          BEGIN
+            Value := FieldRef.VALUE;
+            IF Value <> '' THEN
+              Value := FORMAT(FieldRef.VALUE);
+          END;
+        'Option':
+          Value := FORMAT(FieldRef);
+        'Integer','BigInteger','Byte':
+          Value := FORMAT(FieldRef.VALUE);
+        'Boolean':
+          BEGIN
+            Bool := FieldRef.VALUE;
+            Value := SetBoolFormat(Bool);
+          END;
+        'Date':
+          BEGIN
+            Date := FieldRef.VALUE;
+            Value := SetDateFormat(Date);
+          END;
+        'Time':
+          BEGIN
+            Time := FieldRef.VALUE;
+            Value := SetTimeFormat(Time);
+          END;
+        'DateTime':
+          BEGIN
+            DateTime := FieldRef.VALUE;
+            Value := SetDateTimeFormat(DateTime);
+          END;
+        'Duration':
+          BEGIN
+            BigInt := FieldRef.VALUE;
+            // Use round to avoid conversion errors due to the conversion from decimal to long.
+            BigInt := ROUND(BigInt / 60000,1);
+            Value := FORMAT(BigInt);
+          END;
+        'DateFormula':
+          Value := FORMAT(FieldRef.VALUE);
+        'Decimal':
+          BEGIN
+            Decimal := FieldRef.VALUE;
+            Value := SetDecimalFormat(Decimal);
+          END;
+        ELSE BEGIN
+          ErrorMessage := STRSUBSTNO(UnsupportedFieldTypeErr,FieldRef.CAPTION,FieldRef.RECORD.CAPTION);
+          SENDTRACETAG('000029O',APIWebhookCategoryLbl,VERBOSITY::Error,ErrorMessage,DATACLASSIFICATION::SystemMetadata);
+          EXIT(FALSE);
+        END;
+      END;
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE SetDateFormat@45(InDate@1000 : Date) OutDate : Text;
+    BEGIN
+      OutDate := FORMAT(InDate,0,'<Year4>-<Month,2>-<Day,2>');
+    END;
+
+    LOCAL PROCEDURE SetTimeFormat@46(InTime@1000 : Time) OutTime : Text;
+    BEGIN
+      OutTime := CONVERTSTR(FORMAT(InTime,0,'<Hours24,2>:<Minutes,2>:<Seconds,2>'),' ','0');
+    END;
+
+    LOCAL PROCEDURE SetDateTimeFormat@68(InDateTime@1000 : DateTime) OutDateTime : Text;
+    BEGIN
+      IF InDateTime = 0DT THEN
+        OutDateTime := SetDateFormat(0D) + 'T' + SetTimeFormat(0T) + 'Z'
+      ELSE
+        OutDateTime := SetDateFormat(DT2DATE(InDateTime)) + 'T' + SetTimeFormat(DT2TIME(InDateTime)) + 'Z';
+    END;
+
+    LOCAL PROCEDURE SetDecimalFormat@48(InDecimal@1000 : Decimal) OutDecimal : Text;
+    BEGIN
+      OutDecimal := FORMAT(InDecimal,0,'<Sign>') + FORMAT(InDecimal,0,'<Integer>');
+
+      IF COPYSTR(FORMAT(InDecimal,0,'<Decimals>'),2) <> '' THEN
+        OutDecimal := OutDecimal + '.' + COPYSTR(FORMAT(InDecimal,0,'<Decimals>'),2)
+      ELSE
+        OutDecimal := OutDecimal + '.0';
+    END;
+
+    LOCAL PROCEDURE SetBoolFormat@47(InBoolean@1000 : Boolean) OutBoolean : Text;
+    BEGIN
+      IF InBoolean THEN
+        OutBoolean := 'true'
+      ELSE
+        OutBoolean := 'false';
+    END;
+
+    LOCAL PROCEDURE GetLastModifiedDateTime@25(VAR RecRef@1002 : RecordRef;VAR FieldRef@1001 : FieldRef) : DateTime;
+    VAR
+      LastModifiedDateTime@1000 : DateTime;
+    BEGIN
+      IF FindLastModifiedDateTimeField(RecRef,FieldRef) THEN
+        LastModifiedDateTime := FieldRef.VALUE
+      ELSE
+        LastModifiedDateTime := CURRENTDATETIME;
+      EXIT(LastModifiedDateTime);
+    END;
+
+    PROCEDURE FindLastModifiedDateTimeField@22(VAR RecRef@1001 : RecordRef;VAR FieldRef@1003 : FieldRef) : Boolean;
+    VAR
+      Field@1002 : Record 2000000041;
+    BEGIN
+      Field.SETRANGE(TableNo,RecRef.NUMBER);
+      Field.SETFILTER(ObsoleteState,'<>%1',Field.ObsoleteState::Removed);
+      Field.SETRANGE(Type,Field.Type::DateTime);
+      Field.SETFILTER(FieldName,'%1|%2|%3|%4',
+        'Last Modified Date Time','Last Modified DateTime','Last DateTime Modified','Last Date Time Modified');
+
+      IF NOT Field.FINDFIRST THEN
+        EXIT(FALSE);
+
+      FieldRef := RecRef.FIELD(Field."No.");
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE ScheduleJob@8(EarliestStartDateTime@1001 : DateTime);
+    VAR
+      JobQueueEntry@1000 : Record 472;
+      ProcessingDateTime@1002 : DateTime;
+    BEGIN
+      ProcessingDateTime := CURRENTDATETIME;
+
+      SENDTRACETAG('000070M',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(ScheduleJobMsg,DateTimeToString(ProcessingDateTime),DateTimeToString(EarliestStartDateTime)),
+        DATACLASSIFICATION::SystemMetadata);
+
+      JobQueueEntry.SETRANGE("Object Type to Run",JobQueueEntry."Object Type to Run"::Codeunit);
+      JobQueueEntry.SETRANGE("Object ID to Run",CODEUNIT::"API Webhook Notification Send");
+      JobQueueEntry.SETRANGE("Job Queue Category Code",JobQueueCategoryCodeLbl);
+      JobQueueEntry.SETRANGE(Status,JobQueueEntry.Status::Ready);
+      JobQueueEntry.SETFILTER("Earliest Start Date/Time",'<=%1',EarliestStartDateTime);
+      IF JobQueueEntry.FINDFIRST THEN BEGIN
+        JobQueueEntry.CALCFIELDS(Scheduled);
+        IF JobQueueEntry.Scheduled THEN BEGIN
+          SENDTRACETAG('000070O',APIWebhookCategoryLbl,VERBOSITY::Normal,
+            STRSUBSTNO(ReadyJobExistsMsg,DateTimeToString(JobQueueEntry."Earliest Start Date/Time")),
+            DATACLASSIFICATION::SystemMetadata);
+          EXIT;
+        END;
+      END;
+
+      JobQueueEntry.SETRANGE(Status);
+      JobQueueEntry.SETRANGE("Earliest Start Date/Time");
+      IF JobQueueEntry.COUNT >= GetMaxNumberOfJobs THEN BEGIN
+        SENDTRACETAG('000070P',APIWebhookCategoryLbl,VERBOSITY::Normal,STRSUBSTNO(TooManyJobsMsg,GetMaxNumberOfJobs),
+          DATACLASSIFICATION::SystemMetadata);
+        EXIT;
+      END;
+
+      CreateJob(EarliestStartDateTime);
+    END;
+
+    LOCAL PROCEDURE CreateJob@38(EarliestStartDateTime@1001 : DateTime);
+    VAR
+      JobQueueEntry@1000 : Record 472;
+    BEGIN
+      IF EarliestStartDateTime = 0DT THEN
+        EarliestStartDateTime := CURRENTDATETIME + GetDelayTime;
+
+      SENDTRACETAG('00006ZR',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(CreateJobMsg,DateTimeToString(EarliestStartDateTime)),DATACLASSIFICATION::SystemMetadata);
+
+      SetJobParameters(JobQueueEntry,EarliestStartDateTime);
+      CODEUNIT.RUN(CODEUNIT::"Job Queue - Enqueue",JobQueueEntry);
+    END;
+
+    LOCAL PROCEDURE SetJobParameters@15(VAR JobQueueEntry@1000 : Record 472;EarliestStartDateTime@1001 : DateTime);
+    BEGIN
+      CreateApiWebhookJobCategoryIfMissing;
+
+      JobQueueEntry."Object Type to Run" := JobQueueEntry."Object Type to Run"::Codeunit;
+      JobQueueEntry."Object ID to Run" := CODEUNIT::"API Webhook Notification Send";
+      JobQueueEntry."Job Queue Category Code" :=
+        COPYSTR(JobQueueCategoryCodeLbl,1,MAXSTRLEN(JobQueueEntry."Job Queue Category Code"));
+      JobQueueEntry."Earliest Start Date/Time" := EarliestStartDateTime;
+      JobQueueEntry."Recurring Job" := FALSE;
+      JobQueueEntry."Maximum No. of Attempts to Run" := 2;
+      JobQueueEntry."Rerun Delay (sec.)" := GetDelayTime DIV 1000;
+    END;
+
+    LOCAL PROCEDURE CreateApiWebhookJobCategoryIfMissing@41();
+    VAR
+      JobQueueCategory@1001 : Record 471;
+    BEGIN
+      IF NOT JobQueueCategory.GET(JobQueueCategoryCodeLbl) THEN BEGIN
+        SENDTRACETAG('00006ZS',APIWebhookCategoryLbl,VERBOSITY::Normal,CreateJobCategoryMsg,DATACLASSIFICATION::SystemMetadata);
+        JobQueueCategory.VALIDATE(Code,COPYSTR(JobQueueCategoryCodeLbl,1,MAXSTRLEN(JobQueueCategory.Code)));
+        JobQueueCategory.VALIDATE(Description,COPYSTR(JobQueueCategoryDescLbl,1,MAXSTRLEN(JobQueueCategory.Description)));
+        JobQueueCategory.INSERT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE GetDelayTime@18() : Integer;
+    VAR
+      ServerConfigSettingHandler@1000 : Codeunit 6723;
+      Handled@1001 : Boolean;
+      DelayTime@1002 : Integer;
+    BEGIN
+      OnGetDelayTime(Handled,DelayTime);
+      IF Handled THEN
+        EXIT(DelayTime);
+
+      DelayTime := ServerConfigSettingHandler.GetApiSubscriptionDelayTime;
+      EXIT(DelayTime);
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnGetDelayTime@16(VAR Handled@1000 : Boolean;VAR Value@1001 : Integer);
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE IsApiSubscriptionEnabled@12() : Boolean;
+    VAR
+      GraphMgtGeneralTools@1000 : Codeunit 5465;
+    BEGIN
+      IF UseCachedApiSubscriptionEnabled THEN
+        EXIT(CachedApiSubscriptionEnabled);
+
+      CachedApiSubscriptionEnabled := GraphMgtGeneralTools.IsApiSubscriptionEnabled;
+      UseCachedApiSubscriptionEnabled := TRUE;
+
+      EXIT(CachedApiSubscriptionEnabled);
+    END;
+
+    PROCEDURE Reset@9();
+    BEGIN
+      UseCachedApiSubscriptionEnabled := FALSE;
+      CLEAR(CachedApiSubscriptionEnabled);
+    END;
+
+    LOCAL PROCEDURE GetMaxNumberOfJobs@104() : Integer;
+    BEGIN
+      EXIT(20);
+    END;
+
+    LOCAL PROCEDURE DateTimeToString@11(Value@1000 : DateTime) : Text;
+    BEGIN
+      EXIT(FORMAT(Value,0,'<Year4>-<Month,2>-<Day,2> <Hours24>:<Minutes,2>:<Seconds,2><Second dec.><Comma,.>'));
+    END;
+
+    BEGIN
+    {
+      Registers notifications in table API Webhook Notification on entity insert, modify, rename and delete
+    }
+    END.
+  }
+}
+

@@ -1,0 +1,1480 @@
+OBJECT Table 11012038 Hour Accounting
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00,4PSSE;
+  }
+  PROPERTIES
+  {
+    OnInsert=BEGIN
+               VALIDATE(Week,Week);
+               TESTFIELD("Employee No.");
+               //"Delivery Date" := TODAY;
+               //"Recorded By" := USERID;
+               Received := TRUE;
+               CheckPostedHours;
+
+               "Inserted On" := TODAY;
+               "Inserted By" := USERID;
+             END;
+
+    OnModify=BEGIN
+               "Recorded By" := USERID;
+
+               "Modified On" := TODAY;
+               "Modified By" := USERID;
+             END;
+
+    OnDelete=BEGIN
+               HourLineRec.SETRANGE(Year,Year);
+               HourLineRec.SETRANGE(Week,Week);
+               HourLineRec.SETRANGE("Employee No.","Employee No.");
+               HourLineRec.SetFromDeleteHeader;
+               //HourLineRec.DELETEALL(TRUE);
+               IF HourLineRec.FINDSET THEN
+                 REPEAT
+                   HourLineRec.DELETE(TRUE);
+                 UNTIL HourLineRec.NEXT = 0;
+
+               //>> 170516 IME483  //180412 changed from ProcessedHoursConsentLine to HoursConsentLine
+               HoursConsentLine.SETRANGE(Year, Year);
+               HoursConsentLine.SETRANGE(Week, Week);
+               HoursConsentLine.SETRANGE(Employee, "Employee No.");
+               IF HoursConsentLine.FINDSET(TRUE) THEN
+                  HoursConsentLine.DELETEALL;
+               //<< 170516 IME483
+             END;
+
+    OnRename=VAR
+               lvProjHourAccHeadRec@1100485000 : Record 11020224;
+             BEGIN
+               VALIDATE(Week,Week);
+               TESTFIELD("Employee No.");
+               VALIDATE("Employee No.","Employee No."); //**4PS01.n
+               CheckPostedHours;
+
+               HourLineRec.SETRANGE(Year,xRec.Year);
+               HourLineRec.SETRANGE(Week,xRec.Week);
+               HourLineRec.SETRANGE("Employee No.",xRec."Employee No.");
+               IF HourLineRec.FINDSET(TRUE, FALSE) THEN
+                 REPEAT
+                   //IF NOT HourLineRec.LineIsEditable THEN
+                   //  ERROR('');
+                   //* project-hour accounting not updated, remained with old values (year/week/employee).
+                   //* Rename not allowed if connection.
+                   IF HourLineRec."Connection No." <> 0 THEN
+                     ERROR(Text007, HourLineRec.TABLECAPTION, HourLineRec."Line No.", lvProjHourAccHeadRec.TABLECAPTION);
+                   HourLineRec2.TRANSFERFIELDS(HourLineRec);
+                   HourLineRec2.Year := Year;
+                   HourLineRec2.Week := Week;
+                   HourLineRec2."Employee No." := "Employee No.";
+                   HourLineRec2."Document No." := "Document No.";
+                   HourLineRec2."Posting Date" := "Posting Date";
+                   HourLineRec2.CheckPostingDate;
+                   HourLineRec2.GetFixedEmployeeData;
+                   HourLineRec2.CalcRateAndAmount;
+
+                   HourLineRec2.SetRenameHeader(TRUE);
+                   HourLineRec2.INSERT(TRUE);
+                   HourLineRec.DELETE(TRUE);
+                 UNTIL HourLineRec.NEXT = 0;
+
+               //>>141104 ENH050
+               UpdateDocumentDate;
+               //<<141104 ENH050
+             END;
+
+    CaptionML=[ENU=Hour Accounting;
+               NOR=Timerapportering;
+               SVE=Tidrapportering];
+    LookupPageID=Page11012039;
+  }
+  FIELDS
+  {
+    { 20  ;   ;Year                ;Integer       ;OnValidate=BEGIN
+                                                                IF CurrFieldNo = FIELDNO(Year) THEN //C014672
+                                                                  TESTFIELD(Status, Status::Open);
+                                                                Date.RESET;
+                                                                Date.SETRANGE("Period Type",Date."Period Type"::Year);
+                                                                Date.SETRANGE("Period No.",Year);
+                                                                IF NOT Date.FINDFIRST THEN
+                                                                  FIELDERROR(Year);
+
+                                                                StartDateYear := Date."Period Start";
+                                                                YearEndDate := Date."Period End";
+                                                              END;
+
+                                                   CaptionML=[ENU=Year;
+                                                              NOR=èr;
+                                                              SVE=èr];
+                                                   MinValue=1 }
+    { 30  ;   ;Week                ;Integer       ;OnValidate=BEGIN
+                                                                TESTFIELD(Status, Status::Open);
+                                                                IF Year = 0 THEN
+                                                                  Year := DATE2DMY(TODAY, 3);
+                                                                VALIDATE(Year,Year);
+                                                                Date.RESET;
+                                                                Date.SETRANGE("Period Type",Date."Period Type"::Week);
+                                                                Date.SETRANGE("Period No.",Week);
+                                                                Date.SETRANGE("Period Start",CALCDATE('<-3D>',StartDateYear),YearEndDate);
+                                                                Date.SETRANGE("Period End",StartDateYear,CALCDATE('<+3D>',YearEndDate));
+                                                                IF NOT Date.FINDFIRST THEN
+                                                                  FIELDERROR(Week);
+
+                                                                GetPostingDate(COMPANYNAME);
+                                                                FillDocumentNo(COMPANYNAME);
+
+                                                                IF ("Posting Date" <> xRec."Posting Date") OR
+                                                                   ("Document No." <> xRec."Document No.") THEN
+                                                                BEGIN
+                                                                  HourLineRec.SETRANGE(Year, Year);
+                                                                  HourLineRec.SETRANGE(Week, Week);
+                                                                  HourLineRec.SETRANGE("Employee No.", "Employee No.");
+                                                                  IF NOT HourLineRec.ISEMPTY THEN BEGIN    //**4PS02.sn
+                                                                    HourLineRec.MODIFYALL("Posting Date", "Posting Date");
+                                                                    HourLineRec.MODIFYALL("Document No.", "Document No.");
+                                                                  END;
+                                                                END;
+
+                                                                VALIDATE("Employee No.","Employee No."); //**4PS01.n
+
+                                                                //>>141104 ENH050
+                                                                UpdateDocumentDate;
+                                                                //<<141104 ENH050
+                                                              END;
+
+                                                   OnLookup=VAR
+                                                              DateSelectionManagement@1100525000 : Codeunit 11130005;
+                                                            BEGIN
+                                                              DateSelectionManagement.GetWeekYear(Week, Year);
+                                                              VALIDATE(Week);
+                                                            END;
+
+                                                   CaptionML=[ENU=Week;
+                                                              NOR=Uke;
+                                                              SVE=Vecka];
+                                                   MinValue=1;
+                                                   MaxValue=53 }
+    { 39  ;   ;Supplying Company   ;Text30        ;TableRelation=Company;
+                                                   OnValidate=BEGIN
+                                                                TESTFIELD(Status, Status::Open);
+                                                              END;
+
+                                                   CaptionML=[ENU=Supplying Company;
+                                                              NOR=Leverende  selskap;
+                                                              SVE=Levererande fîretag] }
+    { 40  ;   ;Employee No.        ;Code20        ;TableRelation=IF (Supplying Company=FILTER('')) Employee.No.;
+                                                   OnValidate=BEGIN
+                                                                IF CurrFieldNo = FIELDNO("Employee No.") THEN
+                                                                  //A validate will also be done at posting
+                                                                  TESTFIELD(Status, Status::Open);
+                                                                IF "Employee No." <> '' THEN BEGIN
+                                                                  FillEmployeeRelatedFields;
+
+                                                                  //**4PS01.sn
+
+                                                                  IF Year = 0 THEN Year := DATE2DMY(TODAY, 3);
+                                                                  VALIDATE(Year,Year);
+                                                                  Date.RESET;
+                                                                  Date.SETRANGE("Period Type",Date."Period Type"::Week);
+                                                                  Date.SETRANGE("Period No.",Week);
+                                                                  Date.SETRANGE("Period Start",CALCDATE('<-3D',StartDateYear),YearEndDate);
+                                                                  Date.SETRANGE("Period End",StartDateYear,CALCDATE('<+3D>',YearEndDate));
+                                                                  IF Date.FINDFIRST THEN BEGIN
+                                                                    IF ((EmplRec.Status <> EmplRec.Status::Active) OR (EmplRec."Inactive Date" <> 0D) OR (EmplRec."Termination Date" <> 0D)) AND (Week <> 0) THEN BEGIN
+                                                                      IF (EmplRec."Termination Date" < Date."Period Start") AND (EmplRec."Termination Date" <> 0D) THEN
+                                                                        ERROR(Text005, EmplRec."Termination Date", EmplRec."No.")
+                                                                      ELSE BEGIN
+                                                                        IF (EmplRec."Inactive Date" < Date."Period Start") AND (EmplRec."Inactive Date" <> 0D) AND (NOT gSuppressMess) THEN
+                                                                          IF (("Employee No." <> xRec."Employee No.") AND (CurrFieldNo = FIELDNO("Employee No."))) OR
+                                                                              ((Week <> xRec.Week) AND (CurrFieldNo = FIELDNO(Week))) OR
+                                                                              (CurrFieldNo = 0)
+                                                                          THEN
+                                                                            ERROR(Text004, EmplRec."Inactive Date", EmplRec."No.");
+                                                                      END;
+                                                                    END;
+                                                                    IF (EmplRec."Employment Date" > Date."Period End") THEN
+                                                                      ERROR(Text012, EmplRec."Employment Date", EmplRec."No.");
+                                                                  END;
+
+                                                                  //**4PS01.en
+                                                                  IF EmplRec."Account Hours" = EmplRec."Account Hours"::"Not allowed" THEN
+                                                                    EmplRec.FIELDERROR("Account Hours");
+                                                                  IF "Employee No." <> xRec."Employee No." THEN
+                                                                    FillCheckByWithDefaultValue;
+                                                                END;
+                                                              END;
+
+                                                   CaptionML=[ENU=Employee No.;
+                                                              NOR=Ansattnr;
+                                                              SVE=AnstÑllningsnr] }
+    { 41  ;   ;Document No.        ;Code20        ;OnValidate=VAR
+                                                                HourLineRec@1100485000 : Record 11012039;
+                                                              BEGIN
+                                                                HourLineRec.SETRANGE(Year,Year);
+                                                                HourLineRec.SETRANGE(Week,Week);
+                                                                HourLineRec.SETRANGE("Employee No.","Employee No.");
+                                                                HourLineRec.SETRANGE("Document No.",xRec."Document No.");
+                                                                IF HourLineRec.FINDFIRST THEN
+                                                                  HourLineRec.TESTFIELD("Document No.", "Document No.");
+                                                              END;
+
+                                                   CaptionML=[ENU=Document No.;
+                                                              NOR=Bilagsnr.;
+                                                              SVE=Verifikationsnr] }
+    { 42  ;   ;Posting Date        ;Date          ;CaptionML=[ENU=Posting Date;
+                                                              NOR=Bokfõringsdato;
+                                                              SVE=Bokfîringsdatum];
+                                                   Editable=No }
+    { 45  ;   ;First Name          ;Text30        ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup(Employee."First Name" WHERE (No.=FIELD(Employee No.)));
+                                                   CaptionML=[ENU=First Name;
+                                                              NOR=Fornavn;
+                                                              SVE=Tilltalsnamn];
+                                                   Editable=No }
+    { 50  ;   ;Last Name           ;Text30        ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup(Employee."Last Name" WHERE (No.=FIELD(Employee No.)));
+                                                   CaptionML=[ENU=Last Name;
+                                                              NOR=Etternavn;
+                                                              SVE=Last Name];
+                                                   Editable=No }
+    { 55  ;   ;Full Name           ;Text100       ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup(Employee."Full Name" WHERE (No.=FIELD(Employee No.)));
+                                                   CaptionML=[ENU=Full name;
+                                                              NOR=Fullt navn;
+                                                              SVE=FullstÑndigt namn];
+                                                   Editable=No }
+    { 70  ;   ;No. of Hour Lines   ;Integer       ;FieldClass=FlowField;
+                                                   CalcFormula=Count("Hour Accounting Line" WHERE (Year=FIELD(Year),
+                                                                                                   Week=FIELD(Week),
+                                                                                                   Employee No.=FIELD(Employee No.),
+                                                                                                   Component Type=FILTER(Hours)));
+                                                   CaptionML=[ENU=No. of Hour Lines;
+                                                              NOR=Antall timerader;
+                                                              SVE=Antal timrader];
+                                                   Editable=No }
+    { 75  ;   ;No. of Expense Lines;Integer       ;FieldClass=FlowField;
+                                                   CalcFormula=Count("Hour Accounting Line" WHERE (Year=FIELD(Year),
+                                                                                                   Week=FIELD(Week),
+                                                                                                   Employee No.=FIELD(Employee No.),
+                                                                                                   Component Type=FILTER(Expenses)));
+                                                   CaptionML=[ENU=No. of Expense Lines;
+                                                              NOR=Antall kostrader;
+                                                              SVE=Antal kostnadsrader];
+                                                   Editable=No }
+    { 80  ;   ;External            ;Boolean       ;CaptionML=[ENU=External;
+                                                              NOR=Eksternt;
+                                                              SVE=Externt];
+                                                   Editable=No }
+    { 90  ;   ;Employer            ;Code20        ;TableRelation=IF (External=CONST(Yes)) Vendor.No.
+                                                                 ELSE IF (External=CONST(No)) Employer.Code;
+                                                   CaptionML=[ENU=Employer;
+                                                              NOR=Arbeidsgiver;
+                                                              SVE=Arbetsgivare];
+                                                   Editable=No }
+    { 100 ;   ;Department Code     ;Code20        ;TableRelation="Dimension Value".Code WHERE (Global Dimension No.=CONST(1));
+                                                   CaptionML=[ENU=Global Dimension 1 Code;
+                                                              NOR=Avdelingskode;
+                                                              SVE=Mottagande avdelningskod];
+                                                   CaptionClass='1,1,1' }
+    { 110 ;   ;Status              ;Option        ;OnValidate=VAR
+                                                                HumanResourcesSetup@1100525000 : Record 5218;
+                                                              BEGIN
+                                                                HumanResourcesSetup.GET;
+                                                                IF NOT HumanResourcesSetup."Activation Hour Log Entries" THEN
+                                                                  EXIT;
+
+                                                                IF Status <> xRec.Status THEN BEGIN
+                                                                  IF Status = Status::Released THEN BEGIN
+                                                                    //>>IME-107
+                                                                    //IF HoursLogEntrRec.GET(Year,Week,"Employee No.") THEN
+                                                                    IF HoursLogEntrRec.GET(Year,Week,"Employee No.") THEN BEGIN
+                                                                       IF HoursLogEntrLinesRec."Approver Change" <> '' THEN BEGIN
+                                                                          IF HoursLogEntrLinesRec."Employee No." = HoursLogEntrLinesRec."Approver Change" THEN BEGIN
+                                                                             HoursLogEntrLinesRec.Informed := TRUE;
+                                                                             HoursLogEntrLinesRec.MODIFY;
+                                                                          END;
+                                                                       END;
+                                                                      //<<IME-107
+                                                                      EXIT;
+                                                                     END
+                                                                    ELSE BEGIN
+                                                                      HoursLogEntrRec.INIT;
+                                                                      HoursLogEntrRec.Year := Year;
+                                                                      HoursLogEntrRec.Week := Week;
+                                                                      HoursLogEntrRec."Employee No." := "Employee No.";
+                                                                      HoursLogEntrRec."Full Name" := "Full Name";
+                                                                      HoursLogEntrRec."Document No." := "Document No.";
+                                                                      HoursLogEntrRec."Posting Date" := "Posting Date";
+                                                                      HoursLogEntrRec.Status := Status;
+                                                                      IF UserSetupRec.GET(USERID) THEN
+                                                                        HoursLogEntrRec."Released By" := UserSetupRec."Employee No."
+                                                                      ELSE
+                                                                        ERROR(Text011,USERID);
+                                                                      IF HoursLogEntrRec.INSERT THEN BEGIN
+                                                                        HoursLogEntrLinesRec."Line No." := 1000;
+                                                                        HoursLogEntrLinesRec.Year := Year;
+                                                                        HoursLogEntrLinesRec.Week := Week;
+                                                                        HoursLogEntrLinesRec."Employee No." := "Employee No.";
+                                                                        HoursLogEntrLinesRec.Date := TODAY;
+                                                                        HoursLogEntrLinesRec.Time := TIME;
+                                                                        IF UserSetupRec.GET(USERID) THEN
+                                                                          HoursLogEntrLinesRec."Approver Change" := UserSetupRec."Employee No."
+                                                                        ELSE
+                                                                          ERROR(Text011,USERID);
+                                                                        HoursLogEntrLinesRec.Field := Text020;
+                                                                        HoursLogEntrLinesRec."Old Value" := Text021;
+                                                                        HoursLogEntrLinesRec."New Value" := Text022;
+
+                                                                        HoursLogEntrLinesRec.Informed := TRUE; //ENH032
+
+                                                                        IF HoursLogEntrLinesRec.INSERT THEN;
+                                                                      END;
+                                                                      //>>IME-107
+                                                                      IF HoursLogEntrLinesRec."Approver Change" <> '' THEN BEGIN
+                                                                         IF HoursLogEntrLinesRec."Employee No." = HoursLogEntrLinesRec."Approver Change" THEN BEGIN
+                                                                            HoursLogEntrLinesRec.Informed := TRUE;
+                                                                            HoursLogEntrLinesRec.MODIFY;
+                                                                         END;
+                                                                      END;
+                                                                      //<<IME-107
+
+                                                                    END;
+                                                                  END;
+                                                                END;
+                                                              END;
+
+                                                   CaptionML=[ENU=Status;
+                                                              NOR=Status;
+                                                              SVE=Status];
+                                                   OptionCaptionML=ENU=Open,,Released,,,,Pending Approval,Approved,,,,,Rejected;
+                                                   OptionString=Open,,Released,,,,Pending Approval,Approved,,,,,Rejected }
+    { 111 ;   ;Released by         ;Code50        ;TableRelation=User."User Name";
+                                                   ValidateTableRelation=No;
+                                                   TestTableRelation=No;
+                                                   CaptionML=[ENU=Released by;
+                                                              NOR=Frigitt av;
+                                                              SVE=SlÑppt av];
+                                                   Editable=No }
+    { 120 ;   ;Delivery Date       ;Date          ;CaptionML=[ENU=Delivery Date;
+                                                              NOR=Leveringsdato;
+                                                              SVE=Leveransdatum] }
+    { 130 ;   ;Recorded By         ;Code50        ;TableRelation=User."User Name";
+                                                   ValidateTableRelation=No;
+                                                   TestTableRelation=No;
+                                                   CaptionML=[ENU=Recorded by;
+                                                              NOR=Registrert av;
+                                                              SVE=Registrerades av] }
+    { 140 ;   ;Received            ;Boolean       ;OnValidate=BEGIN
+                                                                IF Received THEN
+                                                                  "Delivery Date" := TODAY;
+                                                              END;
+
+                                                   CaptionML=[ENU=Received;
+                                                              NOR=Mottatt;
+                                                              SVE=Inlevererad] }
+    { 150 ;   ;Consented           ;Boolean       ;CaptionML=[ENU=Consented;
+                                                              NOR=Godkjent;
+                                                              SVE=GodkÑnt] }
+    { 160 ;   ;Check by Empl. No.  ;Code20        ;TableRelation=Employee;
+                                                   CaptionML=[ENU=Check by Employee No.;
+                                                              NOR=Kontroller etter ansattnr.;
+                                                              SVE=Kontrollera efter anstÑllningsnr];
+                                                   Editable=No }
+    { 161 ;   ;Check by Empl. Full Name;Text100   ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup(Employee."Full Name" WHERE (No.=FIELD(Check by Empl. No.)));
+                                                   CaptionML=[ENU=Check by Employee Full Name;
+                                                              NOR=Kontroller etter den ansattes fullstendige navn;
+                                                              SVE=Kontrollera efter den anstÑlldes fullstÑndiga namn];
+                                                   Editable=No }
+    { 170 ;   ;Date Checked        ;Date          ;OnValidate=BEGIN
+                                                                TESTFIELD(Status, Status::Open);
+                                                                IF "Date Checked" <> 0D THEN BEGIN
+                                                                  CheckIfCheckingHoursIsAllowed;
+                                                                  FillCheckByWithCurrentEmpl;
+                                                                END ELSE
+                                                                  FillCheckByWithDefaultValue;
+                                                              END;
+
+                                                   CaptionML=[ENU=Date Checked;
+                                                              NOR=Datoen er kontrollert;
+                                                              SVE=Datumet Ñr kontrollerat] }
+    { 180 ;   ;Trade Association   ;Code10        ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup(Employee."Trade Association" WHERE (No.=FIELD(Employee No.)));
+                                                   TableRelation="Trade Association";
+                                                   ValidateTableRelation=No;
+                                                   CaptionML=[ENU=Trade Association;
+                                                              NOR=Bransjeorganisasjon;
+                                                              SVE=Branschorganisation];
+                                                   Editable=No }
+    { 200 ;   ;Day Filter          ;Option        ;FieldClass=FlowFilter;
+                                                   CaptionML=[ENU=Day Filter;
+                                                              NOR=Dagfilter;
+                                                              SVE=Dagfilter];
+                                                   OptionCaptionML=[ENU=" ,Monday,Tuesday,Wednesday,Thursday,Friday,Saturday,Sunday";
+                                                                    NOR=" ,Mandag,Tirsdag,Onsdag,Torsdag,Fredag,Lõrdag,Sõndag";
+                                                                    SVE=" ,MÜndag,Tisdag,Onsdag,Torsdag,Fredag,Lîrdag,Sîndag"];
+                                                   OptionString=[ ,Monday,Tuesday,Wednesday,Thursday,Friday,Saturday,Sunday] }
+    { 201 ;   ;Show Controller Employees Only;Boolean;
+                                                   FieldClass=FlowFilter;
+                                                   CaptionML=ENU=Show Controller Employees Only }
+    { 210 ;   ;Manager No.         ;Code20        ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup(Employee."Manager No." WHERE (No.=FIELD(Employee No.)));
+                                                   CaptionML=[ENU=Manager No.;
+                                                              NOR=Ledernr.;
+                                                              SVE=Chefsnr];
+                                                   Editable=No }
+    { 220 ;   ;Manager Name        ;Text100       ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup(Employee."Full Name" WHERE (No.=FIELD(Manager No.)));
+                                                   CaptionML=ENU=Manager Name }
+    { 230 ;   ;Inserted On         ;Date          ;CaptionML=[ENU=Inserted On;
+                                                              SVE=Infogad den];
+                                                   Editable=No }
+    { 240 ;   ;Inserted By         ;Code50        ;TableRelation=User."User Name";
+                                                   OnLookup=BEGIN
+                                                              UserCode := "Inserted By";
+                                                              UserMgt.LookupUserID(UserCode);
+                                                            END;
+
+                                                   ValidateTableRelation=No;
+                                                   TestTableRelation=No;
+                                                   CaptionML=[ENU=Inserted By;
+                                                              NOR=Satt inn av;
+                                                              SVE=Infogad av];
+                                                   Editable=No }
+    { 250 ;   ;Modified On         ;Date          ;CaptionML=[ENU=Modified On;
+                                                              NOR=Modified On;
+                                                              SVE=Modified On];
+                                                   Editable=No }
+    { 260 ;   ;Modified By         ;Code50        ;TableRelation=User."User Name";
+                                                   OnLookup=BEGIN
+                                                              UserCode := "Modified By";
+                                                              UserMgt.LookupUserID(UserCode);
+                                                            END;
+
+                                                   ValidateTableRelation=No;
+                                                   TestTableRelation=No;
+                                                   CaptionML=[ENU=Modified By;
+                                                              NOR=Modified By;
+                                                              SVE=Modified By];
+                                                   Editable=No }
+    { 11128200;;Pre-Registration Hours;Boolean    ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup(Employee."Pre-Registration Hours" WHERE (No.=FIELD(Employee No.)));
+                                                   CaptionML=SVE=Fîrregistreringstimmar;
+                                                   Editable=No }
+    { 11128201;;Document Date      ;Date          ;CaptionML=SVE=Dokumentdatum;
+                                                   Description=ENH050 }
+  }
+  KEYS
+  {
+    {    ;Year,Week,Employee No.                  ;Clustered=Yes }
+    {    ;Employee No.,Document No.,Year,Week      }
+    {    ;Consented                                }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+    VAR
+      HourLineRec@11012000 : Record 11012039;
+      HourLineRec2@11012001 : Record 11012039;
+      Date@11012004 : Record 2000000007;
+      EmplRec@1210190006 : Record 5200;
+      HoursLogEntrRec@1100485008 : Record 11072024;
+      HoursLogEntrLinesRec@1100485009 : Record 11072025;
+      UserSetupRec@1100485013 : Record 91;
+      EmployeeRec@1100485022 : Record 5200;
+      CheckHourLine@1100485027 : Codeunit 11012003;
+      UserMgt@1100529600 : Codeunit 418;
+      StartDateYear@11012006 : Date;
+      YearEndDate@11012007 : Date;
+      Text004@1210190002 : TextConst 'ENU=Employee %2 inactive since %1;NOR=Ansatt %2 har vërt inaktiv siden %1;SVE=AnstÑlld %2 har varit inaktiv sedan %1';
+      Text005@1210190003 : TextConst 'ENU=Employee %2 not employed since %1;NOR=Ansatt %2 har ikke vërt ansatt siden %1;SVE=AnstÑlld %2 har inte varit anstÑlld sedan %1';
+      Text006@1210190004 : TextConst 'ENU=Watch out, %1 %2 already has hours posted in %3 %4 %5 %6.;NOR=Observer at %1 %2 allerede har timer bokfõrt i %3 %4 %5 %6.;SVE=Observera att %1 %2 redan har timmar angivna i %3 %4 %5 %6.';
+      Text007@1100485003 : TextConst 'ENU=%1 %2 is created from %3.\Changes must be made in %3.;NOR=%1 %2 er opprettet fra %3.\Endringer mÜ gjõres i %3.;SVE=%1 %2 har skapats frÜn %3.\éndringar mÜste gîras i %3.';
+      Text008@1100485000 : TextConst 'ENU=%1 not present in User Setup of %2.;NOR=%1 finnes ikke i Brukerinnstillingene for %2.;SVE=%1 finns inte i anvÑndarinstÑllningarna fîr %2.';
+      Text009@1100525000 : TextConst 'ENU=You are no approver for employee %1.;SVE=Du Ñr ingen godkÑnnare fîr anstÑlld %1.';
+      gSuppressMess@1100485004 : Boolean;
+      Text010@1100485006 : TextConst 'ENU=No hour accounting lines present, release not allowed.;NOR=Det finnes ingen timerapporter, ikke tillatt Ü frigi.;SVE=Det finns inga tidrapporter, slÑppning inte tillÜten.';
+      Text011@1100485014 : TextConst 'ENU=No Employee No. found for UserID %1;NOR=Inget Ansattnr funnet for Bruker-ID %1;SVE=Inget anstÑllningsnr hittades fîr anvÑndar-ID %1';
+      Text020@1100485010 : TextConst 'ENU=Status;NOR=Status;SVE=Status';
+      Text021@1100485011 : TextConst 'ENU=Open;NOR=èpne;SVE=ôppna';
+      Text022@1100485012 : TextConst 'ENU=Released;NOR=Frigitt;SVE=SlÑppt';
+      Text025@1100485023 : TextConst 'ENU=Number of hours (%1) different from norm hours (%2);NOR=Antall timer (%1) skiller seg fra normtimer (%2);SVE=Antal timmar (%1) skiljer sig frÜn normtimmar (%2)';
+      TotalNormHours@1100485029 : Decimal;
+      DPA_Management@1100000999 : Codeunit 11012783;
+      Text003@1100528201 : TextConst 'ENU=The approval process must be cancelled or completed to reopen this document.;NOR=Godkjenningsprosessen mÜ avbrytes eller fullfõres fõr du kan Üpne dette dokumentet pÜ nytt.;SVE=GodkÑnnandeprocessen mÜste avbrytas eller slutfîras fîr att det hÑr dokumentet ska kunna îppnas igen.';
+      UserCode@1100529601 : Code[50];
+      Text012@1100527350 : TextConst 'ENU=Employee %2 employed since %1.';
+      "***ITERO***"@1100285001 : Integer;
+      Text11128000@1100285003 : TextConst 'ENU=Team Code must be filled for Hours and Expense Hours;NOR=Tidskode mÜ vëre fylt ut for timer og forbrukstimer;SVE=Arbetslag kod mÜste fyllas i fîr timmar och kostnadstimmar';
+      Text11128230@1100285000 : TextConst 'ENU=Create consent lines?;NOR=Opprette attestrader?;SVE=Skapa godkÑnnanderader?';
+      WageCompRec@1100285002 : Record 11012014;
+      HoursConsentLine@1100285100 : Record 11020437;
+      ProcessedHoursConsentLine@1101285000 : Record 11020439;
+
+    PROCEDURE CheckPostedHours@1210190002();
+    VAR
+      lPostedHourHeader@1210190000 : Record 11012084;
+    BEGIN
+      IF ("Employee No." = '') OR gSuppressMess THEN
+        EXIT;
+
+      lPostedHourHeader.SETRANGE(Year, Year);
+      lPostedHourHeader.SETRANGE(Week, Week);
+      lPostedHourHeader.SETRANGE("Employee No.", "Employee No.");
+      IF lPostedHourHeader.FINDFIRST THEN
+        MESSAGE(
+          Text006, FIELDCAPTION("Employee No."), "Employee No.",
+          FIELDCAPTION(Year), Year, FIELDCAPTION(Week), Week);
+    END;
+
+    PROCEDURE GetPostingDate@1210190000(CurrCompany@1100525000 : Text[30]);
+    VAR
+      PostingDateRec@1210190000 : Record 11020202;
+    BEGIN
+      "Posting Date" := DWY2DATE(5,Week,Year);
+
+      IF CurrCompany <> COMPANYNAME THEN
+        PostingDateRec.CHANGECOMPANY(CurrCompany);
+      IF PostingDateRec.GET(Year, Week) THEN
+        IF PostingDateRec."Posting Date" <> 0D THEN
+          "Posting Date" := PostingDateRec."Posting Date";
+    END;
+
+    PROCEDURE FillDocumentNo@1100525000(CurrCompany@1100525000 : Text[30]);
+    VAR
+      HumanResourcesSetup@1100525002 : Record 5218;
+      Period@1100525001 : Integer;
+    BEGIN
+      IF CurrCompany <> COMPANYNAME THEN
+        HumanResourcesSetup.CHANGECOMPANY(CurrCompany);
+
+      HumanResourcesSetup.GET;
+      HumanResourcesSetup.TESTFIELD("Hours Document Nos.");
+      CASE HumanResourcesSetup."Hour Document No." OF
+        HumanResourcesSetup."Hour Document No."::Week:
+          Period := Week;
+        HumanResourcesSetup."Hour Document No."::"4-Weeks":
+          Period := ((Week-1) DIV 4) + 1;
+        HumanResourcesSetup."Hour Document No."::Month:
+          Period := DATE2DMY(CALCDATE('<-1D>',"Posting Date"),2);
+      END;
+      "Document No." := STRSUBSTNO('%1 %2-%3', HumanResourcesSetup."Hours Document Nos.", Year, FORMAT(Period,2));
+    END;
+
+    PROCEDURE EmplDescrOtherCompany@1210190005();
+    BEGIN
+      IF "Supplying Company" = '' THEN
+        EXIT;
+
+      "First Name" := '';
+      "Last Name" := '';
+      "Full Name" := '';
+      IF "Employee No." <> '' THEN BEGIN
+        EmplRec.CHANGECOMPANY("Supplying Company");
+        IF EmplRec.GET("Employee No.") THEN BEGIN
+          "First Name" := EmplRec."First Name";
+          "Last Name" := EmplRec."Last Name";
+          "Full Name" := EmplRec."Full Name";
+        END;
+      END;
+    END;
+
+    PROCEDURE LookUpEmployee@1210190004(Editable@1100485000 : Boolean);
+    BEGIN
+      EmplRec.CHANGECOMPANY("Supplying Company");
+      EmplRec."No." := "Employee No.";
+      IF NOT Editable THEN
+        PAGE.RUNMODAL(0, EmplRec)
+      ELSE
+        IF PAGE.RUNMODAL(0, EmplRec) = ACTION::LookupOK THEN
+          VALIDATE("Employee No.", EmplRec."No.");
+    END;
+
+    PROCEDURE SetStatus@1100485001(lRelease@1100485000 : Boolean;lControllerNo@1100485002 : Code[20]);
+    VAR
+      HumanResourcesSetup@1100525001 : Record 5218;
+      lHourControllerRec@1100485001 : Record 11012008;
+      HourAccountingFilters@1100525000 : Record 11012038;
+      lHourAccLineRec@1100485003 : Record 11012039;
+      ApprovalManagement4PSConstr@1100528200 : Codeunit 11125349;
+      ApprovalsMgmt@1100528201 : Codeunit 1535;
+      JobsSetup@1100528700 : Record 315;
+      HourAccountingLine@1100285000 : Record 11012039;
+      WageComponent@1100285001 : Record 11012014;
+      Employee@1100285002 : Record 5200;
+    BEGIN
+      JobsSetup.GET;
+      HumanResourcesSetup.GET;
+
+      lHourControllerRec.SETRANGE("Employee No.", "Employee No.");
+      IF (NOT lHourControllerRec.ISEMPTY) THEN BEGIN
+        IF lControllerNo = '' THEN
+          ERROR(Text008, FIELDNAME("Employee No."), USERID);
+        IF NOT EmployeeIsSuperApprover(lControllerNo) THEN BEGIN
+          lHourControllerRec.SETRANGE("Controller No.", lControllerNo);
+          IF lHourControllerRec.ISEMPTY THEN
+            ERROR(Text009, "Employee No.");
+        END;
+      END;
+
+      IF lRelease THEN BEGIN
+
+      //>>131210 ITERO.DJ
+        HourAccountingLine.SETRANGE(Year, Year);
+        HourAccountingLine.SETRANGE(Week, Week);
+        HourAccountingLine.SETRANGE("Employee No.", "Employee No.");
+        HourAccountingLine.SETFILTER("Team Code",'%1','');
+        HourAccountingLine.SETFILTER(Type, '%1|%2',HourAccountingLine.Type::Project,HourAccountingLine.Type::Service);
+
+        IF JobsSetup."Team Code mandatory for Hours" THEN
+          IF HourAccountingLine.FINDSET(FALSE) THEN REPEAT
+            IF Employee.GET(HourAccountingLine."Employee No.") THEN
+              IF (NOT Employee.UTA) AND
+                  WageComponent.GET(HourAccountingLine."Wage Component") THEN
+                IF (WageComponent."Component Type" IN [WageComponent."Component Type"::Hours,WageComponent."Component Type"::"Expense hours"]) THEN
+                  ERROR(Text11128000);
+          UNTIL HourAccountingLine.NEXT=0;
+        //<<131210
+
+        IF Status <> Status::Released THEN BEGIN
+
+          IF ApprovalManagement4PSConstr.IsHourAccountingApprovalsWorkflowEnabled(Rec)
+            AND (Status <> Status::Approved)
+          THEN
+            SendHourAccountingForApproval;
+
+          lHourAccLineRec.SETRANGE(Year, Year);
+          lHourAccLineRec.SETRANGE(Week, Week);
+          lHourAccLineRec.SETRANGE("Employee No.", "Employee No.");
+          IF NOT lHourAccLineRec.FINDFIRST THEN
+            ERROR(Text010);
+
+          // SESB.031 VKO 26.07.2013 >>
+          Consented := FALSE;
+          MODIFY(TRUE);
+          // SESB.031 VKO 26.07.2013 <<
+          // SESB.I031 ASH 11.07.2013 >>
+          IF JobsSetup."Explode Hour Lines at Release" THEN
+            ExplodeLines;
+          // SESB.I031 ASH 11.07.2013 <<
+
+          IF HumanResourcesSetup."Check Hours on Release" THEN
+            CheckLines;
+          IF HumanResourcesSetup."Norm Check" THEN BEGIN
+            EmployeeRec.GET("Employee No.");
+            IF EmployeeRec."Account Hours" = EmployeeRec."Account Hours"::"Required according to Norm" THEN
+              IF NOT CheckNormHoursConsent(lHourAccLineRec) THEN
+                ERROR(Text025,TotalNormHours,EmployeeRec."Norm Hours"); //40 hours check
+          END;
+          CheckLeave;
+          CheckProjectEmployee;
+
+          IF HoursMustBeChecked("Employee No.", "Supplying Company") THEN
+            TESTFIELD("Date Checked");
+          ReleaseLines;
+          HourAccountingFilters.COPYFILTERS(Rec);
+          RESET;
+          FIND('=');
+          COPYFILTERS(HourAccountingFilters);
+          "Released by" := USERID;
+          UpdateLinesStatus; // SESB.031 VKO 26.07.2013
+        END;
+      END ELSE BEGIN
+        IF ApprovalsMgmt.HasOpenApprovalEntries(Rec.RECORDID) THEN
+          ERROR(Text003);
+        ReopenLines;
+        HourAccountingFilters.COPYFILTERS(Rec);
+        RESET;
+        FIND('=');
+        COPYFILTERS(HourAccountingFilters);
+        "Released by" := '';
+        VALIDATE("Date Checked", 0D);
+
+        // SESB.031 VKO 26.07.2013 >>
+        Consented := FALSE;
+        MODIFY(TRUE);
+        // SESB.031 VKO 26.07.2013 <<
+      END;
+      // SESB.031 VKO 26.07.2013 >>
+      // Moved
+      // Consented := FALSE;
+      // MODIFY(TRUE);
+      // SESB.031 VKO 26.07.2013 <<
+      OnAfterReleaseHourAccounting(Rec);
+    END;
+
+    PROCEDURE SetSuppressMessages@1100485000(lvSuppressMess@1100485000 : Boolean);
+    BEGIN
+      //* Only to inhibit MESSAGE so no ERROR
+      gSuppressMess := lvSuppressMess;
+    END;
+
+    PROCEDURE FindRec@1100485002(ShowMyEMployeesOnly@1100485000 : Boolean;VAR Rec@1100485001 : Record 11012038;Which@1100485002 : Text[30];ControllerNo@1100485005 : Code[20]) : Boolean;
+    VAR
+      HourRec2@1100485007 : Record 11012038;
+      Steps@1100485003 : Integer;
+      FindNext@1100485008 : Integer;
+      HourControllerRec@1100485004 : Record 11012008;
+      Found@1100485006 : Boolean;
+    BEGIN
+      IF ShowMyEMployeesOnly THEN BEGIN
+        HourRec2.COPY(Rec);
+        IF Which = '+' THEN
+          Steps := -1
+        ELSE
+          Steps := 1;
+        IF HourRec2.FIND(Which) THEN
+          REPEAT
+            Found := HourRec2."Employee No." = ControllerNo; //C032249.n
+            IF NOT Found THEN BEGIN  //C032249.n
+              HourControllerRec.SETRANGE("Employee No.", HourRec2."Employee No.");
+              HourControllerRec.SETRANGE("Controller No.", ControllerNo);
+              Found := HourControllerRec.FINDFIRST;
+            END; //C032249.n
+            IF NOT Found THEN BEGIN
+              FindNext := HourRec2.NEXT(Steps);
+              IF (FindNext = 0) AND (Steps = 1) THEN BEGIN
+                //At the end of the table reverse order
+                FindNext := -1;
+                Steps := -1;
+              END;
+            END;
+          UNTIL (FindNext = 0) OR Found;
+        IF Found THEN
+          Rec := HourRec2;
+        EXIT(Found);
+      END ELSE
+        EXIT(FIND(Which));
+    END;
+
+    PROCEDURE GetRec@1100485003(ShowMyEmployeesOnly@1100485003 : Boolean;VAR HourAccounting@1100485002 : Record 11012038;Steps@1100485001 : Integer;ControllerNo@1100485000 : Code[20]) : Integer;
+    VAR
+      HourAccounting2@1100485006 : Record 11012038;
+      ActualSteps@1100485004 : Integer;
+      Step@1100528400 : Integer;
+      NoOneFound@1100485005 : Boolean;
+    BEGIN
+      IF ShowMyEmployeesOnly THEN BEGIN
+        //kkleermaker.sn, 130911, C007383
+        HourAccounting2.COPY(HourAccounting);
+        // Example taken from pag5114
+        IF Steps < 0 THEN
+          Step := -1
+        ELSE
+          Step := 1;
+
+        REPEAT
+          IF HourAccounting2.NEXT(Step) <> 0 THEN BEGIN
+            IF (HourAccounting2."Employee No." = ControllerNo) OR HourAccBelongsToController(HourAccounting2, ControllerNo) THEN BEGIN //C032249.c
+              ActualSteps := ActualSteps + Step;
+              IF Steps <> 0 THEN
+                HourAccounting := HourAccounting2;
+            END;
+          END ELSE
+            NoOneFound := TRUE;
+        UNTIL (ActualSteps = Steps) OR NoOneFound;
+        EXIT(ActualSteps);
+        //kkleermaker.en
+      END ELSE
+        EXIT(NEXT(Steps));
+    END;
+
+    PROCEDURE FillEmployeeRelatedFields@1100485004();
+    BEGIN
+      IF "Employee No." = '' THEN
+        EXIT;
+
+      EmplRec.CHANGECOMPANY("Supplying Company");
+      EmplRec.GET("Employee No.");
+      External := EmplRec.External;
+      Employer := EmplRec.Employer;
+      "Department Code" := EmplRec."Global Dimension 1 Code";
+    END;
+
+    LOCAL PROCEDURE CheckLines@1100528700();
+    VAR
+      HourAccountingLine@1100528700 : Record 11012039;
+      CheckHourLine@1100528701 : Codeunit 11012003;
+    BEGIN
+      HourAccountingLine.SETRANGE(Year, Year);
+      HourAccountingLine.SETRANGE(Week, Week);
+      HourAccountingLine.SETRANGE("Employee No.", "Employee No.");
+      IF HourAccountingLine.FINDSET THEN
+        REPEAT
+          CheckHourLine.RunCheck(HourAccountingLine);
+        UNTIL HourAccountingLine.NEXT = 0;
+    END;
+
+    PROCEDURE CheckLinesBeforeApproval@1100528200() : Boolean;
+    VAR
+      HourAccountingLine@1100528201 : Record 11012039;
+      CheckHourLine@1100528200 : Codeunit 11012003;
+    BEGIN
+      HourAccountingLine.SETRANGE(Year, Year);
+      HourAccountingLine.SETRANGE(Week, Week);
+      HourAccountingLine.SETRANGE("Employee No.", "Employee No.");
+      IF HourAccountingLine.FINDSET THEN
+        REPEAT
+          CheckHourLine.RunCheck(HourAccountingLine);
+        UNTIL HourAccountingLine.NEXT = 0;
+    END;
+
+    PROCEDURE CheckNormHoursConsent@1100485008(HourLine@1100485001 : Record 11012039) : Boolean;
+    VAR
+      LvHourLines@1100485000 : Record 11012039;
+      ErrMsg@1100528700 : Text[1024];
+    BEGIN
+      LvHourLines.SETRANGE(Year,HourLine.Year);
+      LvHourLines.SETRANGE(Week,HourLine.Week);
+      LvHourLines.SETRANGE("Employee No.",HourLine."Employee No.");
+      IF LvHourLines.FINDFIRST THEN
+        EXIT(CheckHourLine.CheckNormPostingHours(LvHourLines, TRUE, FALSE, ErrMsg));
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE FillCheckByWithDefaultValue@1100528404();
+    BEGIN
+      TESTFIELD("Date Checked", 0D);
+      "Check by Empl. No." := GetDefaultCheckByEmplNo('', "Employee No.", "Supplying Company");
+    END;
+
+    PROCEDURE GetDefaultCheckByEmplNo@1100525001(EmplCompany@1100525002 : Text;EmplNo@1100525003 : Code[20];SupplyingCompany@1100525004 : Text) : Code[20];
+    VAR
+      HumanResourcesSetup@1100525000 : Record 5218;
+      Employee@1100525001 : Record 5200;
+    BEGIN
+      IF (EmplNo <> '') AND (SupplyingCompany = '') THEN BEGIN
+        IF EmplCompany <> '' THEN
+          HumanResourcesSetup.CHANGECOMPANY(EmplCompany);
+        HumanResourcesSetup.GET;
+        IF HumanResourcesSetup."Check Hours" THEN BEGIN
+          IF EmplCompany <> '' THEN
+            Employee.CHANGECOMPANY(EmplCompany);
+          Employee.GET(EmplNo);
+          IF Employee."Check Hours" THEN
+            EXIT(Employee."Manager No.");
+        END;
+      END;
+      EXIT('');
+    END;
+
+    LOCAL PROCEDURE FillCheckByWithCurrentEmpl@1100528403();
+    BEGIN
+      "Check by Empl. No." := GetCurrentEmployeeNo;
+    END;
+
+    LOCAL PROCEDURE CheckIfCheckingHoursIsAllowed@1100528402();
+    VAR
+      CurrentEmployeeNo@1100528400 : Code[20];
+      Employee@1100528401 : Record 5200;
+    BEGIN
+      CurrentEmployeeNo := GetCurrentEmployeeNo;
+      IF "Check by Empl. No." = CurrentEmployeeNo THEN
+        EXIT;
+
+      Employee.GET(CurrentEmployeeNo);
+      IF Employee."Super Approver" THEN
+        EXIT
+      ELSE
+        TESTFIELD("Check by Empl. No.", CurrentEmployeeNo);
+    END;
+
+    LOCAL PROCEDURE GetCurrentEmployeeNo@1100528405() : Code[20];
+    VAR
+      UserSetup@1100528400 : Record 91;
+    BEGIN
+      UserSetup.GET(USERID);
+      UserSetup.TESTFIELD("Employee No.");
+      EXIT(UserSetup."Employee No.");
+    END;
+
+    LOCAL PROCEDURE HoursMustBeChecked@1100528406(EmployeeNo@1100528400 : Code[20];SupplyingCompany@1100409000 : Text[30]) : Boolean;
+    VAR
+      HumanResourcesSetup@1100528401 : Record 5218;
+      Employee@1100528402 : Record 5200;
+    BEGIN
+      HumanResourcesSetup.GET;
+      IF HumanResourcesSetup."Check Hours" AND (SupplyingCompany = '') THEN BEGIN
+        Employee.GET(EmployeeNo);
+        EXIT(Employee."Check Hours");
+      END;
+    END;
+
+    LOCAL PROCEDURE EmployeeIsSuperApprover@1100528704(EmployeeNo@1100528700 : Code[20]) : Boolean;
+    VAR
+      Employee@1100528701 : Record 5200;
+    BEGIN
+      Employee.GET(EmployeeNo);
+      EXIT(Employee."Super Approver")
+    END;
+
+    PROCEDURE LinesHaveBeenRefreshed@1100525003() : Boolean;
+    VAR
+      HourAccountingLine@1100525000 : Record 11012039;
+    BEGIN
+      HourAccountingLine.SETRANGE(Year, Year);
+      HourAccountingLine.SETRANGE(Week, Week);
+      HourAccountingLine.SETRANGE("Employee No.", "Employee No.");
+      HourAccountingLine.SETRANGE("Registration Day", 0);
+      EXIT(HourAccountingLine.ISEMPTY);
+    END;
+
+    PROCEDURE DPA_GetFieldNoDepartmentFilter@1100000993() : Integer;
+    BEGIN
+      //**4PS Generated Code - Do Not Change
+      EXIT(0);
+    END;
+
+    LOCAL PROCEDURE HourAccBelongsToController@1100528407(HourAccounting@1100528400 : Record 11012038;ControllerNo@1100528401 : Code[20]) : Boolean;
+    VAR
+      HourController@1100528402 : Record 11012008;
+    BEGIN
+      //kkleermaker, 130911, C007383
+      HourController.SETRANGE("Employee No.", HourAccounting."Employee No.");
+      HourController.SETRANGE("Controller No.", ControllerNo);
+      EXIT(NOT HourController.ISEMPTY);
+    END;
+
+    PROCEDURE ReleaseLines@1100528204();
+    VAR
+      HourAccountingLine@1100528400 : Record 11012039;
+    BEGIN
+      HourAccountingLine.SETRANGE(Year, Year);
+      HourAccountingLine.SETRANGE(Week, Week);
+      HourAccountingLine.SETRANGE("Employee No.", "Employee No.");
+      HourAccountingLine.SETFILTER(Status,'%1|%2',HourAccountingLine.Status::Open,HourAccountingLine.Status::Rejected);
+      IF HourAccountingLine.FINDSET THEN
+        HourAccountingLine.Release;
+    END;
+
+    PROCEDURE PendingApprovalLines@1100525004();
+    VAR
+      HourAccountingLine@1100528400 : Record 11012039;
+    BEGIN
+      HourAccountingLine.SETRANGE(Year, Year);
+      HourAccountingLine.SETRANGE(Week, Week);
+      HourAccountingLine.SETRANGE("Employee No.", "Employee No.");
+      HourAccountingLine.SETFILTER(Status,'%1|%2',HourAccountingLine.Status::Open,HourAccountingLine.Status::Rejected);
+      IF HourAccountingLine.FINDSET THEN
+        HourAccountingLine.PendingApproval;
+    END;
+
+    PROCEDURE ApproveLines@1100528203();
+    VAR
+      HourAccountingLine@1100528200 : Record 11012039;
+    BEGIN
+      HourAccountingLine.SETRANGE(Year, Year);
+      HourAccountingLine.SETRANGE(Week, Week);
+      HourAccountingLine.SETRANGE("Employee No.", "Employee No.");
+      HourAccountingLine.SETRANGE(Status, HourAccountingLine.Status::"Pending Approval");
+      IF HourAccountingLine.FINDSET THEN
+        HourAccountingLine.Approve;
+    END;
+
+    PROCEDURE RejectLine@1100528202(LineNo@1100528200 : Integer);
+    VAR
+      HourAccountingLine@1100528201 : Record 11012039;
+    BEGIN
+      HourAccountingLine.SETRANGE(Year, Year);
+      HourAccountingLine.SETRANGE(Week, Week);
+      HourAccountingLine.SETRANGE("Employee No.", "Employee No.");
+      HourAccountingLine.SETRANGE(Status, HourAccountingLine.Status::"Pending Approval");
+      HourAccountingLine.SETRANGE("Line No.", LineNo);
+      IF HourAccountingLine.FINDSET THEN
+        HourAccountingLine.Reject('');
+    END;
+
+    PROCEDURE ReopenLines@1100528201();
+    VAR
+      HourAccountingLine@1100528200 : Record 11012039;
+    BEGIN
+      //SiteMngmntHoursSetup.GET;
+      HourAccountingLine.SETRANGE(Year, Year);
+      HourAccountingLine.SETRANGE(Week, Week);
+      HourAccountingLine.SETRANGE("Employee No.", "Employee No.");
+      HourAccountingLine.SETFILTER(Status, '%1|%2|%3', HourAccountingLine.Status::Released, HourAccountingLine.Status::Rejected, HourAccountingLine.Status::"Pending Approval");
+
+      IF HourAccountingLine.FINDSET THEN
+        REPEAT
+          HourAccountingLine.Reopen;
+        UNTIL HourAccountingLine.NEXT = 0;
+    END;
+
+    PROCEDURE DPA_GetFiltersFltrGrp@1100000997(FilterGroupNo@1100525000 : Integer) FilterText : Text[250];
+    BEGIN
+      //**4PS Generated Code - Do Not Change
+      FILTERGROUP(FilterGroupNo);
+      FilterText := COPYSTR(GETFILTERS, 1, MAXSTRLEN(FilterText));
+      FILTERGROUP(0);
+    END;
+
+    PROCEDURE DPA_SetFilters@1100000998(Context@1100525000 : Text[30]) : Boolean;
+    VAR
+      RecRef@1100525003 : RecordRef;
+      i@1100525004 : Integer;
+    BEGIN
+      //**4PS Generated Code - Do Not Change
+      IF NOT DPA_IsActive THEN
+        EXIT;
+
+      RecRef.GETTABLE(Rec);
+      DPA_Management.SetDPAFilterFromContext(
+        RecRef,
+        Context,
+        DPA_GetFieldNoDepartmentCode,
+        DPA_GetFieldNoDepartmentFilter );
+
+      FOR i := 10 DOWNTO 0 DO BEGIN
+        RecRef.FILTERGROUP(i);
+        FILTERGROUP(i);
+        SETVIEW(RecRef.GETVIEW(FALSE));
+      END;
+
+      EXIT(DPA_Management.IsHardFilter);
+    END;
+
+    LOCAL PROCEDURE DPA_IsActive@1100000999() : Boolean;
+    VAR
+      DepartmentAuthorizObject@1100526000 : Record 11012466;
+      FPSLicenseManagement@1100527400 : Codeunit 11229289;
+    BEGIN
+      //**4PS Generated Code - Do Not Change
+      IF NOT FPSLicenseManagement.LicenseAndReadPermissionForTable(DepartmentAuthorizObject) THEN
+        EXIT(FALSE);
+
+      IF NOT DPA_Management.AuthorizationActive THEN
+        EXIT(FALSE);
+
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE DPA_FindRecWithDPAFilterAppld@1100000989();
+    BEGIN
+      //**4PS Generated Code - Do Not Change
+      IF NOT DPA_IsActive THEN BEGIN
+        FIND;
+        EXIT;
+      END;
+
+      IF NOT DPA_Management.HasTableHardFilter(11012038) THEN BEGIN
+        FIND;
+        EXIT;
+      END;
+
+      DPA_SetFilters('Table 11012038');
+      IF NOT FIND THEN
+        DPA_Management.RaiseDPAErrorForTable(TABLECAPTION);
+    END;
+
+    PROCEDURE DPA_ChkDepartmentCodeAllowed@1100000990(IsHardFilter@1100526000 : Boolean);
+    VAR
+      DimensionManagement@1100526001 : Codeunit 408;
+    BEGIN
+      //**4PS Generated Code - Do Not Change
+      DimensionManagement.CheckDepartmAuthWithFilterType(
+        DATABASE::"Hour Accounting", "Department Code", IsHardFilter);
+    END;
+
+    PROCEDURE DPA_GetFieldNoDepartmentCode@1100000994() : Integer;
+    BEGIN
+      //**4PS Generated Code - Do Not Change
+      EXIT(FIELDNO("Department Code"));
+    END;
+
+    PROCEDURE DPA_SetDefaultDepartment@1100000996();
+    BEGIN
+      //**4PS Generated Code - Do Not Change
+      IF NOT DPA_IsActive THEN
+        EXIT;
+
+      DPA_Management.SetDepartmentCodeUser(TABLENAME, "Department Code");
+    END;
+
+    PROCEDURE GetWeekYearText@1100527000() : Text;
+    BEGIN
+      EXIT(STRSUBSTNO('%1.%2',Week,Year));
+    END;
+
+    LOCAL PROCEDURE GetEmployeeHours@1100527002(EmployeeNo@1100527000 : Code[20]) : Boolean;
+    VAR
+      PostedHourHeader@1100527003 : Record 11012084;
+      HourAccountingLine@1100527002 : Record 11012039;
+    BEGIN
+      IF PostedHourHeader.GET(Year, Week, EmployeeNo) THEN
+        EXIT(TRUE);
+      HourAccountingLine.SETRANGE(Year, Year);
+      HourAccountingLine.SETRANGE(Week, Week);
+      HourAccountingLine.SETRANGE("Employee No.", EmployeeNo);
+      IF HourAccountingLine.FINDFIRST THEN BEGIN
+        HourAccountingLine.CALCFIELDS("Normal Hours", "Norm Hours");
+        IF HourAccountingLine."Normal Hours" >= HourAccountingLine."Norm Hours" THEN
+          EXIT(TRUE);
+      END;
+
+      EXIT(FALSE);
+    END;
+
+    PROCEDURE GetEmployeeNamesReportingDelay@1100527001() EmployeeNames : Text;
+    VAR
+      Employee@1100527000 : Record 5200;
+    BEGIN
+      Employee.SETFILTER("Account Hours",'%1',Employee."Account Hours"::"Required according to Norm");
+      Employee.SETRANGE("Manager No.","Employee No.");
+      IF Employee.FINDSET THEN BEGIN
+        REPEAT
+          IF NOT GetEmployeeHours(Employee."No.") THEN
+            EmployeeNames += Employee."Full Name" + '<BR/>';
+        UNTIL Employee.NEXT = 0;
+      END;
+    END;
+
+    [Integration]
+    PROCEDURE OnAfterReleaseHourAccounting@116(VAR HourAccounting@1000 : Record 11012038);
+    BEGIN
+    END;
+
+    PROCEDURE SendHourAccountingForApproval@1100525002();
+    VAR
+      ApprovalsBridge4PSConstruct@1100525002 : Codeunit 11125348;
+      HumanResourcesSetup@1100525001 : Record 5218;
+      ApprovalsMgmt@1100525000 : Codeunit 1535;
+    BEGIN
+      IF  ApprovalsBridge4PSConstruct.CheckHourAccountingApprovalsWorkflowEnabled(Rec) THEN BEGIN
+        HumanResourcesSetup.GET;
+        IF HumanResourcesSetup."Check Hours on Release" THEN
+          CheckLinesBeforeApproval;
+        IF ApprovalsMgmt.HasOpenOrPendingApprovalEntries(RECORDID) THEN
+          ApprovalsBridge4PSConstruct.OnSendHourAccountingForApprovalAgain(Rec)
+        ELSE
+          ApprovalsBridge4PSConstruct.OnSendHourAccountingForApproval(Rec);
+      END;
+    END;
+
+    PROCEDURE ExplodeLines@1100294000();
+    VAR
+      HourLine@1100294000 : Record 11012039;
+      TempHourLine@1100294001 : TEMPORARY Record 11012039;
+      HourCommentLine@1100294005 : Record 11128234;
+      TempHourCommentLine@1100294004 : TEMPORARY Record 11128234;
+      HoursConsentLine@1100294007 : Record 11020437;
+      TempHoursConsentLine@1100294008 : TEMPORARY Record 11020437;
+      RecRef@1100294006 : RecordRef;
+      LineNo@1100294002 : Integer;
+      DayNo@1100294003 : Integer;
+      i@1100294009 : Integer;
+    BEGIN
+      // SESB.I031 ASH 11.07.2013 >>
+      HourLine.SETRANGE(Year,Year);
+      HourLine.SETRANGE(Week,Week);
+      HourLine.SETRANGE("Employee No.","Employee No.");
+      HoursConsentLine.SETRANGE(Year, Year);
+      HoursConsentLine.SETRANGE(Week, Week);
+      HoursConsentLine.SETRANGE(Employee, "Employee No.");
+      HoursConsentLine.SETRANGE(LineType, HoursConsentLine.LineType::Normal);
+
+      IF HourLine.FINDSET THEN
+        REPEAT
+          HourLine.CALCFIELDS("Component Type");
+          IF TempHourLine.FINDLAST THEN
+            LineNo := TempHourLine."Line No." + 10000
+          ELSE
+            LineNo := 10000;
+
+          HoursConsentLine.SETRANGE("Line No.", HourLine."Line No.");
+          IF HoursConsentLine.FINDSET THEN
+            REPEAT
+              TempHoursConsentLine := HoursConsentLine;
+              TempHoursConsentLine."Line No." := LineNo;
+              TempHoursConsentLine.INSERT;
+            UNTIL HoursConsentLine.NEXT = 0;
+
+          RecRef.GETTABLE(HourLine);
+          HourCommentLine.SETRANGE("Table Name", HourCommentLine."Table Name"::"Hour Accounting Line");
+          HourCommentLine.SETRANGE("Record ID", RecRef.RECORDID);
+
+      //>>RFC226
+      //    IF HourLine."Component Type" IN [HourLine."Component Type"::Hours,HourLine."Component Type"::"Expense hours"] THEN BEGIN
+          IF HourLine."Component Type" IN [HourLine."Component Type"::Hours,HourLine."Component Type"::"Expense hours",HourLine."Component Type"::Addition] THEN BEGIN
+      //<<RFC226
+            // SESB.I038 VKO 07.08.2013 >>
+            CASE HourLine."Component Type" OF
+      //>>RFC226
+      //        HourLine."Component Type"::Hours:
+              HourLine."Component Type"::Hours, HourLine."Component Type"::Addition:
+      //<<RFC226
+                i := 1;
+              HourLine."Component Type"::"Expense hours":
+      //>>4PSSE, 130919, email from Ward
+                //i := 0;
+                i := 1;
+      //<<4PSSE, 130919
+            END;
+            // SESB.I038 VKO 07.08.2013 >>
+            FOR DayNo := i TO 7 DO BEGIN
+              TempHourLine := HourLine;
+              //>>4PSSE, 130919, email from Ward
+              // //SESB.I038 VKO 07.08.2013 >>
+              //TempHourLine.Quantity := 0;
+              //TempHourLine.Amount := 0;
+              //TempHourLine."Amount (LCY)" := 0;
+              // //SESB.I038 VKO 07.08.2013 <<
+              //<<4PSSE, 130919
+              TempHourLine.Monday := 0;
+              TempHourLine.Tuesday := 0;
+              TempHourLine.Wednesday := 0;
+              TempHourLine.Thursday := 0;
+              TempHourLine.Friday := 0;
+              TempHourLine.Saturday := 0;
+              TempHourLine.Sunday := 0;
+              CASE DayNo OF
+                // SESB.I038 VKO 07.08.2013 >>
+                0: // For amount in case of "Expense hours"
+                  BEGIN
+                    TempHourLine.Quantity := HourLine.Quantity;
+                    TempHourLine.Amount := HourLine.Amount;
+                    TempHourLine."Amount (LCY)" := HourLine."Amount (LCY)";
+                    TempHourLine."Time From" := 0T;
+                    TempHourLine."Time Until" := 0T;
+                    TempHourLine.Duration := 0;
+                  END;
+                // SESB.I038 VKO 07.08.2013 <<
+                1:
+                  TempHourLine.Monday    := HourLine.Monday;
+                2:
+                  TempHourLine.Tuesday   := HourLine.Tuesday;
+                3:
+                  TempHourLine.Wednesday := HourLine.Wednesday;
+                4:
+                  TempHourLine.Thursday  := HourLine.Thursday;
+                5:
+                  TempHourLine.Friday    := HourLine.Friday;
+                6:
+                  TempHourLine.Saturday  := HourLine.Saturday;
+                7:
+                  TempHourLine.Sunday    := HourLine.Sunday;
+              END;
+              TempHourLine."Total Line" :=
+                TempHourLine.Monday + TempHourLine.Tuesday + TempHourLine.Wednesday +
+                TempHourLine.Thursday + TempHourLine.Friday + TempHourLine.Saturday + TempHourLine.Sunday;
+              // SESB.I038 VKO 07.08.2013 >>
+
+              //>>4PSSE, 130919, email from Ward
+              //IF (TempHourLine."Total Line" <> 0) OR (TempHourLine.Quantity <> 0) THEN BEGIN
+              IF (TempHourLine."Total Line" <> 0) THEN BEGIN
+              //<<4PSSE, 130919, email from Ward
+
+                // SESB.I038 VKO 07.08.2013 >>
+                // TempHourLine."Amount (LCY)" := ROUND(TempHourLine."Total Line" * TempHourLine."Unit Cost (LCY)");
+                // SESB.I038 VKO 07.08.2013 <<
+                TempHourLine.CheckPostingDate;
+                TempHourLine."Line No." := LineNo;
+                //>>IME-046
+                TempHourLine.CalcRateAndAmount;
+                //<<IME-046
+                TempHourLine.INSERT;
+                LineNo += 10000;
+
+                RecRef.GETTABLE(TempHourLine);
+                IF HourCommentLine.FINDSET THEN
+                  REPEAT
+                    TempHourCommentLine := HourCommentLine;
+                    TempHourCommentLine."Record ID" := RecRef.RECORDID;
+                    TempHourCommentLine.INSERT(TRUE);
+                  UNTIL HourCommentLine.NEXT = 0;
+              END;
+            END;
+
+          END ELSE BEGIN
+            TempHourLine := HourLine;
+            TempHourLine."Line No." := LineNo;
+            TempHourLine.INSERT;
+
+            RecRef.GETTABLE(TempHourLine);
+            IF HourCommentLine.FINDSET THEN
+              REPEAT
+                TempHourCommentLine := HourCommentLine;
+                TempHourCommentLine."Record ID" := RecRef.RECORDID;
+                TempHourCommentLine.INSERT(TRUE);
+              UNTIL HourCommentLine.NEXT = 0;
+          END;
+          HourLine.DeleteLineComments;
+        UNTIL HourLine.NEXT = 0;
+      HourLine.DELETEALL;
+
+      IF TempHourLine.FINDSET THEN
+        REPEAT
+          HourLine := TempHourLine;
+          HourLine.INSERT;
+        UNTIL TempHourLine.NEXT = 0;
+
+      HoursConsentLine.SETRANGE("Line No.");
+      HoursConsentLine.DELETEALL(TRUE);
+      IF TempHoursConsentLine.FINDSET THEN
+        REPEAT
+          HoursConsentLine := TempHoursConsentLine;
+          HoursConsentLine.INSERT(TRUE);
+          //>>4PS-028
+          HoursConsentLine.HourAccountingCheck(HoursConsentLine);
+          //<<4PS-028
+        UNTIL TempHoursConsentLine.NEXT = 0;
+
+      IF TempHourCommentLine.FINDSET THEN
+        REPEAT
+          HourCommentLine := TempHourCommentLine;
+          HourCommentLine.INSERT;
+        UNTIL TempHourCommentLine.NEXT = 0;
+      // SESB.I031 ASH 11.07.2013 <<
+    END;
+
+    PROCEDURE UpdateLinesStatus@1100294001();
+    VAR
+      HourAccountingLine@1100294001 : Record 11012039;
+    BEGIN
+      // SESB.I031 ASH 12.07.2013 >>
+      HourAccountingLine.SETRANGE(Year, Year);
+      HourAccountingLine.SETRANGE(Week, Week);
+      HourAccountingLine.SETRANGE("Employee No.", "Employee No.");
+      IF HourAccountingLine.FINDSET THEN
+        REPEAT
+      //>>141103, ENH050, save last used date with day-value
+          HourAccountingLine.UpdateActualDateOnTheLine;
+          HourAccountingLine.UpdateLineStatus;  //180412
+          HourAccountingLine.MODIFY(FALSE);
+      //<<141103, ENH050
+          //HourAccountingLine.UpdateLineStatus;  //180412
+        UNTIL HourAccountingLine.NEXT = 0;
+      // SESB.I031 ASH 12.07.2013 <<
+    END;
+
+    PROCEDURE ChangeConsentSuperUser@1100285500(pHourLine@1100285500 : Record 11012039);
+    VAR
+      lvHourAccountingLines@1100285501 : Record 11012039;
+      lvHoursConsentLines@1100285502 : Record 11020437;
+      lvHourAccounting@1100285503 : Record 11012038;
+    BEGIN
+      //Remove ConsentLines for HourLines that are changed
+      lvHourAccountingLines.SETRANGE(Year           , pHourLine.Year);
+      lvHourAccountingLines.SETRANGE(Week           , pHourLine.Week);
+      lvHourAccountingLines.SETRANGE("Employee No." , pHourLine."Employee No.");
+      lvHourAccountingLines.SETRANGE(Changed        , TRUE);
+      //IF lvHourAccountingLines.FINDFIRST THEN REPEAT
+      IF lvHourAccountingLines.FINDSET(FALSE) THEN REPEAT
+         CLEAR(lvHoursConsentLines);
+         lvHoursConsentLines.SETRANGE(Year       , lvHourAccountingLines.Year);
+         lvHoursConsentLines.SETRANGE(Week       , lvHourAccountingLines.Week);
+         lvHoursConsentLines.SETRANGE(Employee   , lvHourAccountingLines."Employee No.");
+         lvHoursConsentLines.SETRANGE("Line No." , lvHourAccountingLines."Line No." );
+         IF lvHoursConsentLines.FINDSET THEN
+            lvHoursConsentLines.DELETEALL;
+      UNTIL lvHourAccountingLines.NEXT = 0;
+
+      //>>ITERO.DL 140731 post-test result
+      CLEAR(lvHoursConsentLines);
+      lvHoursConsentLines.SETRANGE(Year       , pHourLine.Year);
+      lvHoursConsentLines.SETRANGE(Week       , pHourLine.Week);
+      lvHoursConsentLines.SETRANGE(Employee   , pHourLine."Employee No.");
+      lvHoursConsentLines.SETRANGE(Denied     , TRUE);
+      IF lvHoursConsentLines.FINDSET THEN
+         lvHoursConsentLines.DELETEALL;
+      //<<ITERO.DL 140731
+
+      //
+      //TimeSheet Consented
+      Consented := TRUE;
+      MODIFY(TRUE);
+    END;
+
+    PROCEDURE UpdateDocumentDate@1100285503();
+    BEGIN
+      "Document Date":= DWY2DATE(5,Week,Year);
+    END;
+
+    PROCEDURE CheckLeave@1100527900();
+    VAR
+      HourAccountingLine@1100527900 : Record 11012039;
+    BEGIN
+      HourAccountingLine.SETRANGE(Year, Year);
+      HourAccountingLine.SETRANGE(Week, Week);
+      HourAccountingLine.SETRANGE("Employee No.", "Employee No.");
+      IF HourAccountingLine.FINDSET THEN
+        REPEAT
+          HourAccountingLine.CheckLeave;
+        UNTIL HourAccountingLine.NEXT = 0;
+    END;
+
+    PROCEDURE CheckProjectEmployee@1100527901();
+    VAR
+      HourAccountingLine@1100527900 : Record 11012039;
+    BEGIN
+      HourAccountingLine.SETRANGE(Year,Year);
+      HourAccountingLine.SETRANGE(Week,Week);
+      HourAccountingLine.SETRANGE("Employee No.","Employee No.");
+      HourAccountingLine.SETRANGE(Type,HourAccountingLine.Type::Project);
+      HourAccountingLine.SETFILTER("Project No.",'<>%1','');
+      IF HourAccountingLine.FINDSET THEN
+        REPEAT
+          HourAccountingLine.CheckProjectEmployee;
+        UNTIL HourAccountingLine.NEXT = 0;
+    END;
+
+    PROCEDURE FillYearAndWeekWithDefaultValue@1100528400();
+    VAR
+      UserSetup@1100528400 : Record 91;
+      HourAccountingDate@1100528401 : Date;
+    BEGIN
+      HourAccountingDate := TODAY;
+      IF UserSetup.GET(USERID) THEN
+        IF UserSetup."Week of Hour Accounting" = UserSetup."Week of Hour Accounting"::"Last Week" THEN
+          HourAccountingDate := CALCDATE('<-1W>',HourAccountingDate);
+      Year := DATE2DWY(HourAccountingDate,3);
+      Week := DATE2DWY(HourAccountingDate,2);
+    END;
+
+    BEGIN
+    {
+      SESB.I025 Automatic posting of hours
+         KD 11.07.2013 Key Consented added
+
+      SESB.I031 Work Flow - Approval of hours
+         ASH 11.07.2013 Trigger ExplodeLines added
+         ASH 12.07.2013 Trigger UpdateLinesStatus added
+         ASH 12.07.2013 Trigger SetStatus changed
+         ASH 12.07.2013 Trigger CreateConsentLines changed
+         ASH 12.07.2013 Trigger DeleteHoursConsentLines changed
+         VKO 26.07.2013 Trigger SetStatus changed
+
+      SESB.I038 New Wage Component type
+         VKO 07.08.2013 Trigger ExplodeLines changed
+
+      Itero 130917
+          DeleteHoursConsentLines changed
+
+      131024
+      //>>IME-046
+      131024 Itero GH : Amount Hour incorrect in Project Controle when exploding
+
+
+
+      //>>131210 ITERO.DJ IME082 Added control for Team Code
+      //>>131213 ITERO.DJ IME082 Adjustment to control
+
+      //>>IME-107 ITERO.GH 140213
+
+      140226 ITERO.GH 4PS-028 Check with AutoConsent - field Consented in Hour Accounting Table With ITERO.DJ
+      140414 IME-114          Reopen Setrange Statement
+      14072x IME-164          ChangeConsentSuperUser(HourLine);
+      141103 ITERO.DL ENH-050 Save actual date on posted hour line, change in export file to Agda, UpdateLinesStatus() modified
+      141104 ITERO.WG ENH-050 Added field "Document Date", will be filled based on Year and Week
+      160225 ITERO.DL IME424x repace 'findfirst then repeat' (causes locking) with 'findset(false) then repeat'
+      170516 ITERO.FH IME483  Added code for removing "Hours Consent Line" in function OnDelete.
+      190204 ORANGO.DL RFC226 new "Component Type"
+    }
+    END.
+  }
+}
+

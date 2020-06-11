@@ -1,0 +1,915 @@
+OBJECT Codeunit 11012308 Product Discount Mgt
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text001@1100528900 : TextConst 'DEU=Besch„ftigt mit #1################# @2@@@@@@@@@@@@@;ENU=Busy with       #1################# @2@@@@@@@@@@@@@;NLD=Bezig met       #1################# @2@@@@@@@@@@@@@;NOR=Opptatt med       #1################# @2@@@@@@@@@@@@@;SVE=Upptagen med    #1################# @2@@@@@@@@@@@@@';
+      GeneralLedgerSetup@1100528901 : Record 98;
+      Status@1100528904 : Dialog;
+      maxrec@1100528903 : Integer;
+      currec@1100528902 : Integer;
+      ValidateItems@1100528906 : Codeunit 11012033;
+      DiscType@1100528907 : 'Purchase,Sales';
+
+    PROCEDURE CalculateDiscountEstimate@1100528902(VAR iEstimate@1100528900 : Record 11012151);
+    VAR
+      ProductDiscount@1100528901 : Record 11012743;
+      ProductDiscountEstimate@1100528904 : Record 11229400;
+      Estimate@1100528917 : Record 11012151;
+      EstimateLine@1100528906 : Record 11072072;
+      EstimateLine2@1100528911 : Record 11072072;
+      RecipeLine@1100528908 : Record 11072075;
+      RecipeLine2@1100528913 : Record 11072075;
+      DiscPerc@1100528903 : Decimal;
+      DiscAmnt@1100528905 : Decimal;
+      LineNo@1100528902 : Integer;
+      RefDate@1100528909 : Date;
+      DiscRef1@1100528916 : Code[20];
+      DiscRef2@1100528915 : Code[20];
+      DiscPrio@1100528914 : Code[10];
+      GrossPrice@1100528912 : Decimal;
+      NetPrice@1100528910 : Decimal;
+      VendorDisc@1100528907 : Decimal;
+      CumQuantity@1100528918 : Decimal;
+      CostObject@1100528919 : Code[20];
+      DimValRec@1100528921 : Record 349;
+      DimMgt@1100528920 : Codeunit 408;
+    BEGIN
+      GeneralLedgerSetup.GET;
+      Status.OPEN(Text001);
+
+      Estimate.COPY(iEstimate);
+      IF Estimate.FINDSET THEN BEGIN
+        REPEAT
+          Status.UPDATE(1,EstimateLine.TABLECAPTION);
+          RefDate := ValidateItems.GetRefDateEstimate(Estimate);
+          DiscRef1 := Estimate."Purch Discount Term Group 1";
+          DiscRef2 := Estimate."Purch Discount Term Group 2";
+          DiscPrio := ValidateItems.GetRefPrioEstimate(Estimate, DiscType::Purchase);
+          Estimate.TESTFIELD(Fixed, FALSE);
+          //
+          ProductDiscountEstimate.SETRANGE("Estimate No.", Estimate."No.");
+          ProductDiscountEstimate.DELETEALL;
+          //
+          EstimateLine.RESET;
+          EstimateLine.SETRANGE("Estimate No.", Estimate."No.");
+          EstimateLine.SETRANGE("Product Discount Line", TRUE);
+          EstimateLine.DELETEALL;
+          //
+          RecipeLine.RESET;
+          RecipeLine.SETRANGE("Estimate No.", Estimate."No.");
+          RecipeLine.SETRANGE("Product Discount Line", TRUE);
+          RecipeLine.DELETEALL;
+          //
+          EstimateLine.RESET;
+          EstimateLine.SETRANGE("Estimate No.", Estimate."No.");
+          EstimateLine.SETRANGE("Product Discount Line", FALSE);
+          EstimateLine.SETFILTER(Manufacturer, '<>%1', '');
+          EstimateLine.SETFILTER("Basic Item", '<>%1', '');
+          IF EstimateLine.FINDSET THEN BEGIN
+            currec := 0;
+            maxrec := EstimateLine.COUNT;
+            REPEAT
+              IF ProductDiscountEstimate."Estimate No." <> EstimateLine."Estimate No." THEN
+                LineNo := 0;
+              //
+              DiscPerc := ProductDiscount.GetDiscountPercentage(EstimateLine.Manufacturer, EstimateLine."Basic Item", RefDate);
+              DiscAmnt := ProductDiscount.GetDiscountAmount(EstimateLine.Manufacturer, EstimateLine."Basic Item", RefDate);
+              IF (DiscPerc <> 0) OR (DiscAmnt <> 0) THEN BEGIN
+                CumQuantity := EstimateLine.Quantity * EstimateLine."Part Quantity";
+                GetPriceAndDiscount(
+                  EstimateLine."Vendor (Trade Item)", EstimateLine."Trade Item",
+                  EstimateLine.Manufacturer, EstimateLine."Basic Item",
+                  RefDate, DiscRef1, DiscRef2, DiscPrio,
+                  GrossPrice, NetPrice, VendorDisc);
+                CostObject := CheckCostObject(EstimateLine.Manufacturer, EstimateLine."Basic Item");
+                DimMgt.GetDimValueRec(2, CostObject, DimValRec, TRUE,'');
+                //
+                ProductDiscountEstimate.INIT;
+                ProductDiscountEstimate."Estimate No." := EstimateLine."Estimate No.";
+                ProductDiscountEstimate."Line No." := LineNo + 10000;
+                LineNo := ProductDiscountEstimate."Line No.";
+                ProductDiscountEstimate."Sub-Estimate No." := EstimateLine."Sub-Estimate No.";
+                ProductDiscountEstimate."Part Group" := EstimateLine."Part Group";
+                ProductDiscountEstimate.Part := EstimateLine.Part;
+                ProductDiscountEstimate.Element := EstimateLine.Element;
+                ProductDiscountEstimate.Manufacturer := EstimateLine.Manufacturer;
+                ProductDiscountEstimate."Basic Item" := EstimateLine."Basic Item";
+                ProductDiscountEstimate.Quantity := CumQuantity;
+                ProductDiscountEstimate."Unit of Measure" := EstimateLine."Unit of Measure";
+                ProductDiscountEstimate."Gross Price" := GrossPrice;
+                ProductDiscountEstimate."Vendor Discount %" := VendorDisc;
+                ProductDiscountEstimate."Cost Price" := NetPrice;
+                IF (DiscAmnt <> 0) THEN BEGIN
+                  ProductDiscountEstimate."Product Discount Amount" := DiscAmnt;
+                  ProductDiscountEstimate."Line Discount Amount" :=
+                    ROUND((CumQuantity * DiscAmnt), GeneralLedgerSetup."Unit-Amount Rounding Precision");
+                END ELSE BEGIN
+                  ProductDiscountEstimate."Product Discount %" := DiscPerc;
+                  ProductDiscountEstimate."Line Discount Amount" :=
+                    ROUND((CumQuantity * NetPrice * DiscPerc/100), GeneralLedgerSetup."Unit-Amount Rounding Precision");
+                END;
+                ProductDiscountEstimate.INSERT;
+                //
+                IF Estimate."Apply Product Discount" = TRUE THEN BEGIN
+                  EstimateLine2 := EstimateLine;
+                  EstimateLine2."Product Discount Line" := TRUE;
+                  EstimateLine2.Manufacturer := '';
+                  EstimateLine2."Basic Item" := '';
+                  EstimateLine2."Vendor (Trade Item)" := '';
+                  EstimateLine2."Trade Item" := '';
+                  EstimateLine2."Item No." := '';
+                  EstimateLine2."Purchase Discount %" := 0;
+                  EstimateLine2."Sales Discount %" := 0;
+                  EstimateLine2."Cost Type (Price)" := DimValRec."Cost Type";
+                  EstimateLine2."Cost Object Price" := CostObject;
+                  IF (DiscAmnt <> 0) THEN BEGIN
+                    EstimateLine2."Gross Price" := DiscAmnt;
+                    EstimateLine2.Description := ProductDiscount.TABLECAPTION + ': ' + FORMAT(DiscAmnt);
+                  END ELSE BEGIN
+                    EstimateLine2."Gross Price" := GrossPrice * DiscPerc/100;
+                    EstimateLine2.Description := ProductDiscount.TABLECAPTION + ': ' + FORMAT(DiscPerc) + '%';
+                  END;
+                  EstimateLine2.Description := EstimateLine2.Description + '; ' +
+                    EstimateLine.FIELDCAPTION("Basic Item") + ' ' + EstimateLine."Basic Item";
+                  EstimateLine2.Quantity := -1 * EstimateLine.Quantity;
+                  EstimateLine2."Quantity (Sales)" := -1 * EstimateLine."Quantity (Sales)";
+                  EstimateLine2."Line No." := EstimateLine."Line No.";
+                  EstimateLine2."Attached to Line No." := EstimateLine."Line No.";
+                  REPEAT
+                    EstimateLine2."Line No." := EstimateLine."Line No." + 1;
+                  UNTIL EstimateLine2.INSERT;
+                  EstimateLine2.CalculateNetPrice;
+                  EstimateLine2.CalculateTotals;
+                  EstimateLine2.MODIFY;
+                END;
+              END;
+              //
+              currec := currec + 1;
+              Status.UPDATE(2,ROUND(currec / maxrec * 10000,1));
+            UNTIL EstimateLine.NEXT = 0;
+          END;
+          //
+          Status.UPDATE(1,RecipeLine.TABLECAPTION);
+          //
+          RecipeLine.RESET;
+          RecipeLine.SETRANGE("Estimate No.", Estimate."No.");
+          RecipeLine.SETRANGE("Product Discount Line", FALSE);
+          RecipeLine.SETFILTER(Manufacturer, '<>%1', '');
+          RecipeLine.SETFILTER("Basic Item", '<>%1', '');
+          IF RecipeLine.FINDSET THEN BEGIN
+            currec := 0;
+            maxrec := RecipeLine.COUNT;
+            REPEAT
+              IF ProductDiscountEstimate."Estimate No." <> RecipeLine."Estimate No." THEN
+                LineNo := 0;
+              //
+              DiscPerc := ProductDiscount.GetDiscountPercentage(RecipeLine.Manufacturer, RecipeLine."Basic Item", RefDate);
+              DiscAmnt := ProductDiscount.GetDiscountAmount(RecipeLine.Manufacturer, RecipeLine."Basic Item", RefDate);
+              IF (DiscPerc <> 0) OR (DiscAmnt <> 0) THEN BEGIN
+                EstimateLine.GET(RecipeLine."Estimate No.", RecipeLine."Sub-Estimate No.", RecipeLine."Part Group", RecipeLine.Part, RecipeLine."Estimate Line");
+                //
+                IF RecipeLine."Ignore Recipe Quantity" THEN
+                  CumQuantity := RecipeLine.Quantity * EstimateLine."Part Quantity"
+                ELSE
+                  CumQuantity := RecipeLine.Quantity * EstimateLine.Quantity * EstimateLine."Part Quantity";
+                GetPriceAndDiscount(
+                  RecipeLine."Vendor (Trade Item)", RecipeLine."Trade Item",
+                  RecipeLine.Manufacturer, RecipeLine."Basic Item",
+                  RefDate, DiscRef1, DiscRef2, DiscPrio,
+                  GrossPrice, NetPrice, VendorDisc);
+                CostObject := CheckCostObject(RecipeLine.Manufacturer, RecipeLine."Basic Item");
+                DimMgt.GetDimValueRec(2, CostObject, DimValRec, TRUE,'');
+                //
+                ProductDiscountEstimate.INIT;
+                ProductDiscountEstimate."Estimate No." := RecipeLine."Estimate No.";
+                ProductDiscountEstimate."Line No." := LineNo + 10000;
+                LineNo := ProductDiscountEstimate."Line No.";
+                ProductDiscountEstimate."Sub-Estimate No." := RecipeLine."Sub-Estimate No.";
+                ProductDiscountEstimate."Part Group" := RecipeLine."Part Group";
+                ProductDiscountEstimate.Part := RecipeLine.Part;
+                ProductDiscountEstimate."Recipe Group" := RecipeLine."Recipe Group";
+                ProductDiscountEstimate.Recipe := RecipeLine.Recipe;
+                ProductDiscountEstimate.Element := RecipeLine.Element;
+                ProductDiscountEstimate.Manufacturer := RecipeLine.Manufacturer;
+                ProductDiscountEstimate."Basic Item" := RecipeLine."Basic Item";
+                ProductDiscountEstimate.Quantity := CumQuantity;
+                ProductDiscountEstimate."Unit of Measure" := RecipeLine."Unit of Measure";
+                ProductDiscountEstimate."Gross Price" := GrossPrice;
+                ProductDiscountEstimate."Vendor Discount %" := VendorDisc;
+                ProductDiscountEstimate."Cost Price" := NetPrice;
+                IF (DiscAmnt <> 0) THEN BEGIN
+                  ProductDiscountEstimate."Product Discount Amount" := DiscAmnt;
+                  ProductDiscountEstimate."Line Discount Amount" :=
+                    ROUND((CumQuantity * DiscAmnt), GeneralLedgerSetup."Unit-Amount Rounding Precision");
+                END ELSE BEGIN
+                  ProductDiscountEstimate."Product Discount %" := DiscPerc;
+                  ProductDiscountEstimate."Line Discount Amount" :=
+                    ROUND((CumQuantity * NetPrice * DiscPerc/100), GeneralLedgerSetup."Unit-Amount Rounding Precision");
+                END;
+                ProductDiscountEstimate.INSERT;
+                //
+                IF Estimate."Apply Product Discount" = TRUE THEN BEGIN
+                  RecipeLine2 := RecipeLine;
+                  RecipeLine2."Product Discount Line" := TRUE;
+                  RecipeLine2.Manufacturer := '';
+                  RecipeLine2."Basic Item" := '';
+                  RecipeLine2."Vendor (Trade Item)" := '';
+                  RecipeLine2."Trade Item" := '';
+                  RecipeLine2."Item No." := '';
+                  RecipeLine2."Purchase Discount %" := 0;
+                  RecipeLine2."Sales Discount %" := 0;
+                  RecipeLine2."Cost Type (Price)" := DimValRec."Cost Type";
+                  RecipeLine2."Cost Object Price" := CostObject;
+                  IF (DiscAmnt <> 0) THEN BEGIN
+                    RecipeLine2."Gross Price" := DiscAmnt;
+                    RecipeLine2.Description := ProductDiscount.TABLECAPTION + ': ' + FORMAT(DiscAmnt);
+                  END ELSE BEGIN
+                    RecipeLine2."Gross Price" := GrossPrice  * DiscPerc/100;
+                    RecipeLine2.Description := ProductDiscount.TABLECAPTION + ': ' + FORMAT(DiscPerc) + '%';
+                  END;
+                  RecipeLine2.Description := RecipeLine2.Description + '; ' +
+                    RecipeLine.FIELDCAPTION("Basic Item") + ' ' + RecipeLine."Basic Item";
+                  RecipeLine2.Quantity := -1 * RecipeLine.Quantity;
+                  RecipeLine2."Quantity (Sales)" := -1 * RecipeLine."Quantity (Sales)";
+                  RecipeLine2."Line No." := RecipeLine."Line No.";
+                  RecipeLine2."Attached to Line No." := RecipeLine."Line No.";
+                  REPEAT
+                    RecipeLine2."Line No." := RecipeLine."Line No." + 1;
+                  UNTIL RecipeLine2.INSERT;
+                  RecipeLine2.CalculateNetPrice;
+                  RecipeLine2.CalculateTotals;
+                  RecipeLine2.MODIFY;
+                END;
+              END;
+              //
+              currec := currec + 1;
+              Status.UPDATE(2,ROUND(currec / maxrec * 10000,1));
+            UNTIL RecipeLine.NEXT = 0;
+          END;
+        UNTIL Estimate.NEXT = 0;
+      END;
+
+      Status.CLOSE;
+    END;
+
+    PROCEDURE CalculateDiscountProjectBudget@1100528900(VAR iJob@1100528900 : Record 11072003);
+    VAR
+      ProductDiscount@1100528901 : Record 11012743;
+      ProductDiscountProjBudget@1100528904 : Record 11229401;
+      Job@1100528911 : Record 11072003;
+      BudgetLine@1100528906 : Record 11012001;
+      BudgetLine2@1100528915 : Record 11012001;
+      DiscPerc@1100528903 : Decimal;
+      DiscAmnt@1100528905 : Decimal;
+      LineNo@1100528902 : Integer;
+      RefDate@1100528909 : Date;
+      DiscRef1@1100528914 : Code[20];
+      DiscRef2@1100528913 : Code[20];
+      DiscPrio@1100528912 : Code[10];
+      GrossPrice@1100528910 : Decimal;
+      NetPrice@1100528908 : Decimal;
+      VendorDisc@1100528907 : Decimal;
+      CostObject@1100528916 : Code[20];
+      DimValRec@1100528918 : Record 349;
+      DimMgt@1100528917 : Codeunit 408;
+    BEGIN
+      GeneralLedgerSetup.GET;
+      Status.OPEN(Text001);
+
+      Job.COPY(iJob);
+      IF Job.FINDSET THEN BEGIN
+        REPEAT
+          Status.UPDATE(1,BudgetLine.TABLECAPTION);
+          RefDate := ValidateItems.GetRefDateProject(Job);
+          DiscRef1 := Job."Purch Discount Term Group 1";
+          DiscRef2 := Job."Purch Discount Term Group 2";
+          DiscPrio := ValidateItems.GetRefPrioProject(Job, DiscType::Purchase);
+          //
+          ProductDiscountProjBudget.SETRANGE("Project No.", Job."No.");
+          ProductDiscountProjBudget.DELETEALL;
+          //
+          BudgetLine.RESET;
+          BudgetLine.SETRANGE("Project No.", Job."No.");
+          BudgetLine.SETRANGE("Product Discount Line", TRUE);
+          BudgetLine.DELETEALL;
+          //
+          BudgetLine.RESET;
+          BudgetLine.SETCURRENTKEY("Main Project No.", "Project No.", Element);
+          BudgetLine.SETRANGE("Main Project No.", Job."Main Project");
+          BudgetLine.SETRANGE("Project No.", Job."No.");
+          BudgetLine.SETFILTER(Manufacturer, '<>%1', '');
+          BudgetLine.SETFILTER("Basic Item", '<>%1', '');
+          IF BudgetLine.FINDSET THEN BEGIN
+            currec := 0;
+            maxrec := BudgetLine.COUNT;
+            REPEAT
+              IF ProductDiscountProjBudget."Project No." <> BudgetLine."Project No." THEN
+                LineNo := 0;
+              //
+              DiscPerc := ProductDiscount.GetDiscountPercentage(BudgetLine.Manufacturer, BudgetLine."Basic Item", RefDate);
+              DiscAmnt := ProductDiscount.GetDiscountAmount(BudgetLine.Manufacturer, BudgetLine."Basic Item", RefDate);
+              IF (DiscPerc <> 0) OR (DiscAmnt <> 0) THEN BEGIN
+                GetPriceAndDiscount(
+                  BudgetLine."Vendor (Trade Item)", BudgetLine."Trade Item",
+                  BudgetLine.Manufacturer, BudgetLine."Basic Item",
+                  RefDate, DiscRef1, DiscRef2, DiscPrio,
+                  GrossPrice, NetPrice, VendorDisc);
+                CostObject := CheckCostObject(BudgetLine.Manufacturer, BudgetLine."Basic Item");
+                DimMgt.GetDimValueRec(2, CostObject, DimValRec, TRUE,'');
+                //
+                ProductDiscountProjBudget.INIT;
+                ProductDiscountProjBudget."Project No." := BudgetLine."Project No.";
+                ProductDiscountProjBudget."Line No." := LineNo + 10000;
+                LineNo := ProductDiscountProjBudget."Line No.";
+                ProductDiscountProjBudget."Extension Contract" := BudgetLine."Extension Contract";
+                ProductDiscountProjBudget.Adjustment := BudgetLine.Adjustment;
+                ProductDiscountProjBudget.Option := BudgetLine.Option;
+                ProductDiscountProjBudget.Element := BudgetLine.Element;
+                ProductDiscountProjBudget.Manufacturer := BudgetLine.Manufacturer;
+                ProductDiscountProjBudget."Basic Item" := BudgetLine."Basic Item";
+                ProductDiscountProjBudget.Quantity := BudgetLine.Quantity;
+                ProductDiscountProjBudget."Unit of Measure" := BudgetLine."Unit of Measure";
+                ProductDiscountProjBudget."Gross Price" := GrossPrice;
+                ProductDiscountProjBudget."Vendor Discount %" := VendorDisc;
+                ProductDiscountProjBudget."Cost Price" := NetPrice;
+                IF (DiscAmnt <> 0) THEN BEGIN
+                  ProductDiscountProjBudget."Product Discount Amount" := DiscAmnt;
+                  ProductDiscountProjBudget."Line Discount Amount" :=
+                    ROUND((BudgetLine.Quantity * DiscAmnt), GeneralLedgerSetup."Unit-Amount Rounding Precision");
+                END ELSE BEGIN
+                  ProductDiscountProjBudget."Product Discount %" := DiscPerc;
+                  ProductDiscountProjBudget."Line Discount Amount" :=
+                    ROUND((BudgetLine.Quantity * NetPrice * DiscPerc/100), GeneralLedgerSetup."Unit-Amount Rounding Precision");
+                END;
+                ProductDiscountProjBudget.INSERT;
+                //
+                IF Job."Apply Product Discount Budget" = TRUE THEN BEGIN
+                  BudgetLine2 := BudgetLine;
+                  BudgetLine2."Product Discount Line" := TRUE;
+                  BudgetLine2.Manufacturer := '';
+                  BudgetLine2."Basic Item" := '';
+                  BudgetLine2."Vendor (Trade Item)" := '';
+                  BudgetLine2."Trade Item" := '';
+                  BudgetLine2."Item No." := '';
+                  BudgetLine2."Discount %" := 0;
+                  BudgetLine2."Cost Type" := DimValRec."Cost Type";
+                  BudgetLine2."Cost Object" := CostObject;
+                  IF (DiscAmnt <> 0) THEN BEGIN
+                    BudgetLine2."Gross Price (LCY)" := DiscAmnt;
+                    BudgetLine2.Description := ProductDiscount.TABLECAPTION + ': ' + FORMAT(DiscAmnt);
+                  END ELSE BEGIN
+                    BudgetLine2."Gross Price (LCY)" := GrossPrice  * DiscPerc/100;
+                    BudgetLine2.Description := ProductDiscount.TABLECAPTION + ': ' + FORMAT(DiscPerc) + '%';
+                  END;
+                  BudgetLine2.Description := BudgetLine2.Description + '; ' +
+                    BudgetLine.FIELDCAPTION("Basic Item") + ' ' + BudgetLine."Basic Item";
+                  BudgetLine2.Quantity := -1 * BudgetLine.Quantity;
+                  BudgetLine2."Line No." := BudgetLine."Line No.";
+                  BudgetLine2."Attached to Line No." := BudgetLine."Line No.";
+                  REPEAT
+                    BudgetLine2."Line No." := BudgetLine."Line No." + 1;
+                  UNTIL BudgetLine2.INSERT;
+                  BudgetLine2.CalculateNetPrice;
+                  BudgetLine2.CalcTotals;
+                  BudgetLine2.GiveErrorMessageBudgetFixed(BudgetLine2);  //check Fixed related to Project, Adjustment or Extension Contract
+                  BudgetLine2.MODIFY;
+                END;
+              END;
+              //
+              currec := currec + 1;
+              Status.UPDATE(2,ROUND(currec / maxrec * 10000,1));
+            UNTIL BudgetLine.NEXT = 0;
+          END;
+        UNTIL Job.NEXT = 0;
+      END;
+
+      Status.CLOSE;
+    END;
+
+    PROCEDURE CalculateDiscountJobEntry@1100528901(VAR iJob@1100528900 : Record 11072003);
+    VAR
+      ProductDiscount@1100528901 : Record 11012743;
+      ProductDiscountProjEntry@1100528904 : Record 11229402;
+      Job@1100528914 : Record 11072003;
+      JobLedgerEntry@1100528906 : Record 11072005;
+      DiscPerc@1100528903 : Decimal;
+      DiscAmnt@1100528910 : Decimal;
+      LineNo@1100528902 : Integer;
+      RefDate@1100528909 : Date;
+      DiscRef1@1100528905 : Code[20];
+      DiscRef2@1100528907 : Code[20];
+      DiscPrio@1100528911 : Code[10];
+      GrossPrice@1100528908 : Decimal;
+      NetPrice@1100528912 : Decimal;
+      VendorDisc@1100528913 : Decimal;
+      CostObject@1100528915 : Code[20];
+      DimValRec@1100528917 : Record 349;
+      DimMgt@1100528916 : Codeunit 408;
+    BEGIN
+      GeneralLedgerSetup.GET;
+      Status.OPEN(Text001);
+
+      Job.COPY(iJob);
+      IF Job.FINDSET THEN BEGIN
+        REPEAT
+          Status.UPDATE(1,JobLedgerEntry.TABLECAPTION);
+          //RefDate := ValidateItems.GetRefDateProject(Job);
+          DiscRef1 := Job."Purch Discount Term Group 1";
+          DiscRef2 := Job."Purch Discount Term Group 2";
+          DiscPrio := ValidateItems.GetRefPrioProject(Job, DiscType::Purchase);
+          //
+          ProductDiscountProjEntry.SETRANGE("Project No.", Job."No.");
+          ProductDiscountProjEntry.DELETEALL;
+          //
+          JobLedgerEntry.SETCURRENTKEY("Job No.", Element);
+          JobLedgerEntry.SETRANGE("Job No.", Job."No.");
+          JobLedgerEntry.SETRANGE("Entry Type", JobLedgerEntry."Entry Type"::Usage);
+          JobLedgerEntry.SETFILTER("Document Line No.", '<>%1', 0);  //skip entry generated for ProductDiscount
+          JobLedgerEntry.SETFILTER(Manufacturer, '<>%1', '');
+          JobLedgerEntry.SETFILTER("Basic Item", '<>%1', '');
+          JobLedgerEntry.SETRANGE(Surcharge, FALSE);  //db, 06-03-18
+          IF JobLedgerEntry.FINDSET THEN BEGIN
+            currec := 0;
+            maxrec := JobLedgerEntry.COUNT;
+            REPEAT
+              RefDate := JobLedgerEntry."Posting Date";
+              IF ProductDiscountProjEntry."Project No." <> JobLedgerEntry."Job No." THEN
+                LineNo := 0;
+              //
+              DiscPerc := ProductDiscount.GetDiscountPercentage(JobLedgerEntry.Manufacturer, JobLedgerEntry."Basic Item", RefDate);
+              DiscAmnt := ProductDiscount.GetDiscountAmount(JobLedgerEntry.Manufacturer, JobLedgerEntry."Basic Item", RefDate);
+              IF (DiscPerc <> 0) OR (DiscAmnt <> 0) THEN BEGIN
+                GetPriceAndDiscount(
+                  JobLedgerEntry."Vendor (Trade Item)", JobLedgerEntry."Trade Item",
+                  JobLedgerEntry.Manufacturer, JobLedgerEntry."Basic Item",
+                  RefDate, DiscRef1, DiscRef2, DiscPrio,
+                  GrossPrice, NetPrice, VendorDisc);
+                CostObject := CheckCostObject(JobLedgerEntry.Manufacturer, JobLedgerEntry."Basic Item");
+                DimMgt.GetDimValueRec(2, CostObject, DimValRec, TRUE,'');
+                //
+                ProductDiscountProjEntry.INIT;
+                ProductDiscountProjEntry."Project No." := JobLedgerEntry."Job No.";
+                ProductDiscountProjEntry."Line No." := LineNo + 10000;
+                LineNo := ProductDiscountProjEntry."Line No.";
+                ProductDiscountProjEntry."Entry No." := JobLedgerEntry."Entry No.";
+                ProductDiscountProjEntry."Document No." := JobLedgerEntry."Document No.";
+                ProductDiscountProjEntry."Posting Date" := JobLedgerEntry."Posting Date";
+                ProductDiscountProjEntry."Extension Contract" := JobLedgerEntry."Extension Contract";
+                ProductDiscountProjEntry.Element := JobLedgerEntry.Element;
+                ProductDiscountProjEntry.Manufacturer := JobLedgerEntry.Manufacturer;
+                ProductDiscountProjEntry."Basic Item" := JobLedgerEntry."Basic Item";
+                ProductDiscountProjEntry.Quantity := JobLedgerEntry.Quantity;
+                ProductDiscountProjEntry."Unit of Measure" := JobLedgerEntry."Unit of Measure Code";
+                ProductDiscountProjEntry."Gross Price" := GrossPrice;
+                ProductDiscountProjEntry."Vendor Discount %" := VendorDisc;
+                ProductDiscountProjEntry."Cost Price" := NetPrice;
+                IF (DiscAmnt <> 0) THEN BEGIN
+                  ProductDiscountProjEntry."Product Discount Amount" := DiscAmnt;
+                  ProductDiscountProjEntry."Line Discount Amount" :=
+                    ROUND((JobLedgerEntry.Quantity * DiscAmnt), GeneralLedgerSetup."Unit-Amount Rounding Precision")
+                END ELSE BEGIN
+                  ProductDiscountProjEntry."Product Discount %" := DiscPerc;
+                  ProductDiscountProjEntry."Line Discount Amount" :=
+                    ROUND((JobLedgerEntry.Quantity * NetPrice * DiscPerc/100), GeneralLedgerSetup."Unit-Amount Rounding Precision");
+                END;
+                ProductDiscountProjEntry.INSERT;
+              END;
+              //
+              currec := currec + 1;
+              Status.UPDATE(2,ROUND(currec / maxrec * 10000,1));
+            UNTIL JobLedgerEntry.NEXT = 0;
+          END;
+        UNTIL Job.NEXT = 0;
+      END;
+
+      Status.CLOSE;
+    END;
+
+    PROCEDURE CalculateDiscountPurchaseOrder@1100528903(VAR iJob@1100528900 : Record 11072003);
+    VAR
+      ProductDiscount@1100528901 : Record 11012743;
+      ProductDiscountPurchControl@1100528904 : Record 11229403;
+      Job@1100528916 : Record 11072003;
+      PurchaseLine@1100528906 : Record 39;
+      PurchaseOrderControlLine@1100528910 : Record 11020221;
+      DiscPerc@1100528903 : Decimal;
+      DiscAmnt@1100528912 : Decimal;
+      LineNo@1100528902 : Integer;
+      RefDate@1100528909 : Date;
+      DiscRef1@1100528905 : Code[20];
+      DiscRef2@1100528907 : Code[20];
+      DiscPrio@1100528913 : Code[10];
+      PurchaseQuantity@1100528911 : Decimal;
+      GrossPrice@1100528915 : Decimal;
+      NetPrice@1100528914 : Decimal;
+      VendorDisc@1100528908 : Decimal;
+      CostObject@1100528917 : Code[20];
+      DimValRec@1100528919 : Record 349;
+      DimMgt@1100528918 : Codeunit 408;
+    BEGIN
+      GeneralLedgerSetup.GET;
+      Status.OPEN(Text001);
+
+      Job.COPY(iJob);
+      IF Job.FINDSET THEN BEGIN
+        REPEAT
+          Status.UPDATE(1,PurchaseLine.TABLECAPTION);
+          //RefDate := ValidateItems.GetRefDateProject(Job);
+          DiscRef1 := Job."Purch Discount Term Group 1";
+          DiscRef2 := Job."Purch Discount Term Group 2";
+          DiscPrio := ValidateItems.GetRefPrioProject(Job, DiscType::Purchase);
+          //
+          ProductDiscountPurchControl.SETRANGE("Project No.", Job."No.");
+          ProductDiscountPurchControl.DELETEALL;
+          //
+          PurchaseLine.SETCURRENTKEY("Job No.", Element);
+          PurchaseLine.SETRANGE("Job No.", Job."No.");
+          PurchaseLine.SETFILTER(Manufacturer, '<>%1', '');
+          PurchaseLine.SETFILTER("Basic Item", '<>%1', '');
+          IF PurchaseLine.FINDSET THEN BEGIN
+            currec := 0;
+            maxrec := PurchaseLine.COUNT;
+            REPEAT
+              RefDate := PurchaseLine."Order Date";
+              IF ProductDiscountPurchControl."Project No." <> PurchaseLine."Job No." THEN
+                LineNo := 0;
+              //
+              PurchaseQuantity := 0;
+              PurchaseOrderControlLine.SETRANGE("Order No.", PurchaseLine."Document No.");
+              PurchaseOrderControlLine.SETRANGE("Order Line No.", PurchaseLine."Line No.");
+              IF PurchaseOrderControlLine.FINDSET THEN BEGIN
+                REPEAT
+                  PurchaseQuantity := PurchaseQuantity + PurchaseOrderControlLine."Outstanding Quantity";
+                  PurchaseQuantity := PurchaseQuantity + PurchaseOrderControlLine."Quantity Rcd. Not Invoiced";
+                UNTIL PurchaseOrderControlLine.NEXT = 0;
+              END;
+              //
+              IF PurchaseQuantity = 0 THEN BEGIN
+                DiscPerc := 0;
+                DiscAmnt := 0;
+              END ELSE BEGIN
+                DiscPerc := ProductDiscount.GetDiscountPercentage(PurchaseLine.Manufacturer, PurchaseLine."Basic Item", RefDate);
+                DiscAmnt := ProductDiscount.GetDiscountAmount(PurchaseLine.Manufacturer, PurchaseLine."Basic Item", RefDate);
+              END;
+              IF (DiscPerc <> 0) OR (DiscAmnt <> 0) THEN BEGIN
+                GetPriceAndDiscount(
+                  PurchaseLine."Vendor (Trade Item)", PurchaseLine."Trade Item",
+                  PurchaseLine.Manufacturer, PurchaseLine."Basic Item",
+                  RefDate, DiscRef1, DiscRef2, DiscPrio,
+                  GrossPrice, NetPrice, VendorDisc);
+                CostObject := CheckCostObject(PurchaseLine.Manufacturer, PurchaseLine."Basic Item");
+                DimMgt.GetDimValueRec(2, CostObject, DimValRec, TRUE,'');
+                //
+                ProductDiscountPurchControl.INIT;
+                ProductDiscountPurchControl."Project No." := PurchaseLine."Job No.";
+                ProductDiscountPurchControl."Main Project No." := PurchaseLine."Main Project No.";
+                ProductDiscountPurchControl."Line No." := LineNo + 10000;
+                LineNo := ProductDiscountPurchControl."Line No.";
+                ProductDiscountPurchControl."Document No." := PurchaseLine."Document No.";
+                ProductDiscountPurchControl."Order Date" := PurchaseLine."Order Date";
+                ProductDiscountPurchControl."Extension Contract" := PurchaseLine."Extension Contract";
+                ProductDiscountPurchControl.Element := PurchaseLine.Element;
+                ProductDiscountPurchControl."Cost Type" := DimValRec."Cost Type";
+                ProductDiscountPurchControl."Cost Object" := CostObject;
+                ProductDiscountPurchControl.Manufacturer := PurchaseLine.Manufacturer;
+                ProductDiscountPurchControl."Basic Item" := PurchaseLine."Basic Item";
+                ProductDiscountPurchControl.Quantity := PurchaseQuantity;
+                ProductDiscountPurchControl."Unit of Measure" := PurchaseLine."Unit of Measure Code";
+                ProductDiscountPurchControl."Gross Price" := GrossPrice;
+                ProductDiscountPurchControl."Vendor Discount %" := VendorDisc;
+                ProductDiscountPurchControl."Cost Price" := NetPrice;
+                IF (DiscAmnt <> 0) THEN BEGIN
+                  ProductDiscountPurchControl."Product Discount Amount" := DiscAmnt;
+                  ProductDiscountPurchControl."Line Discount Amount" :=
+                    ROUND((PurchaseQuantity * DiscAmnt), GeneralLedgerSetup."Unit-Amount Rounding Precision");
+                END ELSE BEGIN
+                  ProductDiscountPurchControl."Product Discount %" := DiscPerc;
+                  ProductDiscountPurchControl."Line Discount Amount" :=
+                    ROUND((PurchaseQuantity * NetPrice * DiscPerc/100), GeneralLedgerSetup."Unit-Amount Rounding Precision");
+                END;
+                ProductDiscountPurchControl.INSERT;
+              END;
+              //
+              currec := currec + 1;
+              Status.UPDATE(2,ROUND(currec / maxrec * 10000,1));
+            UNTIL PurchaseLine.NEXT = 0;
+          END;
+        UNTIL Job.NEXT = 0;
+      END;
+
+      Status.CLOSE;
+    END;
+
+    LOCAL PROCEDURE GetPriceAndDiscount@1100528905(VendorCode@1100528900 : Code[20];ItemVendor@1100528901 : Code[20];ManufacturerCode@1100528902 : Code[20];ProductCode@1100528903 : Code[20];RefDate@1100528911 : Date;DiscRef1@1100528910 : Code[20];DiscRef2@1100528909 : Code[20];DiscPrio@1100528908 : Code[10];VAR GrossPrice@1100528906 : Decimal;VAR NetPrice@1100528905 : Decimal;VAR VendorDisc@1100528904 : Decimal);
+    VAR
+      BasicItem@1100528912 : Record 11012316;
+      TradeItem@1100528907 : Record 11012317;
+    BEGIN
+      GrossPrice := 0;
+      NetPrice := 0;
+      VendorDisc := 0;
+      IF TradeItem.GET(VendorCode, ItemVendor) THEN BEGIN
+        ValidateItems.GetPriceTradeItem(TradeItem, RefDate, DiscRef1, DiscRef2, DiscPrio);
+        GrossPrice := TradeItem."Gross Price";
+        NetPrice := TradeItem."Net Price";
+        VendorDisc := TradeItem."Discount Percentage";
+      END ELSE BEGIN
+        IF BasicItem.GET(ManufacturerCode, ProductCode) THEN BEGIN
+          ValidateItems.GetPriceBasicItem(BasicItem, RefDate, DiscRef1, DiscRef2, DiscPrio, FALSE);
+          GrossPrice := BasicItem."Gross Price";
+          NetPrice := BasicItem."Net Price";
+          VendorDisc := BasicItem."Discount Percentage";
+        END;
+      END;
+    END;
+
+    PROCEDURE CalculateDiscountResult@1100528904(VAR iJob@1100528900 : Record 11072003);
+    VAR
+      ProductDiscountProjEntry@1100528901 : Record 11229402;
+      ProductDiscountPurchControl@1100528906 : Record 11229403;
+      ProductDiscountResult@1100528902 : Record 11229404;
+      TmpProductDiscountResult@1100528907 : TEMPORARY Record 11229404;
+      Job@1100528908 : Record 11072003;
+      DiffQuantity@1100528905 : Decimal;
+      DiffAmount@1100528903 : Decimal;
+      LineNo@1100528904 : Integer;
+    BEGIN
+      //db.sn, 06-03-18
+      CalculateDiscountPurchaseOrder(iJob);
+      CalculateDiscountJobEntry(iJob);
+      //db.en, 06-03-18
+
+      GeneralLedgerSetup.GET;
+      Status.OPEN(Text001);
+
+      Job.COPY(iJob);
+      IF Job.FINDSET THEN BEGIN
+        REPEAT
+          Status.UPDATE(1,ProductDiscountProjEntry.TABLECAPTION);
+          LineNo := 0;
+          //
+          ProductDiscountProjEntry.SETCURRENTKEY("Project No.");
+          ProductDiscountProjEntry.SETRANGE("Project No.", Job."No.");
+          IF ProductDiscountProjEntry.FINDSET THEN BEGIN
+            currec := 0;
+            maxrec := ProductDiscountProjEntry.COUNT;
+            REPEAT
+              TmpProductDiscountResult.RESET;
+              TmpProductDiscountResult.SETRANGE("Project No.", ProductDiscountProjEntry."Project No.");
+              TmpProductDiscountResult.SETRANGE(Element, ProductDiscountProjEntry.Element);
+              TmpProductDiscountResult.SETRANGE("Extension Contract", ProductDiscountProjEntry."Extension Contract");
+              TmpProductDiscountResult.SETRANGE(Manufacturer, ProductDiscountProjEntry.Manufacturer);
+              TmpProductDiscountResult.SETRANGE("Basic Item", ProductDiscountProjEntry."Basic Item");
+              IF NOT TmpProductDiscountResult.FINDFIRST THEN BEGIN
+                TmpProductDiscountResult.INIT;
+                TmpProductDiscountResult."Project No." := ProductDiscountProjEntry."Project No.";
+                TmpProductDiscountResult.Element := ProductDiscountProjEntry.Element;
+                TmpProductDiscountResult."Extension Contract" := ProductDiscountProjEntry."Extension Contract";
+                TmpProductDiscountResult.Manufacturer := ProductDiscountProjEntry.Manufacturer;
+                TmpProductDiscountResult."Basic Item" := ProductDiscountProjEntry."Basic Item";
+                TmpProductDiscountResult."Line No." := 0;
+                TmpProductDiscountResult.INSERT;
+              END;
+              TmpProductDiscountResult.Quantity := TmpProductDiscountResult.Quantity + ProductDiscountProjEntry.Quantity;
+              TmpProductDiscountResult."Unit of Measure" := ProductDiscountProjEntry."Unit of Measure";
+              TmpProductDiscountResult."Line Discount Amount" := TmpProductDiscountResult."Line Discount Amount" + ProductDiscountProjEntry."Line Discount Amount";
+              TmpProductDiscountResult.MODIFY;
+              //
+              currec := currec + 1;
+              Status.UPDATE(2,ROUND(currec / maxrec * 10000,1));
+            UNTIL ProductDiscountProjEntry.NEXT = 0;
+          END;
+          //
+          Status.UPDATE(1,ProductDiscountPurchControl.TABLECAPTION);
+          //
+          ProductDiscountPurchControl.SETCURRENTKEY("Project No.");
+          ProductDiscountPurchControl.SETRANGE("Project No.", Job."No.");
+          IF ProductDiscountPurchControl.FINDSET THEN BEGIN
+            currec := 0;
+            maxrec := ProductDiscountPurchControl.COUNT;
+            REPEAT
+              TmpProductDiscountResult.RESET;
+              TmpProductDiscountResult.SETRANGE("Project No.", ProductDiscountPurchControl."Project No.");
+              TmpProductDiscountResult.SETRANGE(Element, ProductDiscountPurchControl.Element);
+              TmpProductDiscountResult.SETRANGE("Extension Contract", ProductDiscountPurchControl."Extension Contract");
+              TmpProductDiscountResult.SETRANGE(Manufacturer, ProductDiscountPurchControl.Manufacturer);
+              TmpProductDiscountResult.SETRANGE("Basic Item", ProductDiscountPurchControl."Basic Item");
+              IF NOT TmpProductDiscountResult.FINDFIRST THEN BEGIN
+                TmpProductDiscountResult.INIT;
+                TmpProductDiscountResult."Project No." := ProductDiscountPurchControl."Project No.";
+                TmpProductDiscountResult.Element := ProductDiscountPurchControl.Element;
+                TmpProductDiscountResult."Extension Contract" := ProductDiscountPurchControl."Extension Contract";
+                TmpProductDiscountResult.Manufacturer := ProductDiscountPurchControl.Manufacturer;
+                TmpProductDiscountResult."Basic Item" := ProductDiscountPurchControl."Basic Item";
+                TmpProductDiscountResult."Line No." := 0;
+                TmpProductDiscountResult.INSERT;
+              END;
+              TmpProductDiscountResult.Quantity := TmpProductDiscountResult.Quantity + ProductDiscountPurchControl.Quantity;
+              TmpProductDiscountResult."Unit of Measure" := ProductDiscountPurchControl."Unit of Measure";
+              TmpProductDiscountResult."Line Discount Amount" := TmpProductDiscountResult."Line Discount Amount" + ProductDiscountPurchControl."Line Discount Amount";
+              TmpProductDiscountResult.MODIFY;
+              //
+              currec := currec + 1;
+              Status.UPDATE(2,ROUND(currec / maxrec * 10000,1));
+            UNTIL ProductDiscountPurchControl.NEXT = 0;
+          END;
+          //
+          Status.UPDATE(1,ProductDiscountResult.TABLECAPTION);
+          //
+          TmpProductDiscountResult.RESET;
+          TmpProductDiscountResult.SETCURRENTKEY("Project No.");
+          TmpProductDiscountResult.SETRANGE("Project No.", Job."No.");
+          IF TmpProductDiscountResult.FINDSET THEN BEGIN
+            currec := 0;
+            maxrec := TmpProductDiscountResult.COUNT;
+            REPEAT
+              ProductDiscountResult.SETRANGE("Project No.", TmpProductDiscountResult."Project No.");
+              ProductDiscountResult.SETRANGE(Element, TmpProductDiscountResult.Element);
+              ProductDiscountResult.SETRANGE("Extension Contract", TmpProductDiscountResult."Extension Contract");
+              ProductDiscountResult.SETRANGE(Manufacturer, TmpProductDiscountResult.Manufacturer);
+              ProductDiscountResult.SETRANGE("Basic Item", TmpProductDiscountResult."Basic Item");
+              IF ProductDiscountResult.FINDLAST THEN BEGIN
+                ProductDiscountResult.CALCFIELDS("Total Quantity", "Total Discount Amount");
+                DiffAmount := TmpProductDiscountResult."Line Discount Amount" - ProductDiscountResult."Total Discount Amount";
+                DiffQuantity := TmpProductDiscountResult.Quantity - ProductDiscountResult."Total Quantity";
+                LineNo := ProductDiscountResult."Line No.";
+              END ELSE BEGIN
+                DiffAmount := TmpProductDiscountResult."Line Discount Amount";
+                DiffQuantity := TmpProductDiscountResult.Quantity;
+                LineNo := 0;
+              END;
+              IF DiffAmount <> 0 THEN BEGIN
+                ProductDiscountResult.INIT;
+                ProductDiscountResult."Project No." := TmpProductDiscountResult."Project No.";
+                ProductDiscountResult.Element := TmpProductDiscountResult.Element;
+                ProductDiscountResult."Extension Contract" := TmpProductDiscountResult."Extension Contract";
+                ProductDiscountResult.Manufacturer := TmpProductDiscountResult.Manufacturer;
+                ProductDiscountResult."Basic Item" := TmpProductDiscountResult."Basic Item";
+                ProductDiscountResult."Line No." := LineNo + 10000;
+                LineNo := ProductDiscountResult."Line No.";
+                ProductDiscountResult.Quantity := DiffQuantity;
+                ProductDiscountResult."Unit of Measure" := TmpProductDiscountResult."Unit of Measure";  //assumed to be same Unit for each VendorItem
+                ProductDiscountResult."Line Discount Amount" := DiffAmount;
+                ProductDiscountResult.INSERT;
+              END;
+              //
+              currec := currec + 1;
+              Status.UPDATE(2,ROUND(currec / maxrec * 10000,1));
+            UNTIL TmpProductDiscountResult.NEXT = 0;
+          END;
+        UNTIL Job.NEXT = 0;
+      END;
+
+      Status.CLOSE;
+    END;
+
+    PROCEDURE ProcessDiscountResult@1100528907();
+    VAR
+      ProjSetup@1100528900 : Record 315;
+      GenJournalLine@1100528903 : Record 81;
+      GLEntry@1100528907 : Record 17;
+      ProductDiscountResult@1100528901 : Record 11229404;
+      TmpProductDiscountResult@1100528906 : TEMPORARY Record 11229404;
+      LineNo@1100528902 : Integer;
+      JournalTemplateName@1100528904 : Text;
+      JournalBatchName@1100528905 : Text;
+    BEGIN
+      ProjSetup.GET;
+      ProjSetup.TESTFIELD("Product Disc. Journal Template");
+      ProjSetup.TESTFIELD("Product Disc. Journal Batch");
+      JournalTemplateName := ProjSetup."Product Disc. Journal Template";
+      JournalBatchName := ProjSetup."Product Disc. Journal Batch";
+      //
+      GenJournalLine.SETRANGE("Journal Template Name", JournalTemplateName);
+      GenJournalLine.SETRANGE("Journal Batch Name", JournalBatchName);
+      IF GenJournalLine.FINDLAST THEN
+        LineNo := GenJournalLine."Line No.";
+
+      Status.OPEN(Text001);
+      Status.UPDATE(1,ProductDiscountResult.TABLECAPTION);
+
+      ProductDiscountResult.SETCURRENTKEY("Document Date");
+      ProductDiscountResult.SETFILTER("Document No.", '%1', '');
+      IF ProductDiscountResult.FINDSET THEN BEGIN
+        currec := 0;
+        maxrec := ProductDiscountResult.COUNT;
+        GenJournalLine.INIT;
+        GenJournalLine."Journal Template Name" := JournalTemplateName;
+        GenJournalLine."Journal Batch Name" := JournalBatchName;
+        GenJournalLine.SetUpNewLine(GenJournalLine,0,FALSE);  //get DocumentNo,Posting/DocumentDate,Source/ReasonCode,AccountType
+        REPEAT
+          GenJournalLine."Line No." := LineNo + 10000;
+          FillGenJnlLineWithDiscountResult(ProductDiscountResult, GenJournalLine);
+          LineNo :=  GenJournalLine."Line No.";
+          //
+          TmpProductDiscountResult := ProductDiscountResult;
+          TmpProductDiscountResult."Document No." := GenJournalLine."Document No.";
+          TmpProductDiscountResult."Document Date" := GenJournalLine."Document Date";
+          TmpProductDiscountResult.INSERT;
+          //
+          currec := currec + 1;
+          Status.UPDATE(2,ROUND(currec / maxrec * 10000,1));
+        UNTIL ProductDiscountResult.NEXT = 0;
+      END;
+
+      Status.CLOSE;
+
+      COMMIT;
+      PAGE.RUNMODAL(PAGE::"General Journal", GenJournalLine);
+
+      IF TmpProductDiscountResult.FINDSET THEN BEGIN
+        REPEAT
+          //check if GenJournalLine has been processed with GLEntry as result
+          GLEntry.SETCURRENTKEY("Document No.");
+          GLEntry.SETRANGE("Document No.", TmpProductDiscountResult."Document No.");
+          GLEntry.SETRANGE("Document Date", TmpProductDiscountResult."Document Date");
+          IF GLEntry.FINDFIRST THEN BEGIN
+            IF ProductDiscountResult.GET(
+              TmpProductDiscountResult."Project No.",
+              TmpProductDiscountResult.Element,
+              TmpProductDiscountResult."Extension Contract",
+              TmpProductDiscountResult.Manufacturer,
+              TmpProductDiscountResult."Basic Item",
+              TmpProductDiscountResult."Line No.") THEN
+            BEGIN
+              ProductDiscountResult."Document No." := TmpProductDiscountResult."Document No.";
+              ProductDiscountResult."Document Date" := TmpProductDiscountResult."Document Date";
+              ProductDiscountResult.MODIFY;
+            END;
+          END;
+        UNTIL TmpProductDiscountResult.NEXT = 0;
+        //db.sn, 06-03-18
+        GenJournalLine.SETRANGE("Journal Template Name", JournalTemplateName);
+        GenJournalLine.SETRANGE("Journal Batch Name", JournalBatchName);
+        GenJournalLine.SETRANGE("Document No.", TmpProductDiscountResult."Document No.");
+        GenJournalLine.SETRANGE("Document Date", TmpProductDiscountResult."Document Date");
+        IF GenJournalLine.FINDFIRST THEN
+          GenJournalLine.DELETEALL;
+        //db.en, 06-03-18
+      END;
+    END;
+
+    LOCAL PROCEDURE FillGenJnlLineWithDiscountResult@1100485000(ProductDiscountResult@1100528906 : Record 11229404;VAR GenJournalLine@1100528900 : Record 81);
+    VAR
+      ProductDiscount@1100528902 : Record 11012743;
+      CostObject@1100528901 : Code[20];
+    BEGIN
+      WITH ProductDiscountResult DO BEGIN
+        GenJournalLine.VALIDATE("Job No.", "Project No.");
+        GenJournalLine.Element := Element;
+        GenJournalLine."Extension Contract" := "Extension Contract";
+        //
+        GenJournalLine.Manufacturer := Manufacturer;
+        GenJournalLine."Basic Item" := "Basic Item";
+        CostObject := CheckCostObject(Manufacturer, "Basic Item");
+        GenJournalLine.VALIDATE("Shortcut Dimension 2 Code", CostObject);
+
+        GenJournalLine.VALIDATE(Quantity, Quantity);
+        GenJournalLine."Unit of Measure Code" := "Unit of Measure";
+        CALCFIELDS("Product Description");
+        GenJournalLine.Description := "Product Description";
+        GenJournalLine."Description 2" := ProductDiscount.TABLECAPTION;
+
+        GenJournalLine.VALIDATE(Amount, -1 * "Line Discount Amount");
+
+        GenJournalLine."Gen. Bus. Posting Group" := '';
+        GenJournalLine."Gen. Prod. Posting Group" := '';
+        GenJournalLine."VAT Bus. Posting Group" := '';
+        GenJournalLine."VAT Prod. Posting Group" := '';
+        GenJournalLine.INSERT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckCostObject@1100528906(Manufacturer@1100528900 : Code[20];ProductCode@1100528901 : Code[20]) CostObject : Code[20];
+    VAR
+      ProjSetup@1100528902 : Record 315;
+      BasicItem@1100528903 : Record 11012316;
+    BEGIN
+      ProjSetup.GET;
+      IF ProjSetup."Cost Object (Product Discount)" <> '' THEN BEGIN
+        CostObject := ProjSetup."Cost Object (Product Discount)";
+      END ELSE BEGIN
+        BasicItem.GET(Manufacturer,ProductCode);
+        BasicItem.TESTFIELD("Cost Object");
+        CostObject := BasicItem."Cost Object";
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

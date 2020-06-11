@@ -1,0 +1,381 @@
+OBJECT Codeunit 12013607 Purch.-Quote to Order ExFlow
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=EXF513000;
+  }
+  PROPERTIES
+  {
+    TableNo=38;
+    OnRun=VAR
+            AppSetup@1100285022 : Record 12013601;
+            OldPurchCommentLine@1001 : Record 43;
+            Vend@1002 : Record 23;
+            DocHead@1100285000 : Record 12013608;
+            DocLine@1100285002 : Record 12013609;
+            DocLineApp@1100285004 : Record 12013610;
+            DocLineDim@1100285006 : Record 12013611;
+            Column@1100285003 : Record 12013661;
+            ExDoc2@1100285001 : Record 12013612;
+            GLSetup@1100285005 : Record 98;
+            PurchLine@1100285009 : Record 39;
+            TempVATAmountLine0@1100285013 : TEMPORARY Record 290;
+            TempVATAmountLine1@1100285011 : TEMPORARY Record 290;
+            PurchSetup@1100285016 : Record 312;
+            ItemChargeAssgntPurch@1100285019 : Record 5805;
+            PurchCommentLine@1100285020 : Record 43;
+            PurchQuoteLine@1100285023 : Record 39;
+            PurchOrderLine@1100285021 : Record 39;
+            ExAttachment@1100285026 : Record 12013643;
+            ReservePurchLine@1100285018 : Codeunit 99000834;
+            PrepmtMgt@1100285017 : Codeunit 441;
+            WhsePurchRelease@1100285014 : Codeunit 5772;
+            ArchiveManagement@1100285015 : Codeunit 5063;
+            ExFlow@1100285024 : Codeunit 12013601;
+            ExDimMgt@1100285025 : Codeunit 12013605;
+            ColumnID@1100285008 : Integer;
+            TempImageName@1100285012 : Text[250];
+            CreateLine@1100285010 : Boolean;
+            DoNotInsert@1100285007 : Boolean;
+          BEGIN
+            TESTFIELD("Document Type","Document Type"::Quote);
+            Vend.GET("Buy-from Vendor No.");
+            Vend.CheckBlockedVendOnDocs(Vend,FALSE);
+
+            AppSetup.GET;
+            GLSetup.GET;
+
+            PurchOrderHeader.INIT;
+            PurchOrderHeader.TRANSFERFIELDS(Rec);
+            PurchOrderHeader."Document Type" := PurchOrderHeader."Document Type"::Order;
+            PurchOrderHeader."No. Printed" := 0;
+            PurchOrderHeader.Status := PurchOrderHeader.Status::Open;
+            IF AppSetup."Use Quote No for the PO" THEN
+              PurchOrderHeader."No." := "No."
+            ELSE BEGIN
+              PurchOrderHeader."No." := '';
+              PurchOrderHeader."Quote No." :=  "No.";
+            END;
+
+            PurchOrderLine.LOCKTABLE;
+            PurchOrderHeader.INSERT(TRUE);
+
+            ExDimMgt.CopyDimFromImpHeader(DATABASE::"Purchase Header","Document Type","No.",
+                                          DATABASE::"Purchase Header",PurchOrderHeader."Document Type",PurchOrderHeader."No.");
+
+            PurchOrderHeader."Order Date" := TODAY;
+
+            IF "Posting Date" <> 0D THEN
+              PurchOrderHeader."Posting Date" := "Posting Date";
+
+            PurchOrderHeader."Document Date" := "Document Date";
+            PurchOrderHeader."Expected Receipt Date" := "Expected Receipt Date";
+            PurchOrderHeader."Shortcut Dimension 1 Code" := "Shortcut Dimension 1 Code";
+            PurchOrderHeader."Shortcut Dimension 2 Code" := "Shortcut Dimension 2 Code";
+
+            PurchOrderHeader."Location Code" := "Location Code";
+            PurchOrderHeader."Inbound Whse. Handling Time" := "Inbound Whse. Handling Time";
+            PurchOrderHeader."Ship-to Name" := "Ship-to Name";
+            PurchOrderHeader."Ship-to Name 2" := "Ship-to Name 2";
+            PurchOrderHeader."Ship-to Address" := "Ship-to Address";
+            PurchOrderHeader."Ship-to Address 2" := "Ship-to Address 2";
+            PurchOrderHeader."Ship-to City" := "Ship-to City";
+            PurchOrderHeader."Ship-to Post Code" := "Ship-to Post Code";
+            PurchOrderHeader."Ship-to County" := "Ship-to County";
+            PurchOrderHeader."Ship-to Country/Region Code" := "Ship-to Country/Region Code";
+            PurchOrderHeader."Ship-to Contact" := "Ship-to Contact";
+
+            PurchOrderHeader."Prepayment %" := Vend."Prepayment %";
+            IF PurchOrderHeader."Posting Date" = 0D THEN
+              PurchOrderHeader."Posting Date" := WORKDATE;
+
+            PurchOrderHeader."Due Date" := TODAY;
+            PurchOrderHeader.MODIFY;
+
+            DocHead.RetrieveRecord(DocHead,"Document Type","No.");
+            DocHead."Document Type" := DocHead."Document Type"::Order;
+            DocHead."Document No." := PurchOrderHeader."No.";
+            DocHead.Status := DocHead.Status::Approved;
+            DocHead."Due Date" := TODAY;
+            DocHead."Change Jnl Processed PO" := TRUE;
+            DocHead."Requisition Status" := AppSetup."Set Status to (Order)";
+            DocHead."Posting Date" := PurchOrderHeader."Posting Date";
+            DocHead.MODIFY;
+
+            PurchQuoteLine.RESET;
+            PurchQuoteLine.SETRANGE("Document Type","Document Type");
+            PurchQuoteLine.SETRANGE("Document No.","No.");
+            IF PurchQuoteLine.FINDSET(TRUE) THEN
+              REPEAT
+                CreateLine := TRUE;
+                IF AppSetup."Delete Zero Lines" THEN
+                  IF (PurchQuoteLine.Type > 0) AND (PurchQuoteLine."No." <> '') AND
+                     (PurchQuoteLine."Line Amount" = 0) THEN
+                    CreateLine := FALSE;
+
+                IF NOT CreateLine THEN BEGIN
+                  IF DocLine.RetrieveRecord(DocLine,PurchQuoteLine."Document Type",
+                                            PurchQuoteLine."Document No.",PurchQuoteLine."Line No.") THEN BEGIN
+                    DocLineApp.RESET;
+                    DocLineApp.SETCURRENTKEY("Document Line ID");
+                    DocLineApp.SETRANGE("Document Line ID", DocLine.ID);
+                    DocLineApp.DELETEALL;
+
+                    DocLineDim.RESET;
+                    DocLineDim.SETCURRENTKEY("Document Line ID");
+                    DocLineDim.SETRANGE("Document Line ID", DocLine.ID);
+                    DocLineDim.DELETEALL;
+
+                    DocLine.DELETE;
+                  END;
+                END ELSE BEGIN
+                  PurchOrderLine.INIT;
+                  PurchOrderLine.TRANSFERFIELDS(PurchQuoteLine);
+                  PurchOrderLine.SuspendStatusCheck(TRUE);
+                  PurchOrderLine."Document Type" := PurchOrderHeader."Document Type";
+                  PurchOrderLine."Document No." := PurchOrderHeader."No.";
+                  ReservePurchLine.TransferPurchLineToPurchLine(
+                    PurchQuoteLine,PurchOrderLine,PurchQuoteLine."Reserved Qty. (Base)");
+
+                  IF Vend."Prepayment %" <> 0 THEN
+                    PurchOrderLine."Prepayment %" := Vend."Prepayment %";
+                  PrepmtMgt.SetPurchPrepaymentPct(PurchOrderLine,PurchOrderHeader."Posting Date");
+                  PurchOrderLine.VALIDATE("Prepayment %");
+
+                  PurchOrderLine."Order Date" := PurchOrderHeader."Order Date";
+                  PurchOrderLine.INSERT;
+
+                  IF PurchQuoteLine.Approve THEN BEGIN
+                    IF DocLine.RetrieveRecord(DocLine,PurchQuoteLine."Document Type",
+                                              PurchQuoteLine."Document No.",PurchQuoteLine."Line No.")
+                    THEN BEGIN
+                      DocLineApp.RESET;
+                      DocLineApp.SETCURRENTKEY("Document Line ID");
+                      DocLineApp.SETRANGE("Document Line ID", DocLine.ID);
+                      IF DocLineApp.FINDSET(TRUE) THEN
+                        REPEAT
+                          DocLineApp."Document Type" := PurchOrderLine."Document Type";
+                          DocLineApp."Document No." := PurchOrderLine."Document No.";
+                          DocLineApp."Line No." := PurchOrderLine."Line No.";
+                          DocLineApp.MODIFY;
+                        UNTIL DocLineApp.NEXT = 0;
+
+                      DocLineDim.RESET;
+                      DocLineDim.SETCURRENTKEY("Document Line ID");
+                      DocLineDim.SETRANGE("Document Line ID", DocLine.ID);
+                      IF DocLineDim.FINDSET(TRUE) THEN
+                        REPEAT
+                          ColumnID := ExFlow.GetColumnID(DocLineDim."Dimension Code");
+                          IF ColumnID <> 0 THEN
+                            IF Column.GET(ColumnID) THEN BEGIN
+                              IF Column."Dimension Code" <> '' THEN
+                                ExDimMgt.InsertDocDimFromDocLineDim(DocLineDim,PurchQuoteLine,DoNotInsert,GLSetup);
+
+                              DocLineDim."Document Type" := PurchOrderLine."Document Type";
+                              DocLineDim."Document No." := PurchOrderLine."Document No.";
+                              DocLineDim."Line No." := PurchOrderLine."Line No.";
+                              DocLineDim.MODIFY;
+                            END;
+                        UNTIL DocLineDim.NEXT = 0;
+
+                      DocLine."Document Type" := PurchOrderLine."Document Type";
+                      DocLine."Document No." := PurchOrderLine."Document No.";
+                      DocLine."Line No." := PurchOrderLine."Line No.";
+                      DocLine.MODIFY(FALSE);
+                    END ELSE
+                      ERROR(EXF03);
+                  END;
+
+                  ExDimMgt.CopyDimFromImpLine(DATABASE::"Purchase Line","Document Type","No.",PurchQuoteLine."Line No.",
+                                              DATABASE::"Purchase Line",PurchOrderHeader."Document Type",PurchOrderHeader."No.",
+                                              PurchOrderLine."Line No.");
+
+                  PurchOrderLine."Shortcut Dimension 1 Code" := PurchQuoteLine."Shortcut Dimension 1 Code";
+                  PurchOrderLine."Shortcut Dimension 2 Code" := PurchQuoteLine."Shortcut Dimension 2 Code";
+
+                  PurchOrderLine."PO Approved Amount" := PurchOrderLine."Line Amount";
+                  PurchOrderLine.MODIFY;
+                END;
+              UNTIL PurchQuoteLine.NEXT = 0;
+
+            PurchSetup.GET;
+            IF PurchSetup."Archive Quotes and Orders" THEN
+              ArchiveManagement.ArchPurchDocumentNoConfirm(Rec);
+
+            IF PurchSetup."Default Posting Date" = PurchSetup."Default Posting Date" :: "No Date" THEN
+              PurchOrderHeader."Posting Date" := 0D;
+
+            ExAttachment.RESET;
+            ExAttachment.SETCURRENTKEY("Document ID");
+            ExAttachment.SETRANGE("Document ID", DocHead.ID);
+            IF ExAttachment.FINDSET(TRUE) THEN
+              REPEAT
+                ExAttachment."Document Type" := DocHead."Document Type";
+                ExAttachment."Document No." := DocHead."Document No.";
+                ExAttachment.MODIFY;
+              UNTIL ExAttachment.NEXT = 0;
+
+            PurchCommentLine.RESET;
+            PurchCommentLine.SETRANGE("Document Type","Document Type");
+            PurchCommentLine.SETRANGE("No.","No.");
+            IF NOT PurchCommentLine.ISEMPTY THEN BEGIN
+              PurchCommentLine.LOCKTABLE;
+              IF PurchCommentLine.FIND('-') THEN
+                REPEAT
+                  OldPurchCommentLine := PurchCommentLine;
+                  PurchCommentLine.DELETE;
+                  PurchCommentLine."Document Type" := PurchOrderHeader."Document Type";
+                  PurchCommentLine."No." := PurchOrderHeader."No.";
+                  PurchCommentLine.INSERT;
+                  PurchCommentLine := OldPurchCommentLine;
+                UNTIL PurchCommentLine.NEXT = 0;
+            END;
+
+            ItemChargeAssgntPurch.RESET;
+            ItemChargeAssgntPurch.SETRANGE("Document Type","Document Type");
+            ItemChargeAssgntPurch.SETRANGE("Document No.","No.");
+            WHILE ItemChargeAssgntPurch.FIND('-') DO BEGIN
+              ItemChargeAssgntPurch.DELETE;
+              ItemChargeAssgntPurch."Document Type" := PurchOrderHeader."Document Type";
+              ItemChargeAssgntPurch."Document No." := PurchOrderHeader."No.";
+              IF NOT (ItemChargeAssgntPurch."Applies-to Doc. Type" IN
+                [ItemChargeAssgntPurch."Applies-to Doc. Type"::Receipt,
+                 ItemChargeAssgntPurch."Applies-to Doc. Type"::"Return Shipment"])
+              THEN BEGIN
+                ItemChargeAssgntPurch."Applies-to Doc. Type" := PurchOrderHeader."Document Type";
+                ItemChargeAssgntPurch."Applies-to Doc. No." := PurchOrderHeader."No.";
+              END;
+              ItemChargeAssgntPurch.INSERT;
+            END;
+
+            PurchOrderHeader.Status := PurchOrderHeader.Status::Released;
+
+            PurchLine.RESET;
+            PurchLine.SETRANGE("Document Type", PurchOrderHeader."Document Type");
+            PurchLine.SETRANGE("Document No.", PurchOrderHeader."No.");
+            PurchLine.SETFILTER(Type,'>0');
+            PurchLine.SETFILTER(Quantity,'<>0');
+            IF PurchLine.FIND('-') THEN BEGIN
+              PurchLine.SetPurchHeader(PurchOrderHeader);
+              PurchLine.CalcVATAmountLines(0,PurchOrderHeader,PurchLine,TempVATAmountLine0);
+              PurchLine.CalcVATAmountLines(1,PurchOrderHeader,PurchLine,TempVATAmountLine1);
+              PurchLine.UpdateVATOnLines(0,PurchOrderHeader,PurchLine,TempVATAmountLine0);
+              PurchLine.UpdateVATOnLines(1,PurchOrderHeader,PurchLine,TempVATAmountLine1);
+
+              PurchLine.SETRANGE("Drop Shipment",FALSE);
+              IF PurchLine.FIND('-') THEN
+                IF PurchOrderHeader."Document Type" IN [PurchOrderHeader."Document Type"::Order,
+                                                        PurchOrderHeader."Document Type"::"Return Order"] THEN
+                  WhsePurchRelease.Release(PurchOrderHeader);
+            END;
+
+            PurchOrderHeader.MODIFY;
+
+            DocHead."Requisition Status" := AppSetup."Set Status to (Order)";
+            DocHead.MODIFY(FALSE);
+
+            //New ExDoc will be created on succesfull pdf generation
+            IF ExDoc2.RetrieveRecord(ExDoc2,"Document Type","No.") THEN
+              ExDoc2.DELETE;
+
+            DELETELINKS;
+            DELETE;
+            PurchQuoteLine.DELETEALL;
+
+            PurchOrderHeader.RESET;
+            PurchOrderHeader.SETRANGE("Document Type",PurchOrderHeader."Document Type");
+            PurchOrderHeader.SETRANGE("No.",PurchOrderHeader."No.");
+
+            "No." := PurchOrderHeader."No.";
+
+            PrintPODoc(PurchOrderHeader);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      EXF02@1100285005 : TextConst 'ENU=Could not create html image!;SVE=Kunde inta skapa html-bild!';
+      EXF03@1100285006 : TextConst 'ENU=Ex Document Line Missing, Check that approvers exists for all approval lines.;SVE=Ex Dokumentrad saknas, kontrollera att det finns attestanter f”r alla Attestrader';
+      PurchOrderHeader@1100285000 : Record 38;
+      EXF04@1100285001 : TextConst 'ENU=ExFlow document does not exist;SVE=ExFlow dokumentet saknas';
+      EXF50@1100285003 : TextConst 'ENU=Requisition Report ID missing in Approval Setup!;SVE=Rekvisitionsrapport-ID saknas i Attestinst„llningar!';
+      EXF51@1100285002 : TextConst 'ENU=Order Report ID missing in Approval Setup!;SVE=Orderrapport-ID saknas i Attestinst„llningar!';
+
+    PROCEDURE GetPurchOrderHeader@1(VAR PurchHeader@1000 : Record 38);
+    BEGIN
+      PurchHeader := PurchOrderHeader;
+    END;
+
+    PROCEDURE PrintPODoc@1100285000(VAR PurchaseHeader@1100285003 : Record 38);
+    VAR
+      ExFlowSetup@1100285010 : Record 12013601;
+      DocHead@1100285004 : Record 12013608;
+      ExDoc2@1100285002 : Record 12013612;
+      SubFolder@1100285005 : Text;
+      UseFileSystem@1100285009 : Boolean;
+      TempBlob@1100285012 : Record 99008535;
+      TempImageName@1100285001 : Text[1024];
+      ExFlow@1100285000 : Codeunit 12013601;
+      ExFlowFileMgt@1100285006 : Codeunit 12013602;
+      ReportNo@1100285007 : Integer;
+    BEGIN
+      IF NOT DocHead.RetrieveRecord(DocHead,PurchaseHeader."Document Type", PurchaseHeader."No.") THEN
+        ERROR(EXF04);
+
+      ExFlowSetup.GET;
+
+      UseFileSystem := (ExFlowSetup."File storage type" = ExFlowSetup."File storage type"::Filesystem);
+      IF UseFileSystem THEN BEGIN
+        ExFlowSetup.TESTFIELD("Path to Used Invoices");
+        SubFolder := ExFlow.DayMap(WORKDATE);
+      END;
+      TempImageName := SubFolder + FORMAT(PurchaseHeader."Document Type") + '-' + PurchaseHeader."No." + '.pdf';
+
+      PurchaseHeader.SETRECFILTER;
+      ExFlowFileMgt.SaveReportAsPDF(CheckReports(ExFlowSetup,DocHead),TempImageName,PurchaseHeader,ExFlowSetup."Path to Used Invoices",UseFileSystem,TempBlob);
+
+      DocHead."Image Name" := TempImageName;
+      DocHead.MODIFY(FALSE);
+      IF ExDoc2.RetrieveRecord(ExDoc2,DocHead."Document Type",DocHead."Document No.") THEN BEGIN
+        ExDoc2."Image Name" := DocHead."Image Name";
+        ExDoc2."Image Blob" := TempBlob.Blob;
+        ExDoc2.MODIFY;
+      END ELSE BEGIN
+        ExDoc2.INIT;
+        ExDoc2."Entry No." := 0;
+        ExDoc2."Document Type" := DocHead."Document Type";
+        ExDoc2."Document No." := DocHead."Document No.";
+        ExDoc2."Image Name" := DocHead."Image Name";
+        ExDoc2."Image Blob" := TempBlob.Blob;
+        ExDoc2."Document ID" := DocHead.ID;
+        ExDoc2."Web ID" := DocHead."Web ID";
+        ExDoc2.INSERT;
+      END;
+    END;
+
+    PROCEDURE CheckReports@1100285031(ExFlowSetup@1100285001 : Record 12013601;DocHead@1100285002 : Record 12013608) ReportToUse : Integer;
+    BEGIN
+      IF DocHead."Document Type" = DocHead."Document Type"::Quote THEN BEGIN
+        ExFlowSetup.TESTFIELD(Requisition);
+        ExFlowSetup.TESTFIELD("Requisition Report");
+        EXIT(ExFlowSetup."Requisition Report");
+      END;
+
+      IF DocHead."Document Type" = DocHead."Document Type"::Order THEN BEGIN
+        ExFlowSetup.TESTFIELD("Purchase Order");
+        ExFlowSetup.TESTFIELD("Order Report");
+        IF DocHead.Status < DocHead.Status::Approved THEN
+          IF ExFlowSetup."Unapproved Order Report" <> 0 THEN
+            EXIT(ExFlowSetup."Unapproved Order Report");
+        EXIT(ExFlowSetup."Order Report");
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -1,0 +1,965 @@
+OBJECT Report 11072164 Create Service Prognosis Lines
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    CaptionML=[DEU=Service-Prognosezeilen erstellen;
+               ENU=Create Service Prognosis Lines;
+               NLD=Serviceprognoseregels aanmaken];
+    ProcessingOnly=Yes;
+  }
+  DATASET
+  {
+    { 1100528601;;DataItem;                  ;
+               DataItemTable=Table11072309;
+               DataItemTableView=SORTING(Prognosis Date,Seq. No.) }
+
+    { 1100528600;;DataItem;                  ;
+               DataItemTable=Table11012812;
+               DataItemTableView=WHERE(Status=CONST(Invoicing Allowed));
+               OnPreDataItem=BEGIN
+                               TotalNoOfContracts := COUNT;
+                               ProgressDialog.OPEN(Text000);
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  TmpServiceContract@1100529600 : TEMPORARY Record 11012812;
+                                  DimensionValue@1100529601 : Record 349;
+                                  OtherPrognosisSeqNo@1100528602 : Integer;
+                                BEGIN
+                                  LineNo := GetLastUsedLineNoPrognosisLine("Service Prognosis");
+
+                                  IF ("Service-Contract".GETFILTERS = '') OR OnlyServiceOrdersWithoutContract THEN BEGIN
+                                    CLEAR(TmpServiceContract);
+                                    TmpServiceContract.INSERT;
+
+                                    DimensionValue.SETRANGE("Global Dimension No.", 1);
+                                    IF DimensionValue.FINDSET THEN
+                                      REPEAT
+                                        TmpServiceContract."No." := DimensionValue.Code;
+                                        TmpServiceContract."Global Dimension 1 Code" := DimensionValue.Code;
+                                        TmpServiceContract.INSERT;
+                                      UNTIL DimensionValue.NEXT = 0;
+
+                                    IF "Service Order".GETFILTER("Global Dimension 1 Code") <> '' THEN
+                                      TmpServiceContract.SETFILTER("Global Dimension 1 Code", "Service Order".GETFILTER("Global Dimension 1 Code"));
+
+                                    IF TmpServiceContract.FINDSET THEN
+                                      REPEAT
+                                        IF NOT "Service Prognosis".IsContractOnOtherPrognosisSeqNo('', TmpServiceContract."Global Dimension 1 Code", OtherPrognosisSeqNo) THEN
+                                          CreatePrognosisLinesByContract("Service Prognosis", '', TmpServiceContract."Global Dimension 1 Code", LineNo);
+                                      UNTIL TmpServiceContract.NEXT = 0;
+                                  END;
+
+                                  IF NOT OnlyServiceOrdersWithoutContract THEN BEGIN
+                                    NoOfContracts += 1;
+                                    ProgressDialog.UPDATE(1, ROUND(NoOfContracts / TotalNoOfContracts * 9999, 1));
+                                    ProgressDialog.UPDATE(2, 0);
+                                    ProgressDialog.UPDATE(5, '');
+                                    ProgressDialog.UPDATE(6, 0);
+
+                                    IF NOT "Service Prognosis".IsContractOnOtherPrognosisSeqNo("No.", '', OtherPrognosisSeqNo) THEN
+                                      CreatePrognosisLinesByContract("Service Prognosis", "No.", "Global Dimension 1 Code", LineNo);
+                                  END;
+                                END;
+
+               OnPostDataItem=BEGIN
+                                ProgressDialog.CLOSE;
+                              END;
+
+               ReqFilterFields=No.,Customer No.,Contract Manager,Contract Type }
+
+    { 1100529900;;DataItem;                  ;
+               DataItemTable=Table11012823;
+               DataItemTableView=WHERE(Base Service Order=CONST(Yes));
+               ReqFilterFields=No. }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      OnOpenPage=BEGIN
+                   "Service Order".SETRANGE("Base Service Order", TRUE);
+                 END;
+
+    }
+    CONTROLS
+    {
+      { 1100528600;;Container;
+                  ContainerType=ContentArea }
+
+      { 1100528601;1;Group  ;
+                  CaptionML=[DEU=Optionen;
+                             ENU=Options;
+                             NLD=Opties;
+                             NOR=Alternativer;
+                             SVE=Alternativ];
+                  GroupType=Group }
+
+      { 1100528602;2;Field  ;
+                  CaptionML=[DEU=Nur Serviceauftr„ge ohne Vertrag;
+                             ENU=Only Service Orders Without Contract;
+                             NLD=Alleen serviceorders zonder contract];
+                  SourceExpr=OnlyServiceOrdersWithoutContract }
+
+      { 1100529600;2;Field  ;
+                  CaptionML=[DEU=Vorige Prognose kopieren;
+                             ENU=Copy Previous Prognosis;
+                             NLD=Vorige prognose overnemen];
+                  SourceExpr=CopyPreviousPrognosis }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      ServiceContract@1100529602 : Record 11012812;
+      ProgressDialog@1100528600 : Dialog;
+      TotalNoOfContracts@1100528602 : Integer;
+      NoOfContracts@1100528604 : Integer;
+      LineNo@1100528603 : Integer;
+      OnlyServiceOrdersWithoutContract@1100528605 : Boolean;
+      Text000@1100528601 : TextConst 'DEU=Fortschritt:\Vertrag @1@@@@@\Periode: @2@@@@@;ENU=Progress:\Contract: @1@@@@@\Period: @2@@@@@\Rounding up:\Type: #5#####\Period: @6@@@@@;NLD=Voortgang:\Contract: @1@@@@@\Periode: @2@@@@@\Afronden:\Soort: #5#####\Periode: @6@@@@@';
+      Text001@1100528606 : TextConst 'DEU=Feld %1 aus Tabelle %2 ist vor dem Arbeitsdatum, dennoch fortfahren?;ENU=Field %1 from table %2 is before the work date, continue anyway?;NLD=Veld %1 van tabel %2 ligt voor de werkdatum, doorgaan?';
+      CopyPreviousPrognosis@1100529603 : Boolean;
+      TotalBudgetRevenueContract@1100528607 : Decimal;
+
+    LOCAL PROCEDURE CreatePrognosisLinesByContract@1100528601(IServicePrognosis@1100528604 : Record 11072309;IServiceContractNo@1100528600 : Code[20];IGlobalDim1Code@1100529600 : Code[20];VAR IOLineNo@1100528603 : Integer);
+    VAR
+      ServicePrognosisLine@1100528602 : Record 11072310;
+      TmpServiceControlPeriod@1100528601 : TEMPORARY Record 11071755;
+      TmpServiceCategory@1100528606 : TEMPORARY Record 11071985;
+      ServiceOrder@1100528608 : Record 11012823;
+      SCControlbyPeriodMgt@1100528616 : Codeunit 11012885;
+      SourceType@1100528607 : Option;
+      LineType@1100528605 : Option;
+      SourceTypeLineAdded@1100528610 : Boolean;
+      TotalNoOfPeriods@1100528609 : Integer;
+      NoOfPeriods@1100528611 : Integer;
+      TotalNoOfPrognosisLines@1100528612 : Integer;
+      NoOfPrognosisLines@1100528613 : Integer;
+      HasCalculatedTotalBudgetRevenueContract@1100528615 : Boolean;
+    BEGIN
+      IF NOT ServiceContract.GET(IServiceContractNo) THEN
+        ServiceContract.INIT;
+      IF FillTmpServiceControlPeriod(IServiceContractNo, TmpServiceControlPeriod, IServicePrognosis."Prognosis Date") THEN BEGIN
+        SCControlbyPeriodMgt.UpdateContractArrangements(ServiceContract."No.", ServiceContract."Budget Based on", TmpServiceControlPeriod);
+        TotalNoOfPeriods := TmpServiceControlPeriod.COUNT;
+        NoOfPeriods := 0;
+        REPEAT
+          HasCalculatedTotalBudgetRevenueContract := FALSE;
+          TotalBudgetRevenueContract := 0;
+
+          NoOfPeriods += 1;
+          IF GUIALLOWED THEN
+            ProgressDialog.UPDATE(2, ROUND(NoOfPeriods / TotalNoOfPeriods * 10000, 1));
+          IServicePrognosis.SetRestOfContract(TmpServiceControlPeriod."Rest of Contract", TmpServiceControlPeriod."Starting Date", TmpServiceControlPeriod."Ending Date");
+          IServicePrognosis.AddPrognosisLine(IServiceContractNo, TmpServiceControlPeriod.Code, ServicePrognosisLine."Line Type"::Period, '', 0, '', IOLineNo, 0, IGlobalDim1Code);
+
+          FillTmpServiceCategory(IServiceContractNo, TmpServiceCategory);
+          REPEAT
+            IServicePrognosis.SetRestOfContractEditable(TmpServiceCategory."Rest of Contract");
+            IF (IServiceContractNo <> '') AND
+               ((TmpServiceCategory.Code <> '') OR
+                (ServiceContract."Budget Based on" IN [ServiceContract."Budget Based on"::Category, ServiceContract."Budget Based on"::"Category + Maintenance Scheme"]))
+            THEN
+              IServicePrognosis.AddPrognosisLine(
+                IServiceContractNo, TmpServiceControlPeriod.Code, ServicePrognosisLine."Line Type"::"Service Category",
+                TmpServiceCategory.Code, 0, '', IOLineNo, 0, IGlobalDim1Code);
+            ServiceOrder.RESET;
+            ServiceOrder.COPY("Service Order");
+            ServiceOrder.SETCURRENTKEY("Service Contract No.");
+            ServiceOrder.FILTERGROUP(10);
+            ServiceOrder.SETRANGE("Service Contract No.", IServiceContractNo);
+            IF IServiceContractNo = '' THEN
+              ServiceOrder.SETRANGE("Global Dimension 1 Code", IGlobalDim1Code);
+            IF TmpServiceControlPeriod.Code <> '' THEN
+              ServiceOrder.SETRANGE("Service Control Period Date", TmpServiceControlPeriod."Starting Date", TmpServiceControlPeriod."Ending Date");
+            ServiceOrder.SETRANGE("Service Category", TmpServiceCategory.Code);
+            ServiceOrder.SETFILTER(Status, '<>%1', ServiceOrder.Status::Cancelled);
+            ServiceOrder.SETRANGE("Base Service Order", TRUE);
+
+            FOR SourceType := ServicePrognosisLine."Source Type"::Call TO ServicePrognosisLine."Source Type"::Direct DO BEGIN
+              SourceTypeLineAdded := FALSE;
+              IF (IServiceContractNo <> '') AND
+                  (((SourceType IN [ServicePrognosisLine."Source Type"::Call, ServicePrognosisLine."Source Type"::Contract]) AND
+                    (ServiceContract."Budget Based on" IN [ServiceContract."Budget Based on"::"Maintenance Scheme"])) OR
+                    ((ServiceContract."Budget Based on" IN [ServiceContract."Budget Based on"::Category, ServiceContract."Budget Based on"::"Category + Maintenance Scheme"])) {AND (TmpServiceCategory.Code <> '')})
+              THEN BEGIN
+                IServicePrognosis.AddPrognosisLine(
+                  IServiceContractNo, TmpServiceControlPeriod.Code, ServicePrognosisLine."Line Type"::"Source Type",
+                  TmpServiceCategory.Code, SourceType, '', IOLineNo, 0, IGlobalDim1Code);
+                IF (ServiceContract."Budget Based on" IN [ServiceContract."Budget Based on"::Category, ServiceContract."Budget Based on"::"Category + Maintenance Scheme"]) OR
+                   (SourceType IN [ServicePrognosisLine."Source Type"::Call, ServicePrognosisLine."Source Type"::Contract])
+                THEN
+                  IF (TmpServiceCategory.Code = '') AND (NOT HasCalculatedTotalBudgetRevenueContract) THEN BEGIN
+                    TotalBudgetRevenueContract := SCControlbyPeriodMgt.GetSCBudgetRevenue(
+                      IServiceContractNo, TmpServiceControlPeriod."Starting Date", TmpServiceControlPeriod."Ending Date", '');
+                    HasCalculatedTotalBudgetRevenueContract := TRUE;
+                  END;
+                  IServicePrognosis.AddPrognosisLine(
+                    IServiceContractNo, TmpServiceControlPeriod.Code, ServicePrognosisLine."Line Type"::"Service Order",
+                    TmpServiceCategory.Code, SourceType, '', IOLineNo, TotalBudgetRevenueContract, IGlobalDim1Code);
+                SourceTypeLineAdded := TRUE;
+              END;
+              ServiceOrder.SETRANGE("Source Type", SourceType);
+              IF ServiceOrder.FINDSET THEN BEGIN
+                IF NOT SourceTypeLineAdded THEN BEGIN
+                  IF (TmpServiceCategory.Code = '') AND (NOT HasCalculatedTotalBudgetRevenueContract) THEN BEGIN
+                    TotalBudgetRevenueContract := SCControlbyPeriodMgt.GetSCBudgetRevenue(
+                      IServiceContractNo, TmpServiceControlPeriod."Starting Date", TmpServiceControlPeriod."Ending Date", '');
+                    HasCalculatedTotalBudgetRevenueContract := TRUE;
+                  END;
+                  IServicePrognosis.AddPrognosisLine(
+                    IServiceContractNo, TmpServiceControlPeriod.Code, ServicePrognosisLine."Line Type"::"Source Type",
+                    TmpServiceCategory.Code, SourceType, '', IOLineNo, TotalBudgetRevenueContract, IGlobalDim1Code);
+                END;
+                REPEAT
+                  IServicePrognosis.AddPrognosisLine(
+                    IServiceContractNo, TmpServiceControlPeriod.Code, ServicePrognosisLine."Line Type"::"Service Order",
+                    ServiceOrder."Service Category", ServiceOrder."Source Type", ServiceOrder."No.", IOLineNo, 0, IGlobalDim1Code);
+                UNTIL ServiceOrder.NEXT = 0;
+                SourceTypeLineAdded := TRUE;
+              END;
+
+              IF TmpServiceControlPeriod."Rest of Contract" THEN BEGIN
+                ServicePrognosisLine.RESET;
+                ServicePrognosisLine.SETRANGE("Prognosis Date", IServicePrognosis."Prognosis Date");
+                ServicePrognosisLine.SETRANGE("Prognosis Seq. No.", IServicePrognosis."Seq. No.");
+                ServicePrognosisLine.SETRANGE("Service Contract No.", IServiceContractNo);
+                ServicePrognosisLine.SETRANGE("Service Category", TmpServiceCategory.Code);
+                ServicePrognosisLine.SETFILTER("Service Order No.", '<>%1', '');
+                ServicePrognosisLine.SETRANGE("Source Type", SourceType);
+                ServicePrognosisLine.SETRANGE("Line Type", ServicePrognosisLine."Line Type"::"Service Order");
+                ServicePrognosisLine.SETRANGE("Rest of Contract", FALSE);
+                IF NOT ServicePrognosisLine.ISEMPTY THEN BEGIN
+                  IF NOT SourceTypeLineAdded THEN
+                    IServicePrognosis.AddPrognosisLine(
+                      IServiceContractNo, TmpServiceControlPeriod.Code, ServicePrognosisLine."Line Type"::"Source Type",
+                      TmpServiceCategory.Code, SourceType, '', IOLineNo, 0, IGlobalDim1Code);
+                  IServicePrognosis.AddTotalSOPrognosisLine(
+                    IServiceContractNo, TmpServiceControlPeriod.Code, ServicePrognosisLine."Line Type"::"Service Order",
+                    TmpServiceCategory.Code, SourceType, '', IOLineNo);
+                END;
+              END;
+            END;
+
+          UNTIL TmpServiceCategory.NEXT = 0;
+        UNTIL TmpServiceControlPeriod.NEXT = 0;
+      END;
+
+      ServicePrognosisLine.RESET;
+      ServicePrognosisLine.SETRANGE("Prognosis Date", IServicePrognosis."Prognosis Date");
+      ServicePrognosisLine.SETRANGE("Prognosis Seq. No.", IServicePrognosis."Seq. No.");
+      ServicePrognosisLine.SETRANGE("Service Contract No.", IServiceContractNo);
+      FOR LineType := ServicePrognosisLine."Line Type"::"Source Type" DOWNTO ServicePrognosisLine."Line Type"::Period DO BEGIN
+        IF GUIALLOWED THEN BEGIN
+          ServicePrognosisLine."Line Type" := LineType;
+          ProgressDialog.UPDATE(5, ServicePrognosisLine."Line Type");
+        END;
+        ServicePrognosisLine.SETRANGE("Line Type", LineType);
+        TotalNoOfPrognosisLines := ServicePrognosisLine.COUNT;
+        NoOfPrognosisLines := 0;
+        IF ServicePrognosisLine.FINDSET(TRUE) THEN
+          REPEAT
+            NoOfPrognosisLines += 1;
+            IF GUIALLOWED THEN
+              ProgressDialog.UPDATE(6, ROUND(NoOfPrognosisLines / TotalNoOfPrognosisLines * 10000, 1));
+            ServicePrognosisLine.DetermineTotals;
+            ServicePrognosisLine.MODIFY(TRUE);
+          UNTIL ServicePrognosisLine.NEXT = 0;
+      END;
+
+      IF NOT ServiceContract.GET(IServiceContractNo) THEN
+        ServiceContract.INIT;
+
+      IF ServiceContract."Control Details" = ServiceContract."Control Details"::"Cost Type/Cost Object" THEN BEGIN
+        CreateServicePrognosisByCostType(IServicePrognosis, IServiceContractNo);
+        DeleteServPrognByCostTypeLowerLevel(IServicePrognosis, IServiceContractNo);
+      END;
+      ProcessPreviousPrognosis(IServicePrognosis, IServiceContractNo, IGlobalDim1Code);
+    END;
+
+    LOCAL PROCEDURE FillTmpServiceControlPeriod@1100528625(IServiceContractNo@1100528600 : Code[20];VAR OTmpServiceControlPeriod@1100528601 : Record 11071755;PrognosisDate@1100529600 : Date) : Boolean;
+    VAR
+      ServiceSetup@1100528605 : Record 11012800;
+      ServiceControlPeriod@1100528602 : Record 11071755;
+      ServiceContractCtrlPeriod@1100528603 : Record 11071746;
+      ControlReferenceDate@1100528604 : Date;
+      NoOfPeriods@1100529602 : Integer;
+    BEGIN
+      IF NOT OTmpServiceControlPeriod.ISTEMPORARY THEN
+        EXIT(FALSE);
+      OTmpServiceControlPeriod.RESET;
+      OTmpServiceControlPeriod.DELETEALL;
+
+      IF IServiceContractNo <> '' THEN BEGIN
+        NoOfPeriods := ServiceContract."Number of Control Ref. Periods";
+        ControlReferenceDate := ServiceContract."Control Reference Date";
+        IF (ControlReferenceDate <> 0D) AND (ControlReferenceDate < WORKDATE) AND GUIALLOWED THEN
+          IF NOT CONFIRM(Text001, FALSE, ServiceContract.FIELDCAPTION("Control Reference Date"), ServiceContract.TABLECAPTION) THEN
+            ERROR('');
+        IF (ServiceContract."Ending Date" <> 0D) AND ((ControlReferenceDate = 0D) OR (ControlReferenceDate > ServiceContract."Ending Date")) THEN
+          ControlReferenceDate := ServiceContract."Ending Date";
+      END;
+      IF (ControlReferenceDate = 0D) AND (NoOfPeriods = 0) THEN BEGIN
+        ServiceSetup.GET;
+        ControlReferenceDate := ServiceSetup."Control Reference Date";
+        IF ControlReferenceDate = 0D THEN
+          ControlReferenceDate := WORKDATE
+        ELSE
+          IF (ControlReferenceDate < WORKDATE) AND GUIALLOWED THEN
+            IF NOT CONFIRM(Text001, FALSE, ServiceSetup.FIELDCAPTION("Control Reference Date"), ServiceSetup.TABLECAPTION) THEN
+              ERROR('');
+      END;
+
+      IF IServiceContractNo = '' THEN BEGIN
+        ServiceControlPeriod.SETRANGE("Date Finished", 0D);
+        ServiceControlPeriod.SETFILTER("Starting Date", '<=%1', ControlReferenceDate);
+        IF ServiceControlPeriod.FINDSET THEN
+          REPEAT
+            OTmpServiceControlPeriod := ServiceControlPeriod;
+            OTmpServiceControlPeriod.INSERT;
+          UNTIL ServiceControlPeriod.NEXT = 0;
+      END ELSE BEGIN
+        ServiceContractCtrlPeriod.SetIgnoreActualPeriods(ServiceContract."Rest of Contract");
+        ServiceContractCtrlPeriod.UpdateControlPeriodsNumber(IServiceContractNo, PrognosisDate, ControlReferenceDate);
+        ServiceContractCtrlPeriod.SETRANGE("Service Contract No.", IServiceContractNo);
+        IF NOT ServiceContract."Result Calc. on Total Contract" THEN
+          ServiceContractCtrlPeriod.SETRANGE("Date Finished", 0D);
+        ServiceContractCtrlPeriod.SETFILTER("Starting Date", '<=%1', ControlReferenceDate);
+        IF ServiceContractCtrlPeriod.FINDSET THEN BEGIN
+          REPEAT
+            OTmpServiceControlPeriod.Code := ServiceContractCtrlPeriod.Code;
+            OTmpServiceControlPeriod."Starting Date" := ServiceContractCtrlPeriod."Starting Date";
+            OTmpServiceControlPeriod."Ending Date" := ServiceContractCtrlPeriod."Ending Date";
+            OTmpServiceControlPeriod.INSERT;
+          UNTIL ServiceContractCtrlPeriod.NEXT = 0;
+
+          OTmpServiceControlPeriod.Code := INCSTR(ServiceContractCtrlPeriod.Code);
+          OTmpServiceControlPeriod."Starting Date" := ServiceContractCtrlPeriod."Ending Date" + 1;
+          OTmpServiceControlPeriod."Ending Date" := ServiceContract."Ending Date";
+          OTmpServiceControlPeriod."Rest of Contract" := TRUE;
+          IF AddRestOfContractLine(ServiceContractCtrlPeriod."Ending Date", OTmpServiceControlPeriod."Ending Date") THEN
+            OTmpServiceControlPeriod.INSERT;
+        END;
+      END;
+      EXIT(OTmpServiceControlPeriod.FINDFIRST);
+    END;
+
+    LOCAL PROCEDURE FillTmpServiceCategory@1100528632(IServiceContractNo@1100528601 : Code[20];VAR OTmpServiceCategory@1100528600 : TEMPORARY Record 11071985);
+    VAR
+      ServiceCategory@1100528602 : Record 11071985;
+    BEGIN
+      IF NOT OTmpServiceCategory.ISTEMPORARY THEN
+        EXIT;
+      CLEAR(OTmpServiceCategory);
+      OTmpServiceCategory.DELETEALL;
+      OTmpServiceCategory."Rest of Contract" := ServiceContract."Rest of Contract";
+      OTmpServiceCategory.INSERT;
+      ServiceCategory.SETFILTER("Service Contract No.", '<>%1&%2', '', IServiceContractNo);
+      IF ServiceCategory.FINDSET THEN
+        REPEAT
+          OTmpServiceCategory := ServiceCategory;
+          OTmpServiceCategory.INSERT;
+        UNTIL ServiceCategory.NEXT = 0;
+      OTmpServiceCategory.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE GetLastUsedLineNoPrognosisLine@1100528600(IServicePrognosis@1100528600 : Record 11072309) : Integer;
+    VAR
+      ServicePrognosisLine@1100528601 : Record 11072310;
+    BEGIN
+      ServicePrognosisLine.SETRANGE("Prognosis Date", IServicePrognosis."Prognosis Date");
+      ServicePrognosisLine.SETRANGE("Prognosis Seq. No.", IServicePrognosis."Seq. No.");
+      IF ServicePrognosisLine.FINDLAST THEN
+        EXIT(ServicePrognosisLine."Line No.");
+    END;
+
+    LOCAL PROCEDURE CreateServicePrognosisByCostType@1100529600(ServicePrognosis@1100529601 : Record 11072309;ServiceContractNo@1100529604 : Code[20]);
+    VAR
+      ServicePrognosisLine@1100529602 : Record 11072310;
+      ServicePrognosisByCostType@1100529600 : Record 11072553;
+      TmpServicePrognosisByCostType@1100529605 : TEMPORARY Record 11072553;
+      PostingDateFilter@1100529609 : Text;
+      LocLineNo@1100529603 : Integer;
+    BEGIN
+      ServicePrognosisLine.SETRANGE("Prognosis Date", ServicePrognosis."Prognosis Date");
+      ServicePrognosisLine.SETRANGE("Prognosis Seq. No.", ServicePrognosis."Seq. No.");
+      ServicePrognosisLine.SETRANGE("Service Contract No.", ServiceContractNo);
+
+      ServicePrognosisLine.SETRANGE("Line Type", ServicePrognosisLine."Line Type"::"Service Category");
+      IF ServicePrognosisLine.ISEMPTY THEN
+        ServicePrognosisLine.SETRANGE("Line Type", ServicePrognosisLine."Line Type"::Period);
+      IF ServicePrognosisLine.ISEMPTY THEN
+        EXIT;
+
+      PostingDateFilter := STRSUBSTNO('..%1', ServicePrognosis."Prognosis Date");
+      CLEAR(TmpServicePrognosisByCostType);
+
+      ServicePrognosisByCostType.SETRANGE("Prognosis Date", ServicePrognosis."Prognosis Date");
+      ServicePrognosisByCostType.SETRANGE("Prognosis Seq. No.", ServicePrognosis."Seq. No.");
+      ServicePrognosisByCostType.SETRANGE("Service Contract No.", ServiceContractNo);
+
+      ServicePrognosisLine.FINDSET;
+      REPEAT
+        ServicePrognosisByCostType.SETRANGE("Service Category", ServicePrognosisLine."Service Category");
+        ServicePrognosisByCostType.SETRANGE("Control Period Code", ServicePrognosisLine."Control Period Code");
+
+        ProcessServiceOrderBudgetLine(ServicePrognosisLine, PostingDateFilter, TmpServicePrognosisByCostType, ServicePrognosisByCostType);
+
+        ServicePrognosisByCostType.SETRANGE("Source Type");
+        ServicePrognosisByCostType.SETRANGE("Cost Type");
+        ServicePrognosisByCostType.SETRANGE("Cost Object");
+
+        IF ServicePrognosisByCostType.FINDSET THEN BEGIN
+          TmpServicePrognosisByCostType.RESET;
+          IF TmpServicePrognosisByCostType.FINDLAST THEN
+            LocLineNo := TmpServicePrognosisByCostType."Prognosis Line No.";
+          REPEAT
+            LocLineNo += 1;
+            TmpServicePrognosisByCostType := ServicePrognosisByCostType;
+            TmpServicePrognosisByCostType."Prognosis Line No." := LocLineNo;
+            TmpServicePrognosisByCostType.INSERT;
+          UNTIL ServicePrognosisByCostType.NEXT = 0;
+          ServicePrognosisByCostType.DELETEALL;
+        END;
+
+        ProcessServiceLedgerEntry(ServicePrognosisLine, PostingDateFilter, TmpServicePrognosisByCostType);
+        ProcessPurchaseOrderControlLine(ServicePrognosisLine, PostingDateFilter, TmpServicePrognosisByCostType);
+        ProcessItemJournalLine(ServicePrognosisLine, PostingDateFilter, TmpServicePrognosisByCostType);
+        ProcessHourAccountingLine(ServicePrognosisLine, PostingDateFilter, TmpServicePrognosisByCostType);
+      UNTIL ServicePrognosisLine.NEXT = 0;
+
+      LocLineNo := TmpServicePrognosisByCostType."Prognosis Line No.";
+
+      ServicePrognosisLine.SETRANGE("Line Type", ServicePrognosisLine."Line Type"::"Source Type");
+      IF ServicePrognosisLine.ISEMPTY THEN
+        EXIT;
+
+      TmpServicePrognosisByCostType.SETCURRENTKEY("Source Type", "Control Period Code", "Cost Type", "Cost Object");
+      ServicePrognosisLine.FINDSET;
+      REPEAT
+        IF ServicePrognosisLine."Rest of Contract" THEN BEGIN
+          ServicePrognosisByCostType.RESET;
+          ServicePrognosisByCostType.SETRANGE("Prognosis Date", ServicePrognosis."Prognosis Date");
+          ServicePrognosisByCostType.SETRANGE("Prognosis Seq. No.", ServicePrognosis."Seq. No.");
+          ServicePrognosisByCostType.SETRANGE("Service Contract No.", ServiceContractNo);
+          ServicePrognosisByCostType.SETRANGE("Line Type", ServicePrognosisLine."Line Type");
+          ServicePrognosisByCostType.SETRANGE("Service Category", ServicePrognosisLine."Service Category");
+          ServicePrognosisByCostType.SETRANGE("Source Type", ServicePrognosisLine."Source Type");
+          ServicePrognosisByCostType.SETRANGE("Rest of Contract", FALSE);
+          IF NOT ServicePrognosisByCostType.ISEMPTY THEN BEGIN
+            ServicePrognosisByCostType.SETCURRENTKEY("Cost Type", "Cost Object");
+            ServicePrognosisByCostType.FINDSET;
+            REPEAT
+              IF ServicePrognosisByCostType."Cost Object" <> '' THEN BEGIN
+                LocLineNo += 1;
+                TmpServicePrognosisByCostType.INIT;
+                TmpServicePrognosisByCostType."Service Category" := ServicePrognosisLine."Service Category";
+                TmpServicePrognosisByCostType."Prognosis Line No." := LocLineNo;
+                TmpServicePrognosisByCostType."Control Period Code" := ServicePrognosisLine."Control Period Code";
+                TmpServicePrognosisByCostType."Starting Date" := ServicePrognosisLine."Starting Date";
+                TmpServicePrognosisByCostType."Ending Date" := ServicePrognosisLine."Ending Date";
+                TmpServicePrognosisByCostType."Source Type" := ServicePrognosisLine."Source Type";
+                TmpServicePrognosisByCostType."Cost Type" := ServicePrognosisByCostType."Cost Type";
+                TmpServicePrognosisByCostType."Cost Object" := ServicePrognosisByCostType."Cost Object";
+                TmpServicePrognosisByCostType.INSERT;
+              END;
+              ServicePrognosisByCostType.SETRANGE("Cost Type", ServicePrognosisByCostType."Cost Type");
+              ServicePrognosisByCostType.SETRANGE("Cost Object", ServicePrognosisByCostType."Cost Object");
+              ServicePrognosisByCostType.FINDLAST;
+              ServicePrognosisByCostType.SETRANGE("Cost Type");
+              ServicePrognosisByCostType.SETRANGE("Cost Object");
+            UNTIL ServicePrognosisByCostType.NEXT = 0;
+          END;
+        END;
+        TmpServicePrognosisByCostType.SETRANGE("Service Category", ServicePrognosisLine."Service Category");
+        TmpServicePrognosisByCostType.SETRANGE("Source Type", ServicePrognosisLine."Source Type");
+        CreateServicePrognosisByCostTypeUpperLevel(ServicePrognosisLine, TmpServicePrognosisByCostType);
+      UNTIL ServicePrognosisLine.NEXT = 0;
+
+      ServicePrognosisByCostType.RESET;
+      ServicePrognosisByCostType.SETRANGE("Prognosis Date", ServicePrognosis."Prognosis Date");
+      ServicePrognosisByCostType.SETRANGE("Prognosis Seq. No.", ServicePrognosis."Seq. No.");
+      ServicePrognosisByCostType.SETRANGE("Service Contract No.", ServiceContractNo);
+      ServicePrognosisByCostType.SETRANGE("Line Type", ServicePrognosisByCostType."Line Type"::"Source Type");
+
+      ServicePrognosisLine.SETRANGE("Line Type", ServicePrognosisLine."Line Type"::"Service Category");
+      IF ServicePrognosisLine.FINDSET THEN BEGIN
+        REPEAT
+          ServicePrognosisByCostType.SETRANGE("Service Category", ServicePrognosisLine."Service Category");
+          CreateServicePrognosisByCostTypeUpperLevel(ServicePrognosisLine, ServicePrognosisByCostType);
+        UNTIL ServicePrognosisLine.NEXT = 0;
+        ServicePrognosisByCostType.SETRANGE("Line Type", ServicePrognosisByCostType."Line Type"::"Service Category");
+        ServicePrognosisByCostType.SETRANGE("Service Category");
+      END;
+
+      ServicePrognosisLine.SETRANGE("Line Type", ServicePrognosisLine."Line Type"::Period);
+      ServicePrognosisLine.FINDSET;
+      REPEAT
+        CreateServicePrognosisByCostTypeUpperLevel(ServicePrognosisLine, ServicePrognosisByCostType);
+      UNTIL ServicePrognosisLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ProcessServiceOrderBudgetLine@1100529602(ServicePrognosisLine@1100529614 : Record 11072310;PostingDateFilter@1100529613 : Text;VAR TmpServicePrognosisByCostType@1100529601 : TEMPORARY Record 11072553;VAR ServicePrognosisByCostType@1100529602 : Record 11072553);
+    VAR
+      ServiceOrderBudgetLine@1100529600 : Query 11012800;
+    BEGIN
+      ServiceOrderBudgetLine.SETRANGE(Service_Contract_No, ServicePrognosisLine."Service Contract No.");
+      ServiceOrderBudgetLine.SETRANGE(Service_Category, ServicePrognosisLine."Service Category");
+      ServiceOrderBudgetLine.SETRANGE(Service_Control_Period_Date, ServicePrognosisLine."Starting Date", ServicePrognosisLine."Ending Date");
+      ServiceOrderBudgetLine.OPEN;
+      WHILE ServiceOrderBudgetLine.READ DO BEGIN
+        TmpServicePrognosisByCostType.INIT;
+        TmpServicePrognosisByCostType."Service Category" := ServicePrognosisLine."Service Category";
+        TmpServicePrognosisByCostType."Prognosis Line No." += 1;
+        TmpServicePrognosisByCostType."Control Period Code" := ServicePrognosisLine."Control Period Code";
+        TmpServicePrognosisByCostType."Starting Date" := ServicePrognosisLine."Starting Date";
+        TmpServicePrognosisByCostType."Ending Date" := ServicePrognosisLine."Ending Date";
+        TmpServicePrognosisByCostType."Source Type" := ServiceOrderBudgetLine.Source_Type;
+        TmpServicePrognosisByCostType."Cost Type" := ServiceOrderBudgetLine.Cost_Type;
+        TmpServicePrognosisByCostType."Cost Object" := ServiceOrderBudgetLine.Cost_Object;
+        TmpServicePrognosisByCostType."Budget Cost" := ServiceOrderBudgetLine.Sum_Amount;
+        TmpServicePrognosisByCostType."Budget Hours" := ServiceOrderBudgetLine.Sum_Hours;
+        IF ServiceOrderBudgetLine.Finished THEN BEGIN
+          TmpServicePrognosisByCostType."Allowed Cost" := ServiceOrderBudgetLine.Sum_Amount;
+          TmpServicePrognosisByCostType."Allowed Hours" := ServiceOrderBudgetLine.Sum_Hours;
+        END;
+        TmpServicePrognosisByCostType.INSERT;
+
+        IF ((TmpServicePrognosisByCostType."Budget Cost" <> 0) OR (TmpServicePrognosisByCostType."Budget Hours" <> 0)) AND
+           ((ServiceContract."Budget Based on" = ServiceContract."Budget Based on"::Category) OR
+           ((TmpServicePrognosisByCostType."Source Type" <> TmpServicePrognosisByCostType."Source Type"::Contract) AND
+           (ServiceContract."Budget Based on" = ServiceContract."Budget Based on"::"Category + Maintenance Scheme")))
+        THEN BEGIN
+          ServicePrognosisByCostType.SETRANGE("Source Type", TmpServicePrognosisByCostType."Source Type");
+          ServicePrognosisByCostType.SETRANGE("Cost Type", TmpServicePrognosisByCostType."Cost Type");
+          ServicePrognosisByCostType.SETRANGE("Cost Object", TmpServicePrognosisByCostType."Cost Object");
+          IF ServicePrognosisByCostType.FINDLAST THEN BEGIN
+            ServicePrognosisByCostType."Budget Cost" -= TmpServicePrognosisByCostType."Budget Cost";
+            IF ServicePrognosisByCostType."Budget Cost" < 0 THEN
+              ServicePrognosisByCostType."Budget Cost" := 0;
+            ServicePrognosisByCostType."Budget Hours" -= TmpServicePrognosisByCostType."Budget Hours";
+            IF ServicePrognosisByCostType."Budget Hours" < 0 THEN
+              ServicePrognosisByCostType."Budget Hours" := 0;
+            ServicePrognosisByCostType.MODIFY;
+          END;
+        END;
+      END;
+      ServiceOrderBudgetLine.CLOSE;
+    END;
+
+    LOCAL PROCEDURE ProcessServiceLedgerEntry@1100529604(ServicePrognosisLine@1100529615 : Record 11072310;PostingDateFilter@1100529614 : Text;VAR TmpServicePrognosisByCostType@1100529613 : TEMPORARY Record 11072553);
+    VAR
+      ServLedgEntryByCostType@1100529600 : Query 11012801;
+    BEGIN
+      ServLedgEntryByCostType.SETRANGE(Service_Contract_No, ServicePrognosisLine."Service Contract No.");
+      ServLedgEntryByCostType.SETRANGE(Service_Category, ServicePrognosisLine."Service Category");
+      ServLedgEntryByCostType.SETRANGE(Service_Control_Period_Date, ServicePrognosisLine."Starting Date", ServicePrognosisLine."Ending Date");
+      ServLedgEntryByCostType.SETFILTER(Posting_Date, PostingDateFilter);
+      ServLedgEntryByCostType.OPEN;
+
+      WHILE ServLedgEntryByCostType.READ DO BEGIN
+        TmpServicePrognosisByCostType.INIT;
+        TmpServicePrognosisByCostType."Service Category" := ServicePrognosisLine."Service Category";
+        TmpServicePrognosisByCostType."Prognosis Line No." += 1;
+        TmpServicePrognosisByCostType."Control Period Code" := ServicePrognosisLine."Control Period Code";
+        TmpServicePrognosisByCostType."Starting Date" := ServicePrognosisLine."Starting Date";
+        TmpServicePrognosisByCostType."Ending Date" := ServicePrognosisLine."Ending Date";
+        TmpServicePrognosisByCostType."Source Type" := ServLedgEntryByCostType.Source_Type;
+        TmpServicePrognosisByCostType."Cost Type" := ServLedgEntryByCostType.Cost_Type;
+        TmpServicePrognosisByCostType."Cost Object" := ServLedgEntryByCostType.Cost_Object;
+        TmpServicePrognosisByCostType."Actual Cost" := ServLedgEntryByCostType.Sum_Total_Cost_LCY;
+        TmpServicePrognosisByCostType."Actual Hours" := ServLedgEntryByCostType.Sum_Quantity;
+        IF ServLedgEntryByCostType.Additional_Cost THEN BEGIN
+          TmpServicePrognosisByCostType."Actual Cost (Additional)" := ServLedgEntryByCostType.Sum_Total_Cost_LCY;
+          TmpServicePrognosisByCostType."Total Cost (Additional)" := ServLedgEntryByCostType.Sum_Total_Cost_LCY;
+          TmpServicePrognosisByCostType."Actual Hours (Additional)" :=ServLedgEntryByCostType.Sum_Quantity;
+          TmpServicePrognosisByCostType."Total Hours (Additional)" := ServLedgEntryByCostType.Sum_Quantity;
+        END;
+        TmpServicePrognosisByCostType.INSERT;
+      END;
+      ServLedgEntryByCostType.CLOSE;
+    END;
+
+    LOCAL PROCEDURE ProcessPurchaseOrderControlLine@1100529606(ServicePrognosisLine@1100529615 : Record 11072310;PostingDateFilter@1100529614 : Text;VAR TmpServicePrognosisByCostType@1100529613 : TEMPORARY Record 11072553);
+    VAR
+      PurchaseOrderControlLine@1100529600 : Query 11012802;
+    BEGIN
+      PurchaseOrderControlLine.SETRANGE(Service_Contract_No, ServicePrognosisLine."Service Contract No.");
+      PurchaseOrderControlLine.SETRANGE(Service_Category, ServicePrognosisLine."Service Category");
+      PurchaseOrderControlLine.SETRANGE(Service_Control_Period_Date, ServicePrognosisLine."Starting Date", ServicePrognosisLine."Ending Date");
+      PurchaseOrderControlLine.SETFILTER(Date, PostingDateFilter);
+      PurchaseOrderControlLine.OPEN;
+
+      WHILE PurchaseOrderControlLine.READ DO BEGIN
+        TmpServicePrognosisByCostType.INIT;
+        TmpServicePrognosisByCostType."Service Category" := ServicePrognosisLine."Service Category";
+        TmpServicePrognosisByCostType."Prognosis Line No." += 1;
+        TmpServicePrognosisByCostType."Control Period Code" := ServicePrognosisLine."Control Period Code";
+        TmpServicePrognosisByCostType."Starting Date" := ServicePrognosisLine."Starting Date";
+        TmpServicePrognosisByCostType."Ending Date" := ServicePrognosisLine."Ending Date";
+        TmpServicePrognosisByCostType."Source Type" := PurchaseOrderControlLine.Service_Source_Type;
+        TmpServicePrognosisByCostType."Cost Type" := PurchaseOrderControlLine.Cost_Type - 1;
+        TmpServicePrognosisByCostType."Cost Object" := PurchaseOrderControlLine.Cost_Object;
+        TmpServicePrognosisByCostType."Open (Purchase)" := PurchaseOrderControlLine.Sum_Outstanding_Amount;
+        TmpServicePrognosisByCostType."Open Ovh. Surch. Soft (Purch.)" := PurchaseOrderControlLine.Sum_Overhead_Surcharge_Soft;
+        TmpServicePrognosisByCostType."Received/Not Invoiced" := PurchaseOrderControlLine.Sum_Amt_Rcd_Not_Invoiced;
+        TmpServicePrognosisByCostType."Open Ovh. Surch. Firm (Purch.)" := PurchaseOrderControlLine.Sum_Overhead_Surcharge_Firm;
+        IF PurchaseOrderControlLine.Additional_Cost_Service THEN
+          TmpServicePrognosisByCostType."Total Cost (Additional)" := PurchaseOrderControlLine.Sum_Outstanding_Amount +
+                                                                     PurchaseOrderControlLine.Sum_Overhead_Surcharge_Soft +
+                                                                     PurchaseOrderControlLine.Sum_Amt_Rcd_Not_Invoiced +
+                                                                     PurchaseOrderControlLine.Sum_Overhead_Surcharge_Firm;
+
+        TmpServicePrognosisByCostType.INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE ProcessItemJournalLine@1100529609(ServicePrognosisLine@1100529615 : Record 11072310;PostingDateFilter@1100529614 : Text;VAR TmpServicePrognosisByCostType@1100529613 : TEMPORARY Record 11072553);
+    VAR
+      ItemJournalLine@1100529600 : Query 11012803;
+    BEGIN
+      ItemJournalLine.SETRANGE(Service_Contract_No, ServicePrognosisLine."Service Contract No.");
+      ItemJournalLine.SETRANGE(Service_Category, ServicePrognosisLine."Service Category");
+      ItemJournalLine.SETRANGE(Service_Control_Period_Date, ServicePrognosisLine."Starting Date", ServicePrognosisLine."Ending Date");
+      ItemJournalLine.SETFILTER(Posting_Date, PostingDateFilter);
+      ItemJournalLine.OPEN;
+
+      WHILE ItemJournalLine.READ DO BEGIN
+        TmpServicePrognosisByCostType.INIT;
+        TmpServicePrognosisByCostType."Service Category" := ServicePrognosisLine."Service Category";
+        TmpServicePrognosisByCostType."Prognosis Line No." += 1;
+        TmpServicePrognosisByCostType."Control Period Code" := ServicePrognosisLine."Control Period Code";
+        TmpServicePrognosisByCostType."Starting Date" := ServicePrognosisLine."Starting Date";
+        TmpServicePrognosisByCostType."Ending Date" := ServicePrognosisLine."Ending Date";
+        TmpServicePrognosisByCostType."Source Type" := ItemJournalLine.Service_Source_Type;
+        TmpServicePrognosisByCostType."Cost Type" := ItemJournalLine.Cost_Type - 1;
+        TmpServicePrognosisByCostType."Cost Object" := ItemJournalLine.Cost_Object;
+        TmpServicePrognosisByCostType."Open (Inventory)" := ItemJournalLine.Sum_Amount;
+        TmpServicePrognosisByCostType."Open Ovh. Surch. (Inventory)" := ItemJournalLine.Sum_Overhead_Surcharge_Service;
+        IF ItemJournalLine.Additional_Cost_Service THEN
+          TmpServicePrognosisByCostType."Total Cost (Additional)" := ItemJournalLine.Sum_Amount + ItemJournalLine.Sum_Overhead_Surcharge_Service;
+        TmpServicePrognosisByCostType.INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE ProcessHourAccountingLine@1100529612(ServicePrognosisLine@1100529615 : Record 11072310;PostingDateFilter@1100529614 : Text;VAR TmpServicePrognosisByCostType@1100529613 : TEMPORARY Record 11072553);
+    VAR
+      HourAccountingLine@1100529600 : Query 11012804;
+    BEGIN
+      HourAccountingLine.SETRANGE(Service_Contract_No, ServicePrognosisLine."Service Contract No.");
+      HourAccountingLine.SETRANGE(Service_Category, ServicePrognosisLine."Service Category");
+      HourAccountingLine.SETRANGE(Service_Control_Period_Date, ServicePrognosisLine."Starting Date", ServicePrognosisLine."Ending Date");
+      HourAccountingLine.SETFILTER(Posting_Date, PostingDateFilter);
+      HourAccountingLine.OPEN;
+
+      WHILE HourAccountingLine.READ DO BEGIN
+        TmpServicePrognosisByCostType.INIT;
+        TmpServicePrognosisByCostType."Service Category" := ServicePrognosisLine."Service Category";
+        TmpServicePrognosisByCostType."Prognosis Line No." += 1;
+        TmpServicePrognosisByCostType."Control Period Code" := ServicePrognosisLine."Control Period Code";
+        TmpServicePrognosisByCostType."Starting Date" := ServicePrognosisLine."Starting Date";
+        TmpServicePrognosisByCostType."Ending Date" := ServicePrognosisLine."Ending Date";
+        TmpServicePrognosisByCostType."Source Type" := HourAccountingLine.Service_Source_Type;
+        TmpServicePrognosisByCostType."Cost Type" := HourAccountingLine.Cost_Type;
+        TmpServicePrognosisByCostType."Cost Object" := HourAccountingLine.Cost_Object;
+        TmpServicePrognosisByCostType."Open Amount (Hours)" := HourAccountingLine.Sum_Amount_LCY;
+        TmpServicePrognosisByCostType."Open Ovh. Surch. (Hours)" := HourAccountingLine.Sum_Overhead_Surcharge_Service;
+        TmpServicePrognosisByCostType."Open Hours" := HourAccountingLine.Sum_Total_Line;
+        IF HourAccountingLine.Additional_Cost_Service THEN BEGIN
+          TmpServicePrognosisByCostType."Total Cost (Additional)" := HourAccountingLine.Sum_Amount_LCY + HourAccountingLine.Sum_Overhead_Surcharge_Service;
+          TmpServicePrognosisByCostType."Total Hours (Additional)" := HourAccountingLine.Sum_Total_Line;
+        END;
+        TmpServicePrognosisByCostType.INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateServicePrognosisByCostTypeUpperLevel@1100529607(ServicePrognosisLine@1100529608 : Record 11072310;VAR ServicePrognosisByCostType@1100529600 : Record 11072553);
+    VAR
+      CostObjectServicePrognosisByCostType@1100529607 : Record 11072553;
+      CostTypeServicePrognosisByCostType@1100529606 : Record 11072553;
+      CostType@1100529603 : Integer;
+    BEGIN
+      ServicePrognosisByCostType.SETRANGE("Control Period Code", ServicePrognosisLine."Control Period Code");
+      ServicePrognosisByCostType.SETCURRENTKEY("Cost Type", "Cost Object");
+
+      FOR CostType := 0 TO 4 DO BEGIN
+        ServicePrognosisByCostType.SETRANGE("Cost Type", CostType);
+        IF ServicePrognosisByCostType.FINDSET THEN
+          REPEAT
+            ServicePrognosisByCostType.SETRANGE("Cost Object", ServicePrognosisByCostType."Cost Object");
+            IF ServicePrognosisByCostType."Cost Object" <> '' THEN BEGIN
+              ServicePrognosisByCostType.CALCSUMS(
+                "Budget Cost", "Actual Cost", "Actual Cost (Additional)", "Open (Purchase)", "Open Ovh. Surch. Soft (Purch.)",
+                "Received/Not Invoiced", "Open Ovh. Surch. Firm (Purch.)", "Open (Inventory)", "Open Ovh. Surch. (Inventory)",
+                "Open Amount (Hours)", "Open Ovh. Surch. (Hours)", "Total Cost", "Total Cost (Additional)", "Allowed Cost",
+                Available, Result, "Prognosis Total Cost", "Calc. Prognosis Total Cost");
+              IF CostType = ServicePrognosisByCostType."Cost Type"::Labor THEN
+                ServicePrognosisByCostType.CALCSUMS(
+                  "Budget Hours", "Actual Hours", "Actual Hours (Additional)", "Open Hours",
+                  "Total Hours", "Total Hours (Additional)", "Allowed Hours", "Result Hours");
+              IF ServicePrognosisLine."Rest of Contract" THEN
+                ServicePrognosisByCostType.CALCSUMS("Prognosis Total Contract Cost");
+              InsertServicePrognosisByCostType(CostObjectServicePrognosisByCostType, ServicePrognosisByCostType,
+                                               ServicePrognosisLine, CostType, ServicePrognosisByCostType."Cost Object");
+            END;
+            ServicePrognosisByCostType.FINDLAST;
+            ServicePrognosisByCostType.SETRANGE("Cost Object");
+          UNTIL ServicePrognosisByCostType.NEXT = 0;
+
+        CLEAR(CostObjectServicePrognosisByCostType);
+        CostObjectServicePrognosisByCostType.SETRANGE("Prognosis Date", ServicePrognosisLine."Prognosis Date");
+        CostObjectServicePrognosisByCostType.SETRANGE("Prognosis Seq. No.", ServicePrognosisLine."Prognosis Seq. No.");
+        CostObjectServicePrognosisByCostType.SETRANGE("Prognosis Line No.", ServicePrognosisLine."Line No.");
+        CostObjectServicePrognosisByCostType.SETRANGE("Prognosis Date", ServicePrognosisLine."Prognosis Date");
+        CostObjectServicePrognosisByCostType.SETRANGE("Prognosis Date", ServicePrognosisLine."Prognosis Date");
+        CostObjectServicePrognosisByCostType.SETRANGE("Cost Type", CostType);
+        CostObjectServicePrognosisByCostType.CALCSUMS(
+          "Budget Cost", "Actual Cost", "Actual Cost (Additional)", "Open (Purchase)", "Open Ovh. Surch. Soft (Purch.)",
+          "Received/Not Invoiced", "Open Ovh. Surch. Firm (Purch.)", "Open (Inventory)", "Open Ovh. Surch. (Inventory)",
+          "Open Amount (Hours)", "Open Ovh. Surch. (Hours)", "Total Cost", "Total Cost (Additional)", "Allowed Cost",
+          Available, Result, "Prognosis Total Cost", "Calc. Prognosis Total Cost");
+        IF CostType = ServicePrognosisByCostType."Cost Type"::Labor THEN
+          CostObjectServicePrognosisByCostType.CALCSUMS(
+            "Budget Hours", "Actual Hours", "Actual Hours (Additional)", "Open Hours",
+            "Total Hours", "Total Hours (Additional)", "Allowed Hours", "Result Hours");
+        IF ServicePrognosisLine."Rest of Contract" THEN
+          CostObjectServicePrognosisByCostType.CALCSUMS("Prognosis Total Contract Cost");
+        InsertServicePrognosisByCostType(CostTypeServicePrognosisByCostType, CostObjectServicePrognosisByCostType,
+                                         ServicePrognosisLine, CostType, '');
+      END;
+
+      IF NOT ServicePrognosisByCostType.ISTEMPORARY THEN BEGIN
+        ServicePrognosisByCostType.SETRANGE("Cost Type");
+        ServicePrognosisByCostType.SETRANGE("Cost Object");
+        ServicePrognosisByCostType.MODIFYALL("Upper Level Prognosis Line No.", ServicePrognosisLine."Line No.");
+      END;
+    END;
+
+    LOCAL PROCEDURE InsertServicePrognosisByCostType@1100529611(VAR NewServicePrognosisByCostType@1100529607 : Record 11072553;ServicePrognosisByCostType@1100529600 : Record 11072553;ServicePrognosisLine@1100529605 : Record 11072310;CostType@1100529603 : Option;CostObj@1100529604 : Code[20]);
+    BEGIN
+      NewServicePrognosisByCostType := ServicePrognosisByCostType;
+      NewServicePrognosisByCostType."Prognosis Date" := ServicePrognosisLine."Prognosis Date";
+      NewServicePrognosisByCostType."Prognosis Seq. No." := ServicePrognosisLine."Prognosis Seq. No.";
+      NewServicePrognosisByCostType."Prognosis Line No." := ServicePrognosisLine."Line No.";
+      NewServicePrognosisByCostType."Cost Type" := CostType;
+      NewServicePrognosisByCostType."Cost Object" := CostObj;
+
+      NewServicePrognosisByCostType."Line Type" := ServicePrognosisLine."Line Type";
+      NewServicePrognosisByCostType."Source Type" := ServicePrognosisLine."Source Type";
+      NewServicePrognosisByCostType."Control Period Code" := ServicePrognosisLine."Control Period Code";
+      NewServicePrognosisByCostType."Starting Date" := ServicePrognosisLine."Starting Date";
+      NewServicePrognosisByCostType."Ending Date" := ServicePrognosisLine."Ending Date";
+      NewServicePrognosisByCostType."Service Category" := ServicePrognosisLine."Service Category";
+      NewServicePrognosisByCostType."Service Contract No." := ServicePrognosisLine."Service Contract No.";
+      NewServicePrognosisByCostType."Rest of Contract" := ServicePrognosisLine."Rest of Contract";
+      NewServicePrognosisByCostType."Rest of Contract Editable" := ServicePrognosisLine."Rest of Contract Editable";
+
+      NewServicePrognosisByCostType.RoundAmounts;
+      NewServicePrognosisByCostType."Budget Costs Incl. Deviation" := ServicePrognosisByCostType."Budget Cost";
+      NewServicePrognosisByCostType."Budget Hours Incl. Deviation" := ServicePrognosisByCostType."Budget Hours";
+
+      IF NewServicePrognosisByCostType."Cost Object" = '' THEN BEGIN
+        NewServicePrognosisByCostType."Lower Level Progn. Total Cost" := ServicePrognosisByCostType."Prognosis Total Cost";
+        NewServicePrognosisByCostType."Low. Lv. Pr. Total Contr. Cost" := ServicePrognosisByCostType."Prognosis Total Contract Cost";
+      END ELSE BEGIN
+        IF NewServicePrognosisByCostType."Line Type" = NewServicePrognosisByCostType."Line Type"::"Source Type" THEN
+          NewServicePrognosisByCostType.CalculateTotalsAndResults;
+        NewServicePrognosisByCostType.DeterminePrognosisTotalContractCost;
+      END;
+
+      IF NewServicePrognosisByCostType."Cost Type" = NewServicePrognosisByCostType."Cost Type"::Labor THEN
+        GetServicePrognosisByCostTypeRate(NewServicePrognosisByCostType);
+
+      IF (NewServicePrognosisByCostType."Cost Object" = '') OR (NewServicePrognosisByCostType."Line Type" < NewServicePrognosisByCostType."Line Type"::"Source Type") THEN BEGIN
+        NewServicePrognosisByCostType."Low. Lv. Dev. From Budget Amt" := NewServicePrognosisByCostType."Deviation from Budget (Amount)";
+        NewServicePrognosisByCostType."Lower Level Progn. Total Cost" := NewServicePrognosisByCostType."Prognosis Total Cost";
+        NewServicePrognosisByCostType."Low. Lv. Pr. Total Contr. Cost" := NewServicePrognosisByCostType."Prognosis Total Contract Cost";
+      END;
+
+      NewServicePrognosisByCostType.INSERT(TRUE);
+    END;
+
+    LOCAL PROCEDURE GetServicePrognosisByCostTypeRate@1100529601(VAR ServicePrognosisByCostType@1100529601 : Record 11072553);
+    VAR
+      LocRate@1100529600 : Decimal;
+    BEGIN
+      ServicePrognosisByCostType.GetLaborRate(ServiceContract);
+      IF ServicePrognosisByCostType.Rate <> 0 THEN
+        EXIT;
+      IF ServicePrognosisByCostType."Total Hours" <> 0 THEN
+        LocRate := ServicePrognosisByCostType."Total Cost" / ServicePrognosisByCostType."Total Hours";
+      IF LocRate = 0 THEN
+        IF ServicePrognosisByCostType."Budget Hours" <> 0 THEN
+          LocRate := ServicePrognosisByCostType."Budget Cost" / ServicePrognosisByCostType."Budget Hours";
+      IF LocRate <> 0 THEN BEGIN
+        ServicePrognosisByCostType."Rate Code" := '';
+        ServicePrognosisByCostType.Rate := ROUND(LocRate, 0.01);
+      END;
+    END;
+
+    LOCAL PROCEDURE DeleteServPrognByCostTypeLowerLevel@1100529608(ServicePrognosis@1100529602 : Record 11072309;ServiceContractNo@1100529601 : Code[20]);
+    VAR
+      ServicePrognosisByCostType@1100529600 : Record 11072553;
+    BEGIN
+      ServicePrognosisByCostType.SETRANGE("Prognosis Date", ServicePrognosis."Prognosis Date");
+      ServicePrognosisByCostType.SETRANGE("Prognosis Seq. No.", ServicePrognosis."Seq. No.");
+      ServicePrognosisByCostType.SETRANGE("Service Contract No.", ServiceContractNo);
+      ServicePrognosisByCostType.SETRANGE("Line Type", ServicePrognosisByCostType."Line Type"::"Service Order");
+      ServicePrognosisByCostType.DELETEALL;
+    END;
+
+    LOCAL PROCEDURE ProcessPreviousPrognosis@1100529603(ServicePrognosis@1100529608 : Record 11072309;ServiceContractNo@1100529607 : Code[20];GlobalDim1Code@1100529606 : Code[20]);
+    VAR
+      PrevServicePrognosis@1100529601 : Record 11072309;
+      ServicePrognosisLine@1100529602 : Record 11072310;
+      PrevServicePrognosisLine@1100529603 : Record 11072310;
+      ServicePrognosisByCostType@1100529604 : Record 11072553;
+      PrevServicePrognosisByCostType@1100529605 : Record 11072553;
+      LineType@1100529600 : Integer;
+    BEGIN
+      IF NOT CopyPreviousPrognosis THEN
+        EXIT;
+
+      PrevServicePrognosisLine.SETRANGE("Service Contract No.", ServiceContractNo);
+      IF ServiceContractNo = '' THEN
+        PrevServicePrognosisLine.SETRANGE("Global Dimension 1 Code", GlobalDim1Code);
+      PrevServicePrognosisLine.SETFILTER("Prognosis Date", '<%1', ServicePrognosis."Prognosis Date");
+      IF PrevServicePrognosisLine.ISEMPTY THEN
+        EXIT;
+
+      PrevServicePrognosisLine.FINDLAST;
+      PrevServicePrognosis.GET(PrevServicePrognosisLine."Prognosis Date", PrevServicePrognosisLine."Prognosis Seq. No.");
+      PrevServicePrognosisLine.RESET;
+
+      PrevServicePrognosisByCostType.SETRANGE("Prognosis Date", PrevServicePrognosis."Prognosis Date");
+      PrevServicePrognosisByCostType.SETRANGE("Prognosis Seq. No.", PrevServicePrognosis."Seq. No.");
+      PrevServicePrognosisByCostType.SETRANGE("Service Contract No.", ServiceContractNo);
+      IF NOT PrevServicePrognosisByCostType.ISEMPTY THEN BEGIN
+        ServicePrognosisByCostType.SETRANGE("Prognosis Date", ServicePrognosis."Prognosis Date");
+        ServicePrognosisByCostType.SETRANGE("Prognosis Seq. No.", ServicePrognosis."Seq. No.");
+        ServicePrognosisByCostType.SETRANGE("Service Contract No.", ServiceContractNo);
+
+        FOR LineType := ServicePrognosisByCostType."Line Type"::"Source Type" DOWNTO ServicePrognosisByCostType."Line Type"::Period DO BEGIN
+          PrevServicePrognosisByCostType.SETRANGE("Line Type", LineType);
+          ServicePrognosisByCostType.SETRANGE("Line Type", LineType);
+          ServicePrognosisByCostType.SETRANGE("Source Type");
+          ServicePrognosisByCostType.SETRANGE("Service Category");
+          ServicePrognosisLine.CopyPrevServicePrognosisByCostType(ServicePrognosisByCostType, PrevServicePrognosisByCostType, TRUE);
+        END;
+
+        ServicePrognosisByCostType.RESET;
+        ServicePrognosisByCostType.SetSkipUpdateUpperLevelPrognosis(TRUE);
+        ServicePrognosisByCostType.SETRANGE("Prognosis Date", ServicePrognosis."Prognosis Date");
+        ServicePrognosisByCostType.SETRANGE("Prognosis Seq. No.", ServicePrognosis."Seq. No.");
+        ServicePrognosisByCostType.SETRANGE("Service Contract No.", ServiceContractNo);
+        FOR LineType := ServicePrognosisByCostType."Line Type"::"Source Type" DOWNTO ServicePrognosisByCostType."Line Type"::"Service Category" DO BEGIN
+          ServicePrognosisByCostType.SETRANGE("Line Type", LineType);
+          ServicePrognosisByCostType.SETFILTER("Cost Object", '<>%1', '');
+          IF ServicePrognosisByCostType.FINDSET THEN
+            REPEAT
+              ServicePrognosisByCostType.UpdateUpperLevelPrognosisAmounts(ServicePrognosisByCostType.FIELDNO("Deviation from Budget (Amount)"));
+            UNTIL ServicePrognosisByCostType.NEXT = 0;
+        END;
+      END;
+
+      PrevServicePrognosisLine.SETRANGE("Prognosis Date", PrevServicePrognosis."Prognosis Date");
+      PrevServicePrognosisLine.SETRANGE("Prognosis Seq. No.", PrevServicePrognosis."Seq. No.");
+      PrevServicePrognosisLine.SETRANGE("Service Contract No.", ServiceContractNo);
+      IF ServiceContractNo = '' THEN
+        PrevServicePrognosisLine.SETRANGE("Global Dimension 1 Code", GlobalDim1Code);
+      IF NOT PrevServicePrognosisLine.ISEMPTY THEN BEGIN
+        ServicePrognosisLine.SETRANGE("Prognosis Date", ServicePrognosis."Prognosis Date");
+        ServicePrognosisLine.SETRANGE("Prognosis Seq. No.", ServicePrognosis."Seq. No.");
+        ServicePrognosisLine.SETRANGE("Service Contract No.", ServiceContractNo);
+        IF ServiceContractNo = '' THEN
+          ServicePrognosisLine.SETRANGE("Global Dimension 1 Code", GlobalDim1Code);
+
+        FOR LineType := ServicePrognosisLine."Line Type"::"Service Order" DOWNTO ServicePrognosisLine."Line Type"::Period DO BEGIN
+          PrevServicePrognosisLine.SETRANGE("Line Type", LineType);
+          ServicePrognosisLine.SETRANGE("Line Type", LineType);
+          ServicePrognosisLine.SETRANGE("Source Type");
+          ServicePrognosisLine.SETRANGE("Service Category");
+          ServicePrognosisLine.SETRANGE("Service Order No.");
+
+          IF PrevServicePrognosisLine.FINDSET THEN
+            REPEAT
+              CASE PrevServicePrognosisLine."Line Type" OF
+                PrevServicePrognosisLine."Line Type"::"Service Order":
+                  BEGIN
+                    ServicePrognosisLine.SETRANGE("Source Type", PrevServicePrognosisLine."Source Type");
+                    ServicePrognosisLine.SETRANGE("Service Category", PrevServicePrognosisLine."Service Category");
+                    ServicePrognosisLine.SETRANGE("Service Order No.", PrevServicePrognosisLine."Service Order No.");
+                  END;
+                PrevServicePrognosisLine."Line Type"::"Source Type":
+                  BEGIN
+                    ServicePrognosisLine.SETRANGE("Source Type", PrevServicePrognosisLine."Source Type");
+                    ServicePrognosisLine.SETRANGE("Service Category", PrevServicePrognosisLine."Service Category");
+                  END;
+                PrevServicePrognosisLine."Line Type"::"Service Category":
+                  ServicePrognosisLine.SETRANGE("Service Category", PrevServicePrognosisLine."Service Category");
+              END;
+              ServicePrognosisLine.SETRANGE("Control Period Code", PrevServicePrognosisLine."Control Period Code");
+
+              IF NOT ServicePrognosisLine.ISEMPTY THEN BEGIN
+                ServicePrognosisLine.FINDLAST;
+
+                IF (ServicePrognosisLine."Prognosis Total Cost" <> PrevServicePrognosisLine."Prognosis Total Cost") OR
+                   (ServicePrognosisLine."Deviation From Budget" <> PrevServicePrognosisLine."Deviation From Budget") OR
+                   (ServicePrognosisLine."Prognosis Total Revenue (SC)" <> PrevServicePrognosisLine."Prognosis Total Revenue (SC)") OR
+                   (ServicePrognosisLine."Prognosis Total Revenue (SO)" <> PrevServicePrognosisLine."Prognosis Total Revenue (SO)")
+                THEN BEGIN
+                  ServicePrognosisLine.SetDontUpdatePrognosisValueViaLowerLevelValue(TRUE);
+                  IF PrevServicePrognosisLine."Deviation From Budget" <> 0 THEN
+                    ServicePrognosisLine.VALIDATE("Deviation From Budget", PrevServicePrognosisLine."Deviation From Budget");
+                  ServicePrognosisLine.VALIDATE("Prognosis Total Cost", PrevServicePrognosisLine."Prognosis Total Cost");
+                  ServicePrognosisLine.VALIDATE("Prognosis Total Revenue (SC)", PrevServicePrognosisLine."Prognosis Total Revenue (SC)");
+                  ServicePrognosisLine.VALIDATE("Prognosis Total Revenue (SO)", PrevServicePrognosisLine."Prognosis Total Revenue (SO)");
+                  ServicePrognosisLine.MODIFY;
+                END;
+              END;
+            UNTIL PrevServicePrognosisLine.NEXT = 0;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE AddRestOfContractLine@1100529621(LastPeriodEndingDate@1100529620 : Date;VAR ServiceContractEndingDate@1100529621 : Date) : Boolean;
+    VAR
+      LocServiceCategory@1100529622 : Record 11071985;
+    BEGIN
+      IF LastPeriodEndingDate = 0D THEN
+        EXIT(FALSE);
+
+      ServiceContractEndingDate := ServiceContract.GetServiceContractEndingDate;
+      IF ServiceContractEndingDate = 0D THEN
+        EXIT(FALSE);
+
+      IF LastPeriodEndingDate >= ServiceContractEndingDate THEN
+        EXIT(FALSE);
+      IF ServiceContract."Rest of Contract" THEN
+        EXIT(TRUE);
+
+      LocServiceCategory.SETRANGE("Service Contract No.", ServiceContract."No.");
+      LocServiceCategory.SETRANGE("Rest of Contract", TRUE);
+      EXIT(NOT LocServiceCategory.ISEMPTY);
+    END;
+
+    BEGIN
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

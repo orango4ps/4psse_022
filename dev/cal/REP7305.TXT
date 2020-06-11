@@ -1,0 +1,1095 @@
+OBJECT Report 7305 Whse.-Source - Create Document
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.04;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData 6550=rm;
+    CaptionML=[DEU=Logistik Herk. - Beleg erst.;
+               ENU=Whse.-Source - Create Document;
+               NLD=Mag. - Document maken;
+               NOR=Lagerkilde - opprett dokument];
+    ProcessingOnly=Yes;
+    OnPreReport=BEGIN
+                  CLEAR(CreatePick);
+                  CLEAR(CreatePutAway);
+                  EverythingHandled := TRUE;
+                END;
+
+    OnPostReport=VAR
+                   WhseActivHeader@1000 : Record 5766;
+                   TempWhseItemTrkgLine@1001 : TEMPORARY Record 6550;
+                   ItemTrackingMgt@1002 : Codeunit 6500;
+                   HideNothingToHandleErr@1003 : Boolean;
+                 BEGIN
+                   IF (CreateErrorText <> '') AND (FirstActivityNo = '') AND (LastActivityNo = '') THEN
+                     ERROR(CreateErrorText);
+                   IF NOT (WhseDoc IN
+                           [WhseDoc::"Put-away Worksheet",WhseDoc::"Posted Receipt",WhseDoc::"Internal Put-away"])
+                   THEN BEGIN
+                     CreatePick.CreateWhseDocument(FirstActivityNo,LastActivityNo,TRUE);
+                     CreatePick.ReturnTempItemTrkgLines(TempWhseItemTrkgLine);
+                     ItemTrackingMgt.UpdateWhseItemTrkgLines(TempWhseItemTrkgLine);
+                     COMMIT;
+                   END ELSE
+                     CreatePutAway.GetWhseActivHeaderNo(FirstActivityNo,LastActivityNo);
+
+                   HideNothingToHandleErr := FALSE;
+                   OnBeforeSortWhseDocsForPrints(WhseDoc,FirstActivityNo,LastActivityNo,SortActivity,PrintDoc,HideNothingToHandleErr);
+
+                   WhseActivHeader.SETRANGE("No.",FirstActivityNo,LastActivityNo);
+
+                   CASE WhseDoc OF
+                     WhseDoc::"Internal Pick",WhseDoc::Production,WhseDoc::Assembly:
+                       WhseActivHeader.SETRANGE(Type,WhseActivHeader.Type::Pick);
+                     WhseDoc::"Whse. Mov.-Worksheet":
+                       WhseActivHeader.SETRANGE(Type,WhseActivHeader.Type::Movement);
+                     WhseDoc::"Posted Receipt",WhseDoc::"Put-away Worksheet",WhseDoc::"Internal Put-away":
+                       WhseActivHeader.SETRANGE(Type,WhseActivHeader.Type::"Put-away");
+                   END;
+
+                   IF WhseActivHeader.FIND('-') THEN BEGIN
+                     REPEAT
+                       CreatePutAway.DeleteBlankBinContent(WhseActivHeader);
+                       OnAfterCreatePutAwayDeleteBlankBinContent(WhseActivHeader);
+                       IF SortActivity > 0 THEN
+                         WhseActivHeader.SortWhseDoc;
+                       COMMIT;
+                     UNTIL WhseActivHeader.NEXT = 0;
+
+                     IF PrintDoc THEN BEGIN
+                       CASE WhseDoc OF
+                         WhseDoc::"Internal Pick",WhseDoc::Production,WhseDoc::Assembly:
+                           REPORT.RUN(REPORT::"Picking List",FALSE,FALSE,WhseActivHeader);
+                         WhseDoc::"Whse. Mov.-Worksheet":
+                           REPORT.RUN(REPORT::"Movement List",FALSE,FALSE,WhseActivHeader);
+                         WhseDoc::"Posted Receipt",WhseDoc::"Put-away Worksheet",WhseDoc::"Internal Put-away":
+                           REPORT.RUN(REPORT::"Put-away List",FALSE,FALSE,WhseActivHeader);
+                       END
+                     END
+                   END ELSE
+                     ERROR(Text003);
+
+                   OnAfterPostReport(FirstActivityNo,LastActivityNo);
+                 END;
+
+  }
+  DATASET
+  {
+    { 7072;    ;DataItem;                    ;
+               DataItemTable=Table7319;
+               DataItemTableView=SORTING(No.,Line No.);
+               OnPreDataItem=BEGIN
+                               IF WhseDoc <> WhseDoc::"Posted Receipt" THEN
+                                 CurrReport.BREAK;
+
+                               CreatePutAway.SetValues(AssignedID,SortActivity,DoNotFillQtytoHandle,BreakbulkFilter);
+                               COPYFILTERS(PostedWhseReceiptLine);
+
+                               WhseWkshLine.SETCURRENTKEY("Whse. Document Type","Whse. Document No.","Whse. Document Line No.");
+                               WhseWkshLine.SETRANGE(
+                                 "Whse. Document Type",WhseWkshLine."Whse. Document Type"::Receipt);
+                               WhseWkshLine.SETRANGE("Whse. Document No.",PostedWhseReceiptLine."No.");
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  PostedWhseReceiptLine2@1000 : Record 7319;
+                                  TempWhseItemTrkgLine@1001 : TEMPORARY Record 6550;
+                                  WMSMgt@1003 : Codeunit 7302;
+                                  ItemTrackingManagement@1002 : Codeunit 6500;
+                                  WhseSNRequired@1004 : Boolean;
+                                  WhseLNRequired@1005 : Boolean;
+                                BEGIN
+                                  WMSMgt.CheckOutboundBlockedBin("Location Code","Bin Code","Item No.","Variant Code","Unit of Measure Code");
+
+                                  WhseWkshLine.SETRANGE("Whse. Document Line No.","Line No.");
+                                  IF NOT WhseWkshLine.FINDFIRST THEN BEGIN
+                                    PostedWhseReceiptLine2 := "Posted Whse. Receipt Line";
+                                    PostedWhseReceiptLine2.TESTFIELD("Qty. per Unit of Measure");
+                                    PostedWhseReceiptLine2.CALCFIELDS("Put-away Qty. (Base)");
+                                    PostedWhseReceiptLine2."Qty. (Base)" :=
+                                      PostedWhseReceiptLine2."Qty. (Base)" -
+                                      (PostedWhseReceiptLine2."Qty. Put Away (Base)" +
+                                       PostedWhseReceiptLine2."Put-away Qty. (Base)");
+                                    IF PostedWhseReceiptLine2."Qty. (Base)" > 0 THEN BEGIN
+                                      PostedWhseReceiptLine2.Quantity :=
+                                        ROUND(
+                                          PostedWhseReceiptLine2."Qty. (Base)" /
+                                          PostedWhseReceiptLine2."Qty. per Unit of Measure",UOMMgt.QtyRndPrecision);
+
+                                      ItemTrackingManagement.CheckWhseItemTrkgSetup("Item No.",WhseSNRequired,WhseLNRequired,FALSE);
+                                      IF WhseSNRequired OR WhseLNRequired THEN
+                                        ItemTrackingManagement.InitItemTrkgForTempWkshLine(
+                                          WhseWkshLine."Whse. Document Type"::Receipt,
+                                          PostedWhseReceiptLine2."No.",
+                                          PostedWhseReceiptLine2."Line No.",
+                                          PostedWhseReceiptLine2."Source Type",
+                                          PostedWhseReceiptLine2."Source Subtype",
+                                          PostedWhseReceiptLine2."Source No.",
+                                          PostedWhseReceiptLine2."Source Line No.",
+                                          0);
+
+                                      CreatePutAway.SetCrossDockValues(PostedWhseReceiptLine2."Qty. Cross-Docked" <> 0);
+                                      CreatePutAwayFromDiffSource(PostedWhseReceiptLine2,DATABASE::"Posted Whse. Receipt Line");
+                                      CreatePutAway.GetQtyHandledBase(TempWhseItemTrkgLine);
+                                      UpdateWhseItemTrkgLines(PostedWhseReceiptLine2,DATABASE::"Posted Whse. Receipt Line",TempWhseItemTrkgLine);
+
+                                      IF CreateErrorText = '' THEN
+                                        CreatePutAway.GetMessage(CreateErrorText);
+                                      IF EverythingHandled THEN
+                                        EverythingHandled := CreatePutAway.EverythingIsHandled;
+                                    END;
+                                  END;
+                                END;
+
+               OnPostDataItem=BEGIN
+                                OnAfterPostedWhseReceiptLineOnPostDataItem("Posted Whse. Receipt Line");
+                              END;
+                               }
+
+    { 7002;    ;DataItem;Whse. Mov.-Worksheet Line;
+               DataItemTable=Table7326;
+               DataItemTableView=SORTING(Worksheet Template Name,Name,Location Code,Line No.);
+               OnPreDataItem=BEGIN
+                               IF WhseDoc <> WhseDoc::"Whse. Mov.-Worksheet" THEN
+                                 CurrReport.BREAK;
+
+                               CreatePick.SetValues(
+                                 AssignedID,2,SortActivity,2,0,0,FALSE,DoNotFillQtytoHandle,BreakbulkFilter,FALSE);
+
+                               CreatePick.SetCalledFromMoveWksh(TRUE);
+
+                               COPYFILTERS(WhseWkshLine);
+                               SETFILTER("Qty. to Handle (Base)",'>0');
+                               LOCKTABLE;
+
+                               TempWhseWorksheetLineMovement.RESET;
+                               TempWhseWorksheetLineMovement.DELETEALL;
+
+                               OnBeforeProcessWhseMovWkshLines("Whse. Mov.-Worksheet Line");
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  IF FEFOLocation("Location Code") AND ItemTracking("Item No.") THEN
+                                    CreatePick.SetCalledFromWksh(TRUE)
+                                  ELSE
+                                    CreatePick.SetCalledFromWksh(FALSE);
+
+                                  TESTFIELD("Qty. per Unit of Measure");
+                                  IF WhseWkshLine.CheckAvailQtytoMove < 0 THEN
+                                    ERROR(
+                                      Text004,
+                                      TABLECAPTION,FIELDCAPTION("Worksheet Template Name"),"Worksheet Template Name",
+                                      FIELDCAPTION(Name),Name,FIELDCAPTION("Location Code"),"Location Code",
+                                      FIELDCAPTION("Line No."),"Line No.");
+
+                                  CheckBin("Location Code","From Bin Code",FALSE);
+                                  CheckBin("Location Code","To Bin Code",TRUE);
+                                  UpdateWkshMovementLineBuffer("Whse. Mov.-Worksheet Line");
+                                END;
+
+               OnPostDataItem=VAR
+                                PickQty@1001 : Decimal;
+                                PickQtyBase@1000 : Decimal;
+                                QtyHandled@1002 : Decimal;
+                                QtyHandledBase@1003 : Decimal;
+                              BEGIN
+                                IF TempWhseWorksheetLineMovement.ISEMPTY THEN
+                                  CurrReport.SKIP;
+
+                                TempWhseWorksheetLineMovement.FINDSET;
+                                REPEAT
+                                  CreateMovementLines(TempWhseWorksheetLineMovement,PickQty,PickQtyBase);
+                                  QtyHandled := TempWhseWorksheetLineMovement."Qty. to Handle" - PickQty;
+                                  QtyHandledBase := TempWhseWorksheetLineMovement."Qty. to Handle (Base)" - PickQtyBase;
+                                  UpdateMovementWorksheet(TempWhseWorksheetLineMovement,QtyHandled,QtyHandledBase);
+                                UNTIL TempWhseWorksheetLineMovement.NEXT = 0;
+                              END;
+                               }
+
+    { 3605;    ;DataItem;Whse. Put-away Worksheet Line;
+               DataItemTable=Table7326;
+               DataItemTableView=SORTING(Worksheet Template Name,Name,Location Code,Line No.)
+                                 WHERE(Whse. Document Type=FILTER(Receipt|Internal Put-away));
+               OnPreDataItem=BEGIN
+                               IF WhseDoc <> WhseDoc::"Put-away Worksheet" THEN
+                                 CurrReport.BREAK;
+
+                               CreatePutAway.SetValues(AssignedID,SortActivity,DoNotFillQtytoHandle,BreakbulkFilter);
+
+                               COPYFILTERS(WhseWkshLine);
+                               SETFILTER("Qty. to Handle (Base)",'>0');
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  PostedWhseRcptLine@1000 : Record 7319;
+                                  TempWhseItemTrkgLine@1002 : TEMPORARY Record 6550;
+                                  QtyHandledBase@1001 : Decimal;
+                                  SourceType@1003 : Integer;
+                                BEGIN
+                                  LOCKTABLE;
+
+                                  CheckBin("Location Code","From Bin Code",FALSE);
+                                  IF NOT PostedWhseRcptLine.GET("Whse. Document No.","Whse. Document Line No.") THEN BEGIN
+                                    PostedWhseRcptLine.INIT;
+                                    PostedWhseRcptLine."No." := "Whse. Document No.";
+                                    PostedWhseRcptLine."Line No." := "Whse. Document Line No.";
+                                    PostedWhseRcptLine."Item No." := "Item No.";
+                                    PostedWhseRcptLine.Description := Description;
+                                    PostedWhseRcptLine."Description 2" := "Description 2";
+                                    PostedWhseRcptLine."Location Code" := "Location Code";
+                                    PostedWhseRcptLine."Zone Code" := "From Zone Code";
+                                    PostedWhseRcptLine."Bin Code" := "From Bin Code";
+                                    PostedWhseRcptLine."Shelf No." := "Shelf No.";
+                                    PostedWhseRcptLine."Qty. per Unit of Measure" := "Qty. per Unit of Measure";
+                                    PostedWhseRcptLine."Due Date" := "Due Date";
+                                    PostedWhseRcptLine."Unit of Measure Code" := "Unit of Measure Code";
+                                    SourceType := DATABASE::"Whse. Internal Put-away Line";
+                                  END ELSE
+                                    SourceType := DATABASE::"Posted Whse. Receipt Line";
+
+                                  PostedWhseRcptLine.TESTFIELD("Qty. per Unit of Measure");
+                                  PostedWhseRcptLine.Quantity := "Qty. to Handle";
+                                  PostedWhseRcptLine."Qty. (Base)" := "Qty. to Handle (Base)";
+
+                                  CreatePutAway.SetCrossDockValues(PostedWhseRcptLine."Qty. Cross-Docked" <> 0);
+                                  CreatePutAwayFromDiffSource(PostedWhseRcptLine,SourceType);
+
+                                  IF "Qty. to Handle" <> "Qty. Outstanding" THEN
+                                    EverythingHandled := FALSE;
+
+                                  IF EverythingHandled THEN
+                                    EverythingHandled := CreatePutAway.EverythingIsHandled;
+
+                                  QtyHandledBase := CreatePutAway.GetQtyHandledBase(TempWhseItemTrkgLine);
+
+                                  IF QtyHandledBase > 0 THEN BEGIN
+                                    // update/delete line
+                                    WhseWkshLine := "Whse. Put-away Worksheet Line";
+                                    WhseWkshLine.VALIDATE("Qty. Handled (Base)","Qty. Handled (Base)" + QtyHandledBase);
+                                    IF (WhseWkshLine."Qty. Outstanding" = 0) AND
+                                       (WhseWkshLine."Qty. Outstanding (Base)" = 0)
+                                    THEN
+                                      WhseWkshLine.DELETE
+                                    ELSE
+                                      WhseWkshLine.MODIFY;
+                                    UpdateWhseItemTrkgLines(PostedWhseRcptLine,SourceType,TempWhseItemTrkgLine);
+                                  END ELSE
+                                    IF CreateErrorText = '' THEN
+                                      CreatePutAway.GetMessage(CreateErrorText);
+                                END;
+                                 }
+
+    { 3581;    ;DataItem;                    ;
+               DataItemTable=Table7334;
+               DataItemTableView=SORTING(No.,Line No.);
+               OnPreDataItem=BEGIN
+                               IF WhseDoc <> WhseDoc::"Internal Pick" THEN
+                                 CurrReport.BREAK;
+
+                               CreatePick.SetValues(
+                                 AssignedID,3,SortActivity,1,0,0,FALSE,DoNotFillQtytoHandle,BreakbulkFilter,FALSE);
+
+                               COPYFILTERS(WhseInternalPickLine);
+                               SETFILTER("Qty. (Base)",'>0');
+
+                               WhseWkshLine.SETCURRENTKEY("Whse. Document Type","Whse. Document No.","Whse. Document Line No.");
+                               WhseWkshLine.SETRANGE(
+                                 "Whse. Document Type",WhseWkshLine."Whse. Document Type"::"Internal Pick");
+                               WhseWkshLine.SETRANGE("Whse. Document No.",WhseInternalPickLine."No.");
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  WMSMgt@1001 : Codeunit 7302;
+                                  QtyToPick@1003 : Decimal;
+                                  QtyToPickBase@1002 : Decimal;
+                                BEGIN
+                                  WMSMgt.CheckInboundBlockedBin("Location Code","To Bin Code","Item No.","Variant Code","Unit of Measure Code");
+
+                                  CheckBin(FALSE);
+                                  WhseWkshLine.SETRANGE("Whse. Document Line No.","Line No.");
+                                  IF NOT WhseWkshLine.FINDFIRST THEN BEGIN
+                                    TESTFIELD("Qty. per Unit of Measure");
+                                    CALCFIELDS("Pick Qty. (Base)");
+                                    QtyToPickBase := "Qty. (Base)" - ("Qty. Picked (Base)" + "Pick Qty. (Base)");
+                                    QtyToPick :=
+                                      ROUND(
+                                        ("Qty. (Base)" - ("Qty. Picked (Base)" + "Pick Qty. (Base)")) /
+                                        "Qty. per Unit of Measure",UOMMgt.QtyRndPrecision);
+                                    IF QtyToPick > 0 THEN BEGIN
+                                      CreatePick.SetWhseInternalPickLine("Whse. Internal Pick Line",1);
+                                      CreatePick.SetTempWhseItemTrkgLine(
+                                        "No.",DATABASE::"Whse. Internal Pick Line",'',0,"Line No.","Location Code");
+                                      CreatePick.CreateTempLine(
+                                        "Location Code","Item No.","Variant Code","Unit of Measure Code",
+                                        '',"To Bin Code","Qty. per Unit of Measure",QtyToPick,QtyToPickBase);
+                                    END;
+                                  END ELSE
+                                    WhseWkshLineFound := TRUE;
+                                END;
+                                 }
+
+    { 1568;    ;DataItem;                    ;
+               DataItemTable=Table7332;
+               DataItemTableView=SORTING(No.,Line No.);
+               OnPreDataItem=BEGIN
+                               IF WhseDoc <> WhseDoc::"Internal Put-away" THEN
+                                 CurrReport.BREAK;
+
+                               CreatePutAway.SetValues(AssignedID,SortActivity,DoNotFillQtytoHandle,BreakbulkFilter);
+
+                               SETRANGE("No.",WhseInternalPutAwayHeader."No.");
+                               SETFILTER("Qty. (Base)",'>0');
+
+                               WhseWkshLine.SETCURRENTKEY("Whse. Document Type","Whse. Document No.","Whse. Document Line No.");
+                               WhseWkshLine.SETRANGE(
+                                 "Whse. Document Type",WhseWkshLine."Whse. Document Type"::"Internal Put-away");
+                               WhseWkshLine.SETRANGE("Whse. Document No.",WhseInternalPutAwayHeader."No.");
+
+                               OnBeforeProcessWhseMovWkshLines("Whse. Put-away Worksheet Line");
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  TempWhseItemTrkgLine@1000 : TEMPORARY Record 6550;
+                                  WMSMgt@1002 : Codeunit 7302;
+                                  QtyToPutAway@1003 : Decimal;
+                                BEGIN
+                                  WMSMgt.CheckOutboundBlockedBin("Location Code","From Bin Code","Item No.","Variant Code","Unit of Measure Code");
+                                  CheckCurrentLineQty;
+                                  WhseWkshLine.SETRANGE("Whse. Document Line No.","Line No.");
+                                  IF NOT WhseWkshLine.FINDFIRST THEN BEGIN
+                                    TESTFIELD("Qty. per Unit of Measure");
+                                    CALCFIELDS("Put-away Qty. (Base)");
+                                    QtyToPutAway :=
+                                      ROUND(
+                                        ("Qty. (Base)" - ("Qty. Put Away (Base)" + "Put-away Qty. (Base)")) /
+                                        "Qty. per Unit of Measure",UOMMgt.QtyRndPrecision);
+
+                                    IF QtyToPutAway > 0 THEN
+                                      WITH PostedWhseReceiptLine DO BEGIN
+                                        INIT;
+                                        "No." := "Whse. Internal Put-away Line"."No.";
+                                        "Line No." := "Whse. Internal Put-away Line"."Line No.";
+                                        "Location Code" := "Whse. Internal Put-away Line"."Location Code";
+                                        "Bin Code" := "Whse. Internal Put-away Line"."From Bin Code";
+                                        "Zone Code" := "Whse. Internal Put-away Line"."From Zone Code";
+                                        "Item No." := "Whse. Internal Put-away Line"."Item No.";
+                                        "Shelf No." := "Whse. Internal Put-away Line"."Shelf No.";
+                                        Quantity := QtyToPutAway;
+                                        "Qty. (Base)" :=
+                                          "Whse. Internal Put-away Line"."Qty. (Base)" -
+                                          ("Whse. Internal Put-away Line"."Qty. Put Away (Base)" +
+                                           "Whse. Internal Put-away Line"."Put-away Qty. (Base)");
+                                        "Qty. Put Away" := "Whse. Internal Put-away Line"."Qty. Put Away";
+                                        "Qty. Put Away (Base)" := "Whse. Internal Put-away Line"."Qty. Put Away (Base)";
+                                        "Put-away Qty." := "Whse. Internal Put-away Line"."Put-away Qty.";
+                                        "Put-away Qty. (Base)" := "Whse. Internal Put-away Line"."Put-away Qty. (Base)";
+                                        "Unit of Measure Code" := "Whse. Internal Put-away Line"."Unit of Measure Code";
+                                        "Qty. per Unit of Measure" := "Whse. Internal Put-away Line"."Qty. per Unit of Measure";
+                                        "Variant Code" := "Whse. Internal Put-away Line"."Variant Code";
+                                        Description := "Whse. Internal Put-away Line".Description;
+                                        "Description 2" := "Whse. Internal Put-away Line"."Description 2";
+                                        "Due Date" := "Whse. Internal Put-away Line"."Due Date";
+                                        CreatePutAwayFromDiffSource(PostedWhseReceiptLine,DATABASE::"Whse. Internal Put-away Line");
+                                        CreatePutAway.GetQtyHandledBase(TempWhseItemTrkgLine);
+                                        UpdateWhseItemTrkgLines(PostedWhseReceiptLine,DATABASE::"Whse. Internal Put-away Line",TempWhseItemTrkgLine);
+                                      END;
+                                  END;
+                                END;
+                                 }
+
+    { 7771;    ;DataItem;                    ;
+               DataItemTable=Table5407;
+               DataItemTableView=SORTING(Status,Prod. Order No.,Prod. Order Line No.,Line No.);
+               OnPreDataItem=BEGIN
+                               IF WhseDoc <> WhseDoc::Production THEN
+                                 CurrReport.BREAK;
+
+                               WhseSetup.GET;
+                               CreatePick.SetValues(
+                                 AssignedID,4,SortActivity,1,0,0,FALSE,DoNotFillQtytoHandle,BreakbulkFilter,FALSE);
+
+                               SETRANGE("Prod. Order No.",ProdOrderHeader."No.");
+                               SETRANGE(Status,Status::Released);
+                               SETFILTER(
+                                 "Flushing Method",'%1|%2|%3',
+                                 "Flushing Method"::Manual,
+                                 "Flushing Method"::"Pick + Forward",
+                                 "Flushing Method"::"Pick + Backward");
+                               SETRANGE("Planning Level Code",0);
+                               SETFILTER("Expected Qty. (Base)",'>0');
+
+                               WhseWkshLine.SETCURRENTKEY(
+                                 "Source Type","Source Subtype","Source No.","Source Line No.","Source Subline No.");
+                               WhseWkshLine.SETRANGE("Source Type",DATABASE::"Prod. Order Component");
+                               WhseWkshLine.SETRANGE("Source Subtype",ProdOrderHeader.Status);
+                               WhseWkshLine.SETRANGE("Source No.",ProdOrderHeader."No.");
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  WMSMgt@1000 : Codeunit 7302;
+                                  QtyToPick@1003 : Decimal;
+                                  QtyToPickBase@1002 : Decimal;
+                                  SkipProdOrderComp@1001 : Boolean;
+                                BEGIN
+                                  IF ("Flushing Method" = "Flushing Method"::"Pick + Forward") AND ("Routing Link Code" = '') THEN
+                                    CurrReport.SKIP;
+
+                                  WMSMgt.CheckInboundBlockedBin("Location Code","Bin Code","Item No.","Variant Code","Unit of Measure Code");
+
+                                  SkipProdOrderComp := FALSE;
+                                  OnAfterGetRecordProdOrderComponent("Prod. Order Component",SkipProdOrderComp);
+                                  IF SkipProdOrderComp THEN
+                                    CurrReport.SKIP;
+
+                                  WhseWkshLine.SETRANGE("Source Line No.","Prod. Order Line No.");
+                                  WhseWkshLine.SETRANGE("Source Subline No.","Line No.");
+                                  IF NOT WhseWkshLine.FINDFIRST THEN BEGIN
+                                    TESTFIELD("Qty. per Unit of Measure");
+                                    CALCFIELDS("Pick Qty. (Base)");
+                                    QtyToPickBase := "Expected Qty. (Base)" - ("Qty. Picked (Base)" + "Pick Qty. (Base)");
+                                    QtyToPick :=
+                                      ROUND(
+                                        ("Expected Qty. (Base)" - ("Qty. Picked (Base)" + "Pick Qty. (Base)")) /
+                                        "Qty. per Unit of Measure",UOMMgt.QtyRndPrecision);
+                                    IF QtyToPick > 0 THEN BEGIN
+                                      CreatePick.SetProdOrderCompLine("Prod. Order Component",1);
+                                      CreatePick.SetTempWhseItemTrkgLine(
+                                        "Prod. Order No.",DATABASE::"Prod. Order Component",'',
+                                        "Prod. Order Line No.","Line No.","Location Code");
+                                      CreatePick.CreateTempLine(
+                                        "Location Code","Item No.","Variant Code","Unit of Measure Code",
+                                        '',"Bin Code",
+                                        "Qty. per Unit of Measure",QtyToPick,QtyToPickBase);
+                                    END;
+                                  END ELSE
+                                    WhseWkshLineFound := TRUE;
+                                END;
+                                 }
+
+    { 6911;    ;DataItem;                    ;
+               DataItemTable=Table901;
+               DataItemTableView=SORTING(Document Type,Document No.,Type,Location Code)
+                                 WHERE(Type=CONST(Item));
+               OnPreDataItem=BEGIN
+                               IF WhseDoc <> WhseDoc::Assembly THEN
+                                 CurrReport.BREAK;
+
+                               WhseSetup.GET;
+                               CreatePick.SetValues(
+                                 AssignedID,5,SortActivity,1,0,0,FALSE,DoNotFillQtytoHandle,BreakbulkFilter,FALSE);
+
+                               SETRANGE("Document No.",AssemblyHeader."No.");
+                               SETRANGE("Document Type",AssemblyHeader."Document Type");
+                               SETRANGE(Type,Type::Item);
+                               SETFILTER("Remaining Quantity (Base)",'>0');
+
+                               WhseWkshLine.SETCURRENTKEY(
+                                 "Source Type","Source Subtype","Source No.","Source Line No.","Source Subline No.");
+                               WhseWkshLine.SETRANGE("Source Type",DATABASE::"Assembly Line");
+                               WhseWkshLine.SETRANGE("Source Subtype",AssemblyHeader."Document Type");
+                               WhseWkshLine.SETRANGE("Source No.",AssemblyHeader."No.");
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  WMSMgt@1000 : Codeunit 7302;
+                                BEGIN
+                                  WMSMgt.CheckInboundBlockedBin("Location Code","Bin Code","No.","Variant Code","Unit of Measure Code");
+
+                                  WhseWkshLine.SETRANGE("Source Line No.","Line No.");
+                                  IF NOT WhseWkshLine.FINDFIRST THEN
+                                    CreatePick.CreateAssemblyPickLine("Assembly Line")
+                                  ELSE
+                                    WhseWkshLineFound := TRUE;
+                                END;
+                                 }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      OnOpenPage=VAR
+                   Location@1000 : Record 14;
+                 BEGIN
+                   GetLocation(Location,GetHeaderLocationCode);
+                   IF Location."Use ADCS" THEN
+                     DoNotFillQtytoHandle := TRUE;
+
+                   OnAfterOpenPage(Location);
+                 END;
+
+    }
+    CONTROLS
+    {
+      { 1900000001;0;Container;
+                  ContainerType=ContentArea }
+
+      { 1900000002;1;Group  ;
+                  CaptionML=[DEU=Optionen;
+                             ENU=Options;
+                             NLD=Opties;
+                             NOR=Alternativer;
+                             SVE=Alternativ] }
+
+      { 1   ;2   ;Field     ;
+                  CaptionML=[DEU=Zugewiesene Benutzer-ID;
+                             ENU=Assigned User ID;
+                             NLD=Toegewezen gebruikers-id;
+                             NOR=Tilordnet bruker-ID;
+                             SVE=Tilldelat anvÑndar-ID];
+                  ToolTipML=[DEU=Gibt die ID des zugewiesenen Benutzers fÅr die Kommissionieranweisung an.;
+                             ENU=Specifies the ID of the assigned user to perform the pick instruction.;
+                             NLD=Hiermee wordt de id opgegeven van de toegewezen gebruiker die de pickinstructie moet uitvoeren.;
+                             NOR=Angir ID-en for den tilordnede brukeren som skal utfõre plukkinstruksjonen.];
+                  ApplicationArea=#Warehouse;
+                  SourceExpr=AssignedID;
+                  TableRelation="Warehouse Employee";
+                  OnValidate=VAR
+                               WhseEmployee@1000 : Record 7301;
+                             BEGIN
+                               IF AssignedID <> '' THEN
+                                 WhseEmployee.GET(AssignedID,GetHeaderLocationCode);
+                             END;
+
+                  OnLookup=VAR
+                             WhseEmployee@1001 : Record 7301;
+                             LookupWhseEmployee@1000 : Page 7348;
+                           BEGIN
+                             WhseEmployee.SETCURRENTKEY("Location Code");
+                             WhseEmployee.SETRANGE("Location Code",GetHeaderLocationCode);
+                             LookupWhseEmployee.LOOKUPMODE(TRUE);
+                             LookupWhseEmployee.SETTABLEVIEW(WhseEmployee);
+                             IF LookupWhseEmployee.RUNMODAL = ACTION::LookupOK THEN BEGIN
+                               LookupWhseEmployee.GETRECORD(WhseEmployee);
+                               AssignedID := WhseEmployee."User ID";
+                             END;
+                           END;
+                            }
+
+      { 2   ;2   ;Field     ;
+                  Name=SortingMethodForActivityLines;
+                  CaptionML=[DEU=Sortiermethode fÅr LageraktivitÑtszeilen;
+                             ENU=Sorting Method for Activity Lines;
+                             NLD=Sorteringsmethode voor activiteitsregels;
+                             NOR=Sorteringsmetode for aktivitetslinjer];
+                  ToolTipML=[DEU=Gibt die Methode an, nach der die Zeilen in der Anweisung sortiert werden. Die Optionen sind nach Artikel, Beleg, Regal oder Lagerplatz (wenn der Lagerort LagerplÑtze verwendet, ist dies der Lagerplatzcode), FÑlligkeitsdatum, LagerplatzprioritÑt oder Aktionsart.;
+                             ENU=Specifies the method by which the lines in the instruction will be sorted. The options are by item, document, shelf or bin (when the location uses bins, this is the bin code), due date, bin ranking, or action type.;
+                             NLD=Hiermee wordt de methode opgegeven aan de hand waarvan de regels in de instructie worden gesorteerd. U kunt kiezen uit: op artikel, document, schap of opslaglocatie (wanneer de vestiging opslaglocaties gebruikt, is dit de opslaglocatiecode), vervaldatum, opslaglocatievolgorde of actiesoort.;
+                             NOR=Angir metoden som linjene i instruksen blir sortert etter. Alternativene er etter vare, dokument, hylle (nÜr lokasjonen bruker hyller, er dette hyllekoden), forfallsdato, hylleprioritering eller handlingstype.];
+                  OptionCaptionML=[DEU=" ,Artikel,Beleg,Regalnummer oder Lagerplatz,FÑlligkeitsdatum,,LagerplatzprioritÑt,Aktionsart";
+                                   ENU=" ,Item,Document,Shelf or Bin,Due Date,,Bin Ranking,Action Type";
+                                   NLD=" ,Artikel,Document,Schap of opslaglocatie,Vervaldatum,,Opslaglocatievolgorde,Actiesoort";
+                                   NOR=" ,Vare,Dokument,Hylle,Forfallsdato,,Hyllerangering,Handlingstype";
+                                   SVE=" ,Artikel,Dokument,Hyllplats el. lagerplats,Fîrfallodatum,,Lagerplatsordning,ètgÑrdstyp"];
+                  ApplicationArea=#Warehouse;
+                  SourceExpr=SortActivity;
+                  MultiLine=Yes }
+
+      { 9   ;2   ;Field     ;
+                  CaptionML=[DEU=Gebindeanbruchsfilter verw.;
+                             ENU=Set Breakbulk Filter;
+                             NLD=Breakbulkfilter plaatsen;
+                             NOR=Angi anbrekksfilter];
+                  ToolTipML=[DEU=Gibt an, ob das Programm die Gebindeanbruch-Zwischenzeilen ausblenden soll, wenn eine gesamte grî·ere Ma·einheit in eine kleinere Ma·einheit konvertiert wird und vollstÑndig kommissioniert wird.;
+                             ENU=Specifies if you want the program to hide intermediate break-bulk lines when an entire larger unit of measure is converted to a smaller unit of measure and picked completely.;
+                             NLD=Hiermee wordt opgegeven of de tussenliggende breakbulkregels moeten worden verborgen wanneer een grotere eenheid wordt omgezet in een kleinere eenheid en volledig wordt gepickt.;
+                             NOR=Angir om du vil at programmet skal skjule de midlertidige anbrekkslinjene nÜr en stõrre mÜleenhet konverteres til en mindre mÜleenhet og plukkes ferdig.];
+                  ApplicationArea=#Warehouse;
+                  SourceExpr=BreakbulkFilter }
+
+      { 11  ;2   ;Field     ;
+                  CaptionML=[DEU=Bewegungsmenge nicht ausfÅllen;
+                             ENU=Do Not Fill Qty. to Handle;
+                             NLD=Te verwerken aantal niet opvullen;
+                             NOR=Ikke fyll ut antall som skal hÜndteres];
+                  ToolTipML=[DEU=Gibt an, ob das Feld "Zu bearbeitende Menge" in jeder Arbeitsblattzeile manuell ausgefÅllt werden soll.;
+                             ENU=Specifies if you want to manually fill in the Quantity to Handle field on each line.;
+                             NLD=Hiermee wordt opgegeven of u het veld Werk. verwerkt aantal op elke regel handmatig wilt invullen.;
+                             NOR=Angir om du vil fylle ut feltet Antall som skal hÜndteres pÜ hver forslagslinje, manuelt.];
+                  ApplicationArea=#Warehouse;
+                  SourceExpr=DoNotFillQtytoHandle }
+
+      { 3   ;2   ;Field     ;
+                  CaptionML=[DEU=Beleg drucken;
+                             ENU=Print Document;
+                             NLD=Document afdrukken;
+                             NOR=Skriv ut dokument];
+                  ToolTipML=[DEU=Gibt an, ob die Anweisungen gedruckt werden sollen. Andernfalls kînnen Sie diese zu einem spÑteren Zeitpunkt aus dem Lageranweisungsfenster ausdrucken.;
+                             ENU=Specifies if you want the instructions to be printed. Otherwise, you can print it later from the warehouse instruction window.;
+                             NLD=Hiermee wordt opgegeven of de instructies moeten worden afgedrukt. U kunt deze ook later afdrukken in het venster met de magazijninstructie.;
+                             NOR=Angir om du vil skrive ut instruksene. Du kan ogsÜ skrive ut dokumentet senere i lagerinstruksvinduet.];
+                  ApplicationArea=#Warehouse;
+                  SourceExpr=PrintDoc }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      WhseSetup@1031 : Record 5769;
+      WhseWkshLine@1019 : Record 7326;
+      WhseInternalPickLine@1013 : Record 7334;
+      WhseInternalPutAwayHeader@1024 : Record 7331;
+      ProdOrderHeader@1026 : Record 5405;
+      AssemblyHeader@1012 : Record 900;
+      PostedWhseReceiptLine@1028 : Record 7319;
+      TempWhseWorksheetLineMovement@1007 : TEMPORARY Record 7326;
+      CreatePick@1003 : Codeunit 7312;
+      CreatePutAway@1016 : Codeunit 7313;
+      UOMMgt@1000 : Codeunit 5402;
+      FirstActivityNo@1002 : Code[20];
+      LastActivityNo@1001 : Code[20];
+      AssignedID@1008 : Code[50];
+      WhseDoc@1006 : 'Whse. Mov.-Worksheet,Posted Receipt,Internal Pick,Internal Put-away,Production,Put-away Worksheet,Assembly,Service Order';
+      SortActivity@1005 : ' ,Item,Document,Shelf/Bin No.,Due Date,Ship-To,Bin Ranking,Action Type';
+      SourceTableCaption@1025 : Text[30];
+      CreateErrorText@1009 : Text[80];
+      Text000@1011 : TextConst 'DEU=%1 mit der AktivitÑtsnr. %2 wurde erstellt.;ENU=%1 activity no. %2 has been created.;NLD=Activiteit van het type %1 met nummer %2 is gemaakt.;NOR=Aktivitet %1 nr. %2 er opprettet.';
+      Text001@1010 : TextConst 'DEU=Es wurden AktivitÑten der Art %1 von Nr. %2 bis %3 erstellt.;ENU=%1 activities no. %2 to %3 have been created.;NLD=Activiteiten van het type %1 met nummers %2 tot %3 zijn gemaakt.;NOR=Aktivitetene %1 fra %2 til %3 er opprettet.';
+      PrintDoc@1004 : Boolean;
+      EverythingHandled@1017 : Boolean;
+      WhseWkshLineFound@1020 : Boolean;
+      Text002@1021 : TextConst 'DEU=\FÅr %1 mit vorhandenen Lagervorschlagszeilen wurden keine Zeilen der Art %2 erstellt.;ENU=\For %1 with existing Warehouse Worksheet Lines, no %2 lines have been created.;NLD=\Voor %1 met bestaande magazijnvoorstelregels zijn geen regels van het type %2 gemaakt.;NOR=\For %1 med eksisterende lagerforslagslinjer er det ikke opprettet noen linjer for %2.';
+      HideValidationDialog@1022 : Boolean;
+      Text003@1023 : TextConst 'DEU=Es gibt nichts zu bewegen.;ENU=There is nothing to handle.;NLD=Niets te verwerken.;NOR=Det finnes ingenting Ü hÜndtere.;SVE=Det finns inget att hantera.';
+      DoNotFillQtytoHandle@1014 : Boolean;
+      Text004@1018 : TextConst 'DEU="Sie kînnen eine Lagerplatzumlagerung fÅr die verfÅgbare Menge nur in der %1 %2 = %3, %4 = %5, %6 = %7, %8 = %9 erstellen.";ENU="You can create a Movement only for the available quantity in %1 %2 = %3,%4 = %5,%6 = %7,%8 = %9.";NLD="U kunt alleen een verplaatsing maken voor het beschikbare aantal in %1 %2 = %3,%4 = %5,%6 = %7,%8 = %9.";NOR="Du kan bare opprette flytting for det disponible antallet i %1 %2 = %3,%4 = %5,%6 = %7,%8 = %9."';
+      BreakbulkFilter@1029 : Boolean;
+
+    [External]
+    PROCEDURE SetPostedWhseReceiptLine@8(VAR PostedWhseReceiptLine2@1000 : Record 7319;AssignedID2@1001 : Code[50]);
+    BEGIN
+      PostedWhseReceiptLine.COPY(PostedWhseReceiptLine2);
+      WhseDoc := WhseDoc::"Posted Receipt";
+      SourceTableCaption := PostedWhseReceiptLine.TABLECAPTION;
+      AssignedID := AssignedID2;
+
+      OnAfterSetPostedWhseReceiptLine(PostedWhseReceiptLine,SortActivity);
+    END;
+
+    [External]
+    PROCEDURE SetWhseWkshLine@4(VAR WhseWkshLine2@1000 : Record 7326);
+    BEGIN
+      WhseWkshLine.COPY(WhseWkshLine2);
+      CASE WhseWkshLine."Whse. Document Type" OF
+        WhseWkshLine."Whse. Document Type"::Receipt,
+        WhseWkshLine."Whse. Document Type"::"Internal Put-away":
+          WhseDoc := WhseDoc::"Put-away Worksheet";
+        WhseWkshLine."Whse. Document Type"::" ":
+          WhseDoc := WhseDoc::"Whse. Mov.-Worksheet";
+      END;
+
+      OnAfterSetWhseWkshLine(WhseWkshLine,SortActivity);
+    END;
+
+    [External]
+    PROCEDURE SetWhseInternalPickLine@5(VAR WhseInternalPickLine2@1001 : Record 7334;AssignedID2@1000 : Code[50]);
+    BEGIN
+      WhseInternalPickLine.COPY(WhseInternalPickLine2);
+      WhseDoc := WhseDoc::"Internal Pick";
+      SourceTableCaption := WhseInternalPickLine.TABLECAPTION;
+      AssignedID := AssignedID2;
+
+      OnAfterSetWhseInternalPickLine(WhseInternalPickLine,SortActivity);
+    END;
+
+    [External]
+    PROCEDURE SetWhseInternalPutAway@2(VAR WhseInternalPutAwayHeader2@1000 : Record 7331);
+    BEGIN
+      WhseInternalPutAwayHeader.COPY(WhseInternalPutAwayHeader2);
+      WhseDoc := WhseDoc::"Internal Put-away";
+      SourceTableCaption := WhseInternalPutAwayHeader.TABLECAPTION;
+      AssignedID := WhseInternalPutAwayHeader2."Assigned User ID";
+
+      OnAfterSetWhseInternalPutAway(WhseInternalPutAwayHeader,SortActivity);
+    END;
+
+    [External]
+    PROCEDURE SetProdOrder@6(VAR ProdOrderHeader2@1001 : Record 5405);
+    BEGIN
+      ProdOrderHeader.COPY(ProdOrderHeader2);
+      WhseDoc := WhseDoc::Production;
+      SourceTableCaption := ProdOrderHeader.TABLECAPTION;
+
+      OnAfterSetProdOrder(ProdOrderHeader,SortActivity);
+    END;
+
+    [External]
+    PROCEDURE SetAssemblyOrder@15(VAR AssemblyHeader2@1001 : Record 900);
+    BEGIN
+      AssemblyHeader.COPY(AssemblyHeader2);
+      WhseDoc := WhseDoc::Assembly;
+      SourceTableCaption := AssemblyHeader.TABLECAPTION;
+    END;
+
+    [External]
+    PROCEDURE GetResultMessage@3(WhseDocType@1000 : Option) : Boolean;
+    VAR
+      WhseActivHeader@1001 : Record 5766;
+    BEGIN
+      IF FirstActivityNo = '' THEN
+        EXIT(FALSE);
+
+      IF NOT HideValidationDialog THEN BEGIN
+        WhseActivHeader.Type := WhseDocType;
+        IF WhseWkshLineFound THEN BEGIN
+          IF FirstActivityNo = LastActivityNo THEN
+            MESSAGE(
+              STRSUBSTNO(
+                Text000,FORMAT(WhseActivHeader.Type),FirstActivityNo) +
+              STRSUBSTNO(
+                Text002,SourceTableCaption,FORMAT(WhseActivHeader.Type)))
+          ELSE
+            MESSAGE(
+              STRSUBSTNO(
+                Text001,
+                FORMAT(WhseActivHeader.Type),FirstActivityNo,LastActivityNo) +
+              STRSUBSTNO(
+                Text002,SourceTableCaption,FORMAT(WhseActivHeader.Type)));
+        END ELSE BEGIN
+          IF FirstActivityNo = LastActivityNo THEN
+            MESSAGE(Text000,FORMAT(WhseActivHeader.Type),FirstActivityNo)
+          ELSE
+            MESSAGE(Text001,FORMAT(WhseActivHeader.Type),FirstActivityNo,LastActivityNo);
+        END;
+      END;
+      EXIT(EverythingHandled);
+    END;
+
+    [External]
+    PROCEDURE SetHideValidationDialog@14(NewHideValidationDialog@1000 : Boolean);
+    BEGIN
+      HideValidationDialog := NewHideValidationDialog;
+    END;
+
+    LOCAL PROCEDURE GetLocation@7(VAR Location@1001 : Record 14;LocationCode@1000 : Code[10]);
+    BEGIN
+      IF Location.Code <> LocationCode THEN
+        IF LocationCode = '' THEN
+          CLEAR(Location)
+        ELSE
+          Location.GET(LocationCode);
+    END;
+
+    [External]
+    PROCEDURE Initialize@9(AssignedID2@1004 : Code[50];SortActivity2@1002 : ' ,Item,Document,Shelf/Bin No.,Due Date,Ship-To,Bin Ranking,Action Type';PrintDoc2@1001 : Boolean;DoNotFillQtytoHandle2@1000 : Boolean;BreakbulkFilter2@1003 : Boolean);
+    BEGIN
+      AssignedID := AssignedID2;
+      SortActivity := SortActivity2;
+      PrintDoc := PrintDoc2;
+      DoNotFillQtytoHandle := DoNotFillQtytoHandle2;
+      BreakbulkFilter := BreakbulkFilter2;
+    END;
+
+    [External]
+    PROCEDURE SetQuantity@10(VAR PostedWhseRcptLine@1001 : Record 7319;SourceType@1002 : Integer;VAR QtyToHandleBase@1003 : Decimal);
+    VAR
+      WhseItemTrackingLine@1000 : Record 6550;
+      IsHandled@1004 : Boolean;
+    BEGIN
+      IsHandled := FALSE;
+      OnBeforeSetQuantity(PostedWhseRcptLine,SourceType,QtyToHandleBase,IsHandled);
+      IF IsHandled THEN
+        EXIT;
+
+      WITH WhseItemTrackingLine DO BEGIN
+        RESET;
+        SETCURRENTKEY("Serial No.","Lot No.");
+        SETRANGE("Serial No.",PostedWhseRcptLine."Serial No.");
+        SETRANGE("Lot No.",PostedWhseRcptLine."Lot No.");
+        SETRANGE("Source Type",SourceType);
+        SETRANGE("Source ID",PostedWhseRcptLine."No.");
+        SETRANGE("Source Ref. No.",PostedWhseRcptLine."Line No.");
+        IF FINDFIRST THEN BEGIN
+          IF QtyToHandleBase < "Qty. to Handle (Base)" THEN
+            PostedWhseRcptLine."Qty. (Base)" := QtyToHandleBase
+          ELSE
+            PostedWhseRcptLine."Qty. (Base)" := "Qty. to Handle (Base)";
+          QtyToHandleBase -= PostedWhseRcptLine."Qty. (Base)";
+          PostedWhseRcptLine.Quantity :=
+            ROUND(PostedWhseRcptLine."Qty. (Base)" / PostedWhseRcptLine."Qty. per Unit of Measure",UOMMgt.QtyRndPrecision);
+        END;
+      END
+    END;
+
+    [External]
+    PROCEDURE UpdateWhseItemTrkgLines@11(PostedWhseRcptLine@1000 : Record 7319;SourceType@1002 : Integer;VAR TempWhseItemTrkgLine@1003 : Record 6550);
+    VAR
+      WhseItemTrackingLine@1001 : Record 6550;
+    BEGIN
+      WITH WhseItemTrackingLine DO BEGIN
+        RESET;
+        SETCURRENTKEY(
+          "Source ID","Source Type","Source Subtype","Source Batch Name",
+          "Source Prod. Order Line","Source Ref. No.");
+        SETRANGE("Source ID",PostedWhseRcptLine."No.");
+        SETRANGE("Source Type",SourceType);
+        SETRANGE("Source Subtype",0);
+        SETRANGE("Source Batch Name",'');
+        SETRANGE("Source Prod. Order Line",0);
+        SETRANGE("Source Ref. No.",PostedWhseRcptLine."Line No.");
+        IF FIND('-') THEN
+          REPEAT
+            TempWhseItemTrkgLine.SETRANGE("Source Type","Source Type");
+            TempWhseItemTrkgLine.SETRANGE("Source ID","Source ID");
+            TempWhseItemTrkgLine.SETRANGE("Source Ref. No.","Source Ref. No.");
+            TempWhseItemTrkgLine.SETRANGE("Serial No.","Serial No.");
+            TempWhseItemTrkgLine.SETRANGE("Lot No.","Lot No.");
+            IF TempWhseItemTrkgLine.FIND('-') THEN
+              "Quantity Handled (Base)" += TempWhseItemTrkgLine."Quantity (Base)";
+            "Qty. to Handle (Base)" := "Quantity (Base)" - "Quantity Handled (Base)";
+            MODIFY;
+          UNTIL NEXT = 0;
+      END
+    END;
+
+    LOCAL PROCEDURE UpdateWkshMovementLineBuffer@19(WhseWorksheetLine@1000 : Record 7326);
+    BEGIN
+      WITH TempWhseWorksheetLineMovement DO BEGIN
+        FilterWkshLine(TempWhseWorksheetLineMovement,WhseWorksheetLine);
+        IF FINDFIRST THEN BEGIN
+          "Qty. (Base)" += WhseWorksheetLine."Qty. (Base)";
+          Quantity += WhseWorksheetLine.Quantity;
+          "Qty. Outstanding (Base)" += WhseWorksheetLine."Qty. Outstanding (Base)";
+          "Qty. Outstanding" += WhseWorksheetLine."Qty. Outstanding";
+          "Qty. to Handle (Base)" += WhseWorksheetLine."Qty. to Handle (Base)";
+          "Qty. to Handle" += WhseWorksheetLine."Qty. to Handle";
+          "Qty. Handled (Base)" += WhseWorksheetLine."Qty. Handled (Base)";
+          "Qty. Handled" += WhseWorksheetLine."Qty. Handled (Base)";
+          MODIFY;
+        END ELSE BEGIN
+          TempWhseWorksheetLineMovement := WhseWorksheetLine;
+          INSERT;
+        END;
+        RESET;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateMovementLines@30(WhseWorksheetLine@1000 : Record 7326;VAR PickQty@1001 : Decimal;VAR PickQtyBase@1002 : Decimal);
+    BEGIN
+      CreatePick.SetCalledFromWksh(TRUE);
+      CreatePick.SetWhseWkshLine(WhseWorksheetLine,1);
+
+      WITH WhseWorksheetLine DO BEGIN
+        CreatePick.SetTempWhseItemTrkgLine(
+          Name,DATABASE::"Whse. Worksheet Line","Worksheet Template Name",0,"Line No.","Location Code");
+        PickQty := "Qty. to Handle";
+        PickQtyBase := "Qty. to Handle (Base)";
+        CreatePick.CreateTempLine(
+          "Location Code","Item No.","Variant Code","Unit of Measure Code","From Bin Code","To Bin Code",
+          "Qty. per Unit of Measure",PickQty,PickQtyBase);
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateMovementWorksheet@31(WhseWorksheetLineBuffer@1002 : Record 7326;QtyHandled@1001 : Decimal;QtyHandledBase@1000 : Decimal);
+    VAR
+      WhseWorksheetLine@1004 : Record 7326;
+      ItemTrackingMgt@1003 : Codeunit 6500;
+      OldQtyToHandleBase@1005 : Decimal;
+      OldQtyHandledBase@1006 : Decimal;
+    BEGIN
+      FilterWkshLine(WhseWorksheetLine,WhseWorksheetLineBuffer);
+      WITH WhseWorksheetLine DO BEGIN
+        FINDSET(TRUE);
+        REPEAT
+          IF "Qty. to Handle" = "Qty. Outstanding" THEN BEGIN
+            DELETE;
+            ItemTrackingMgt.DeleteWhseItemTrkgLines(
+              DATABASE::"Whse. Worksheet Line",0,Name,"Worksheet Template Name",0,"Line No.","Location Code",TRUE);
+            QtyHandled -= "Qty. to Handle";
+            QtyHandledBase -= "Qty. to Handle (Base)";
+          END ELSE BEGIN
+            OldQtyHandledBase := "Qty. Handled (Base)";
+            OldQtyToHandleBase := "Qty. to Handle (Base)";
+            IF QtyHandledBase >= "Qty. to Handle (Base)" THEN BEGIN
+              QtyHandledBase -= "Qty. to Handle (Base)";
+              QtyHandled -= "Qty. to Handle";
+              VALIDATE("Qty. Handled","Qty. Handled" + "Qty. to Handle");
+              "Qty. Handled (Base)" := OldQtyHandledBase + OldQtyToHandleBase;
+            END ELSE BEGIN
+              VALIDATE("Qty. Handled","Qty. Handled" + "Qty. to Handle" - QtyHandled);
+              "Qty. Handled (Base)" := OldQtyHandledBase + OldQtyToHandleBase - QtyHandledBase;
+              QtyHandledBase := 0;
+              QtyHandled := 0;
+            END;
+            "Qty. Outstanding (Base)" := "Qty. (Base)" - "Qty. Handled (Base)";
+            MODIFY;
+          END;
+        UNTIL (NEXT = 0) OR (QtyHandledBase = 0);
+      END;
+    END;
+
+    LOCAL PROCEDURE FilterWkshLine@24(VAR WhseWorksheetLineToFilter@1000 : Record 7326;WhseWorksheetLine@1001 : Record 7326);
+    BEGIN
+      WITH WhseWorksheetLineToFilter DO BEGIN
+        SETRANGE("Worksheet Template Name",WhseWorksheetLine."Worksheet Template Name");
+        SETRANGE(Name,WhseWorksheetLine.Name);
+        SETRANGE("Location Code",WhseWorksheetLine."Location Code");
+        SETRANGE("Item No.",WhseWorksheetLine."Item No.");
+        SETRANGE("Variant Code",WhseWorksheetLine."Variant Code");
+        SETRANGE("From Bin Code",WhseWorksheetLine."From Bin Code");
+        SETRANGE("To Bin Code",WhseWorksheetLine."To Bin Code");
+        SETRANGE("From Zone Code",WhseWorksheetLine."From Zone Code");
+        SETRANGE("To Zone Code",WhseWorksheetLine."To Zone Code");
+        SETRANGE("Unit of Measure Code",WhseWorksheetLine."Unit of Measure Code");
+        SETRANGE("From Unit of Measure Code",WhseWorksheetLine."From Unit of Measure Code");
+      END;
+    END;
+
+    [External]
+    PROCEDURE CreatePutAwayFromDiffSource@12(PostedWhseRcptLine@1001 : Record 7319;SourceType@1000 : Integer);
+    VAR
+      TempPostedWhseRcptLine@1006 : TEMPORARY Record 7319;
+      TempPostedWhseRcptLine2@1005 : TEMPORARY Record 7319;
+      ItemTrackingMgt@1004 : Codeunit 6500;
+      RemQtyToHandleBase@1002 : Decimal;
+    BEGIN
+      CASE SourceType OF
+        DATABASE::"Whse. Internal Put-away Line":
+          ItemTrackingMgt.SplitInternalPutAwayLine(PostedWhseRcptLine,TempPostedWhseRcptLine);
+        DATABASE::"Posted Whse. Receipt Line":
+          ItemTrackingMgt.SplitPostedWhseRcptLine(PostedWhseRcptLine,TempPostedWhseRcptLine);
+      END;
+      RemQtyToHandleBase := PostedWhseRcptLine."Qty. (Base)";
+
+      TempPostedWhseRcptLine.RESET;
+      IF TempPostedWhseRcptLine.FIND('-') THEN
+        REPEAT
+          TempPostedWhseRcptLine2 := TempPostedWhseRcptLine;
+          TempPostedWhseRcptLine2."Line No." := PostedWhseRcptLine."Line No.";
+          SetQuantity(TempPostedWhseRcptLine2,SourceType,RemQtyToHandleBase);
+          IF TempPostedWhseRcptLine2."Qty. (Base)" > 0 THEN BEGIN
+            CreatePutAway.RUN(TempPostedWhseRcptLine2);
+            CreatePutAway.UpdateTempWhseItemTrkgLines(TempPostedWhseRcptLine2,SourceType);
+          END;
+        UNTIL TempPostedWhseRcptLine.NEXT = 0;
+    END;
+
+    [External]
+    PROCEDURE FEFOLocation@1200(LocCode@1201 : Code[10]) : Boolean;
+    VAR
+      Location2@1202 : Record 14;
+    BEGIN
+      IF LocCode <> '' THEN BEGIN
+        Location2.GET(LocCode);
+        EXIT(Location2."Pick According to FEFO");
+      END;
+      EXIT(FALSE);
+    END;
+
+    [External]
+    PROCEDURE ItemTracking@1203(ItemNo@1204 : Code[20]) : Boolean;
+    VAR
+      Item@1205 : Record 27;
+      ItemTrackingCode@1206 : Record 6502;
+    BEGIN
+      IF ItemNo <> '' THEN BEGIN
+        Item.GET(ItemNo);
+        IF Item."Item Tracking Code" <> '' THEN BEGIN
+          ItemTrackingCode.GET(Item."Item Tracking Code");
+          EXIT((ItemTrackingCode."SN Specific Tracking" OR ItemTrackingCode."Lot Specific Tracking"));
+        END;
+      END;
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE GetHeaderLocationCode@13() : Code[10];
+    BEGIN
+      CASE WhseDoc OF
+        WhseDoc::"Posted Receipt":
+          EXIT(PostedWhseReceiptLine."Location Code");
+        WhseDoc::"Put-away Worksheet",
+        WhseDoc::"Whse. Mov.-Worksheet":
+          EXIT(WhseWkshLine."Location Code");
+        WhseDoc::"Internal Pick":
+          EXIT(WhseInternalPickLine."Location Code");
+        WhseDoc::"Internal Put-away":
+          EXIT(WhseInternalPutAwayHeader."Location Code");
+        WhseDoc::Production:
+          EXIT(ProdOrderHeader."Location Code");
+        WhseDoc::Assembly:
+          EXIT(AssemblyHeader."Location Code");
+      END;
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterCreatePutAwayDeleteBlankBinContent@28(VAR WarehouseActivityHeader@1000 : Record 5766);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterGetRecordProdOrderComponent@18(VAR ProdOrderComponent@1000 : Record 5407;VAR SkipProdOrderComp@1001 : Boolean);
+    BEGIN
+    END;
+
+    [Integration(TRUE,TRUE)]
+    LOCAL PROCEDURE OnAfterOpenPage@16(VAR Location@1000 : Record 14);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterPostReport@17(FirstActivityNo@1000 : Code[20];LastActivityNo@1001 : Code[20]);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterPostedWhseReceiptLineOnPostDataItem@20(VAR PostedWhseReceiptLine@1000 : Record 7319);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterSetPostedWhseReceiptLine@22(PostedWhseReceiptLine@1000 : Record 7319;VAR SortActivity@1001 : Option);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterSetProdOrder@27(ProductionOrder@1000 : Record 5405;VAR SortActivity@1001 : Option);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterSetWhseInternalPickLine@25(WhseInternalPickLine@1000 : Record 7334;VAR SortActivity@1001 : Option);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterSetWhseInternalPutAway@26(WhseInternalPutAwayHeader@1000 : Record 7331;VAR SortActivity@1001 : Option);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterSetWhseWkshLine@23(WhseWorksheetLine@1000 : Record 7326;VAR SortActivity@1001 : Option);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeProcessWhseMovWkshLines@1(VAR WhseWorksheetLine@1000 : Record 7326);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeSetQuantity@29(VAR PostedWhseRcptLine@1002 : Record 7319;SourceType@1001 : Integer;VAR QtyToHandleBase@1000 : Decimal;VAR IsHandled@1003 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeSortWhseDocsForPrints@21(WhseDoc@1000 : 'Whse. Mov.-Worksheet,Posted Receipt,Internal Pick,Internal Put-away,Production,Put-away Worksheet,Assembly,Service Order';FirstActivityNo@1001 : Code[20];LastActivityNo@1002 : Code[20];SortActivity@1003 : ' ,Item,Document,Shelf/Bin No.,Due Date,Ship-To,Bin Ranking,Action Type';PrintDoc@1004 : Boolean;VAR HideNothingToHandleErr@1005 : Boolean);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

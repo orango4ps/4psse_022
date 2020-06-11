@@ -1,0 +1,1282 @@
+OBJECT Page 11126280 Service Order Cost Plus SF3
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00,4PSSE;
+  }
+  PROPERTIES
+  {
+    CaptionML=[ENU=Service Order Cost Plus Entry;
+               NOR=Serviceordre, selvkosttransaksjon;
+               SVE=Redovisad sj„lvkostnad f”r serviceorder];
+    SourceTable=Table11012825;
+    DelayedInsert=Yes;
+    PageType=List;
+    AutoSplitKey=Yes;
+    OnInit=BEGIN
+             ServiceOrderNoEditable := TRUE;
+           END;
+
+    OnOpenPage=VAR
+                 ServiceOrder@1210190000 : Record 11012823;
+                 Text0001@1100285300 : TextConst 'ENU=Create cust plus entries?;SVE=Generera redovisad sj„lvkostnad?';
+                 ServiceLedgerEntry@1100285302 : Record 11012819;
+               BEGIN
+                 ServSetup.GET;
+                 CostComponentEditable := ServSetup."Cost Component Editable";
+
+                 FILTERGROUP(4);
+                 IF GETFILTER("Service Order No.") <> '' THEN
+                   IF NOT ServiceOrder.GET(GETFILTER("Service Order No.")) THEN // Error using SetupWidthHeight when switching from other company
+                     SETRANGE("Service Order No.");
+                   IF GETFILTER("Base Service Order No.") <> '' THEN
+                     CurrPage.ExtendedServiceOrderFB.PAGE.SetBaseServiceOrder(TRUE);
+                 FILTERGROUP(0);
+
+                 //>> 190314 ORANGO.SB Feature #23422 New setup for create cost plus entr. when open page
+                 IF ServSetup."Create cost plus entries" THEN BEGIN
+                   //>> 160225 ITERO.SB Create cost plus entries when open page
+                   ServiceLedgerEntry."Service Order No." := "Service Order No.";
+                   ServiceLedgerEntry.SETRANGE("Service Order No.", "Service Order No.");
+                   ServiceLedgerEntry.SETRANGE("Cost Plus Entry Created", FALSE);
+                   ServiceLedgerEntry.SETFILTER("Service Order Status", '%1|%2|%3',
+                   ServiceLedgerEntry."Service Order Status"::Open,
+                   ServiceLedgerEntry."Service Order Status"::"In Process",
+                   ServiceLedgerEntry."Service Order Status"::"Technical Finished"); //mg.c, 12-11-2013: C010587
+                   IF NOT ServiceLedgerEntry.ISEMPTY THEN BEGIN
+                     IF CONFIRM(Text0001) THEN BEGIN
+                       REPORT.RUNMODAL(REPORT::"Create Serv. Order Cost Plus", TRUE, FALSE, ServiceLedgerEntry);
+                       //CurrPage.UPDATE;
+                       CurrPage.UPDATE(FALSE); //171017 ITERO.FH
+                     END;
+                   END;
+                   //<<
+                 END;
+                 //<<
+               END;
+
+    OnAfterGetRecord=BEGIN
+                       CALCFIELDS("Service Contract No.");
+                       RecipeHeader := "Recipe Header"; //DP01183
+                       //>> 160607 ITERO.SB RAD-008 Show margin on cost plus line
+                       //>>200116
+                       GotSalesMargin := GetSalesMargin;
+                       NegBalMargin := GotSalesMargin <= 0;
+                       // IF GetSalesMargin <= 0 THEN
+                       //  NegBalMargin:=TRUE
+                       // ELSE
+                       //  NegBalMargin:=FALSE;
+                       //<<
+                       //<<
+
+                       //>>180919
+                       IF ("Cost Type"<>"Cost Type"::Material)
+                           OR (("Trade Item"='') AND ("Item No."=''))
+                           OR (Quantity = "Usage from FSA")
+                         THEN
+                         CLEAR("Usage from FSA");
+                       //<180919
+                     END;
+
+    OnNewRecord=VAR
+                  ServiceOrderExtension@1100528601 : Record 11071727;
+                BEGIN
+                  CALCFIELDS("Service Contract No.");
+                  "Posting Date" := WORKDATE;  //db, 08-01-10: M17743
+                  IF ServOrderRec.GET("Service Order No.") THEN BEGIN
+                    "Currency Code" := ServOrderRec."Currency Code";
+                    ServiceOrderExtension.GetServOrderExtension("Service Order No.");
+                    "Price Book Code" := ServiceOrderExtension."Price Book Code";
+                    "Unit Price Index Date" := ServiceOrderExtension."Price Book Index Date";
+                  END;
+                  //T003311
+                  SetSkipDetermineChargeable(FALSE);
+                  DetermineChargeable;
+                  //
+                END;
+
+    OnInsertRecord=BEGIN
+                     SetSkipDetermineChargeable(TRUE); //T003311
+                   END;
+
+    OnAfterGetCurrRecord=BEGIN
+                           UpdateEditable; //mg, 16-12-10: M19900
+                         END;
+
+    ActionList=ACTIONS
+    {
+      { 1210190016;  ;ActionContainer;
+                      ActionContainerType=RelatedInformation }
+      { 1210190014;1 ;ActionGroup;
+                      CaptionML=[ENU=&Cost Plus Entry;
+                                 NOR=&Selvkosttransaksjon;
+                                 SVE=&Redovisad sj„lvkostnad] }
+      { 1210190012;2 ;Action    ;
+                      CaptionML=[ENU=Text;
+                                 NOR=Tekst;
+                                 SVE=Ben„mning];
+                      Promoted=Yes;
+                      Image=SNInfo;
+                      PromotedCategory=Process;
+                      OnAction=BEGIN
+                                 EditText;
+                               END;
+                                }
+      { 1100285303;2 ;Action    ;
+                      CaptionML=[ENU=&Documents;
+                                 NOR=&Dokumenter;
+                                 SVE=&Dokument];
+                      Promoted=Yes;
+                      PromotedIsBig=Yes;
+                      Image=Documents;
+                      PromotedCategory=Report;
+                      OnAction=VAR
+                                 RecRef@1210190001 : RecordRef;
+                                 DocumentFilters@1210190000 : Codeunit 11012432;
+                                 SourceCodeSetup@1000000001 : Record 242;
+                                 PurchInvHeader@1000000000 : Record 122;
+                                 PurchCredHeader@1100285300 : Record 124;
+                                 DocumentFilter@1000000003 : Record 11012073;
+                                 GlobalTempDocumentProperties@1000000002 : TEMPORARY Record 11012746;
+                               BEGIN
+                                 //160324
+                                 IF PurchInvHeader.GET("Source Document") THEN
+                                   RecRef.GETTABLE(PurchInvHeader)
+                                 ELSE
+                                   IF PurchCredHeader.GET("Source Document") THEN
+                                     RecRef.GETTABLE(PurchCredHeader)
+                                   ELSE
+                                   RecRef.GETTABLE(Rec);
+
+                                 DocumentFilters.CreateTemporaryFilter(RecRef, DocumentFilter);
+                                 COMMIT;
+
+                                 DocumentFilters.ApplyDocumentFilter(DocumentFilter, GlobalTempDocumentProperties);
+                                 GlobalTempDocumentProperties.SETRANGE("From Filter Form", FALSE);
+                                 CASE GlobalTempDocumentProperties.COUNT OF
+                                   0:
+                                     CASE RecRef.NUMBER OF
+                                      122: BEGIN PurchInvHeader.SETRECFILTER; PurchInvHeader.PrintRecords(TRUE); END;
+                                      124: BEGIN PurchCredHeader.SETRECFILTER; PurchCredHeader.PrintRecords(TRUE,FALSE); END;
+                                     END;
+
+                                   1:  GlobalTempDocumentProperties.OpenDocument;
+                                   ELSE
+                                   PAGE.RUNMODAL(0, GlobalTempDocumentProperties);
+                                 END;
+                                 //<<160603
+                               END;
+                                }
+      { 1210190010;  ;ActionContainer;
+                      ActionContainerType=ActionItems }
+      { 1210190008;1 ;ActionGroup;
+                      CaptionML=[ENU=F&unctions;
+                                 NOR=Fu&nksjon;
+                                 SVE=F&unktion] }
+      { 1210190006;2 ;Action    ;
+                      CaptionML=[ENU=Generate;
+                                 NOR=Generer;
+                                 SVE=Generera];
+                      Promoted=Yes;
+                      Image=SelectEntries;
+                      PromotedCategory=Process;
+                      OnAction=VAR
+                                 ServiceLedgerEntry@1210190000 : Record 11012819;
+                                 ServiceOrderNoFilter@1100525000 : Text;
+                               BEGIN
+                                 ServiceLedgerEntry."Service Order No." := "Service Order No.";
+                                 FILTERGROUP(4);
+                                 ServiceOrderNoFilter := GETFILTER("Base Service Order No.");
+                                 IF ServiceOrderNoFilter <> '' THEN
+                                   ServiceLedgerEntry.SETFILTER("Service Order No.", ServiceOrderNoFilter);
+                                 FILTERGROUP(0);
+                                 IF ServiceOrderNoFilter = '' THEN BEGIN
+                                   ServiceOrderNoFilter := GETFILTER("Service Order No.");
+                                   IF ServiceOrderNoFilter <> '' THEN
+                                     ServiceLedgerEntry.SETFILTER("Service Order No.", ServiceOrderNoFilter)
+                                   ELSE
+                                     ServiceLedgerEntry.SETRANGE("Service Order No.", "Service Order No.");
+                                 END;
+                                 ServiceLedgerEntry.SETRANGE("Cost Plus Entry Created", FALSE);
+                                 ServiceLedgerEntry.SETFILTER("Service Order Status", '%1|%2|%3',
+                                   ServiceLedgerEntry."Service Order Status"::Open,
+                                   ServiceLedgerEntry."Service Order Status"::"In Process",
+                                   ServiceLedgerEntry."Service Order Status"::"Technical Finished");
+                                 REPORT.RUNMODAL(REPORT::"Create Serv. Order Cost Plus", TRUE, FALSE, ServiceLedgerEntry);
+                                 CurrPage.UPDATE;
+                               END;
+                                }
+      { 1210190004;2 ;Action    ;
+                      Ellipsis=Yes;
+                      CaptionML=ENU=Make Chargable;
+                      Promoted=Yes;
+                      Image=Approve;
+                      PromotedCategory=Process;
+                      OnAction=VAR
+                                 ServiceOrderCostPlusEntry@1100528600 : Record 11012825;
+                                 CPChargeablebyCostType@1100528601 : Report 11012886;
+                               BEGIN
+                                 CurrPage.SETSELECTIONFILTER(ServiceOrderCostPlusEntry);
+                                 IF ServiceOrderCostPlusEntry.GETFILTERS = '' THEN BEGIN
+                                   ServiceOrderCostPlusEntry.SETCURRENTKEY("Base Service Order No.");
+                                   ServiceOrderCostPlusEntry.SETRANGE("Base Service Order No.", "Base Service Order No.");
+                                 END;
+                                 CPChargeablebyCostType.SETTABLEVIEW(ServiceOrderCostPlusEntry);
+                                 CPChargeablebyCostType.RUNMODAL;
+                               END;
+                                }
+      { 1210190002;2 ;Action    ;
+                      CaptionML=ENU=Compress Entries;
+                      Promoted=Yes;
+                      Image=Start;
+                      PromotedCategory=Process;
+                      OnAction=BEGIN
+                                 CompressLines;
+                               END;
+                                }
+      { 1100285301;2 ;Action    ;
+                      ShortCutKey=Ctrl+F11;
+                      CaptionML=[ENU=Generate Invoice;
+                                 NOR=Generer faktura;
+                                 SVE=Generera faktura];
+                      Image=Invoice;
+                      OnAction=VAR
+                                 PlantSetup@1100525003 : Record 11012550;
+                                 ServiceOrderCostPlusEntry@1100525002 : Record 11012825;
+                                 PlantLocation@1100525001 : Record 11012554;
+                                 CompanyPlantInvoicesViaIC@1100525000 : Record 11012549;
+                                 Text003@1100285300 : TextConst 'ENU=It''s not possible to use inter company in combination with plant location and extra cost on the cost plus entry''s.';
+                                 SORec@1100285301 : Record 11012823;
+                               BEGIN
+                                 //>> 151230 ITERO.SB Added action for creating invoices
+                                 SORec.GET("Service Order No.");
+                                 IF PlantSetup.GET THEN BEGIN
+                                   IF (SORec."Plant Location" <> '') THEN BEGIN
+                                     IF PlantLocation.GET(SORec."Plant Location") THEN
+                                       IF (PlantLocation."Company Name" <> '') THEN BEGIN
+                                         IF PlantSetup."Post Invoice Proposals via IC" = PlantSetup."Post Invoice Proposals via IC"::Specific THEN
+                                           IF CompanyPlantInvoicesViaIC.GET(PlantLocation."Company Name") THEN BEGIN
+                                             ServiceOrderCostPlusEntry.SETRANGE(ServiceOrderCostPlusEntry."Service Order No.", SORec."No.");
+                                             ServiceOrderCostPlusEntry.SETRANGE(ServiceOrderCostPlusEntry.Invoiced, FALSE);
+                                             ServiceOrderCostPlusEntry.SETRANGE(ServiceOrderCostPlusEntry.Chargeable, TRUE);
+                                             ServiceOrderCostPlusEntry.SETRANGE(ServiceOrderCostPlusEntry."Additional Cost", TRUE);
+                                             IF ServiceOrderCostPlusEntry.FINDFIRST THEN
+                                               ERROR(Text003,ServiceOrderCostPlusEntry.COUNT);
+                                           END;
+                                           IF (PlantSetup."Post Invoice Proposals via IC" = PlantSetup."Post Invoice Proposals via IC"::Yes) THEN BEGIN
+                                               ServiceOrderCostPlusEntry.SETRANGE(ServiceOrderCostPlusEntry."Service Order No.", SORec."No.");
+                                               ServiceOrderCostPlusEntry.SETRANGE(ServiceOrderCostPlusEntry.Invoiced, FALSE);
+                                               ServiceOrderCostPlusEntry.SETRANGE(ServiceOrderCostPlusEntry.Chargeable, TRUE);
+                                               ServiceOrderCostPlusEntry.SETRANGE(ServiceOrderCostPlusEntry."Additional Cost", TRUE);
+                                               IF ServiceOrderCostPlusEntry.FINDFIRST THEN
+                                                 ERROR(Text003,ServiceOrderCostPlusEntry.COUNT);
+                                           END;
+                                       END;
+                                   END;
+                                 END;
+
+                                 SORec.CreateSalesInvoiceViaCollList;
+                                 //<<
+                               END;
+                                }
+      { 1100528605;2 ;Action    ;
+                      CaptionML=[ENU=Copy;
+                                 NOR=KOPIER;
+                                 SVE=KOPIA];
+                      Promoted=Yes;
+                      Image=Copy;
+                      PromotedCategory=Process;
+                      OnAction=BEGIN
+                                 DuplicateLine;
+                                 CurrPage.UPDATE(FALSE);
+                               END;
+                                }
+      { 1100525005;2 ;Action    ;
+                      Name=CalcSurcharge;
+                      ShortCutKey=Shift+Ctrl+S;
+                      CaptionML=[ENU=Calculate &Surcharge;
+                                 NOR=Beregn &tilleggsgebyr;
+                                 SVE=Ber„kna &till„ggsavgift];
+                      Image=Calculate;
+                      OnAction=BEGIN
+                                 //C024476
+                                 CostPlusRec.CalcSurcharge("Service Order No.");
+                                 CurrPage.UPDATE;
+                               END;
+                                }
+      { 1100525007;2 ;Action    ;
+                      Name=CalcDiscount;
+                      ShortCutKey=Shift+Ctrl+D;
+                      CaptionML=[ENU=Calculate &Discount;
+                                 SVE=Ber„kna rabatt];
+                      Image=Calculate;
+                      OnAction=BEGIN
+                                 //C024476
+                                 CostPlusRec.CalcDiscount("Service Order No.");
+                                 CurrPage.UPDATE;
+                               END;
+                                }
+      { 1100525003;2 ;Action    ;
+                      Name=RemovalContribution;
+                      ShortCutKey=Shift+Ctrl+R;
+                      CaptionML=[ENU=Calculate &Removal Contribution;
+                                 NOR=Beregn &fjerningsbidrag;
+                                 SVE=Ber„kna &borttagningsbidrag];
+                      Visible=false;
+                      Image=Calculate;
+                      OnAction=BEGIN
+                                 //C024476
+                                 CostPlusRec.RESET;
+                                 CostPlusRec."Service Order No." := "Service Order No.";
+                                 CostPlusRec.DetermineRemovalContribution(FALSE);
+                                 CurrPage.UPDATE;
+                               END;
+                                }
+      { 1100525001;2 ;Action    ;
+                      Name=InvoiceBaseAmount;
+                      ShortCutKey=Shift+Ctrl+B;
+                      CaptionML=[ENU=Check Invoice &Base Amount;
+                                 SVE=Kontrollera fakturans basbelopp];
+                      Enabled=InvoiceBaseAmountEnabled;
+                      Image=Calculate;
+                      OnAction=BEGIN
+                                 //C024476
+                                 //DP01008.sn
+                                 ServOrderRec.GET("Service Order No.");
+                                 IF ServOrderRec."Collect Invoices By OLD" = ServOrderRec."Collect Invoices By OLD"::BaseOrder THEN BEGIN
+                                   CostPlusRec.RESET;
+                                   CostPlusRec."Service Order No." := ServOrderRec."Base Service Order No.";
+                                   CostPlusRec.CheckInvBaseAmountBaseOrder;
+                                 END ELSE BEGIN
+                                   CostPlusRec.RESET;
+                                   CostPlusRec."Service Order No." := ServOrderRec."No.";
+                                   CostPlusRec.CheckInvoiceBaseAmount;
+                                 END;
+                                 //DP01008.en
+                                 CurrPage.UPDATE;
+                               END;
+                                }
+      { 1100529407;2 ;Action    ;
+                      CaptionML=[ENU=Recalculate;
+                                 NOR=Rekalkuler;
+                                 SVE=Omber„kna];
+                      Promoted=Yes;
+                      Image=CalculateSimulation;
+                      PromotedCategory=Process;
+                      OnAction=VAR
+                                 ServiceOrderCostPlusEntry@1100529400 : Record 11012825;
+                                 BaseServiceOrder@1100529401 : Record 11012823;
+                               BEGIN
+                                 CurrPage.SETSELECTIONFILTER(ServiceOrderCostPlusEntry);
+                                 IF ServiceOrderCostPlusEntry.FINDSET THEN
+                                   REPEAT
+                                     BaseServiceOrder."No." := ServiceOrderCostPlusEntry."Base Service Order No.";
+                                     BaseServiceOrder.MARK(TRUE);
+                                   UNTIL ServiceOrderCostPlusEntry.NEXT = 0;
+                                 BaseServiceOrder.MARKEDONLY(TRUE);
+                                 //>> 160618 ITERO.SB RAD-023 Added action, invoice text
+                                 IF BaseServiceOrder.FINDSET THEN
+                                   REPEAT
+                                     BaseServiceOrder.RecalcBaseSOCostPlusEntries(BaseServiceOrder."No.");
+                                   UNTIL BaseServiceOrder.NEXT = 0;
+                               END;
+                                }
+      { 1100528607;2 ;Action    ;
+                      ShortCutKey=Ctrl+F11;
+                      CaptionML=[ENU=Generate Invoice;
+                                 NOR=Generer faktura;
+                                 SVE=Generera faktura];
+                      Promoted=Yes;
+                      Image=Invoice;
+                      PromotedCategory=Process;
+                      OnAction=VAR
+                                 ServiceOrder@1100528600 : Record 11012823;
+                               BEGIN
+                                 ServiceOrder.GET("Service Order No.");
+                                 ServiceOrder.CreateSalesInvoiceViaCollList;
+                               END;
+                                }
+      { 1100528610;2 ;Action    ;
+                      CaptionML=ENU=Create Lines based on Unit Price Cluster;
+                      Visible=false;
+                      Image=CreateLinesFromJob;
+                      OnAction=VAR
+                                 ServiceOrder@1100528601 : Record 11012823;
+                               BEGIN
+                                 ServiceOrder.GET("Service Order No.");
+                                 ServiceOrder.SETRECFILTER;
+                                 ServiceOrder.SETFILTER(Status, '<%1', ServiceOrder.Status::"Administrative Finished");
+                                 REPORT.RUNMODAL(REPORT::"Create CPE by SUP Cluster", TRUE, FALSE, ServiceOrder);
+                                 CurrPage.UPDATE(FALSE);
+                               END;
+                                }
+      { 1101285000;2 ;Action    ;
+                      Name=<Action1100285000>;
+                      CaptionML=[ENU=ROT/RUT Reduction;
+                                 NOR=ROT/RUT Bel›p;
+                                 SVE=ROT/RUT avdrag];
+                      Promoted=Yes;
+                      Image=AmountByPeriod;
+                      PromotedCategory=Category4;
+                      OnAction=VAR
+                                 ROTInformation@1100285000 : Record 11128101;
+                                 ROTInformationPage@1100285001 : Page 11128101;
+                               BEGIN
+                                 // Check if there is any ROT related to the current record
+                                 ROTInformation.RESET();
+                                 ROTInformation.SETRANGE(Type, ROTInformation.Type::"Service Order");
+                                 ROTInformation.SETRANGE("Document No.", "Service Order No.");
+
+                                 // Set the page view and open ROT Information page.
+                                 ROTInformationPage.HideProjPrincipal();
+                                 ROTInformationPage.SETTABLEVIEW(ROTInformation);
+                                 ROTInformationPage.RUN;
+                               END;
+                                }
+      { 1100529405;1 ;ActionGroup;
+                      CaptionML=[ENU=Recipe;
+                                 NOR=Mal;
+                                 SVE=Mall];
+                      Visible=false;
+                      Image=Receipt }
+      { 1100529402;2 ;Action    ;
+                      Name=SelectRecipe;
+                      CaptionML=[ENU=Select Recipes;
+                                 NOR=Velg Maler;
+                                 SVE=V„lj mallar];
+                      Image=ReceiptLines;
+                      OnAction=BEGIN
+                                 LookupRecipe(TRUE);  //DP01183
+                               END;
+                                }
+      { 1100529403;2 ;Action    ;
+                      Name=ExpandRecipe;
+                      ShortCutKey=Shift+Ctrl+X;
+                      CaptionML=[ENU=Collapse/Expand Recipe;
+                                 SVE=Visa/d”lj mall];
+                      Image=ExplodeBOM;
+                      OnAction=BEGIN
+                                 HandleRecipeLevel;  //DP01183
+                               END;
+                                }
+      { 1100529404;2 ;Action    ;
+                      Name=TransferRecipeToProject;
+                      CaptionML=[ENU=Transfer Service Recipes to Assembly Project;
+                                 SVE=™verf”r mallar till monteringsprojekt];
+                      Image=TransferOrder;
+                      OnAction=VAR
+                                 ServiceOrderCostPlusEntry@1100528401 : Record 11012825;
+                                 TransferRecipeToProject@1100528400 : Page 11126767;
+                               BEGIN
+                                 //DP01183
+                                 CurrPage.SETSELECTIONFILTER(ServiceOrderCostPlusEntry);
+                                 TransferRecipeToProject.SETTABLEVIEW(ServiceOrderCostPlusEntry);
+                                 TransferRecipeToProject.StdDialogRunModal;
+                               END;
+                                }
+      { 1100285304;2 ;Action    ;
+                      CaptionML=[ENU=Invoice text;
+                                 NOR=Fakturatekst;
+                                 SVE=Fakturatext];
+                      Promoted=Yes;
+                      Image=Text;
+                      PromotedCategory=Process;
+                      OnAction=VAR
+                                 ServiceOrder@1100285300 : Record 11012823;
+                               BEGIN
+                                 //>> 160618 ITERO.SB RAD-023 Added action, invoice text
+                                 ServiceOrder.SETRANGE("No.", "Service Order No.");
+                                 PAGE.RUNMODAL(11128097,ServiceOrder);
+                                 //<<
+                               END;
+                                }
+      { 1100409003;1 ;ActionGroup;
+                      CaptionML=[ENU=Print;
+                                 NOR=Skriv ut;
+                                 SVE=Skriv ut];
+                      Image=PrintDocument }
+      { 1100409001;2 ;Action    ;
+                      Ellipsis=Yes;
+                      CaptionML=ENU=Print Cost Plus &Entries;
+                      Image=Print;
+                      OnAction=VAR
+                                 ServiceOrder@1100525001 : Record 11012823;
+                                 PrintDoc@1100409000 : Codeunit 229;
+                               BEGIN
+                                 //C018759
+                                 ServiceOrder.SETRANGE("No.", "Service Order No.");
+                                 PrintDoc.PrintServCostPlus(ServiceOrder);
+                               END;
+                                }
+    }
+  }
+  CONTROLS
+  {
+    { 1900000001;0;Container;
+                ContainerType=ContentArea }
+
+    { 1210190000;1;Group  ;
+                Name=tbCostPlusEntries;
+                GroupType=Repeater }
+
+    { 1100525004;2;Field  ;
+                SourceExpr="Service Order No.";
+                Visible=FALSE;
+                Editable="ServiceOrderNoEditable";
+                OnValidate=VAR
+                             ServiceOrder@1100525000 : Record 11012823;
+                           BEGIN
+                             //mg.sn, 16-12-10: M19900
+                             ServiceOrder.GET("Service Order No.");
+                             Rec.FILTERGROUP(4);
+                             ServiceOrder.TESTFIELD("Base Service Order No.", Rec.GETFILTER("Base Service Order No."));
+                             Rec.FILTERGROUP(0);
+                             //mg.en, 16-12-10: M19900
+                           END;
+
+                OnLookup=VAR
+                           ServiceOrder@1100525000 : Record 11012823;
+                           ServiceOrderListFrm@1100525001 : Page 11012830;
+                         BEGIN
+                           //mg.sn, 16-12-10: M19900
+                           Rec.FILTERGROUP(4);
+                           Rec.COPYFILTER("Base Service Order No.", ServiceOrder."Base Service Order No.");
+                           Rec.FILTERGROUP(0);
+                           ServiceOrder.SETCURRENTKEY("Base Service Order No.");
+                           IF "Service Order No." <> '' THEN
+                             ServiceOrder.GET("Service Order No.");
+                           ServiceOrderListFrm.LOOKUPMODE := TRUE;
+                           ServiceOrderListFrm.SETTABLEVIEW(ServiceOrder);
+                           ServiceOrderListFrm.SETRECORD(ServiceOrder);
+                           IF ServiceOrderListFrm.RUNMODAL = ACTION::LookupOK THEN BEGIN
+                             IF "Service Order No." = '' THEN BEGIN
+                               ServiceOrderListFrm.GETRECORD(ServiceOrder);
+                               "Service Order No." := ServiceOrder."No.";
+                               "Base Service Order No." := ServiceOrder."Base Service Order No.";
+                             END;
+                           END;
+                           //mg.en, 16-12-10: M19900
+                         END;
+                          }
+
+    { 1210190005;2;Field  ;
+                SourceExpr="Line No.";
+                Visible=FALSE }
+
+    { 1100528604;2;Field  ;
+                SourceExpr="Bill-to Customer No.";
+                Visible=FALSE }
+
+    { 1100528606;2;Field  ;
+                SourceExpr="Bill-to Name";
+                Visible=FALSE }
+
+    { 1100485012;2;Field  ;
+                SourceExpr="Object Customer";
+                Visible=FALSE }
+
+    { 1210190031;2;Field  ;
+                SourceExpr="Posting Date" }
+
+    { 1210190073;2;Field  ;
+                SourceExpr="Object No." }
+
+    { 1210190009;2;Field  ;
+                SourceExpr="Cost Type" }
+
+    { 1210190007;2;Field  ;
+                SourceExpr="Cost Object";
+                LookupPageID=Cost Object List;
+                OnValidate=BEGIN
+                             CostObjectOnAfterValidate;
+                           END;
+                            }
+
+    { 1210190047;2;Field  ;
+                SourceExpr="Employee No.";
+                OnValidate=BEGIN
+                             EmployeeNoOnAfterValidate;
+                           END;
+                            }
+
+    { 1100485010;2;Field  ;
+                CaptionML=[ENU=Name;
+                           NOR=Navn;
+                           SVE=Namn];
+                SourceExpr=EmplRec.CompleteEmployeeName("Employee No.") }
+
+    { 1210190055;2;Field  ;
+                SourceExpr="Item No.";
+                OnValidate=BEGIN
+                             ItemNoOnAfterValidate;
+                           END;
+
+                OnLookup=BEGIN
+                           IF HandleLookupItem(FIELDNO("Item No.")) THEN //DP02213
+                             CurrPage.UPDATE(FALSE);
+                         END;
+                          }
+
+    { 1100528200;2;Field  ;
+                SourceExpr="Execution Date";
+                Visible=FALSE }
+
+    { 1100485000;2;Field  ;
+                SourceExpr="Source Document";
+                Visible=FALSE;
+                OnDrillDown=BEGIN
+                              Navigate;  //db, 05-02-07
+                            END;
+                             }
+
+    { 1100485022;2;Field  ;
+                SourceExpr="Source Line";
+                Visible=FALSE }
+
+    { 1100529400;2;Field  ;
+                SourceExpr="Recipe Group";
+                Visible=FALSE }
+
+    { 1100529401;2;Field  ;
+                SourceExpr=Recipe;
+                Visible=FALSE }
+
+    { 1210190063;2;Field  ;
+                SourceExpr="Vendor (Trade Item)";
+                Visible=false }
+
+    { 1210190059;2;Field  ;
+                SourceExpr="Trade Item";
+                Visible=false;
+                OnValidate=BEGIN
+                             TradeItemOnAfterValidate;
+                           END;
+
+                OnLookup=BEGIN
+                           IF HandleLookupItem(FIELDNO("Trade Item")) THEN  //DP02213
+                             CurrPage.UPDATE(FALSE);
+                         END;
+
+                OnAssistEdit=BEGIN
+                               HandleItemAssistEdit(3);
+                             END;
+                              }
+
+    { 1100528500;2;Field  ;
+                SourceExpr="Serial No.";
+                Visible=FALSE }
+
+    { 1100485006;2;Field  ;
+                SourceExpr="Cost Component";
+                Visible=FALSE;
+                Editable=CostComponentEditable }
+
+    { 1210190011;2;Field  ;
+                SourceExpr=Description;
+                Style=Strong;
+                StyleExpr=RecipeHeader }
+
+    { 1210190067;2;Field  ;
+                SourceExpr="Description 2";
+                Visible=FALSE }
+
+    { 1210190013;2;Field  ;
+                SourceExpr=Quantity;
+                OnValidate=BEGIN
+                             CurrPage.UPDATE;  //C024476 (refresh Attached Line)
+                           END;
+                            }
+
+    { 1210190015;2;Field  ;
+                SourceExpr="Unit of Measure" }
+
+    { 100000000;2;Field   ;
+                CaptionML=[ENU=Divergent usage from FSA;
+                           SVE=Avvikande f”rbrukning fr†n FSA];
+                SourceExpr="Usage from FSA" }
+
+    { 1100528501;2;Field  ;
+                SourceExpr="Lot No.";
+                Visible=FALSE }
+
+    { 1210190065;2;Field  ;
+                SourceExpr=Manufacturer;
+                Visible=FALSE }
+
+    { 1210190057;2;Field  ;
+                SourceExpr="Basic Item";
+                Visible=FALSE;
+                OnValidate=BEGIN
+                             BasicItemOnAfterValidate;
+                           END;
+
+                OnLookup=BEGIN
+                           IF HandleLookupItem(FIELDNO("Basic Item")) THEN //DP02213
+                             CurrPage.UPDATE(FALSE);
+                         END;
+                          }
+
+    { 1210190017;2;Field  ;
+                SourceExpr="Hour Rate Code";
+                OnLookup=BEGIN
+                           //db.sn, 07-01-11: M27653
+                           LookupHourRate;
+                           CurrPage.UPDATE(TRUE);
+                           //db.en, 07-01-11: M27653
+                         END;
+                          }
+
+    { 1100485008;2;Field  ;
+                SourceExpr="Wage Component";
+                Visible=FALSE }
+
+    { 1100525002;2;Field  ;
+                DrillDown=No;
+                SourceExpr="Description Wage Component";
+                Visible=FALSE }
+
+    { 1100528800;2;Field  ;
+                SourceExpr="Gross Price";
+                Visible=FALSE }
+
+    { 1210190001;2;Field  ;
+                SourceExpr="Gross Price (LCY)" }
+
+    { 1000000000;2;Field  ;
+                SourceExpr="Total Cost Price (LCY)";
+                Editable=FALSE }
+
+    { 1100528802;2;Field  ;
+                SourceExpr="Cost Price";
+                Visible=FALSE }
+
+    { 1100485018;2;Field  ;
+                SourceExpr="Cost Price (LCY)" }
+
+    { 1100528804;2;Field  ;
+                SourceExpr="Basic Price";
+                Visible=FALSE }
+
+    { 1210190023;2;Field  ;
+                SourceExpr="Basic Price (LCY)" }
+
+    { 1210190025;2;Field  ;
+                SourceExpr="Surcharge %" }
+
+    { 1100409000;2;Field  ;
+                SourceExpr="Unit Price Code";
+                Visible=FALSE;
+                OnLookup=VAR
+                           CopyUsed@1100528500 : Boolean;
+                         BEGIN
+                           LookupUnitPriceLineCode(TRUE, CopyUsed);
+                           IF CopyUsed THEN
+                             CurrPage.UPDATE(FALSE);
+                         END;
+                          }
+
+    { 1210190019;2;Field  ;
+                SourceExpr="Discount % (ServOrder)" }
+
+    { 1100528806;2;Field  ;
+                SourceExpr="Sales Price";
+                Visible=FALSE }
+
+    { 1210190027;2;Field  ;
+                SourceExpr="Sales Price (LCY)" }
+
+    { 1210190077;2;Field  ;
+                SourceExpr=Chargeable;
+                OnValidate=BEGIN
+                             IF CostPlusRec.GET("Service Order No.", "Line No.") THEN  //C028952
+                               CurrPage.UPDATE;  //C024476 (refresh Attached Line)
+                           END;
+                            }
+
+    { 1100525006;2;Field  ;
+                SourceExpr=Checked }
+
+    { 1100528611;2;Field  ;
+                SourceExpr="Surcharge Set Code (PriceBook)";
+                Visible=FALSE }
+
+    { 1100528812;2;Field  ;
+                SourceExpr="Invoice Price";
+                Visible=FALSE }
+
+    { 1210190021;2;Field  ;
+                SourceExpr="Invoice Price (LCY)" }
+
+    { 1210190039;2;Field  ;
+                SourceExpr=Invoiced }
+
+    { 1100528808;2;Field  ;
+                SourceExpr="Invoiced Price";
+                Visible=FALSE }
+
+    { 1210190041;2;Field  ;
+                SourceExpr="Invoiced Price (LCY)" }
+
+    { 1100528601;2;Field  ;
+                SourceExpr="Invoice in Process";
+                Visible=FALSE }
+
+    { 1210190043;2;Field  ;
+                SourceExpr="Invoice in Process (LCY)" }
+
+    { 1100528603;2;Field  ;
+                SourceExpr="Credit Memo in Process";
+                Visible=FALSE }
+
+    { 1210190045;2;Field  ;
+                SourceExpr="Credit Memo in Process (LCY)";
+                Visible=false }
+
+    { 1210190075;2;Field  ;
+                SourceExpr="Text Block";
+                Visible=FALSE;
+                OnDrillDown=BEGIN
+                              EditText;
+                            END;
+                             }
+
+    { 1100529900;2;Field  ;
+                SourceExpr="Dimensional Factor";
+                Visible=FALSE }
+
+    { 1100528810;2;Field  ;
+                SourceExpr="Currency Code";
+                Visible=FALSE }
+
+    { 1100485020;2;Field  ;
+                SourceExpr="Purchase Discount % (Item)";
+                Visible=FALSE;
+                Editable=FALSE }
+
+    { 1100528814;2;Field  ;
+                SourceExpr="Currency Code Costs";
+                Visible=FALSE }
+
+    { 1210190003;2;Field  ;
+                SourceExpr="Sales Discount % (Item)";
+                Visible=FALSE;
+                OnAssistEdit=BEGIN
+                               AssistEditSalesCondition;  //db, 26-01-16: C015604
+                             END;
+                              }
+
+    { 1100525008;2;Field  ;
+                SourceExpr="Sales Condition Present";
+                Visible=FALSE }
+
+    { 1100485032;2;Field  ;
+                SourceExpr="Basic Price Found at";
+                Visible=FALSE }
+
+    { 1100528900;2;Field  ;
+                SourceExpr="Price Agreement";
+                Visible=FALSE }
+
+    { 1100525009;2;Field  ;
+                SourceExpr="Surcharge Amount (FCY)";
+                Visible=FALSE }
+
+    { 1100525000;2;Field  ;
+                SourceExpr="Surcharge Amount (LCY)";
+                Visible=FALSE }
+
+    { 1100485026;2;Field  ;
+                SourceExpr="Discount % (ServContr)";
+                Visible=FALSE;
+                OnDrillDown=BEGIN
+                              DrillDownDiscount(0);  //db, 23-05-08
+                            END;
+                             }
+
+    { 1100485028;2;Field  ;
+                SourceExpr="Discount % (Warranty)";
+                Visible=FALSE;
+                OnDrillDown=BEGIN
+                              DrillDownDiscount(1);  //db, 23-05-08
+                            END;
+                             }
+
+    { 1210190029;2;Field  ;
+                SourceExpr="VAT Prod. Posting Group" }
+
+    { 1100528609;2;Field  ;
+                SourceExpr="Warranty Code";
+                Visible=FALSE }
+
+    { 1100485004;2;Field  ;
+                SourceExpr="Additional Cost";
+                Visible=FALSE;
+                Editable=AdditionalCostEditable }
+
+    { 1100525102;2;Field  ;
+                SourceExpr="Extra Cost";
+                Visible=FALSE }
+
+    { 1100529601;2;Field  ;
+                SourceExpr="Charge to Plant Location";
+                Visible=FALSE;
+                Editable=ChargeToPlantLocationEditable;
+                OnValidate=BEGIN
+                             CurrPage.UPDATE;
+                           END;
+                            }
+
+    { 1100528801;2;Field  ;
+                SourceExpr=Text;
+                Visible=FALSE }
+
+    { 1210190037;2;Field  ;
+                SourceExpr="Entry No. Service Ledger";
+                Visible=FALSE }
+
+    { 1100485002;2;Field  ;
+                SourceExpr="Installment Scheme";
+                Visible=FALSE }
+
+    { 1100485024;2;Field  ;
+                SourceExpr="Installment No.";
+                Visible=FALSE }
+
+    { 1210190033;2;Field  ;
+                SourceExpr="Creation Date" }
+
+    { 1210190035;2;Field  ;
+                SourceExpr="Last Date Modified" }
+
+    { 1100528602;2;Field  ;
+                SourceExpr="Unit Price Extention";
+                Visible=FALSE }
+
+    { 1210190051;2;Field  ;
+                SourceExpr="From Date";
+                Visible=FALSE }
+
+    { 1100485014;2;Field  ;
+                SourceExpr="From Time";
+                Visible=FALSE }
+
+    { 1210190053;2;Field  ;
+                SourceExpr="To Date";
+                Visible=FALSE }
+
+    { 1100485016;2;Field  ;
+                SourceExpr="To Time";
+                Visible=FALSE }
+
+    { 1210190061;2;Field  ;
+                SourceExpr="Glazing Service Call No.";
+                Visible=FALSE }
+
+    { 1210190079;2;Field  ;
+                SourceExpr="Glazing Service Call Line No.";
+                Visible=FALSE }
+
+    { 1100528600;2;Field  ;
+                SourceExpr="FSA-Created Entry";
+                Visible=FALSE }
+
+    { 1100528608;2;Field  ;
+                SourceExpr="Collective List No.";
+                Visible=FALSE }
+
+    { 1100528300;2;Field  ;
+                SourceExpr="Production Recording Date";
+                Visible=FALSE }
+
+    { 1100528301;2;Field  ;
+                SourceExpr="Unit Price Room";
+                Visible=FALSE }
+
+    { 1100529406;2;Field  ;
+                SourceExpr="Purchase Route Reference";
+                Visible=FALSE;
+                Editable=FALSE }
+
+    { 1100528803;2;Field  ;
+                SourceExpr="Alternative Bill-to Address";
+                Visible=FALSE }
+
+    { 1100527000;2;Field  ;
+                SourceExpr="Resource No.";
+                Visible=FALSE }
+
+    { 1100528503;2;Field  ;
+                SourceExpr="Resource Name";
+                Visible=FALSE }
+
+    { 1100527001;2;Field  ;
+                SourceExpr="Trade Association";
+                Visible=FALSE }
+
+    { 1100285003;2;Field  ;
+                CaptionML=[ENU=Price History (Customer) Found;
+                           SVE=Prishistorik (kund) finns];
+                SourceExpr="Price History Found";
+                Editable=FALSE }
+
+    { 1100285004;2;Field  ;
+                CaptionML=[ENU=Price History (Customer) Vendor No.;
+                           SVE=Prishistorik (kund) kataloglev.];
+                SourceExpr="Price History Vendor No.";
+                Editable=FALSE }
+
+    { 1100285001;2;Field  ;
+                CaptionML=[ENU=Customer price list;
+                           NOR=Kundeprisliste;
+                           SVE=Kundprislista];
+                SourceExpr="Price History PriceList";
+                TableRelation="Customer Price List" WHERE (Display Price List=CONST(Yes));
+                OnValidate=VAR
+                             lvPriceHistRec@1100285000 : Record 11012315;
+                             lvRefDate@1100285001 : Date;
+                             ItemTypeOpt@1100285002 : 'Item,Basic Item,Trade Item,Trade Vendor';
+                           BEGIN
+
+                             IF NOT ServOrderRec.GET("Service Order No.") THEN
+                               ServOrderRec.INIT;
+
+                             lvRefDate := ServOrderRec."Reference Date (Item)";
+                             IF lvRefDate = 0D THEN
+                               lvRefDate := TODAY;
+
+                             lvPriceHistRec.SETCURRENTKEY("Item Code", "Starting Date", "Price List Code");
+                             lvPriceHistRec.SETRANGE("Item Code", "Trade Item");
+                             lvPriceHistRec.SETRANGE("Starting Date", 0D, lvRefDate);
+                             lvPriceHistRec.SETRANGE("Price List Code", "Price History PriceList");
+
+                             IF NOT lvPriceHistRec.FINDLAST THEN BEGIN
+                               ERROR(STRSUBSTNO( Text100, "Trade Item", "Price History PriceList"));
+                               EXIT;
+                             END;
+
+                             SetManualPriceList("Price History PriceList");
+                             ValidateItem(ItemTypeOpt::"Trade Item");
+                             //FindSalesPrice;
+                           END;
+                            }
+
+    { 1100285302;2;Field  ;
+                Name=SalesMargin;
+                CaptionML=[ENU=Sales Margin %;
+                           NOR=Margin %;
+                           SVE=Marginal %];
+                SourceExpr=GetSalesMargin;
+                Style=Attention;
+                StyleExpr=NegBalMargin }
+
+    { 1101285001;2;Field  ;
+                SourceExpr="Work Order No.";
+                Visible=false }
+
+    { 1101285002;2;Field  ;
+                SourceExpr="Payment Code (SUP)" }
+
+    { 1100528502;2;Field  ;
+                SourceExpr="Supplying Company";
+                Visible=FALSE }
+
+    { 1100529500;2;Field  ;
+                SourceExpr="Sub-part of (Unit Price Code)";
+                Visible=FALSE }
+
+    { 1100528303;2;Field  ;
+                SourceExpr="Dsp Assignment Id";
+                Visible=false }
+
+    { 1100528304;2;Field  ;
+                SourceExpr="Service Order Object No.";
+                Visible=false }
+
+    { 1100528302;2;Field  ;
+                SourceExpr="Service Order Object Descr";
+                Visible=false }
+
+    { 1100528700;0;Container;
+                ContainerType=FactBoxArea }
+
+    { 1100285300;1;Part   ;
+                SubPageLink=Service Order No.=FIELD(Service Order No.),
+                            Line No.=FIELD(Line No.);
+                PagePartID=Page11128046;
+                PartType=Page }
+
+    { 1100528201;1;Part   ;
+                Name=ExtendedServiceOrderFB;
+                SubPageLink=No.=FIELD(Service Order No.),
+                            Department Filter=FIELD(Department Filter);
+                PagePartID=Page11127080;
+                PartType=Page }
+
+    { 1100528400;1;Part   ;
+                SubPageLink=No.=FIELD(Service Order No.),
+                            Department Filter=FIELD(Department Filter);
+                PagePartID=Page11126833;
+                PartType=Page }
+
+  }
+  CODE
+  {
+    VAR
+      Text009@1210190000 : TextConst 'ENU=Before editing text enter the line first;NOR=Velg rad f›r du redigerer tekst.;SVE=V„lj rad innan du redigerar text.';
+      ServSetup@1100485000 : Record 11012800;
+      EmplRec@1100485002 : Record 5200;
+      ServOrderRec@1100485005 : Record 11012823;
+      CostPlusRec@1100525002 : Record 11012825;
+      ServiceOrderNoEditable@19020415 : Boolean INDATASET;
+      AdditionalCostEditable@1210190001 : Boolean INDATASET;
+      CostComponentEditable@1210190003 : Boolean INDATASET;
+      RecipeHeader@1100529400 : Boolean INDATASET;
+      Text100@1100285000 : TextConst 'ENU=Trade Item code %1 not found in the selected customer price list %2;SVE=Anskaffningsartikel %1 finns inte i vald kundprislista %2';
+      InvoiceBaseAmountEnabled@1100525003 : Boolean INDATASET;
+      NegBalMargin@1100285300 : Boolean;
+      ChargeToPlantLocationEditable@1100529600 : Boolean;
+      GotSalesMargin@1100285100 : Decimal;
+
+    PROCEDURE EditText@8();
+    VAR
+      TextFrm@11012001 : Page 11012120;
+    BEGIN
+      IF "Line No." = 0 THEN
+        ERROR(Text009);
+
+      TextFrm.SetSelection(DATABASE::"Service Order Cost Plus Entry","Service Order No.",
+        '','','','','',"Line No.",0);
+
+      TextFrm.RUNMODAL;
+      CLEAR(TextFrm);
+      CurrPage.UPDATE(FALSE);
+    END;
+
+    PROCEDURE CompressLines@1210190000();
+    VAR
+      CompressCu@1210190000 : Codeunit 11012043;
+      lvCostPlusRec@1210190001 : Record 11012825;
+    BEGIN
+      CurrPage.SETSELECTIONFILTER(lvCostPlusRec);
+      CompressCu.ProcessServiceCostPlus(lvCostPlusRec);
+    END;
+
+    PROCEDURE SetInvoiceStatus@1100525000();
+    BEGIN
+      SetInvoiceStatus(Rec);
+    END;
+
+    PROCEDURE UpdateEditable@1100525003();
+    VAR
+      ServiceOrder@1210190000 : Record 11012823;
+    BEGIN
+      ServiceOrderNoEditable := "Service Order No." = '';
+      IF NOT ServiceOrder.GET("Service Order No.") THEN
+        ServiceOrder.INIT;
+
+      ChargeToPlantLocationEditable := ServiceOrder."Plant Location" <> '';
+
+      AdditionalCostEditable :=
+        ((ServiceOrder."Source Type" <> ServiceOrder."Source Type"::Direct) OR
+         (ServiceOrder."Service Contract No." = '')) AND
+         NOT ("Charge to Plant Location");
+
+      //DP01008.sn
+      InvoiceBaseAmountEnabled := TRUE;
+      IF (ServiceOrder."Base Service Order" = FALSE) AND (ServiceOrder."Collect Invoices By OLD" = ServiceOrder."Collect Invoices By OLD"::BaseOrder) THEN
+        InvoiceBaseAmountEnabled := FALSE;
+      //DP01008.en
+    END;
+
+    LOCAL PROCEDURE EmployeeNoOnAfterValidate@19040646();
+    BEGIN
+      CurrPage.SAVERECORD;  //db, 23-06-08 (CalcSurcharge)
+    END;
+
+    LOCAL PROCEDURE ItemNoOnAfterValidate@19061248();
+    BEGIN
+      CurrPage.SAVERECORD;  //db, 23-06-08 (CalcSurcharge)
+    END;
+
+    LOCAL PROCEDURE BasicItemOnAfterValidate@19054956();
+    BEGIN
+      CurrPage.SAVERECORD;  //db, 23-06-08 (CalcSurcharge)
+    END;
+
+    LOCAL PROCEDURE TradeItemOnAfterValidate@19075338();
+    BEGIN
+      CurrPage.SAVERECORD;  //db, 23-06-08 (CalcSurcharge)
+    END;
+
+    LOCAL PROCEDURE CostObjectOnAfterValidate@19061648();
+    BEGIN
+      CurrPage.SAVERECORD;  //db, 23-06-08 (CalcSurcharge)
+    END;
+
+    PROCEDURE HandleItemAssistEdit@1100528302(ZoomType@1210190000 : Integer);
+    BEGIN
+      AssistEditItemData(ZoomType);
+      IF ZoomType = -1 THEN
+        CurrPage.UPDATE(TRUE);
+    END;
+
+    PROCEDURE HandleRecipeLevel@1100529400();
+    BEGIN
+      ExpandRecipe;  //DP01183
+      CurrPage.UPDATE(TRUE);
+    END;
+
+    LOCAL PROCEDURE "-ITERO-"@1100285300();
+    BEGIN
+    END;
+
+    PROCEDURE GetSalesMargin@1100285101() : Decimal;
+    VAR
+      lvResult@1100285100 : Decimal;
+    BEGIN
+      //>> 160607 ITERO.SB RAD-008 Show margin on cost plus line
+      //>>#18897, "Cost Price" is often 0, if so use "Cost Price (LCY)" instead
+      // IF "Sales Price" <> 0 THEN BEGIN
+      //  lvResult := ("Sales Price"  - "Cost Price") / "Sales Price" * 100
+      // END ELSE BEGIN
+      //  lvResult := 0;
+      // END;
+
+      CASE TRUE OF
+        ("Sales Price" <> 0) AND ("Cost Price"<>0) :
+          lvResult := ("Sales Price"  - "Cost Price") / "Sales Price" * 100;
+
+        ("Cost Price" = 0) AND ("Sales Price (LCY)"<>0) :
+          lvResult := ("Sales Price (LCY)"  - "Cost Price (LCY)") / "Sales Price (LCY)" * 100;
+
+        ELSE
+          lvResult := 0;
+      END;
+      //<<#18897
+
+      EXIT(lvResult);
+      //<<
+    END;
+
+    BEGIN
+    {
+      150904 ITERO.AC Added fields "Price History Found", "Price History Vendor No." and "Price History PriceList"
+      151006 ITERO.SB Added filter for factbox "Settlement Sheet Margin SO"
+      151230 ITERO.SB Added action for creating invoices
+      160225 ITERO.SB Create cost plus entries when open page (Radiator rfc-182)
+      160603 ITERO.DL add 'show documents'
+      160607 ITERO.SB RAD-008 Show margin on cost plus line
+      160618 ITERO.SB RAD-023 Added action, invoice text
+      171017 ITERO.FH RADxxx False on "CurrPage.UPDATE" so no empty extra line is created
+      180914 ORANGO.DL #18897 change GetSalesMargin due to missing data in field "Cost Price"
+      190314 ORANGO.SB Feature #23422 New setup for create cost plus entr. when open page
+      190402 ORANGO.SB Feature #23703 Added ROT-page (actions)
+      200114 ORANGO.SB Support #26911 SRFC-1010 Added fields work order no., Payment Code (SUP)
+      200116 ORANGO.DL performace issues
+    }
+    END.
+  }
+}
+

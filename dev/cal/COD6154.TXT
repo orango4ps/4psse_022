@@ -1,0 +1,1717 @@
+OBJECT Codeunit 6154 API Webhook Notification Send
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+            IF NOT IsApiSubscriptionEnabled THEN BEGIN
+              SENDTRACETAG('000029V',APIWebhookCategoryLbl,VERBOSITY::Normal,DisabledSubscriptionMsg,DATACLASSIFICATION::SystemMetadata);
+              EXIT;
+            END;
+
+            Initialize;
+            DeleteExpiredSubscriptions;
+            DeleteObsoleteSubscriptions;
+            DeleteInactiveJobs;
+
+            IF NOT GetActiveSubscriptions THEN BEGIN
+              SENDTRACETAG('000029W',APIWebhookCategoryLbl,VERBOSITY::Normal,NoActiveSubscriptionsMsg,DATACLASSIFICATION::SystemMetadata);
+              EXIT;
+            END;
+
+            // Don't roll back the cleanup done
+            // and release any potentional locks before starting of processing
+            COMMIT;
+            ProcessNotifications;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      TempAPIWebhookNotificationAggr@1021 : TEMPORARY Record 2000000098;
+      TempAPIWebhookSubscription@1022 : TEMPORARY Record 2000000095;
+      TempSubscriptionIdBySubscriptionNoNameValueBuffer@1029 : TEMPORARY Record 823;
+      TempKeyFieldTypeBySubscriptionIdNameValueBuffer@1013 : TEMPORARY Record 823;
+      TempFirstModifiedDateTimeAPIWebhookNotification@1069 : TEMPORARY Record 2000000096;
+      TypeHelper@1000 : Codeunit 10;
+      APIWebhookNotificationMgt@1005 : Codeunit 6153;
+      ResourceUrlBySubscriptionIdDictionaryWrapper@1001 : Codeunit 708;
+      NotificationUrlBySubscriptionIdDictionaryWrapper@1026 : Codeunit 708;
+      SubscriptionsPerNotificationUrlDictionaryWrapper@1018 : Codeunit 708;
+      ProcessingDateTime@1020 : DateTime;
+      APIWebhookCategoryLbl@1009 : TextConst '@@@={Locked};ENU=AL API Webhook;NOR=AL API Webhook';
+      ActivityLogContextLbl@1090 : TextConst '@@@={Locked};ENU=APIWEBHOOK;NOR=APIWEBHOOK';
+      JobQueueCategoryCodeLbl@1088 : TextConst '@@@={Locked};ENU=APIWEBHOOK;NOR=APIWEBHOOK';
+      ProcessNotificationsMsg@1031 : TextConst '@@@={Locked};ENU=Process notifications. Processing time: %1.;NOR=Process notifications. Processing time: %1.';
+      DeleteProcessedNotificationsMsg@1058 : TextConst '@@@={Locked};ENU=Delete processed notifications. Processing time: %1.;NOR=Delete processed notifications. Processing time: %1.';
+      SavedFailedNotificationsMsg@1059 : TextConst '@@@={Locked};ENU=Saved failed notifications. Earliest scheduled time: %1.;NOR=Saved failed notifications. Earliest scheduled time: %1.';
+      SaveFailedNotificationMsg@1060 : TextConst '@@@={Locked};ENU=Save failed notification. Change type: %1. Last modification time: %2. Attempt number: %3.;NOR=Save failed notification. Change type: %1. Last modification time: %2. Attempt number: %3.';
+      GenerateAggregateNotificationMsg@1078 : TextConst '@@@={Locked};ENU=Generate aggregate notification. Change type: %1. Last modification time: %2.;NOR=Generate aggregate notification. Change type: %1. Last modification time: %2.';
+      MergeIntoExistingCollectionAggregateNotificationMsg@1079 : TextConst '@@@={Locked};ENU=Merge into existing collection aggregate notification. Change type: %1. Last modification time: %2.;NOR=Merge into existing collection aggregate notification. Change type: %1. Last modification time: %2.';
+      MergeAllIntoNewCollectionAggregateNotificationMsg@1081 : TextConst '@@@={Locked};ENU=Merge all notifications into new collection aggregate notification. Last modification time: %1.;NOR=Merge all notifications into new collection aggregate notification. Last modification time: %1.';
+      GenerateSingleAggregateNotificationMsg@1082 : TextConst '@@@={Locked};ENU=Generate single aggregate notification. Change type: %1. Last modification time: %2.;NOR=Generate single aggregate notification. Change type: %1. Last modification time: %2.';
+      SendNotificationsMsg@1032 : TextConst '@@@={Locked};ENU=Send notifications. Unique notification URL count: %1.;NOR=Send notifications. Unique notification URL count: %1.';
+      SendNotificationMsg@1007 : TextConst '@@@={Locked};ENU=Send notification. Notification URL number: %1.;NOR=Send notification. Notification URL number: %1.';
+      AllPayloadsEmptyMsg@1075 : TextConst '@@@={Locked};ENU=No one notification has been sent. All the payloads are empty.;NOR=No one notification has been sent. All the payloads are empty.';
+      SucceedNotificationMsg@1008 : TextConst '@@@={Locked};ENU=Notification has been sent successfully. Notification URL number: %1.;NOR=Notification has been sent successfully. Notification URL number: %1.';
+      FailedNotificationRescheduleMsg@1010 : TextConst '@@@={Locked};ENU=Server was not able to proceess the notification at this point. Notification URL number: %1. Response code %2. Notification is rescheduled.;NOR=Server was not able to proceess the notification at this point. Notification URL number: %1. Response code %2. Notification is rescheduled.';
+      FailedNotificationRejectedMsg@1012 : TextConst '@@@={Locked};ENU=Server has rejected the notification. Notification URL number: %1. Response code %2.;NOR=Server has rejected the notification. Notification URL number: %1. Response code %2.';
+      NoPendingNotificationsMsg@1014 : TextConst '@@@={Locked};ENU=No pending notifications.;NOR=No pending notifications.';
+      NoActiveSubscriptionsMsg@1028 : TextConst '@@@={Locked};ENU=No active subscriptions.;NOR=No active subscriptions.';
+      DisabledSubscriptionMsg@1027 : TextConst '@@@={Locked};ENU=API subscription disabled.;NOR=API subscription disabled.';
+      DeleteObsoleteSubscriptionMsg@1011 : TextConst '@@@={Locked};ENU=Delete obsolete subscription. Subscription expiration time: %1. Source table: %2.;NOR=Delete obsolete subscription. Subscription expiration time: %1. Source table: %2.';
+      DeleteExpiredSubscriptionMsg@1003 : TextConst '@@@={Locked};ENU=Delete expired subscription. Subscription expiration time: %1. Source table: %2.;NOR=Delete expired subscription. Subscription expiration time: %1. Source table: %2.';
+      DeleteInvalidSubscriptionsMsg@1057 : TextConst '@@@={Locked};ENU=Delete invalid subscriptions with numbers %1.;NOR=Delete invalid subscriptions with numbers %1.';
+      DeleteInvalidSubscriptionMsg@1030 : TextConst '@@@={Locked};ENU=Delete invalid subscription with number %1.;NOR=Delete invalid subscription with number %1.';
+      DeleteSubscriptionWithTooManyFailuresMsg@1002 : TextConst '@@@={Locked};ENU=Delete subscription with too many failures. Subscription expiration time: %1. Attempt number: %2.;NOR=Delete subscription with too many failures. Subscription expiration time: %1. Attempt number: %2.';
+      DeleteNotificationsForSubscriptionsMsg@1045 : TextConst '@@@={Locked};ENU=Delete notifications for subscriptions with numbers %1.;NOR=Delete notifications for subscriptions with numbers %1.';
+      DeleteNotificationsForSubscriptionMsg@1046 : TextConst '@@@={Locked};ENU=Delete notifications for subscription with number %1.;NOR=Delete notifications for subscription with number %1.';
+      UnexpectedNotificationChangeTypeMsg@1085 : TextConst '@@@={Locked};ENU=Unexpected notification change type. Expected change type: %1. Actual change type: %2.;NOR=Unexpected notification change type. Expected change type: %1. Actual change type: %2.';
+      ManyNotificationsOfTypeCollectionMsg@1025 : TextConst '@@@={Locked};ENU=Many notifications of type collection. Expected count: %1. Actual count: %2.;NOR=Many notifications of type collection. Expected count: %1. Actual count: %2.';
+      FewNotificationsOfTypeCollectionMsg@1074 : TextConst '@@@={Locked};ENU=Few notifications of type collection. Expected count: %1. Actual count: %2.;NOR=Few notifications of type collection. Expected count: %1. Actual count: %2.';
+      UpdateNotificationOfTypeCollectionMsg@1039 : TextConst '@@@={Locked};ENU=Update notification of type collection. First modification time: %1. Last modification time: %2.;NOR=Update notification of type collection. First modification time: %1. Last modification time: %2.';
+      MergeNotificationsOfTypeUpdatedMsg@1033 : TextConst '@@@={Locked};ENU=Merge notifications of type updated. Last modification time: %1.;NOR=Merge notifications of type updated. Last modification time: %1.';
+      MergeNotificationsIntoOneOfTypeCollectionMsg@1050 : TextConst '@@@={Locked};ENU=Merge %1 notifications into one of type collection. First modification time: %2. Last modification time: %3.;NOR=Merge %1 notifications into one of type collection. First modification time: %2. Last modification time: %3.';
+      EmptyLastModifiedDateTimeMsg@1006 : TextConst '@@@={Locked};ENU=Empty last modified time. Notification change type: %1. Attempt number: %2.;NOR=Empty last modified time. Notification change type: %1. Attempt number: %2.';
+      EmptyNotificationUrlErr@1015 : TextConst '@@@={Locked};ENU=Empty notification URL. Notification URL number: %1.;NOR=Empty notification URL. Notification URL number: %1.';
+      EmptySubscriptionIdErr@1036 : TextConst '@@@={Locked};ENU=Empty subscription ID. Subscription number %1.;NOR=Empty subscription ID. Subscription number %1.';
+      EmptyPayloadPerSubscriptionErr@1016 : TextConst '@@@={Locked};ENU=Empty payload per subscription. Subscription number %1.;NOR=Empty payload per subscription. Subscription number %1.';
+      EmptyPayloadPerNotificationUrlErr@1004 : TextConst '@@@={Locked};ENU=Empty payload per notification URL. Notification URL number: %1.;NOR=Empty payload per notification URL. Notification URL number: %1.';
+      CannotGetResponseErr@1019 : TextConst '@@@={Locked};ENU=Cannot get response. Notification URL number: %1.;NOR=Cannot get response. Notification URL number: %1.';
+      CannotFindCachedAggregateNotificationErr@1083 : TextConst '@@@={Locked};ENU=Cannot find cached aggregate notification for subscription ID.;NOR=Cannot find cached aggregate notification for subscription ID.';
+      CannotFindCachedCollectionAggregateNotificationMsg@1084 : TextConst '@@@={Locked};ENU=Cannot find cached collection aggregate notification for subscription ID.;NOR=Cannot find cached collection aggregate notification for subscription ID.';
+      CannotFindCachedSubscriptionIdForSubscriptionNumberErr@1017 : TextConst '@@@={Locked};ENU=Cannot find cached subscription ID for subscription number %1.;NOR=Cannot find cached subscription ID for subscription number %1.';
+      CannotFindCachedEntityKeyFieldTypeForSubscriptionIdErr@1041 : TextConst '@@@={Locked};ENU=Cannot find cached entity key field type for subscription ID.;NOR=Cannot find cached entity key field type for subscription ID.';
+      CannotFindCachedFirstModifiedTimeForSubscriptionIdMsg@1071 : TextConst '@@@={Locked};ENU=Cannot find cached first modified time for subscription ID.;NOR=Cannot find cached first modified time for subscription ID.';
+      CannotFindCachedResourceUrlForSubscriptionIdErr@1042 : TextConst '@@@={Locked};ENU=Cannot find cached resource URL for subscription ID.;NOR=Cannot find cached resource URL for subscription ID.';
+      CannotFindCachedNotificationUrlForSubscriptionIdErr@1043 : TextConst '@@@={Locked};ENU=Cannot find cached notification URL for subscription ID.;NOR=Cannot find cached notification URL for subscription ID.';
+      CannotFindCachedSubscriptionNumbersForNotificationUrlNumberErr@1044 : TextConst '@@@={Locked};ENU=Cannot find cached subscription numbers for notification URL number %1.;NOR=Cannot find cached subscription numbers for notification URL number %1.';
+      CannotFindCachedNotificationUrlForNotificationUrlNumberErr@1040 : TextConst '@@@={Locked};ENU=Cannot find cached notification URL for notification URL number %1.;NOR=Cannot find cached notification URL for notification URL number %1.';
+      FoundCachedSubscriptionIdForSubscriptionNumberMsg@1062 : TextConst '@@@={Locked};ENU=Found cached subscription ID for subscription number %1.;NOR=Found cached subscription ID for subscription number %1.';
+      FoundCachedEntityKeyFieldTypeForSubscriptionIdMsg@1063 : TextConst '@@@={Locked};ENU=Found cached entity key field type %1 for subscription ID.;NOR=Found cached entity key field type %1 for subscription ID.';
+      FoundCachedFirstModifiedTimeForSubscriptionIdMsg@1070 : TextConst '@@@={Locked};ENU=Found cached first modified time %1 for subscription ID.;NOR=Found cached first modified time %1 for subscription ID.';
+      FoundCachedResourceUrlForSubscriptionIdMsg@1064 : TextConst '@@@={Locked};ENU=Found cached resource URL for subscription ID.;NOR=Found cached resource URL for subscription ID.';
+      FoundCachedNotificationUrlForSubscriptionIdMsg@1065 : TextConst '@@@={Locked};ENU=Found cached notification URL for subscription ID.;NOR=Found cached notification URL for subscription ID.';
+      FoundCachedSubscriptionNumbersForNotificationUrlNumberMsg@1061 : TextConst '@@@={Locked};ENU=Found cached subscription numbers %1 for notification URL number %2.;NOR=Found cached subscription numbers %1 for notification URL number %2.';
+      CachedResourceUrlForSubscriptionIdMsg@1048 : TextConst '@@@={Locked};ENU=Resource URL for subscription ID is cached already. Subscription number: %1. Subscription expiration time: %2.;NOR=Resource URL for subscription ID is cached already. Subscription number: %1. Subscription expiration time: %2.';
+      CachedNotificationUrlForSubscriptionIdMsg@1049 : TextConst '@@@={Locked};ENU=Notification URL for subscription ID is cached already. Subscription number: %1. Subscription expiration time: %2.;NOR=Notification URL for subscription ID is cached already. Subscription number: %1. Subscription expiration time: %2.';
+      CachingSubscriptionIdForSubscriptionNumberMsg@1055 : TextConst '@@@={Locked};ENU=Caching subscription ID for subscription number %1. Subscription expiration time: %2.;NOR=Caching subscription ID for subscription number %1. Subscription expiration time: %2.';
+      CachingEntityKeyFieldTypeForSubscriptionIdMsg@1054 : TextConst '@@@={Locked};ENU=Caching entity key field type for subscription ID. Subscription number: %1. Subscription expiration time: %2.;NOR=Caching entity key field type for subscription ID. Subscription number: %1. Subscription expiration time: %2.';
+      CachingFirstModifiedTimeForSubscriptionIdMsg@1072 : TextConst '@@@={Locked};ENU=Caching first modified time for subscription ID. Old value: %1. New value: %2.;NOR=Caching first modified time for subscription ID. Old value: %1. New value: %2.';
+      NewFirstModifiedTimeLaterThanCachedMsg@1053 : TextConst '@@@={Locked};ENU=New first modified time %1 is later than cached time %2.;NOR=New first modified time %1 is later than cached time %2.';
+      CachingResourceUrlForSubscriptionIdMsg@1073 : TextConst '@@@={Locked};ENU=Caching resource URL for subscription ID. Subscription number: %1. Subscription expiration time: %2.;NOR=Caching resource URL for subscription ID. Subscription number: %1. Subscription expiration time: %2.';
+      CachingNotificationUrlForSubscriptionIdMsg@1052 : TextConst '@@@={Locked};ENU=Caching notification URL for subscription ID. Subscription number: %1. Subscription expiration time: %2.;NOR=Caching notification URL for subscription ID. Subscription number: %1. Subscription expiration time: %2.';
+      CachingSubscriptionNumbersForNotificationUrlMsg@1051 : TextConst '@@@={Locked};ENU=Adding subscription with number %1 to the cached list of subscription numbers by notification URL. Subscription expiration time: %2.;NOR=Adding subscription with number %1 to the cached list of subscription numbers by notification URL. Subscription expiration time: %2.';
+      CollectPayloadPerNotificationUrlMsg@1034 : TextConst '@@@={Locked};ENU=Collect payload per notification URL. Notification URL number: %1. Subscription numbers: %2.;NOR=Collect payload per notification URL. Notification URL number: %1. Subscription numbers: %2.';
+      CollectPayloadPerSubscriptionMsg@1035 : TextConst '@@@={Locked};ENU=Collect payload per subscription. Subscription number: %1.;NOR=Collect payload per subscription. Subscription number: %1.';
+      CollectNotificationPayloadMsg@1066 : TextConst '@@@={Locked};ENU=Collect notification payload. Subscription number: %1. Notification number: %2. Change type: %3. Last modification time: %4.;NOR=Collect notification payload. Subscription number: %1. Notification number: %2. Change type: %3. Last modification time: %4.';
+      CannotFindSubscriptionErr@1037 : TextConst '@@@={Locked};ENU=Cannot find subscription. Subscription number: %1.;NOR=Cannot find subscription. Subscription number: %1.';
+      NoNotificationsForSubscriptionMsg@1068 : TextConst '@@@={Locked};ENU=No notifications for subscription. Subscription number: %1.;NOR=No notifications for subscription. Subscription number: %1.';
+      RescheduleBeforeOrEqualToProcessingMsg@1038 : TextConst '@@@={Locked};ENU=Reschedule time %1 is before or equal to processing time %2.;NOR=Reschedule time %1 is before or equal to processing time %2.';
+      IncreaseAttemptNumberForSubscriptionsMsg@1047 : TextConst '@@@={Locked};ENU=Increase attempt number for notifications. Subscription numbers %1. Processing time: %2.;NOR=Increase attempt number for notifications. Subscription numbers %1. Processing time: %2.';
+      IncreaseAttemptNumberForSubscriptionMsg@1056 : TextConst '@@@={Locked};ENU=Increase attempt number for notifications. Subscription number %1. Processing time: %2.;NOR=Increase attempt number for notifications. Subscription number %1. Processing time: %2.';
+      IncreaseAttemptNumberForNotificationMsg@1067 : TextConst '@@@={Locked};ENU=Increase attempt number for notification. Subscription number: %1. Change type: %2. Last modification time: %3. Attempt number: %4. Scheduled time: %5. Processing time: %6.;NOR=Increase attempt number for notification. Subscription number: %1. Change type: %2. Last modification time: %3. Attempt number: %4. Scheduled time: %5. Processing time: %6.';
+      DoNotIncreaseAttemptNumberForNotificationMsg@1080 : TextConst '@@@={Locked};ENU=Do not increase attempt number for notification. Subscription number: %1. Change type: %2. Last modification time: %3. Attempt number: %4. Scheduled time: %5. Processing time: %6.;NOR=Do not increase attempt number for notification. Subscription number: %1. Change type: %2. Last modification time: %3. Attempt number: %4. Scheduled time: %5. Processing time: %6.';
+      SendingNotificationFailedErr@1023 : TextConst '@@@={Locked};ENU=Sending notification failed for %1. Response code: %2. Error message: %3. Error details: %4.;NOR=Sending notification failed for %1. Response code: %2. Error message: %3. Error details: %4.';
+      CannotInsertAggregateNotificationErr@1076 : TextConst '@@@={Locked};ENU=Cannot insert aggregate notification. Notification ID: %1. Change type: %2. Last modification time: %3. Attempt number: %4. Sending scheduled time: %5.;NOR=Cannot insert aggregate notification. Notification ID: %1. Change type: %2. Last modification time: %3. Attempt number: %4. Sending scheduled time: %5.';
+      SendingJobFailedMsg@1086 : TextConst '@@@={Locked};ENU=Sending job failed. Earliest start time: %1.;NOR=Sending job failed. Earliest start time: %1.';
+      FailedJobDetailsMsg@1077 : TextConst '@@@={Locked};ENU=Sending job failed. %1;NOR=Sending job failed. %1';
+      DeleteInactiveJobMsg@1087 : TextConst '@@@={Locked};ENU=Delete inactive job. Status: %1. Earliest start time: %2.;NOR=Delete inactive job. Status: %1. Earliest start time: %2.';
+      DeleteReadyButNotScheduledJobMsg@1024 : TextConst '@@@={Locked};ENU=Delete ready but not scheduled job. Earliest start time: %1.;NOR=Delete ready but not scheduled job. Earliest start time: %1.';
+      DeleteJobWithWrongParametersMsg@1089 : TextConst '@@@={Locked};ENU=Delete job with wrong parameters. Category: %1. Recurring: %2. Earliest start time: %3.;NOR=Delete job with wrong parameters. Category: %1. Recurring: %2. Earliest start time: %3.';
+      SubscriptionDetailsTxt@1094 : TextConst '@@@={Locked};ENU=Subscription ID: %1. Resource URL: %2. Notification URL: %3.;NOR=Subscription ID: %1. Resource URL: %2. Notification URL: %3.';
+      FailedNotificationDetailsTxt@1101 : TextConst '@@@={Locked};ENU=Notification URL: %1. Response code: %2. Error message: %3. Error details: %4.;NOR=Notification URL: %1. Response code: %2. Error message: %3. Error details: %4.';
+      DeleteInvalidSubscriptionTitleTxt@1095 : TextConst '@@@={Locked};ENU=Delete invalid subscription.;NOR=Delete invalid subscription.';
+      DeleteObsoleteSubscriptionTitleTxt@1096 : TextConst '@@@={Locked};ENU=Delete obsolete subscription.;NOR=Delete obsolete subscription.';
+      DeleteExpiredSubscriptionTitleTxt@1097 : TextConst '@@@={Locked};ENU=Delete expired subscription.;NOR=Delete expired subscription.';
+      DeleteSubscriptionWithTooManyFailuresTitleTxt@1098 : TextConst '@@@={Locked};ENU=Delete subscription with too many failures.;NOR=Delete subscription with too many failures.';
+      IncreaseAttemptNumberTitleTxt@1099 : TextConst '@@@={Locked};ENU=Increase attempt number.;NOR=Increase attempt number.';
+      NotificationFailedTitleTxt@1100 : TextConst '@@@={Locked};ENU=Notification failed.;NOR=Notification failed.';
+      JobFailedTitleTxt@1102 : TextConst '@@@={Locked};ENU=Job failed.;NOR=Job failed.';
+
+    LOCAL PROCEDURE Initialize@35();
+    BEGIN
+      TempAPIWebhookNotificationAggr.RESET;
+      TempAPIWebhookNotificationAggr.DELETEALL;
+      TempAPIWebhookNotificationAggr.SETCURRENTKEY("Subscription ID","Last Modified Date Time","Change Type");
+      TempAPIWebhookNotificationAggr.ASCENDING(TRUE);
+
+      TempAPIWebhookSubscription.RESET;
+      TempAPIWebhookSubscription.DELETEALL;
+      TempAPIWebhookSubscription.SETCURRENTKEY("Subscription Id");
+      TempAPIWebhookSubscription.ASCENDING(TRUE);
+
+      TempSubscriptionIdBySubscriptionNoNameValueBuffer.RESET;
+      TempSubscriptionIdBySubscriptionNoNameValueBuffer.DELETEALL;
+      TempSubscriptionIdBySubscriptionNoNameValueBuffer.SETCURRENTKEY(ID);
+      TempSubscriptionIdBySubscriptionNoNameValueBuffer.ASCENDING(TRUE);
+
+      TempKeyFieldTypeBySubscriptionIdNameValueBuffer.RESET;
+      TempKeyFieldTypeBySubscriptionIdNameValueBuffer.DELETEALL;
+      TempKeyFieldTypeBySubscriptionIdNameValueBuffer.SETCURRENTKEY(Name);
+      TempKeyFieldTypeBySubscriptionIdNameValueBuffer.ASCENDING(TRUE);
+
+      TempFirstModifiedDateTimeAPIWebhookNotification.RESET;
+      TempFirstModifiedDateTimeAPIWebhookNotification.DELETEALL;
+      TempFirstModifiedDateTimeAPIWebhookNotification.SETCURRENTKEY("Subscription ID");
+      TempFirstModifiedDateTimeAPIWebhookNotification.ASCENDING(TRUE);
+
+      ResourceUrlBySubscriptionIdDictionaryWrapper.Clear;
+      NotificationUrlBySubscriptionIdDictionaryWrapper.Clear;
+      SubscriptionsPerNotificationUrlDictionaryWrapper.Clear;
+
+      ProcessingDateTime := CURRENTDATETIME;
+    END;
+
+    LOCAL PROCEDURE ProcessNotifications@57();
+    VAR
+      RescheduleDateTime@1000 : DateTime;
+      AggregateNotificationsExist@1001 : Boolean;
+    BEGIN
+      SENDTRACETAG('00006ZT',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(ProcessNotificationsMsg,DateTimeToString(ProcessingDateTime)),DATACLASSIFICATION::SystemMetadata);
+      OnBeforeProcessNotifications;
+      TransferAggregateNotificationsToBuffer;
+      AggregateNotificationsExist := GenerateAggregateNotifications;
+      IF AggregateNotificationsExist THEN BEGIN
+        SendNotifications;
+        UpdateTablesFromBuffer(RescheduleDateTime);
+        IF RescheduleDateTime > ProcessingDateTime THEN
+          APIWebhookNotificationMgt.ScheduleJob(RescheduleDateTime)
+        ELSE
+          IF RescheduleDateTime <> 0DT THEN
+            SENDTRACETAG('00006ZU',APIWebhookCategoryLbl,VERBOSITY::Normal,
+              STRSUBSTNO(RescheduleBeforeOrEqualToProcessingMsg,
+                DateTimeToString(RescheduleDateTime),DateTimeToString(ProcessingDateTime)),
+              DATACLASSIFICATION::SystemMetadata);
+      END;
+      OnAfterProcessNotifications;
+    END;
+
+    LOCAL PROCEDURE SendNotifications@79();
+    VAR
+      SubscriptionNumbers@1000 : Text;
+      NotificationUrl@1004 : Text;
+      PayloadPerNotificationUrl@1002 : Text;
+      NotificationUrlCount@1001 : Integer;
+      I@1007 : Integer;
+      Reschedule@1003 : Boolean;
+      HasPayload@1005 : Boolean;
+    BEGIN
+      NotificationUrlCount := SubscriptionsPerNotificationUrlDictionaryWrapper.Count;
+      SENDTRACETAG('00006ZV',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(SendNotificationsMsg,NotificationUrlCount),
+        DATACLASSIFICATION::SystemMetadata);
+      FOR I := 1 TO NotificationUrlCount DO
+        IF GetSubscriptionsPerNotificationUrl(I,NotificationUrl,SubscriptionNumbers) THEN BEGIN
+          PayloadPerNotificationUrl := GetPayloadPerNotificationUrl(I,SubscriptionNumbers);
+          IF NOT HasPayload THEN
+            HasPayload := PayloadPerNotificationUrl <> '';
+          IF SendNotification(I,NotificationUrl,PayloadPerNotificationUrl,Reschedule) THEN
+            DeleteNotifications(SubscriptionNumbers)
+          ELSE
+            IF Reschedule THEN
+              IncreaseAttemptNumber(SubscriptionNumbers)
+            ELSE BEGIN
+              DeleteNotifications(SubscriptionNumbers);
+              DeleteInvalidSubscriptions(SubscriptionNumbers);
+            END;
+        END;
+      IF NOT HasPayload THEN
+        SENDTRACETAG('0000735',APIWebhookCategoryLbl,VERBOSITY::Warning,
+          AllPayloadsEmptyMsg,DATACLASSIFICATION::SystemMetadata);
+    END;
+
+    LOCAL PROCEDURE GetPayloadPerNotificationUrl@62(NotificationUrlNumber@1009 : Integer;SubscriptionNumbers@1001 : Text) : Text;
+    VAR
+      JSONManagement@1005 : Codeunit 5459;
+      JsonArray@1003 : DotNet "'Newtonsoft.Json, Version=9.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed'.Newtonsoft.Json.Linq.JArray";
+      SubscriptionNumber@1002 : Text;
+      RemainingSubscriptionNumbers@1000 : Text;
+      SubscriptionId@1007 : Text;
+      PayloadPerNotificationUrl@1006 : Text;
+      I@1004 : Integer;
+      N@1008 : Integer;
+    BEGIN
+      SENDTRACETAG('00006ZX',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(CollectPayloadPerNotificationUrlMsg,NotificationUrlNumber,SubscriptionNumbers),
+        DATACLASSIFICATION::SystemMetadata);
+
+      JSONManagement.InitializeEmptyCollection;
+      JSONManagement.GetJsonArray(JsonArray);
+
+      RemainingSubscriptionNumbers := SubscriptionNumbers;
+      N := STRLEN(RemainingSubscriptionNumbers) DIV 2;
+      FOR I := 0 TO N DO
+        IF STRLEN(RemainingSubscriptionNumbers) > 0 THEN BEGIN
+          SubscriptionNumber := GetNextToken(RemainingSubscriptionNumbers,',');
+          SubscriptionId := GetSubscriptionIdBySubscriptionNumber(SubscriptionNumber);
+          AddPayloadPerSubscription(JSONManagement,JsonArray,SubscriptionId,SubscriptionNumber);
+        END ELSE
+          I := N;
+
+      IF JsonArray.Count = 0 THEN BEGIN
+        SENDTRACETAG('000029X',APIWebhookCategoryLbl,VERBOSITY::Normal,
+          STRSUBSTNO(EmptyPayloadPerNotificationUrlErr,NotificationUrlNumber),
+          DATACLASSIFICATION::SystemMetadata);
+        EXIT('')
+      END;
+
+      PayloadPerNotificationUrl := JsonArray.ToString;
+      FormatPayloadPerNotificationUrl(PayloadPerNotificationUrl);
+      EXIT(PayloadPerNotificationUrl);
+    END;
+
+    LOCAL PROCEDURE AddPayloadPerSubscription@69(VAR JSONManagement@1004 : Codeunit 5459;VAR JsonArray@1002 : DotNet "'Newtonsoft.Json, Version=9.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed'.Newtonsoft.Json.Linq.JArray";SubscriptionId@1001 : Text;SubscriptionNumber@1005 : Text);
+    VAR
+      JsonObject@1003 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      I@1000 : Integer;
+    BEGIN
+      SENDTRACETAG('00006ZY',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(CollectPayloadPerSubscriptionMsg,SubscriptionNumber),DATACLASSIFICATION::SystemMetadata);
+
+      IF SubscriptionId = '' THEN BEGIN
+        SENDTRACETAG('00006ZZ',APIWebhookCategoryLbl,VERBOSITY::Error,
+          STRSUBSTNO(EmptySubscriptionIdErr,SubscriptionNumber),DATACLASSIFICATION::SystemMetadata);
+        EXIT;
+      END;
+
+      ClearFiltersFromNotificationsBuffer;
+      TempAPIWebhookNotificationAggr.SETRANGE("Subscription ID",SubscriptionId);
+      IF NOT TempAPIWebhookNotificationAggr.FIND('-') THEN BEGIN
+        SENDTRACETAG('0000700',APIWebhookCategoryLbl,VERBOSITY::Normal,
+          STRSUBSTNO(NoNotificationsForSubscriptionMsg,SubscriptionNumber),DATACLASSIFICATION::SystemMetadata);
+        EXIT;
+      END;
+
+      // We have two rows for a notification of change type Collection. We take the last one.
+      IF TempAPIWebhookNotificationAggr."Change Type" = TempAPIWebhookNotificationAggr."Change Type"::Collection THEN
+        TempAPIWebhookNotificationAggr.FINDLAST;
+
+      REPEAT
+        IF GetEntityJObject(SubscriptionNumber,TempAPIWebhookNotificationAggr,JsonObject) THEN BEGIN
+          JSONManagement.AddJObjectToJArray(JsonArray,JsonObject);
+          I += 1;
+          SENDTRACETAG('00006ZW',APIWebhookCategoryLbl,VERBOSITY::Normal,
+            STRSUBSTNO(CollectNotificationPayloadMsg,SubscriptionNumber,I,TempAPIWebhookNotificationAggr."Change Type",
+              DateTimeToString(TempAPIWebhookNotificationAggr."Last Modified Date Time")),
+            DATACLASSIFICATION::SystemMetadata);
+        END;
+      UNTIL TempAPIWebhookNotificationAggr.NEXT = 0;
+
+      IF I > 0 THEN
+        EXIT;
+
+      SENDTRACETAG('000029Y',APIWebhookCategoryLbl,VERBOSITY::Error,
+        STRSUBSTNO(EmptyPayloadPerSubscriptionErr,SubscriptionNumber),DATACLASSIFICATION::SystemMetadata);
+    END;
+
+    LOCAL PROCEDURE FormatPayloadPerNotificationUrl@75(VAR PayloadPerNotificationUrl@1009 : Text);
+    VAR
+      JSONManagement@1011 : Codeunit 5459;
+      JsonObject@1010 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      JsonArray@1002 : DotNet "'Newtonsoft.Json, Version=9.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed'.Newtonsoft.Json.Linq.JArray";
+    BEGIN
+      IF PayloadPerNotificationUrl = '' THEN
+        EXIT;
+      JSONManagement.InitializeCollection(PayloadPerNotificationUrl);
+      JSONManagement.GetJsonArray(JsonArray);
+      JSONManagement.InitializeEmptyObject;
+      JSONManagement.GetJSONObject(JsonObject);
+      JSONManagement.AddJArrayToJObject(JsonObject,'value',JsonArray);
+      PayloadPerNotificationUrl := JsonObject.ToString;
+    END;
+
+    LOCAL PROCEDURE GetPendingNotifications@3(VAR APIWebhookNotification@1000 : Record 2000000096;ProcessingDateTime@1001 : DateTime) : Boolean;
+    BEGIN
+      APIWebhookNotification.SETCURRENTKEY("Subscription ID","Last Modified Date Time","Change Type");
+      APIWebhookNotification.ASCENDING(TRUE);
+      APIWebhookNotification.SETFILTER("Last Modified Date Time",'<=%1',ProcessingDateTime);
+      EXIT(APIWebhookNotification.FINDSET);
+    END;
+
+    LOCAL PROCEDURE TransferAggregateNotificationsToBuffer@27();
+    VAR
+      APIWebhookNotificationAggr@1001 : Record 2000000098;
+      EmptyGuid@1000 : GUID;
+    BEGIN
+      APIWebhookNotificationAggr.SETFILTER(ID,'<>%1',EmptyGuid);
+      APIWebhookNotificationAggr.SETFILTER("Subscription ID",'<>%1','');
+      IF APIWebhookNotificationAggr.FINDSET THEN
+        REPEAT
+          TempAPIWebhookNotificationAggr.TRANSFERFIELDS(APIWebhookNotificationAggr,TRUE);
+          IF NOT TempAPIWebhookNotificationAggr.INSERT THEN BEGIN
+            SENDTRACETAG('0000736',APIWebhookCategoryLbl,VERBOSITY::Error,
+              STRSUBSTNO(CannotInsertAggregateNotificationErr,
+                TempAPIWebhookNotificationAggr.ID,TempAPIWebhookNotificationAggr."Change Type",
+                DateTimeToString(TempAPIWebhookNotificationAggr."Last Modified Date Time"),
+                TempAPIWebhookNotificationAggr."Attempt No.",
+                DateTimeToString(TempAPIWebhookNotificationAggr."Sending Scheduled Date Time")),
+              DATACLASSIFICATION::SystemMetadata);
+            EXIT;
+          END;
+        UNTIL APIWebhookNotificationAggr.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE GenerateAggregateNotifications@9() : Boolean;
+    VAR
+      APIWebhookNotification@1014 : Record 2000000096;
+      PendingNotificationsExist@1018 : Boolean;
+      NewNotificationsExist@1019 : Boolean;
+    BEGIN
+      ClearFiltersFromNotificationsBuffer;
+      PendingNotificationsExist := TempAPIWebhookNotificationAggr.FINDFIRST;
+      NewNotificationsExist := GetPendingNotifications(APIWebhookNotification,ProcessingDateTime);
+
+      IF (NOT PendingNotificationsExist) AND (NOT NewNotificationsExist) THEN BEGIN
+        SENDTRACETAG('0000298',APIWebhookCategoryLbl,VERBOSITY::Normal,NoPendingNotificationsMsg,DATACLASSIFICATION::SystemMetadata);
+        EXIT(FALSE);
+      END;
+
+      IF PendingNotificationsExist THEN
+        CollectFirstModifiedTimeForPendingCollectionNotifications;
+
+      IF NewNotificationsExist THEN
+        REPEAT
+          GenerateAggregateNotification(APIWebhookNotification);
+        UNTIL APIWebhookNotification.NEXT = 0;
+
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE GenerateAggregateNotification@63(VAR APIWebhookNotification@1014 : Record 2000000096);
+    VAR
+      TooManyNotifications@1000 : Boolean;
+    BEGIN
+      SENDTRACETAG('000073O',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(GenerateAggregateNotificationMsg,
+          APIWebhookNotification."Change Type",DateTimeToString(APIWebhookNotification."Last Modified Date Time")),
+        DATACLASSIFICATION::SystemMetadata);
+
+      ClearFiltersFromNotificationsBuffer;
+      TempAPIWebhookNotificationAggr.SETRANGE("Subscription ID",APIWebhookNotification."Subscription ID");
+      IF TempAPIWebhookNotificationAggr.FINDLAST THEN BEGIN
+        IF TempAPIWebhookNotificationAggr."Change Type" = TempAPIWebhookNotificationAggr."Change Type"::Collection THEN BEGIN
+          MergeIntoExistingCollectionAggregateNotification(APIWebhookNotification);
+          EXIT;
+        END;
+
+        IF APIWebhookNotification."Change Type" = APIWebhookNotification."Change Type"::Updated THEN BEGIN
+          IF MergeIntoExistingUpdatedAggregateNotification(APIWebhookNotification) THEN
+            EXIT;
+        END;
+      END;
+
+      GenerateSingleAggregateNotification(APIWebhookNotification,TooManyNotifications);
+
+      IF TooManyNotifications THEN
+        MergeAllIntoNewCollectionAggregateNotification(APIWebhookNotification);
+    END;
+
+    LOCAL PROCEDURE CollectFirstModifiedTimeForPendingCollectionNotifications@47();
+    VAR
+      PrevSubscriptionId@1000 : Text;
+    BEGIN
+      ClearFiltersFromNotificationsBuffer;
+      TempAPIWebhookNotificationAggr.SETRANGE("Change Type",TempAPIWebhookNotificationAggr."Change Type"::Collection);
+      IF NOT TempAPIWebhookNotificationAggr.FINDFIRST THEN
+        EXIT;
+
+      // We have two rows for a notification of change type Collection. We collect the date from the first one.
+      REPEAT
+        IF TempAPIWebhookNotificationAggr."Subscription ID" <> PrevSubscriptionId THEN BEGIN
+          IF TempAPIWebhookNotificationAggr."Subscription ID" <> '' THEN
+            CollectFirstModifiedTimeBySubscriptionId(
+              TempAPIWebhookNotificationAggr."Subscription ID",TempAPIWebhookNotificationAggr."Last Modified Date Time");
+          PrevSubscriptionId := TempAPIWebhookNotificationAggr."Subscription ID";
+        END;
+      UNTIL TempAPIWebhookNotificationAggr.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE MergeIntoExistingCollectionAggregateNotification@40(VAR APIWebhookNotification@1014 : Record 2000000096);
+    VAR
+      LastAPIWebhookNotification@1016 : Record 2000000096;
+      CountPerSubscription@1001 : Integer;
+      FirstNotificationId@1003 : GUID;
+      LastNotificationId@1005 : GUID;
+      FirstModifiedDateTime@1002 : DateTime;
+      LastModifiedDateTime@1004 : DateTime;
+    BEGIN
+      SENDTRACETAG('000073P',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(MergeIntoExistingCollectionAggregateNotificationMsg,
+          APIWebhookNotification."Change Type",DateTimeToString(APIWebhookNotification."Last Modified Date Time")),
+        DATACLASSIFICATION::SystemMetadata);
+
+      ClearFiltersFromNotificationsBuffer;
+      TempAPIWebhookNotificationAggr.SETRANGE("Subscription ID",APIWebhookNotification."Subscription ID");
+      IF NOT TempAPIWebhookNotificationAggr.FINDLAST THEN BEGIN
+        SENDTRACETAG('000073Q',APIWebhookCategoryLbl,VERBOSITY::Error,CannotFindCachedCollectionAggregateNotificationMsg,
+          DATACLASSIFICATION::SystemMetadata);
+        EXIT;
+      END;
+      IF TempAPIWebhookNotificationAggr."Change Type" <> TempAPIWebhookNotificationAggr."Change Type"::Collection THEN BEGIN
+        SENDTRACETAG('000073R',APIWebhookCategoryLbl,VERBOSITY::Error,CannotFindCachedCollectionAggregateNotificationMsg,
+          DATACLASSIFICATION::SystemMetadata);
+        EXIT;
+      END;
+
+      LastNotificationId := TempAPIWebhookNotificationAggr.ID;
+      CountPerSubscription := TempAPIWebhookNotificationAggr.COUNT;
+
+      GetLastNotification(LastAPIWebhookNotification,APIWebhookNotification."Subscription ID");
+      LastModifiedDateTime := LastAPIWebhookNotification."Last Modified Date Time";
+      TempAPIWebhookNotificationAggr."Last Modified Date Time" := LastModifiedDateTime;
+      TempAPIWebhookNotificationAggr.MODIFY(TRUE);
+
+      TempAPIWebhookNotificationAggr.FINDFIRST;
+      IF TempAPIWebhookNotificationAggr."Change Type" <> TempAPIWebhookNotificationAggr."Change Type"::Collection THEN BEGIN
+        SENDTRACETAG('000073S',APIWebhookCategoryLbl,VERBOSITY::Warning,
+          STRSUBSTNO(UnexpectedNotificationChangeTypeMsg,
+            TempAPIWebhookNotificationAggr."Change Type"::Collection,TempAPIWebhookNotificationAggr."Change Type"),
+          DATACLASSIFICATION::SystemMetadata);
+        TempAPIWebhookNotificationAggr."Change Type" := TempAPIWebhookNotificationAggr."Change Type"::Collection;
+        TempAPIWebhookNotificationAggr.MODIFY(TRUE);
+      END;
+
+      FirstNotificationId := TempAPIWebhookNotificationAggr.ID;
+      IF TempAPIWebhookNotificationAggr."Last Modified Date Time" <> 0DT THEN
+        IF LastAPIWebhookNotification."Change Type" <> LastAPIWebhookNotification."Change Type"::Deleted THEN
+          IF NOT HasNotificationOnDelete(APIWebhookNotification."Subscription ID") THEN
+            FirstModifiedDateTime := TempAPIWebhookNotificationAggr."Last Modified Date Time";
+
+      IF TempAPIWebhookNotificationAggr."Last Modified Date Time" <> FirstModifiedDateTime THEN BEGIN
+        TempAPIWebhookNotificationAggr."Last Modified Date Time" := FirstModifiedDateTime;
+        TempAPIWebhookNotificationAggr.MODIFY(TRUE);
+      END;
+
+      // We should have two rows for a notification of change type Collection.
+      IF CountPerSubscription <> 2 THEN
+        IF CountPerSubscription = 1 THEN BEGIN
+          SENDTRACETAG('000072W',APIWebhookCategoryLbl,VERBOSITY::Warning,
+            STRSUBSTNO(FewNotificationsOfTypeCollectionMsg,2,CountPerSubscription),DATACLASSIFICATION::SystemMetadata);
+          FirstModifiedDateTime := 0DT;
+          TempAPIWebhookNotificationAggr.ID := CREATEGUID;
+          TempAPIWebhookNotificationAggr."Last Modified Date Time" := FirstModifiedDateTime;
+          IF NOT TempAPIWebhookNotificationAggr.INSERT THEN BEGIN
+            SENDTRACETAG('0000737',APIWebhookCategoryLbl,VERBOSITY::Error,
+              STRSUBSTNO(CannotInsertAggregateNotificationErr,
+                TempAPIWebhookNotificationAggr.ID,TempAPIWebhookNotificationAggr."Change Type",
+                DateTimeToString(TempAPIWebhookNotificationAggr."Last Modified Date Time"),
+                TempAPIWebhookNotificationAggr."Attempt No.",
+                DateTimeToString(TempAPIWebhookNotificationAggr."Sending Scheduled Date Time")),
+              DATACLASSIFICATION::SystemMetadata);
+            EXIT;
+          END;
+        END ELSE BEGIN
+          SENDTRACETAG('00006P2',APIWebhookCategoryLbl,VERBOSITY::Warning,
+            STRSUBSTNO(ManyNotificationsOfTypeCollectionMsg,2,CountPerSubscription),DATACLASSIFICATION::SystemMetadata);
+          TempAPIWebhookNotificationAggr.SETFILTER(ID,'<>%1&<>%2',FirstNotificationId,LastNotificationId);
+          TempAPIWebhookNotificationAggr.DELETEALL;
+        END;
+
+      SENDTRACETAG('0000712',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(UpdateNotificationOfTypeCollectionMsg,
+          DateTimeToString(FirstModifiedDateTime),DateTimeToString(LastModifiedDateTime)),
+        DATACLASSIFICATION::SystemMetadata);
+
+      CollectFirstModifiedTimeBySubscriptionId(APIWebhookNotification."Subscription ID",FirstModifiedDateTime);
+      APIWebhookNotification := LastAPIWebhookNotification;
+    END;
+
+    LOCAL PROCEDURE MergeIntoExistingUpdatedAggregateNotification@46(VAR APIWebhookNotification@1014 : Record 2000000096) : Boolean;
+    BEGIN
+      ClearFiltersFromNotificationsBuffer;
+      TempAPIWebhookNotificationAggr.SETRANGE("Subscription ID",APIWebhookNotification."Subscription ID");
+      TempAPIWebhookNotificationAggr.SETRANGE("Entity Key Value",APIWebhookNotification."Entity Key Value");
+      IF TempAPIWebhookNotificationAggr.FINDLAST THEN
+        IF TempAPIWebhookNotificationAggr."Change Type" = TempAPIWebhookNotificationAggr."Change Type"::Updated THEN BEGIN
+          SENDTRACETAG('0000713',APIWebhookCategoryLbl,VERBOSITY::Normal,
+            STRSUBSTNO(MergeNotificationsOfTypeUpdatedMsg,DateTimeToString(APIWebhookNotification."Last Modified Date Time")),
+            DATACLASSIFICATION::SystemMetadata);
+          TempAPIWebhookNotificationAggr."Last Modified Date Time" := APIWebhookNotification."Last Modified Date Time";
+          TempAPIWebhookNotificationAggr.MODIFY(TRUE);
+          EXIT(TRUE);
+        END;
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE GenerateSingleAggregateNotification@33(VAR APIWebhookNotification@1014 : Record 2000000096;VAR TooManyNotifications@1001 : Boolean);
+    VAR
+      CountPerSubscription@1000 : Integer;
+    BEGIN
+      ClearFiltersFromNotificationsBuffer;
+      TempAPIWebhookNotificationAggr.SETRANGE("Subscription ID",APIWebhookNotification."Subscription ID");
+      CountPerSubscription := TempAPIWebhookNotificationAggr.COUNT;
+      TooManyNotifications := CountPerSubscription > GetMaxNumberOfNotifications - 1;
+      IF TooManyNotifications THEN
+        EXIT;
+
+      SENDTRACETAG('000073T',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(GenerateSingleAggregateNotificationMsg,TempAPIWebhookNotificationAggr."Change Type",
+          DateTimeToString(TempAPIWebhookNotificationAggr."Last Modified Date Time")),
+        DATACLASSIFICATION::SystemMetadata);
+
+      TempAPIWebhookNotificationAggr.TRANSFERFIELDS(APIWebhookNotification,TRUE);
+      IF NOT TempAPIWebhookNotificationAggr.INSERT THEN BEGIN
+        SENDTRACETAG('0000738',APIWebhookCategoryLbl,VERBOSITY::Error,
+          STRSUBSTNO(CannotInsertAggregateNotificationErr,
+            TempAPIWebhookNotificationAggr.ID,TempAPIWebhookNotificationAggr."Change Type",
+            DateTimeToString(TempAPIWebhookNotificationAggr."Last Modified Date Time"),
+            TempAPIWebhookNotificationAggr."Attempt No.",
+            DateTimeToString(TempAPIWebhookNotificationAggr."Sending Scheduled Date Time")),
+          DATACLASSIFICATION::SystemMetadata);
+        EXIT;
+      END;
+    END;
+
+    LOCAL PROCEDURE MergeAllIntoNewCollectionAggregateNotification@21(VAR APIWebhookNotification@1014 : Record 2000000096);
+    VAR
+      FirstNotificationId@1003 : GUID;
+      FirstModifiedDateTime@1002 : DateTime;
+      LastModifiedDateTime@1000 : DateTime;
+      CountPerSubscription@1001 : Integer;
+    BEGIN
+      SENDTRACETAG('000073U',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(MergeAllIntoNewCollectionAggregateNotificationMsg,
+          DateTimeToString(APIWebhookNotification."Last Modified Date Time")),
+        DATACLASSIFICATION::SystemMetadata);
+      ClearFiltersFromNotificationsBuffer;
+      TempAPIWebhookNotificationAggr.SETRANGE("Subscription ID",APIWebhookNotification."Subscription ID");
+      IF NOT TempAPIWebhookNotificationAggr.FINDFIRST THEN BEGIN
+        SENDTRACETAG('000073V',APIWebhookCategoryLbl,VERBOSITY::Error,CannotFindCachedAggregateNotificationErr,
+          DATACLASSIFICATION::SystemMetadata);
+        EXIT;
+      END;
+      CountPerSubscription := TempAPIWebhookNotificationAggr.COUNT;
+      FirstNotificationId := TempAPIWebhookNotificationAggr.ID;
+      FirstModifiedDateTime := 0DT;
+      IF TempAPIWebhookNotificationAggr."Last Modified Date Time" <> 0DT THEN
+        IF APIWebhookNotification."Change Type" <> APIWebhookNotification."Change Type"::Deleted THEN
+          IF NOT HasNotificationOnDelete(APIWebhookNotification."Subscription ID") THEN
+            FirstModifiedDateTime := TempAPIWebhookNotificationAggr."Last Modified Date Time";
+      TempAPIWebhookNotificationAggr."Last Modified Date Time" := FirstModifiedDateTime;
+      TempAPIWebhookNotificationAggr."Change Type" := TempAPIWebhookNotificationAggr."Change Type"::Collection;
+      TempAPIWebhookNotificationAggr.MODIFY(TRUE);
+
+      LastModifiedDateTime := APIWebhookNotification."Last Modified Date Time";
+
+      SENDTRACETAG('0000714',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(MergeNotificationsIntoOneOfTypeCollectionMsg,CountPerSubscription,
+          DateTimeToString(FirstModifiedDateTime),DateTimeToString(LastModifiedDateTime)),
+        DATACLASSIFICATION::SystemMetadata);
+
+      CollectFirstModifiedTimeBySubscriptionId(APIWebhookNotification."Subscription ID",FirstModifiedDateTime);
+
+      ClearFiltersFromNotificationsBuffer;
+      TempAPIWebhookNotificationAggr.SETRANGE("Subscription ID",APIWebhookNotification."Subscription ID");
+      TempAPIWebhookNotificationAggr.SETFILTER(ID,'<>%1',FirstNotificationId);
+      TempAPIWebhookNotificationAggr.DELETEALL;
+
+      TempAPIWebhookNotificationAggr.TRANSFERFIELDS(APIWebhookNotification,TRUE);
+      TempAPIWebhookNotificationAggr."Last Modified Date Time" := LastModifiedDateTime;
+      TempAPIWebhookNotificationAggr."Change Type" := TempAPIWebhookNotificationAggr."Change Type"::Collection;
+      IF NOT TempAPIWebhookNotificationAggr.INSERT THEN BEGIN
+        SENDTRACETAG('0000739',APIWebhookCategoryLbl,VERBOSITY::Error,
+          STRSUBSTNO(CannotInsertAggregateNotificationErr,
+            TempAPIWebhookNotificationAggr.ID,TempAPIWebhookNotificationAggr."Change Type",
+            DateTimeToString(TempAPIWebhookNotificationAggr."Last Modified Date Time"),
+            TempAPIWebhookNotificationAggr."Attempt No.",
+            DateTimeToString(TempAPIWebhookNotificationAggr."Sending Scheduled Date Time")),
+          DATACLASSIFICATION::SystemMetadata);
+        EXIT;
+      END;
+    END;
+
+    LOCAL PROCEDURE GetLastNotification@20(VAR APIWebhookNotification@1001 : Record 2000000096;SubscriptionId@1000 : Text[150]);
+    BEGIN
+      APIWebhookNotification.SETRANGE("Subscription ID",SubscriptionId);
+      APIWebhookNotification.SETCURRENTKEY("Last Modified Date Time","Change Type");
+      APIWebhookNotification.ASCENDING(TRUE);
+      APIWebhookNotification.FINDLAST;
+    END;
+
+    LOCAL PROCEDURE HasNotificationOnDelete@23(SubscriptionId@1000 : Text[150]) : Boolean;
+    VAR
+      APIWebhookNotification@1016 : Record 2000000096;
+    BEGIN
+      APIWebhookNotification.SETRANGE("Subscription ID",SubscriptionId);
+      APIWebhookNotification.SETRANGE("Change Type",APIWebhookNotification."Change Type"::Deleted);
+      EXIT(NOT APIWebhookNotification.ISEMPTY);
+    END;
+
+    LOCAL PROCEDURE CollectValuesInDictionaries@89(VAR APIWebhookSubscription@1000 : Record 2000000095;SubscriptionNumber@1001 : Integer);
+    BEGIN
+      CollectSubscriptionIdBySubscriptionNumber(APIWebhookSubscription,SubscriptionNumber);
+      CollectKeyFieldTypeBySubscriptionId(APIWebhookSubscription,SubscriptionNumber);
+      CollectResourceUrlBySubscriptionId(APIWebhookSubscription,SubscriptionNumber);
+      CollectNotificationUrlBySubscriptionId(APIWebhookSubscription,SubscriptionNumber);
+      CollectSubscriptionsPerNotificationUrl(APIWebhookSubscription,SubscriptionNumber);
+    END;
+
+    LOCAL PROCEDURE CollectSubscriptionIdBySubscriptionNumber@22(VAR APIWebhookSubscription@1000 : Record 2000000095;SubscriptionNumber@1003 : Integer);
+    BEGIN
+      SENDTRACETAG('0000701',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(CachingSubscriptionIdForSubscriptionNumberMsg,SubscriptionNumber,
+          DateTimeToString(APIWebhookSubscription."Expiration Date Time")),
+        DATACLASSIFICATION::SystemMetadata);
+      CLEAR(TempSubscriptionIdBySubscriptionNoNameValueBuffer);
+      TempSubscriptionIdBySubscriptionNoNameValueBuffer.ID := SubscriptionNumber;
+      TempSubscriptionIdBySubscriptionNoNameValueBuffer.Name := '';
+      TempSubscriptionIdBySubscriptionNoNameValueBuffer.Value := APIWebhookSubscription."Subscription Id";
+      TempSubscriptionIdBySubscriptionNoNameValueBuffer.INSERT;
+    END;
+
+    LOCAL PROCEDURE CollectKeyFieldTypeBySubscriptionId@39(VAR APIWebhookSubscription@1004 : Record 2000000095;SubscriptionNumber@1005 : Integer);
+    VAR
+      ApiWebhookEntity@1000 : Record 2000000097;
+      RecRef@1002 : RecordRef;
+      FieldRef@1003 : FieldRef;
+      KeyFieldType@1001 : Text;
+    BEGIN
+      SENDTRACETAG('0000702',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(CachingEntityKeyFieldTypeForSubscriptionIdMsg,SubscriptionNumber,
+          DateTimeToString(APIWebhookSubscription."Expiration Date Time")),
+        DATACLASSIFICATION::SystemMetadata);
+
+      IF NOT APIWebhookNotificationMgt.GetEntity(APIWebhookSubscription,ApiWebhookEntity) THEN
+        EXIT;
+
+      RecRef.OPEN(APIWebhookSubscription."Source Table Id",TRUE);
+      IF NOT APIWebhookNotificationMgt.TryGetEntityKeyField(ApiWebhookEntity,RecRef,FieldRef) THEN
+        EXIT;
+
+      KeyFieldType := FORMAT(FieldRef.TYPE);
+
+      CLEAR(TempKeyFieldTypeBySubscriptionIdNameValueBuffer);
+      TempKeyFieldTypeBySubscriptionIdNameValueBuffer.ID := SubscriptionNumber;
+      TempKeyFieldTypeBySubscriptionIdNameValueBuffer.Name := APIWebhookSubscription."Subscription Id";
+      TempKeyFieldTypeBySubscriptionIdNameValueBuffer.Value :=
+        COPYSTR(KeyFieldType,1,MAXSTRLEN(TempKeyFieldTypeBySubscriptionIdNameValueBuffer.Value));
+      TempKeyFieldTypeBySubscriptionIdNameValueBuffer.INSERT;
+    END;
+
+    LOCAL PROCEDURE CollectFirstModifiedTimeBySubscriptionId@49(SubscriptionId@1005 : Text[150];FirstModifiedDateTime@1006 : DateTime);
+    VAR
+      OldValue@1001 : DateTime;
+      NewValue@1000 : DateTime;
+    BEGIN
+      NewValue := FirstModifiedDateTime;
+      TempFirstModifiedDateTimeAPIWebhookNotification.SETRANGE("Subscription ID",SubscriptionId);
+      IF NOT TempFirstModifiedDateTimeAPIWebhookNotification.FINDFIRST THEN BEGIN
+        SENDTRACETAG('000072X',APIWebhookCategoryLbl,VERBOSITY::Normal,
+          STRSUBSTNO(CachingFirstModifiedTimeForSubscriptionIdMsg,OldValue,NewValue),DATACLASSIFICATION::SystemMetadata);
+        CLEAR(TempFirstModifiedDateTimeAPIWebhookNotification);
+        TempFirstModifiedDateTimeAPIWebhookNotification.ID := CREATEGUID;
+        TempFirstModifiedDateTimeAPIWebhookNotification."Subscription ID" := SubscriptionId;
+        TempFirstModifiedDateTimeAPIWebhookNotification."Last Modified Date Time" := FirstModifiedDateTime;
+        TempFirstModifiedDateTimeAPIWebhookNotification.INSERT;
+        EXIT;
+      END;
+
+      OldValue := TempFirstModifiedDateTimeAPIWebhookNotification."Last Modified Date Time";
+      IF NewValue < OldValue THEN BEGIN
+        SENDTRACETAG('000072Y',APIWebhookCategoryLbl,VERBOSITY::Normal,
+          STRSUBSTNO(CachingFirstModifiedTimeForSubscriptionIdMsg,OldValue,NewValue),DATACLASSIFICATION::SystemMetadata);
+        TempFirstModifiedDateTimeAPIWebhookNotification."Last Modified Date Time" := NewValue;
+        TempFirstModifiedDateTimeAPIWebhookNotification.MODIFY;
+        EXIT;
+      END;
+
+      SENDTRACETAG('000072Z',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(NewFirstModifiedTimeLaterThanCachedMsg,NewValue,OldValue),DATACLASSIFICATION::SystemMetadata);
+    END;
+
+    LOCAL PROCEDURE CollectResourceUrlBySubscriptionId@38(VAR APIWebhookSubscription@1000 : Record 2000000095;SubscriptionNumber@1002 : Integer);
+    VAR
+      ResourceUrl@1001 : Text;
+    BEGIN
+      IF ResourceUrlBySubscriptionIdDictionaryWrapper.ContainsKey(APIWebhookSubscription."Subscription Id") THEN BEGIN
+        SENDTRACETAG('0000703',APIWebhookCategoryLbl,VERBOSITY::Normal,
+          STRSUBSTNO(CachedResourceUrlForSubscriptionIdMsg,SubscriptionNumber,
+            DateTimeToString(APIWebhookSubscription."Expiration Date Time")),
+          DATACLASSIFICATION::SystemMetadata);
+        EXIT;
+      END;
+
+      SENDTRACETAG('0000704',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(CachingResourceUrlForSubscriptionIdMsg,SubscriptionNumber,
+          DateTimeToString(APIWebhookSubscription."Expiration Date Time")),
+        DATACLASSIFICATION::SystemMetadata);
+      ResourceUrl := GetResourceUrl(APIWebhookSubscription);
+      ResourceUrlBySubscriptionIdDictionaryWrapper.Set(APIWebhookSubscription."Subscription Id",ResourceUrl);
+    END;
+
+    LOCAL PROCEDURE CollectNotificationUrlBySubscriptionId@93(VAR APIWebhookSubscription@1000 : Record 2000000095;SubscriptionNumber@1002 : Integer);
+    VAR
+      NotificationUrl@1001 : Text;
+    BEGIN
+      IF NotificationUrlBySubscriptionIdDictionaryWrapper.ContainsKey(APIWebhookSubscription."Subscription Id") THEN BEGIN
+        SENDTRACETAG('0000705',APIWebhookCategoryLbl,VERBOSITY::Normal,
+          STRSUBSTNO(CachedNotificationUrlForSubscriptionIdMsg,SubscriptionNumber,
+            DateTimeToString(APIWebhookSubscription."Expiration Date Time")),
+          DATACLASSIFICATION::SystemMetadata);
+        EXIT;
+      END;
+
+      SENDTRACETAG('0000706',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(CachingNotificationUrlForSubscriptionIdMsg,SubscriptionNumber,
+          DateTimeToString(APIWebhookSubscription."Expiration Date Time")),
+        DATACLASSIFICATION::SystemMetadata);
+      NotificationUrl := GetNotificationUrl(APIWebhookSubscription);
+      NotificationUrlBySubscriptionIdDictionaryWrapper.Set(APIWebhookSubscription."Subscription Id",NotificationUrl);
+    END;
+
+    LOCAL PROCEDURE CollectSubscriptionsPerNotificationUrl@26(VAR APIWebhookSubscription@1000 : Record 2000000095;SubscriptionNumber@1006 : Integer);
+    VAR
+      CachedValue@1003 : Variant;
+      NotificationUrl@1001 : Text;
+      SubscriptionId@1002 : Text;
+      SubscriptionNumbers@1005 : Text;
+    BEGIN
+      SubscriptionId := APIWebhookSubscription."Subscription Id";
+
+      SENDTRACETAG('0000707',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(CachingSubscriptionNumbersForNotificationUrlMsg,SubscriptionNumber,
+          DateTimeToString(APIWebhookSubscription."Expiration Date Time")),
+        DATACLASSIFICATION::SystemMetadata);
+
+      NotificationUrl := GetNotificationUrlBySubscriptionId(SubscriptionId);
+      IF NotificationUrl = '' THEN
+        EXIT;
+
+      IF SubscriptionsPerNotificationUrlDictionaryWrapper.TryGetValue(NotificationUrl,CachedValue) THEN BEGIN
+        SubscriptionNumbers := CachedValue;
+        SubscriptionNumbers := STRSUBSTNO('%1,%2',SubscriptionNumbers,SubscriptionNumber);
+      END ELSE
+        SubscriptionNumbers := FORMAT(SubscriptionNumber);
+      SubscriptionsPerNotificationUrlDictionaryWrapper.Set(NotificationUrl,SubscriptionNumbers);
+    END;
+
+    LOCAL PROCEDURE DeleteNotifications@64(SubscriptionNumbers@1000 : Text);
+    VAR
+      SubscriptionId@1004 : Text;
+      SubscriptionNumber@1002 : Text;
+      RemainingSubscriptionNumbers@1003 : Text;
+      I@1001 : Integer;
+      N@1005 : Integer;
+    BEGIN
+      SENDTRACETAG('0000708',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(DeleteNotificationsForSubscriptionsMsg,SubscriptionNumbers),DATACLASSIFICATION::SystemMetadata);
+      RemainingSubscriptionNumbers := SubscriptionNumbers;
+      N := STRLEN(RemainingSubscriptionNumbers) DIV 2;
+      FOR I := 0 TO N DO
+        IF STRLEN(RemainingSubscriptionNumbers) > 0 THEN BEGIN
+          SubscriptionNumber := GetNextToken(RemainingSubscriptionNumbers,',');
+          SubscriptionId := GetSubscriptionIdBySubscriptionNumber(SubscriptionNumber);
+          SENDTRACETAG('0000709',APIWebhookCategoryLbl,VERBOSITY::Normal,
+            STRSUBSTNO(DeleteNotificationsForSubscriptionMsg,SubscriptionNumber),DATACLASSIFICATION::SystemMetadata);
+          IF SubscriptionId <> '' THEN BEGIN
+            ClearFiltersFromNotificationsBuffer;
+            TempAPIWebhookNotificationAggr.SETRANGE("Subscription ID",SubscriptionId);
+            TempAPIWebhookNotificationAggr.DELETEALL;
+          END;
+        END ELSE
+          I := N;
+    END;
+
+    LOCAL PROCEDURE DeleteInvalidSubscriptions@13(SubscriptionNumbers@1000 : Text);
+    VAR
+      APIWebhookSubscription@1003 : Record 2000000095;
+      SubscriptionId@1004 : Text;
+      SubscriptionNumber@1002 : Text;
+      RemainingSubscriptionNumbers@1005 : Text;
+      I@1001 : Integer;
+      N@1006 : Integer;
+    BEGIN
+      SENDTRACETAG('000070A',APIWebhookCategoryLbl,VERBOSITY::Warning,
+        STRSUBSTNO(DeleteInvalidSubscriptionsMsg,SubscriptionNumbers),DATACLASSIFICATION::SystemMetadata);
+      RemainingSubscriptionNumbers := SubscriptionNumbers;
+      N := STRLEN(RemainingSubscriptionNumbers) DIV 2;
+      FOR I := 0 TO N DO
+        IF STRLEN(RemainingSubscriptionNumbers) > 0 THEN BEGIN
+          SubscriptionNumber := GetNextToken(RemainingSubscriptionNumbers,',');
+          SubscriptionId := GetSubscriptionIdBySubscriptionNumber(SubscriptionNumber);
+          SENDTRACETAG('00006SJ',APIWebhookCategoryLbl,VERBOSITY::Warning,
+            STRSUBSTNO(DeleteInvalidSubscriptionMsg,SubscriptionNumber),DATACLASSIFICATION::SystemMetadata);
+          IF SubscriptionId <> '' THEN
+            IF APIWebhookSubscription.GET(SubscriptionId) THEN BEGIN
+              LogActivity(FALSE,DeleteInvalidSubscriptionTitleTxt,GetSubscriptionDetails(SubscriptionId));
+              APIWebhookNotificationMgt.DeleteSubscription(APIWebhookSubscription);
+            END;
+        END ELSE
+          I := 10;
+    END;
+
+    LOCAL PROCEDURE IncreaseAttemptNumber@80(SubscriptionNumbers@1000 : Text);
+    VAR
+      SubscriptionId@1004 : Text;
+      SubscriptionNumber@1001 : Text;
+      RemainingSubscriptionNumbers@1003 : Text;
+      I@1002 : Integer;
+      N@1005 : Integer;
+    BEGIN
+      SENDTRACETAG('000070B',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(IncreaseAttemptNumberForSubscriptionsMsg,SubscriptionNumbers,DateTimeToString(ProcessingDateTime)),
+        DATACLASSIFICATION::SystemMetadata);
+      RemainingSubscriptionNumbers := SubscriptionNumbers;
+      N := STRLEN(RemainingSubscriptionNumbers) DIV 2;
+      FOR I := 0 TO N DO
+        IF STRLEN(RemainingSubscriptionNumbers) > 0 THEN BEGIN
+          SubscriptionNumber := GetNextToken(RemainingSubscriptionNumbers,',');
+          SubscriptionId := GetSubscriptionIdBySubscriptionNumber(SubscriptionNumber);
+          SENDTRACETAG('000070C',APIWebhookCategoryLbl,VERBOSITY::Normal,
+            STRSUBSTNO(IncreaseAttemptNumberForSubscriptionMsg,SubscriptionNumber,DateTimeToString(ProcessingDateTime)),
+            DATACLASSIFICATION::SystemMetadata);
+          IF SubscriptionId <> '' THEN BEGIN
+            LogActivity(FALSE,IncreaseAttemptNumberTitleTxt,GetSubscriptionDetails(SubscriptionId));
+            ClearFiltersFromNotificationsBuffer;
+            TempAPIWebhookNotificationAggr.SETRANGE("Subscription ID",SubscriptionId);
+            IF TempAPIWebhookNotificationAggr.FIND('-') THEN
+              REPEAT
+                IF TempAPIWebhookNotificationAggr."Sending Scheduled Date Time" <= ProcessingDateTime THEN BEGIN
+                  TempAPIWebhookNotificationAggr."Attempt No." += 1;
+                  TempAPIWebhookNotificationAggr.MODIFY;
+                  SENDTRACETAG('000070Q',APIWebhookCategoryLbl,VERBOSITY::Normal,
+                    STRSUBSTNO(IncreaseAttemptNumberForNotificationMsg,SubscriptionNumber,TempAPIWebhookNotificationAggr."Change Type",
+                      DateTimeToString(TempAPIWebhookNotificationAggr."Last Modified Date Time"),
+                      TempAPIWebhookNotificationAggr."Attempt No.",
+                      DateTimeToString(TempAPIWebhookNotificationAggr."Sending Scheduled Date Time"),
+                      DateTimeToString(ProcessingDateTime)),
+                    DATACLASSIFICATION::SystemMetadata);
+                END ELSE
+                  SENDTRACETAG('000075T',APIWebhookCategoryLbl,VERBOSITY::Normal,
+                    STRSUBSTNO(DoNotIncreaseAttemptNumberForNotificationMsg,SubscriptionNumber,
+                      TempAPIWebhookNotificationAggr."Change Type",
+                      DateTimeToString(TempAPIWebhookNotificationAggr."Last Modified Date Time"),
+                      TempAPIWebhookNotificationAggr."Attempt No.",
+                      DateTimeToString(TempAPIWebhookNotificationAggr."Sending Scheduled Date Time"),
+                      DateTimeToString(ProcessingDateTime)),
+                    DATACLASSIFICATION::SystemMetadata);
+              UNTIL TempAPIWebhookNotificationAggr.NEXT = 0;
+          END;
+        END ELSE
+          I := N;
+    END;
+
+    LOCAL PROCEDURE UpdateTablesFromBuffer@2(VAR EarliestRescheduleDateTime@1002 : DateTime);
+    BEGIN
+      DeleteSubscriptionsWithTooManyFailures;
+      DeleteProcessedNotifications;
+      SaveFailedAggregateNotifications(EarliestRescheduleDateTime);
+    END;
+
+    LOCAL PROCEDURE DeleteProcessedNotifications@106();
+    VAR
+      APIWebhookNotification@1000 : Record 2000000096;
+    BEGIN
+      SENDTRACETAG('000070D',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(DeleteProcessedNotificationsMsg,DateTimeToString(ProcessingDateTime)),DATACLASSIFICATION::SystemMetadata);
+      APIWebhookNotification.SETFILTER("Last Modified Date Time",'<=%1',ProcessingDateTime);
+      IF NOT APIWebhookNotification.ISEMPTY THEN
+        APIWebhookNotification.DELETEALL(TRUE);
+    END;
+
+    LOCAL PROCEDURE SaveFailedAggregateNotifications@107(VAR EarliestScheduledDateTime@1002 : DateTime);
+    VAR
+      APIWebhookNotificationAggr@1001 : Record 2000000098;
+      ScheduledDateTime@1003 : DateTime;
+    BEGIN
+      EarliestScheduledDateTime := 0DT;
+      IF NOT APIWebhookNotificationAggr.ISEMPTY THEN
+        APIWebhookNotificationAggr.DELETEALL(TRUE);
+      ClearFiltersFromNotificationsBuffer;
+
+      IF NOT TempAPIWebhookNotificationAggr.FIND('-') THEN
+        EXIT;
+
+      REPEAT
+        APIWebhookNotificationAggr.TRANSFERFIELDS(TempAPIWebhookNotificationAggr,TRUE);
+        IF APIWebhookNotificationAggr."Sending Scheduled Date Time" < ProcessingDateTime THEN BEGIN
+          ScheduledDateTime := ProcessingDateTime + GetDelayTimeForAttempt(TempAPIWebhookNotificationAggr."Attempt No.");
+          APIWebhookNotificationAggr."Sending Scheduled Date Time" := ScheduledDateTime;
+          IF (ScheduledDateTime < EarliestScheduledDateTime) OR (EarliestScheduledDateTime = 0DT) THEN
+            EarliestScheduledDateTime := ScheduledDateTime;
+        END;
+        SENDTRACETAG('000070F',APIWebhookCategoryLbl,VERBOSITY::Normal,
+          STRSUBSTNO(SaveFailedNotificationMsg,APIWebhookNotificationAggr."Change Type",
+            DateTimeToString(APIWebhookNotificationAggr."Last Modified Date Time"),APIWebhookNotificationAggr."Attempt No."),
+          DATACLASSIFICATION::SystemMetadata);
+        IF NOT APIWebhookNotificationAggr.INSERT(TRUE) THEN BEGIN
+          SENDTRACETAG('000073A',APIWebhookCategoryLbl,VERBOSITY::Error,
+            STRSUBSTNO(CannotInsertAggregateNotificationErr,
+              APIWebhookNotificationAggr.ID,APIWebhookNotificationAggr."Change Type",
+              DateTimeToString(APIWebhookNotificationAggr."Last Modified Date Time"),
+              APIWebhookNotificationAggr."Attempt No.",
+              DateTimeToString(APIWebhookNotificationAggr."Sending Scheduled Date Time")),
+            DATACLASSIFICATION::SystemMetadata);
+          EXIT;
+        END;
+      UNTIL TempAPIWebhookNotificationAggr.NEXT = 0;
+
+      SENDTRACETAG('000070E',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(SavedFailedNotificationsMsg,DateTimeToString(EarliestScheduledDateTime)),
+        DATACLASSIFICATION::SystemMetadata);
+    END;
+
+    LOCAL PROCEDURE SendNotification@43(NotificationUrlNumber@1010 : Integer;NotificationUrl@1000 : Text;NotificationPayload@1001 : Text;VAR Reschedule@1008 : Boolean) : Boolean;
+    VAR
+      HttpStatusCode@1007 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpStatusCode";
+      ResponseBody@1004 : Text;
+      ErrorMessage@1002 : Text;
+      ErrorDetails@1003 : Text;
+      Success@1009 : Boolean;
+    BEGIN
+      IF NotificationUrl = '' THEN BEGIN
+        SENDTRACETAG('000029Z',APIWebhookCategoryLbl,VERBOSITY::Error,
+          STRSUBSTNO(EmptyNotificationUrlErr,NotificationUrlNumber),DATACLASSIFICATION::SystemMetadata);
+        EXIT(TRUE);
+      END;
+
+      IF NotificationPayload = '' THEN BEGIN
+        SENDTRACETAG('00002A0',APIWebhookCategoryLbl,VERBOSITY::Normal,
+          STRSUBSTNO(EmptyPayloadPerNotificationUrlErr,NotificationUrlNumber),
+          DATACLASSIFICATION::SystemMetadata);
+        EXIT(TRUE);
+      END;
+
+      OnBeforeSendNotification(NotificationUrl,NotificationPayload);
+
+      SENDTRACETAG('000029B',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(SendNotificationMsg,NotificationUrlNumber),DATACLASSIFICATION::SystemMetadata);
+      Success := SendRequest(
+          NotificationUrlNumber,NotificationUrl,NotificationPayload,ResponseBody,ErrorMessage,ErrorDetails,HttpStatusCode);
+      IF NOT Success THEN
+        ErrorMessage += GETLASTERRORTEXT + ErrorMessage;
+
+      OnAfterSendNotification(ErrorMessage,ErrorDetails,HttpStatusCode);
+
+      IF NOT Success THEN BEGIN
+        Reschedule := ShouldReschedule(HttpStatusCode);
+        SENDTRACETAG('000076N',APIWebhookCategoryLbl,VERBOSITY::Warning,
+          STRSUBSTNO(SendingNotificationFailedErr,NotificationUrl,HttpStatusCode,ErrorMessage,ErrorDetails),
+          DATACLASSIFICATION::CustomerContent);
+        LogActivity(TRUE,NotificationFailedTitleTxt,
+          STRSUBSTNO(FailedNotificationDetailsTxt,NotificationUrl,HttpStatusCode,ErrorMessage,ErrorDetails));
+        IF Reschedule THEN BEGIN
+          SENDTRACETAG('000029C',APIWebhookCategoryLbl,VERBOSITY::Warning,
+            STRSUBSTNO(FailedNotificationRescheduleMsg,NotificationUrlNumber,HttpStatusCode),
+            DATACLASSIFICATION::SystemMetadata);
+          EXIT(FALSE);
+        END;
+
+        SENDTRACETAG('000029D',APIWebhookCategoryLbl,VERBOSITY::Warning,
+          STRSUBSTNO(FailedNotificationRejectedMsg,NotificationUrlNumber,HttpStatusCode),
+          DATACLASSIFICATION::SystemMetadata);
+        EXIT(FALSE);
+      END;
+
+      SENDTRACETAG('000029E',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(SucceedNotificationMsg,NotificationUrlNumber),DATACLASSIFICATION::SystemMetadata);
+      EXIT(TRUE);
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE SendRequest@14(NotificationUrlNumber@1007 : Integer;NotificationUrl@1015 : Text;NotificationPayload@1004 : Text;VAR ResponseBody@1003 : Text;VAR ErrorMessage@1001 : Text;VAR ErrorDetails@1005 : Text;VAR HttpStatusCode@1002 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpStatusCode");
+    VAR
+      HttpWebRequestMgt@1000 : Codeunit 1297;
+      ResponseHeaders@1006 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Collections.Specialized.NameValueCollection";
+    BEGIN
+      IF NotificationUrl = '' THEN BEGIN
+        SENDTRACETAG('00002A1',APIWebhookCategoryLbl,VERBOSITY::Warning,
+          STRSUBSTNO(EmptyNotificationUrlErr,NotificationUrlNumber),DATACLASSIFICATION::SystemMetadata);
+        ERROR(STRSUBSTNO(EmptyNotificationUrlErr,NotificationUrlNumber));
+      END;
+
+      IF NotificationPayload = '' THEN BEGIN
+        SENDTRACETAG('00002A2',APIWebhookCategoryLbl,VERBOSITY::Warning,
+          STRSUBSTNO(EmptyPayloadPerNotificationUrlErr,NotificationUrlNumber),DATACLASSIFICATION::SystemMetadata);
+        ERROR(STRSUBSTNO(EmptyPayloadPerNotificationUrlErr,NotificationUrlNumber));
+      END;
+
+      HttpWebRequestMgt.Initialize(NotificationUrl);
+      HttpWebRequestMgt.DisableUI;
+      HttpWebRequestMgt.SetMethod('POST');
+      HttpWebRequestMgt.SetReturnType('application/json');
+      HttpWebRequestMgt.SetContentType('application/json');
+      HttpWebRequestMgt.SetTimeout(GetSendingNotificationTimeout);
+      HttpWebRequestMgt.AddBodyAsText(NotificationPayload);
+
+      IF NOT HttpWebRequestMgt.SendRequestAndReadTextResponse(ResponseBody,ErrorMessage,ErrorDetails,HttpStatusCode,ResponseHeaders) THEN BEGIN
+        IF ISNULL(HttpStatusCode) THEN
+          SENDTRACETAG('00002A3',APIWebhookCategoryLbl,VERBOSITY::Warning,
+            STRSUBSTNO(CannotGetResponseErr,NotificationUrlNumber),DATACLASSIFICATION::SystemMetadata);
+        ERROR(STRSUBSTNO(CannotGetResponseErr,NotificationUrlNumber));
+      END;
+    END;
+
+    LOCAL PROCEDURE ShouldReschedule@5(VAR HttpStatusCode@1000 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpStatusCode") : Boolean;
+    VAR
+      HttpStatusCodeNumber@1001 : Integer;
+    BEGIN
+      IF ISNULL(HttpStatusCode) THEN
+        EXIT(TRUE);
+
+      HttpStatusCodeNumber := HttpStatusCode;
+
+      // 5xx range - Server error
+      // 408 - Request Timeout, 429 - Too Many Requests
+      IF ((HttpStatusCodeNumber >= 500) AND (HttpStatusCodeNumber <= 599)) OR
+         (HttpStatusCodeNumber = 408) OR (HttpStatusCodeNumber = 429)
+      THEN
+        EXIT(TRUE);
+
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE GetEntityJObject@45(SubscriptionNumber@1004 : Text;VAR TempAPIWebhookNotificationAggr@1002 : TEMPORARY Record 2000000098;VAR JSONObject@1001 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject") : Boolean;
+    VAR
+      JSONManagement@1003 : Codeunit 5459;
+      ResourceUrl@1006 : Text;
+      LastModifiedDateTime@1000 : DateTime;
+    BEGIN
+      ClearFiltersFromSubscriptionsBuffer;
+      TempAPIWebhookSubscription.SETRANGE("Subscription Id",TempAPIWebhookNotificationAggr."Subscription ID");
+      IF NOT TempAPIWebhookSubscription.FINDFIRST THEN BEGIN
+        SENDTRACETAG('000070G',APIWebhookCategoryLbl,VERBOSITY::Error,
+          STRSUBSTNO(CannotFindSubscriptionErr,SubscriptionNumber),DATACLASSIFICATION::SystemMetadata);
+        EXIT(FALSE);
+      END;
+
+      ResourceUrl := GetEntityUrl(TempAPIWebhookNotificationAggr,TempAPIWebhookSubscription);
+      IF ResourceUrl = '' THEN
+        EXIT(FALSE);
+
+      LastModifiedDateTime := TempAPIWebhookNotificationAggr."Last Modified Date Time";
+      IF LastModifiedDateTime = 0DT THEN
+        IF TempAPIWebhookNotificationAggr."Change Type" = TempAPIWebhookNotificationAggr."Change Type"::Collection THEN
+          LastModifiedDateTime := CURRENTDATETIME
+        ELSE
+          SENDTRACETAG('00006P3',APIWebhookCategoryLbl,VERBOSITY::Warning,
+            STRSUBSTNO(EmptyLastModifiedDateTimeMsg,TempAPIWebhookNotificationAggr."Change Type",
+              TempAPIWebhookNotificationAggr."Attempt No."),
+            DATACLASSIFICATION::SystemMetadata);
+
+      JSONManagement.InitializeEmptyObject;
+      JSONManagement.GetJSONObject(JSONObject);
+      JSONManagement.AddJPropertyToJObject(JSONObject,'subscriptionId',TempAPIWebhookSubscription."Subscription Id");
+      JSONManagement.AddJPropertyToJObject(JSONObject,'clientState',TempAPIWebhookSubscription."Client State");
+      JSONManagement.AddJPropertyToJObject(JSONObject,'expirationDateTime',TempAPIWebhookSubscription."Expiration Date Time");
+      JSONManagement.AddJPropertyToJObject(JSONObject,'resource',ResourceUrl);
+      JSONManagement.AddJPropertyToJObject(JSONObject,'changeType',LOWERCASE(FORMAT(TempAPIWebhookNotificationAggr."Change Type")));
+      JSONManagement.AddJPropertyToJObject(JSONObject,'lastModifiedDateTime',LastModifiedDateTime);
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE GetEntityUrl@17(VAR TempAPIWebhookNotificationAggr@1002 : TEMPORARY Record 2000000098;VAR TempAPIWebhookSubscription@1000 : TEMPORARY Record 2000000095) : Text;
+    VAR
+      EntityUrl@1001 : Text;
+    BEGIN
+      IF TempAPIWebhookNotificationAggr."Change Type" <> TempAPIWebhookNotificationAggr."Change Type"::Collection THEN
+        EntityUrl := GetSingleEntityUrl(TempAPIWebhookNotificationAggr,TempAPIWebhookSubscription)
+      ELSE
+        EntityUrl := GetEntityCollectionUrl(TempAPIWebhookNotificationAggr,TempAPIWebhookSubscription);
+      EXIT(EntityUrl);
+    END;
+
+    LOCAL PROCEDURE GetSingleEntityUrl@15(VAR TempAPIWebhookNotificationAggr@1002 : TEMPORARY Record 2000000098;VAR TempAPIWebhookSubscription@1000 : TEMPORARY Record 2000000095) : Text;
+    VAR
+      ResourceUrl@1005 : Text;
+      EntityUrl@1001 : Text;
+      EntityKeyFieldType@1003 : Text;
+      EntityKeyValue@1004 : Text;
+    BEGIN
+      ResourceUrl := GetResourceUrlBySubscriptionId(TempAPIWebhookSubscription."Subscription Id");
+      IF ResourceUrl = '' THEN
+        EXIT('');
+
+      EntityKeyFieldType := GetEntityKeyFieldTypeBySubscriptionId(TempAPIWebhookSubscription."Subscription Id");
+      IF EntityKeyFieldType = '' THEN
+        EXIT('');
+
+      EntityKeyValue := GetUriEscapeFieldValue(EntityKeyFieldType,TempAPIWebhookNotificationAggr."Entity Key Value");
+
+      EntityUrl := STRSUBSTNO('%1(%2)',ResourceUrl,EntityKeyValue);
+      EXIT(EntityUrl);
+    END;
+
+    LOCAL PROCEDURE GetEntityCollectionUrl@48(VAR TempAPIWebhookNotificationAggr@1002 : TEMPORARY Record 2000000098;VAR TempAPIWebhookSubscription@1000 : TEMPORARY Record 2000000095) : Text;
+    VAR
+      ResourceUrl@1004 : Text;
+      EntityUrl@1001 : Text;
+      FirstModifiedDateTimeUtcString@1007 : Text;
+      FirstModifiedDateTimeAdjusted@1003 : DateTime;
+      FirstModifiedDateTime@1005 : DateTime;
+    BEGIN
+      ResourceUrl := GetResourceUrlBySubscriptionId(TempAPIWebhookSubscription."Subscription Id");
+      IF ResourceUrl = '' THEN
+        EXIT('');
+
+      FirstModifiedDateTime := GetFirstModifiedTimeBySubscriptionId(TempAPIWebhookNotificationAggr."Subscription ID");
+      IF FirstModifiedDateTime = 0DT THEN
+        EXIT(ResourceUrl);
+
+      IF NOT HasLastModifiedDateTimeField(TempAPIWebhookSubscription) THEN
+        EXIT(ResourceUrl);
+
+      // Subtract 50 milliseconds to be sure we get all the changes since the SQL rounds in the different way than C# / AL.
+      FirstModifiedDateTimeAdjusted := FirstModifiedDateTime - 50;
+      FirstModifiedDateTimeUtcString := DateTimeToUtcString(FirstModifiedDateTimeAdjusted);
+      EntityUrl := ResourceUrl + '?$filter=lastModifiedDateTime%20gt%20' + FirstModifiedDateTimeUtcString;
+      EXIT(EntityUrl);
+    END;
+
+    LOCAL PROCEDURE GetUriEscapeFieldValue@24(FieldType@1000 : Text;FieldValue@1003 : Text) : Text;
+    VAR
+      FormattedValue@1009 : Text;
+    BEGIN
+      CASE FieldType OF
+        'Code','Text':
+          IF FieldValue <> '' THEN
+            FormattedValue := AddQuotes(TypeHelper.UriEscapeDataString(FieldValue))
+          ELSE
+            FormattedValue := AddQuotes(FieldValue);
+        'Option':
+          FormattedValue := AddQuotes(TypeHelper.UriEscapeDataString(FieldValue));
+        'DateFormula':
+          FormattedValue := AddQuotes(FieldValue);
+        ELSE
+          FormattedValue := FieldValue;
+      END;
+      EXIT(FormattedValue);
+    END;
+
+    LOCAL PROCEDURE AddQuotes@4(InText@1000 : Text) OutText : Text;
+    BEGIN
+      OutText := '''' + InText + '''';
+    END;
+
+    LOCAL PROCEDURE GetSubscriptionIdBySubscriptionNumber@32(SubscriptionNumber@1001 : Text) : Text;
+    VAR
+      SubscriptionId@1000 : Text;
+    BEGIN
+      IF NOT TempSubscriptionIdBySubscriptionNoNameValueBuffer.GET(SubscriptionNumber) THEN BEGIN
+        SENDTRACETAG('00002A4',APIWebhookCategoryLbl,VERBOSITY::Error,
+          STRSUBSTNO(CannotFindCachedSubscriptionIdForSubscriptionNumberErr,SubscriptionNumber),
+          DATACLASSIFICATION::SystemMetadata);
+        EXIT('');
+      END;
+
+      SubscriptionId := TempSubscriptionIdBySubscriptionNoNameValueBuffer.Value;
+      IF SubscriptionId = '' THEN BEGIN
+        SENDTRACETAG('000070R',APIWebhookCategoryLbl,VERBOSITY::Error,
+          STRSUBSTNO(CannotFindCachedSubscriptionIdForSubscriptionNumberErr,SubscriptionNumber),
+          DATACLASSIFICATION::SystemMetadata);
+        EXIT('');
+      END;
+
+      SENDTRACETAG('000070S',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(FoundCachedSubscriptionIdForSubscriptionNumberMsg,SubscriptionNumber),
+        DATACLASSIFICATION::SystemMetadata);
+      EXIT(SubscriptionId);
+    END;
+
+    LOCAL PROCEDURE GetEntityKeyFieldTypeBySubscriptionId@34(SubscriptionId@1000 : Text) : Text;
+    VAR
+      EntityKeyFieldType@1002 : Text;
+    BEGIN
+      TempKeyFieldTypeBySubscriptionIdNameValueBuffer.SETRANGE(Name,SubscriptionId);
+      IF NOT TempKeyFieldTypeBySubscriptionIdNameValueBuffer.FINDFIRST THEN BEGIN
+        SENDTRACETAG('00002A5',APIWebhookCategoryLbl,VERBOSITY::Error,
+          CannotFindCachedEntityKeyFieldTypeForSubscriptionIdErr,DATACLASSIFICATION::SystemMetadata);
+        EXIT('');
+      END;
+
+      EntityKeyFieldType := TempKeyFieldTypeBySubscriptionIdNameValueBuffer.Value;
+      IF EntityKeyFieldType = '' THEN BEGIN
+        SENDTRACETAG('000070T',APIWebhookCategoryLbl,VERBOSITY::Error,
+          CannotFindCachedEntityKeyFieldTypeForSubscriptionIdErr,DATACLASSIFICATION::SystemMetadata);
+        EXIT('');
+      END;
+
+      SENDTRACETAG('000070U',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(FoundCachedEntityKeyFieldTypeForSubscriptionIdMsg,EntityKeyFieldType),
+        DATACLASSIFICATION::SystemMetadata);
+      EXIT(EntityKeyFieldType);
+    END;
+
+    LOCAL PROCEDURE GetFirstModifiedTimeBySubscriptionId@41(SubscriptionId@1000 : Text) : DateTime;
+    VAR
+      FirstModifiedDateTime@1002 : DateTime;
+    BEGIN
+      TempFirstModifiedDateTimeAPIWebhookNotification.SETRANGE("Subscription ID",SubscriptionId);
+      IF NOT TempFirstModifiedDateTimeAPIWebhookNotification.FINDFIRST THEN BEGIN
+        SENDTRACETAG('0000730',APIWebhookCategoryLbl,VERBOSITY::Normal,
+          CannotFindCachedFirstModifiedTimeForSubscriptionIdMsg,DATACLASSIFICATION::SystemMetadata);
+        EXIT(0DT);
+      END;
+
+      FirstModifiedDateTime := TempFirstModifiedDateTimeAPIWebhookNotification."Last Modified Date Time";
+      IF FirstModifiedDateTime = 0DT THEN BEGIN
+        SENDTRACETAG('0000731',APIWebhookCategoryLbl,VERBOSITY::Normal,
+          CannotFindCachedFirstModifiedTimeForSubscriptionIdMsg,DATACLASSIFICATION::SystemMetadata);
+        EXIT(0DT);
+      END;
+
+      SENDTRACETAG('0000732',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(FoundCachedFirstModifiedTimeForSubscriptionIdMsg,DateTimeToString(FirstModifiedDateTime)),
+        DATACLASSIFICATION::SystemMetadata);
+      EXIT(FirstModifiedDateTime);
+    END;
+
+    LOCAL PROCEDURE GetResourceUrlBySubscriptionId@53(SubscriptionId@1000 : Text) : Text;
+    VAR
+      CachedValue@1001 : Variant;
+      ResourceUrl@1002 : Text;
+    BEGIN
+      IF NOT ResourceUrlBySubscriptionIdDictionaryWrapper.TryGetValue(SubscriptionId,CachedValue) THEN BEGIN
+        SENDTRACETAG('00002A6',APIWebhookCategoryLbl,VERBOSITY::Error,
+          CannotFindCachedResourceUrlForSubscriptionIdErr,DATACLASSIFICATION::SystemMetadata);
+        EXIT('');
+      END;
+
+      ResourceUrl := CachedValue;
+      IF ResourceUrl = '' THEN BEGIN
+        SENDTRACETAG('000070V',APIWebhookCategoryLbl,VERBOSITY::Error,
+          CannotFindCachedResourceUrlForSubscriptionIdErr,DATACLASSIFICATION::SystemMetadata);
+        EXIT('');
+      END;
+
+      SENDTRACETAG('000070W',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        FoundCachedResourceUrlForSubscriptionIdMsg,DATACLASSIFICATION::SystemMetadata);
+      EXIT(ResourceUrl);
+    END;
+
+    LOCAL PROCEDURE GetNotificationUrlBySubscriptionId@54(SubscriptionId@1000 : Text) : Text;
+    VAR
+      CachedValue@1001 : Variant;
+      NotificationUrl@1002 : Text;
+    BEGIN
+      IF NOT NotificationUrlBySubscriptionIdDictionaryWrapper.TryGetValue(SubscriptionId,CachedValue) THEN BEGIN
+        SENDTRACETAG('00002A7',APIWebhookCategoryLbl,VERBOSITY::Error,
+          CannotFindCachedNotificationUrlForSubscriptionIdErr,DATACLASSIFICATION::SystemMetadata);
+        EXIT('');
+      END;
+
+      NotificationUrl := CachedValue;
+      IF NotificationUrl = '' THEN BEGIN
+        SENDTRACETAG('000070X',APIWebhookCategoryLbl,VERBOSITY::Error,
+          CannotFindCachedNotificationUrlForSubscriptionIdErr,DATACLASSIFICATION::SystemMetadata);
+        EXIT('');
+      END;
+
+      SENDTRACETAG('000070Y',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        FoundCachedNotificationUrlForSubscriptionIdMsg,DATACLASSIFICATION::SystemMetadata);
+      EXIT(NotificationUrl);
+    END;
+
+    LOCAL PROCEDURE GetSubscriptionsPerNotificationUrl@87(NotificationUrlNumber@1000 : Integer;VAR NotificationUrl@1003 : Text;VAR SubscriptionNumbers@1004 : Text) : Boolean;
+    VAR
+      CachedKey@1005 : Variant;
+      CachedValue@1001 : Variant;
+    BEGIN
+      IF NOT SubscriptionsPerNotificationUrlDictionaryWrapper.TryGetKeyValue(NotificationUrlNumber - 1,CachedKey,CachedValue) THEN BEGIN
+        SENDTRACETAG('000070H',APIWebhookCategoryLbl,VERBOSITY::Error,
+          STRSUBSTNO(CannotFindCachedSubscriptionNumbersForNotificationUrlNumberErr,NotificationUrlNumber),
+          DATACLASSIFICATION::SystemMetadata);
+        EXIT(FALSE);
+      END;
+
+      NotificationUrl := CachedKey;
+      SubscriptionNumbers := CachedValue;
+      IF NotificationUrl = '' THEN BEGIN
+        SENDTRACETAG('000070Z',APIWebhookCategoryLbl,VERBOSITY::Error,
+          STRSUBSTNO(CannotFindCachedSubscriptionNumbersForNotificationUrlNumberErr,NotificationUrlNumber),
+          DATACLASSIFICATION::SystemMetadata);
+        EXIT(FALSE);
+      END;
+
+      IF SubscriptionNumbers = '' THEN BEGIN
+        SENDTRACETAG('0000710',APIWebhookCategoryLbl,VERBOSITY::Error,
+          STRSUBSTNO(CannotFindCachedNotificationUrlForNotificationUrlNumberErr,NotificationUrlNumber),
+          DATACLASSIFICATION::SystemMetadata);
+        EXIT(FALSE);
+      END;
+
+      SENDTRACETAG('0000711',APIWebhookCategoryLbl,VERBOSITY::Normal,
+        STRSUBSTNO(FoundCachedSubscriptionNumbersForNotificationUrlNumberMsg,SubscriptionNumbers,NotificationUrlNumber),
+        DATACLASSIFICATION::SystemMetadata);
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE GetNextToken@28(VAR SeparatedValues@1000 : Text;Separator@1001 : Text) : Text;
+    VAR
+      Token@1002 : Text;
+      Pos@1003 : Integer;
+    BEGIN
+      Pos := STRPOS(SeparatedValues,Separator);
+      IF Pos > 0 THEN BEGIN
+        Token := COPYSTR(SeparatedValues,1,Pos - 1);
+        IF Pos < STRLEN(SeparatedValues) THEN
+          SeparatedValues := COPYSTR(SeparatedValues,Pos + 1)
+        ELSE
+          SeparatedValues := '';
+      END ELSE BEGIN
+        Token := SeparatedValues;
+        SeparatedValues := '';
+      END;
+      EXIT(Token);
+    END;
+
+    LOCAL PROCEDURE GetResourceUrl@59(VAR APIWebhookSubscription@1000 : Record 2000000095) : Text;
+    VAR
+      InStream@1001 : InStream;
+      ResourceUrl@1002 : Text;
+    BEGIN
+      APIWebhookSubscription."Resource Url Blob".CREATEINSTREAM(InStream);
+      InStream.READ(ResourceUrl);
+      EXIT(ResourceUrl);
+    END;
+
+    LOCAL PROCEDURE GetNotificationUrl@61(VAR APIWebhookSubscription@1000 : Record 2000000095) : Text;
+    VAR
+      InStream@1002 : InStream;
+      NotificationUrl@1001 : Text;
+    BEGIN
+      APIWebhookSubscription."Notification Url Blob".CREATEINSTREAM(InStream);
+      InStream.READ(NotificationUrl);
+      EXIT(NotificationUrl);
+    END;
+
+    LOCAL PROCEDURE HasLastModifiedDateTimeField@60(VAR APIWebhookSubscription@1001 : Record 2000000095) : Boolean;
+    VAR
+      ApiWebhookEntity@1000 : Record 2000000097;
+      RecordRef@1002 : RecordRef;
+      FieldRef@1003 : FieldRef;
+      Result@1004 : Boolean;
+    BEGIN
+      IF NOT APIWebhookNotificationMgt.GetEntity(APIWebhookSubscription,ApiWebhookEntity) THEN
+        EXIT(FALSE);
+
+      RecordRef.OPEN(ApiWebhookEntity."Table No.");
+      Result := APIWebhookNotificationMgt.FindLastModifiedDateTimeField(RecordRef,FieldRef);
+
+      EXIT(Result);
+    END;
+
+    LOCAL PROCEDURE GetActiveSubscriptions@42() : Boolean;
+    VAR
+      APIWebhookSubscription@1000 : Record 2000000095;
+      SubscriptionNumber@1001 : Integer;
+    BEGIN
+      APIWebhookSubscription.SETAUTOCALCFIELDS("Notification Url Blob","Resource Url Blob");
+      APIWebhookSubscription.SETFILTER("Expiration Date Time",'>=%1',ProcessingDateTime);
+      APIWebhookSubscription.SETFILTER("Company Name",'%1|%2',COMPANYNAME,'');
+      IF NOT APIWebhookSubscription.FINDSET THEN
+        EXIT(FALSE);
+
+      SubscriptionNumber := 0;
+      REPEAT
+        SubscriptionNumber += 1;
+        CLEAR(TempAPIWebhookSubscription);
+        TempAPIWebhookSubscription.INIT;
+        TempAPIWebhookSubscription.TRANSFERFIELDS(APIWebhookSubscription,TRUE);
+        CLEAR(TempAPIWebhookSubscription."Notification Url Blob");
+        CLEAR(TempAPIWebhookSubscription."Resource Url Blob");
+        TempAPIWebhookSubscription.INSERT;
+        CollectValuesInDictionaries(APIWebhookSubscription,SubscriptionNumber);
+      UNTIL APIWebhookSubscription.NEXT = 0;
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE DeleteObsoleteSubscriptions@8();
+    VAR
+      APIWebhookSubscription@1000 : Record 2000000095;
+      ApiWebhookEntity@1001 : Record 2000000097;
+    BEGIN
+      IF NOT APIWebhookSubscription.FINDSET THEN
+        EXIT;
+
+      REPEAT
+        IF NOT APIWebhookNotificationMgt.GetEntity(APIWebhookSubscription,ApiWebhookEntity) THEN BEGIN
+          SENDTRACETAG('0000299',APIWebhookCategoryLbl,VERBOSITY::Normal,
+            STRSUBSTNO(DeleteObsoleteSubscriptionMsg,
+              DateTimeToString(APIWebhookSubscription."Expiration Date Time"),APIWebhookSubscription."Source Table Id"),
+            DATACLASSIFICATION::SystemMetadata);
+          LogActivity(FALSE,DeleteObsoleteSubscriptionTitleTxt,GetSubscriptionDetails(APIWebhookSubscription."Subscription Id"));
+          APIWebhookNotificationMgt.DeleteSubscription(APIWebhookSubscription);
+        END;
+      UNTIL APIWebhookSubscription.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE DeleteExpiredSubscriptions@19();
+    VAR
+      APIWebhookSubscription@1000 : Record 2000000095;
+    BEGIN
+      APIWebhookSubscription.SETFILTER("Expiration Date Time",'<%1',ProcessingDateTime);
+      APIWebhookSubscription.SETFILTER("Company Name",'%1|%2',COMPANYNAME,'');
+      IF NOT APIWebhookSubscription.FINDSET THEN
+        EXIT;
+
+      REPEAT
+        SENDTRACETAG('000029A',APIWebhookCategoryLbl,VERBOSITY::Normal,
+          STRSUBSTNO(DeleteExpiredSubscriptionMsg,
+            DateTimeToString(APIWebhookSubscription."Expiration Date Time"),APIWebhookSubscription."Source Table Id"),
+          DATACLASSIFICATION::SystemMetadata);
+        LogActivity(FALSE,DeleteExpiredSubscriptionTitleTxt,
+          GetSubscriptionDetails(APIWebhookSubscription."Subscription Id"));
+        APIWebhookNotificationMgt.DeleteSubscription(APIWebhookSubscription);
+      UNTIL APIWebhookSubscription.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE DeleteSubscriptionsWithTooManyFailures@103();
+    VAR
+      APIWebhookSubscription@1000 : Record 2000000095;
+    BEGIN
+      ClearFiltersFromNotificationsBuffer;
+      TempAPIWebhookNotificationAggr.SETFILTER("Attempt No.",'>%1',GetMaxNumberOfAttempts);
+      IF NOT TempAPIWebhookNotificationAggr.FIND('-') THEN
+        EXIT;
+
+      REPEAT
+        IF APIWebhookSubscription.GET(TempAPIWebhookNotificationAggr."Subscription ID") THEN BEGIN
+          SENDTRACETAG('00007MN',APIWebhookCategoryLbl,VERBOSITY::Normal,
+            STRSUBSTNO(DeleteSubscriptionWithTooManyFailuresMsg,
+              DateTimeToString(APIWebhookSubscription."Expiration Date Time"),TempAPIWebhookNotificationAggr."Attempt No."),
+            DATACLASSIFICATION::SystemMetadata);
+          LogActivity(FALSE,DeleteSubscriptionWithTooManyFailuresTitleTxt,
+            GetSubscriptionDetails(APIWebhookSubscription."Subscription Id"));
+          APIWebhookNotificationMgt.DeleteSubscription(APIWebhookSubscription);
+        END;
+      UNTIL TempAPIWebhookNotificationAggr.NEXT = 0;
+      TempAPIWebhookNotificationAggr.DELETEALL;
+    END;
+
+    LOCAL PROCEDURE DeleteInactiveJobs@7();
+    VAR
+      JobQueueEntry@1000 : Record 472;
+    BEGIN
+      OnBeforeDeleteInactiveJobs;
+      JobQueueEntry.SETRANGE("Object Type to Run",JobQueueEntry."Object Type to Run"::Codeunit);
+      JobQueueEntry.SETRANGE("Object ID to Run",CODEUNIT::"API Webhook Notification Send");
+      JobQueueEntry.SETFILTER(Status,'<>%1&<>%2',JobQueueEntry.Status::"In Process",JobQueueEntry.Status::Ready);
+      IF JobQueueEntry.FINDSET THEN
+        REPEAT
+          SENDTRACETAG('000070N',APIWebhookCategoryLbl,VERBOSITY::Normal,
+            STRSUBSTNO(DeleteInactiveJobMsg,JobQueueEntry.Status,DateTimeToString(JobQueueEntry."Earliest Start Date/Time")),
+            DATACLASSIFICATION::SystemMetadata);
+          IF JobQueueEntry.DELETE(TRUE) THEN ;
+        UNTIL JobQueueEntry.NEXT = 0;
+
+      JobQueueEntry.SETRANGE(Status,JobQueueEntry.Status::Ready);
+      IF JobQueueEntry.FINDSET THEN
+        REPEAT
+          IF (JobQueueEntry."Job Queue Category Code" <> JobQueueCategoryCodeLbl) OR JobQueueEntry."Recurring Job" THEN BEGIN
+            SENDTRACETAG('000029Q',APIWebhookCategoryLbl,VERBOSITY::Warning,
+              STRSUBSTNO(DeleteJobWithWrongParametersMsg,JobQueueEntry."Job Queue Category Code",
+                JobQueueEntry."Recurring Job",DateTimeToString(JobQueueEntry."Earliest Start Date/Time")),
+              DATACLASSIFICATION::SystemMetadata);
+            IF JobQueueEntry.DELETE(TRUE) THEN ;
+          END ELSE BEGIN
+            JobQueueEntry.CALCFIELDS(Scheduled);
+            IF NOT JobQueueEntry.Scheduled THEN BEGIN
+              SENDTRACETAG('000075S',APIWebhookCategoryLbl,VERBOSITY::Warning,
+                STRSUBSTNO(DeleteReadyButNotScheduledJobMsg,DateTimeToString(JobQueueEntry."Earliest Start Date/Time")),
+                DATACLASSIFICATION::SystemMetadata);
+              IF JobQueueEntry.DELETE(TRUE) THEN ;
+            END;
+          END;
+        UNTIL JobQueueEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ClearFiltersFromNotificationsBuffer@94();
+    BEGIN
+      TempAPIWebhookNotificationAggr.SETRANGE(ID);
+      TempAPIWebhookNotificationAggr.SETRANGE("Subscription ID");
+      TempAPIWebhookNotificationAggr.SETRANGE("Entity Key Value");
+      TempAPIWebhookNotificationAggr.SETRANGE("Attempt No.");
+      TempAPIWebhookNotificationAggr.SETRANGE("Change Type");
+    END;
+
+    LOCAL PROCEDURE ClearFiltersFromSubscriptionsBuffer@100();
+    BEGIN
+      TempAPIWebhookSubscription.SETRANGE("Subscription Id");
+    END;
+
+    LOCAL PROCEDURE IsApiSubscriptionEnabled@37() : Boolean;
+    VAR
+      GraphMgtGeneralTools@1000 : Codeunit 5465;
+    BEGIN
+      EXIT(GraphMgtGeneralTools.IsApiSubscriptionEnabled);
+    END;
+
+    LOCAL PROCEDURE GetMaxNumberOfNotifications@18() : Integer;
+    VAR
+      ServerConfigSettingHandler@1000 : Codeunit 6723;
+      Handled@1001 : Boolean;
+      MaxNumberOfNotifications@1002 : Integer;
+    BEGIN
+      OnGetMaxNumberOfNotifications(Handled,MaxNumberOfNotifications);
+      IF Handled THEN
+        EXIT(MaxNumberOfNotifications);
+
+      MaxNumberOfNotifications := ServerConfigSettingHandler.GetApiSubscriptionMaxNumberOfNotifications;
+      EXIT(MaxNumberOfNotifications);
+    END;
+
+    LOCAL PROCEDURE GetMaxNumberOfAttempts@104() : Integer;
+    VAR
+      Handled@1001 : Boolean;
+      Value@1000 : Integer;
+    BEGIN
+      OnGetMaxNumberOfAttempts(Handled,Value);
+      IF Handled THEN
+        EXIT(Value);
+
+      EXIT(5);
+    END;
+
+    LOCAL PROCEDURE GetSendingNotificationTimeout@29() : Integer;
+    VAR
+      ServerConfigSettingHandler@1000 : Codeunit 6723;
+      Handled@1001 : Boolean;
+      Timeout@1002 : Integer;
+    BEGIN
+      OnGetSendingNotificationTimeout(Handled,Timeout);
+      IF Handled THEN
+        EXIT(Timeout);
+
+      Timeout := ServerConfigSettingHandler.GetApiSubscriptionSendingNotificationTimeout;
+      EXIT(Timeout);
+    END;
+
+    LOCAL PROCEDURE GetDelayTimeForAttempt@25(AttemptNumber@1000 : Integer) : Integer;
+    BEGIN
+      CASE AttemptNumber OF
+        0,1,2:
+          EXIT(60000);
+        3:
+          EXIT(600000);
+        4:
+          EXIT(6000000);
+        ELSE
+          EXIT(60000000);
+      END;
+    END;
+
+    [EventSubscriber(Table,472,OnBeforeInsertLogEntry)]
+    LOCAL PROCEDURE HandleOnBeforeInsertJobQueueLogEntry@58(VAR JobQueueLogEntry@1000 : Record 474;VAR JobQueueEntry@1003 : Record 472);
+    BEGIN
+      IF JobQueueLogEntry.ISTEMPORARY THEN
+        EXIT;
+      IF JobQueueLogEntry.Status <> JobQueueLogEntry.Status::Error THEN
+        EXIT;
+      IF JobQueueEntry."Object ID to Run" <> CODEUNIT::"API Webhook Notification Send" THEN
+        EXIT;
+      IF JobQueueEntry."Object Type to Run" <> JobQueueEntry."Object Type to Run"::Codeunit THEN
+        EXIT;
+
+      SENDTRACETAG('000075U',APIWebhookCategoryLbl,VERBOSITY::Error,
+        STRSUBSTNO(SendingJobFailedMsg,DateTimeToString(JobQueueEntry."Earliest Start Date/Time")),
+        DATACLASSIFICATION::SystemMetadata);
+
+      SENDTRACETAG('000076O',APIWebhookCategoryLbl,VERBOSITY::Error,
+        STRSUBSTNO(FailedJobDetailsMsg,JobQueueLogEntry.GetErrorMessage),
+        DATACLASSIFICATION::CustomerContent);
+
+      LogActivity(TRUE,JobFailedTitleTxt,JobQueueLogEntry.GetErrorMessage);
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeProcessNotifications@1();
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterProcessNotifications@11();
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeDeleteInactiveJobs@66();
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeSendNotification@65(NotificationUrl@1001 : Text;Payload@1000 : Text);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterSendNotification@12(VAR ErrorMessage@1002 : Text;VAR ErrorDetails@1001 : Text;VAR HttpStatusCode@1000 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpStatusCode");
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnGetMaxNumberOfNotifications@16(VAR Handled@1000 : Boolean;VAR Value@1001 : Integer);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnGetMaxNumberOfAttempts@6(VAR Handled@1001 : Boolean;VAR Value@1000 : Integer);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnGetSendingNotificationTimeout@10(VAR Handled@1000 : Boolean;VAR Value@1001 : Integer);
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE DateTimeToString@30(Value@1000 : DateTime) : Text;
+    BEGIN
+      EXIT(FORMAT(Value,0,'<Year4>-<Month,2>-<Day,2> <Hours24>:<Minutes,2>:<Seconds,2><Second dec.><Comma,.>'));
+    END;
+
+    PROCEDURE DateTimeToUtcString@86(DateTimeValue@1001 : DateTime) : Text;
+    VAR
+      JSONManagement@1000 : Codeunit 5459;
+      JsonObject@1002 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      UtcDateTimeString@1003 : Text;
+    BEGIN
+      // TODO replace getting UTC through JSON with the new function when such function is implemented on the platform side
+      JSONManagement.InitializeEmptyObject;
+      JSONManagement.GetJSONObject(JsonObject);
+      JSONManagement.AddJPropertyToJObject(JsonObject,'value',DateTimeValue);
+      JSONManagement.GetStringPropertyValueFromJObjectByName(JsonObject,'value',UtcDateTimeString);
+      EXIT(UtcDateTimeString);
+    END;
+
+    LOCAL PROCEDURE LogActivity@31(ActivityFailed@1004 : Boolean;ActivityDescription@1002 : Text;ActivityMessage@1003 : Text);
+    VAR
+      DummyAPIWebhookSubscription@1001 : Record 2000000095;
+      ActivityLog@1000 : Record 710;
+      ActivityStatus@1005 : Option;
+    BEGIN
+      IF ActivityFailed THEN
+        ActivityStatus := ActivityLog.Status::Failed
+      ELSE
+        ActivityStatus := ActivityLog.Status::Success;
+      ActivityLog.LogActivity(DummyAPIWebhookSubscription.RECORDID,ActivityStatus,ActivityLogContextLbl,
+        ActivityDescription,ActivityMessage);
+    END;
+
+    LOCAL PROCEDURE GetSubscriptionDetails@109(SubscriptionId@1000 : Text) : Text;
+    VAR
+      ResourceUrl@1001 : Text;
+      NotificationUrl@1002 : Text;
+    BEGIN
+      ResourceUrl := GetResourceUrlBySubscriptionId(SubscriptionId);
+      NotificationUrl := GetNotificationUrlBySubscriptionId(SubscriptionId);
+      EXIT(STRSUBSTNO(SubscriptionDetailsTxt,SubscriptionId,ResourceUrl,NotificationUrl));
+    END;
+
+    BEGIN
+    {
+      1. Aggregates notifications
+      2. Generates notifications payload per notification URL
+      3. Sends notifications
+    }
+    END.
+  }
+}
+

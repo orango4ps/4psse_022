@@ -1,0 +1,612 @@
+OBJECT Codeunit 11072100 INSBOU Process Maint. Instr.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    TableNo=11072350;
+    OnRun=BEGIN
+            ProcessMaintenanceInstruction(Rec);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      NoServiceLocationFound@1100528800 : TextConst 'DEU=Kein Servicestandort gefunden.;ENU=No Service Location Found.;NLD=Geen servicelocatie gevonden.';
+      MaintenanceInstructionTxt@1100528801 : TextConst 'DEU=Wartungsanleitung: %1;ENU=Maintenance Instruction: %1;NLD=Onderhoudsopdracht: %1';
+      Text001@1100529900 : TextConst 'DEU=Die Steuerberechnung aus dem Bericht weicht von der Steuerberechnung des Kunden ab.;ENU=The VAT Calculation Type from the message differs from the Vat Calculation Type of the customer;NLD=De BTW berekening uit het bericht wijkt af van de BTW berekening van de klant.';
+
+    PROCEDURE ProcessMaintenanceInstruction@1100528800(VAR INSBOUMaintInstruction@1100528802 : Record 11072350);
+    BEGIN
+      IF (INSBOUMaintInstruction."Process Status" > INSBOUMaintInstruction."Process Status"::Processing) THEN
+        INSBOUMaintInstruction.FIELDERROR("Process Status");
+
+      INSBOUMaintInstruction."Process Status" := INSBOUMaintInstruction."Process Status"::Processing;
+      INSBOUMaintInstruction."Error Message" := '';
+      INSBOUMaintInstruction.MODIFY(TRUE);
+      COMMIT;
+      CLEARLASTERROR;
+      CreateServiceOrderByMaintenanceInstruction(INSBOUMaintInstruction);
+      INSBOUMaintInstruction."Error Message" := COPYSTR(GETLASTERRORTEXT, 1, MAXSTRLEN(INSBOUMaintInstruction."Error Message"));
+    END;
+
+    PROCEDURE CreateServiceOrderByMaintenanceInstruction@1100528803(VAR INSBOUMaintInstruction@1100528800 : Record 11072350);
+    VAR
+      Customer@1100528806 : Record 18;
+      ServiceContract@1100528802 : Record 11012812;
+      ServiceOrder@1100528803 : Record 11012823;
+      ServiceSetup@1100528804 : Record 11012800;
+      ServiceSourceTypeSetup@1100528805 : Record 11071726;
+      INSBOUMaintStatusMgt@1100529901 : Codeunit 11072102;
+      OBaseServiceOrderNo@1100529900 : Code[20];
+      ServiceLocationCode@1100528801 : Code[20];
+    BEGIN
+      INSBOUMaintInstruction.TESTFIELD(BuyerGLN);
+      Customer.SETRANGE(GLN, INSBOUMaintInstruction.BuyerGLN);
+      Customer.FINDFIRST;
+
+      IF NOT FindServiceLocation(
+        INSBOUMaintInstruction.RealEstateUnitNumber,
+        INSBOUMaintInstruction.PostalCode,
+        INSBOUMaintInstruction.HouseNumber,
+        INSBOUMaintInstruction.HouseNumberSuffix,
+        ServiceLocationCode)
+      THEN
+        ERROR(NoServiceLocationFound);
+
+      IF ServiceContract.GET(INSBOUMaintInstruction.ContractNumber) THEN;
+
+      ServiceSetup.GET;
+      ServiceOrder.INIT;
+      CLEAR(ServiceOrder);
+      ServiceOrder."Source Type" := ServiceOrder."Source Type"::Direct;
+      ServiceOrder.Origin := ServiceOrder.Origin::"INSBOU Maint. Instr.";
+      ServiceSourceTypeSetup.GET(ServiceOrder."Source Type");
+      ServiceOrder.Description := GetServiceOrderDescription(INSBOUMaintInstruction);
+
+      ServiceOrder.INSERT(TRUE);
+
+      IF LinkServiceOrder(INSBOUMaintInstruction, OBaseServiceOrderNo) THEN BEGIN
+        ServiceOrder."Base Service Order" := FALSE;
+        ServiceOrder."Base Service Order No." := OBaseServiceOrderNo;
+        ServiceOrder.MODIFY;
+      END;
+
+      ServiceOrder.VALIDATE("Service Contract No.", GetServiceContractNoByExtContractNo(Customer."No.", INSBOUMaintInstruction.ContractNumber));
+      ServiceOrder.VALIDATE("Service Location No.", ServiceLocationCode);
+      ServiceOrder.VALIDATE("Customer No.", Customer."No.");
+      ServiceOrder."Contact Person No." := GetContactPersonNumberByEmail(Customer."No.", INSBOUMaintInstruction.BuyerContactPersonEmail);
+      ServiceOrder."Your Reference" := INSBOUMaintInstruction.InstructionSubNumber;
+      ServiceOrder."Order No. Customer" := INSBOUMaintInstruction.InstructionNumber;
+      ServiceOrder."Commision Date" := INSBOUMaintInstruction.InstructionDate;
+      ServiceOrder."Contact Name" := INSBOUMaintInstruction.ContactPersonName;
+      ServiceOrder."Phone No." := INSBOUMaintInstruction.PhoneNumber1;
+      ServiceOrder."Phone No. 2" := INSBOUMaintInstruction.PhoneNumber2;
+      ServiceOrder."E-Mail" := INSBOUMaintInstruction.EmailAddress1;
+      ServiceOrder.VALIDATE("Starting Date", INSBOUMaintInstruction.RequiredDeliveryDate);
+      ServiceOrder.VALIDATE("Starting Time", INSBOUMaintInstruction.RequiredDeliveryTime);
+      ServiceOrder.VALIDATE("First Possible Starting Date", INSBOUMaintInstruction.DeliveryDateEarliest);
+      ServiceOrder.VALIDATE("First Possible Starting Time", INSBOUMaintInstruction.DeliveryTimeEarliest);
+      ServiceOrder.VALIDATE("Last Possible Ending Date", INSBOUMaintInstruction.DeliveryDateLatest);
+      ServiceOrder.VALIDATE("Last Possible Ending Time", INSBOUMaintInstruction.DeliveryTimeLatest);
+
+      IF ServiceOrder."Preferred Employee No." <> '' THEN
+        IF ServiceSetup."Use Pref. Employee as Employee" THEN BEGIN
+          ServiceOrder.VALIDATE("Employee No.", ServiceOrder."Preferred Employee No.");
+          ServiceOrder.UpdateWorkorderEmployee(FALSE);
+        END;
+
+      ServiceOrder.MODIFY;
+
+      INSBOUMaintStatusMgt.AddMaintStatusToMessageQueue(ServiceOrder."No.", 3);
+
+      AddServiceTextToServiceOrder(ServiceOrder."No.", INSBOUMaintInstruction);
+      CreateDocumentLinkByMaintInstr(INSBOUMaintInstruction, ServiceOrder);
+
+      INSBOUMaintInstruction."Service Order No." := ServiceOrder."No.";
+      INSBOUMaintInstruction."Process Status" := INSBOUMaintInstruction."Process Status"::Processed;
+      INSBOUMaintInstruction.MODIFY;
+
+      ProcessMaintenanceInstructionLines(
+        INSBOUMaintInstruction.MessageNumber, INSBOUMaintInstruction.BuyerGLN, Customer);
+    END;
+
+    LOCAL PROCEDURE ProcessMaintenanceInstructionLines@1100528804(MaintInstructionMessageNo@1100528800 : Code[17];BuyerGLN@1100528806 : Code[13];Customer@1100528500 : Record 18);
+    VAR
+      INSBOUMaintInstruction@1100528805 : Record 11072350;
+      INSBOUMaintInstructionLine@1100528801 : Record 11072351;
+      SUPRecordingLine@1100528802 : Record 11071772;
+      ServiceOrder@1100528804 : Record 11012823;
+      ServiceOrderExtension@1100528803 : Record 11071727;
+      ServiceUnitPrice@1100529900 : Record 11071769;
+    BEGIN
+      IF NOT INSBOUMaintInstruction.GET(MaintInstructionMessageNo, BuyerGLN) THEN
+        EXIT;
+
+      IF NOT ServiceOrder.GET(INSBOUMaintInstruction."Service Order No.") THEN
+        EXIT;
+
+      INSBOUMaintInstructionLine.SETRANGE(MessageNumber, MaintInstructionMessageNo);
+
+      IF INSBOUMaintInstructionLine.FINDSET THEN
+        REPEAT
+          CLEARLASTERROR;
+          INSBOUMaintInstructionLine."Process Status" := INSBOUMaintInstructionLine."Process Status"::Processing;
+          INSBOUMaintInstructionLine.MODIFY;
+          SUPRecordingLine.INIT;
+          SUPRecordingLine."Service Order No." := ServiceOrder."No.";
+          SUPRecordingLine."Line No." := GetLineNoSupRecordingLine(ServiceOrder."No.");
+          AddInstructionLineFreeTextToSupRecLineCommentLine(SUPRecordingLine, INSBOUMaintInstructionLine, INSBOUMaintInstruction.MessageDate);
+          CASE INSBOUMaintInstruction.MessageVersion OF
+            '001': SUPRecordingLine.Room := COPYSTR(INSBOUMaintInstructionLine.Area, MAXSTRLEN(SUPRecordingLine.Room));
+            '005':
+              BEGIN
+                AddLedoInformationToSupRecLineCommentLine(SUPRecordingLine, INSBOUMaintInstructionLine, INSBOUMaintInstruction.MessageDate);
+                SUPRecordingLine.Room := GetRoomFromLEDOIfExists(ServiceOrder."Customer No.",INSBOUMaintInstructionLine.LedoInformation1);
+              END;
+          END;
+          SUPRecordingLine."Price Book Type" := ServiceOrder."Price Book Type";
+          ServiceOrderExtension.GetServOrderExtension(ServiceOrder."No.");
+          SUPRecordingLine."Price Book Code" := ServiceOrderExtension."Price Book Code";
+          SUPRecordingLine."Index Date" := ServiceOrderExtension."Price Book Index Date";
+          IF INSBOUMaintInstructionLine.NormPriceCode <> '' THEN BEGIN
+            IF ServiceUnitPrice.GET(SUPRecordingLine."Price Book Code", SUPRecordingLine."Index Date", INSBOUMaintInstructionLine.NormPriceCode) THEN BEGIN
+              SUPRecordingLine.VALIDATE("Unit Price Code", INSBOUMaintInstructionLine.NormPriceCode);
+            END ELSE BEGIN
+              SUPRecordingLine.VALIDATE("Alternative Unit Price Code", INSBOUMaintInstructionLine.NormPriceCode);
+              SUPRecordingLine."VAT Prod. Posting Group" := DetermineVATProdPostingGroup(Customer, INSBOUMaintInstructionLine, INSBOUMaintInstruction.ReverseChargeIndicator);
+              SUPRecordingLine."Unit Price" := INSBOUMaintInstructionLine.Price;
+              SUPRecordingLine.Description := INSBOUMaintInstructionLine.ShortDescription;
+            END;
+          END ELSE BEGIN
+            SUPRecordingLine."VAT Prod. Posting Group" := DetermineVATProdPostingGroup(Customer, INSBOUMaintInstructionLine, INSBOUMaintInstruction.ReverseChargeIndicator);
+            SUPRecordingLine."Unit Price" := INSBOUMaintInstructionLine.Price;
+            SUPRecordingLine.Description := INSBOUMaintInstructionLine.ShortDescription;
+          END;
+          SUPRecordingLine."Unit of Measure" := INSBOUMaintInstructionLine.MeasurementUnitQuantity;
+          SUPRecordingLine.VALIDATE("Recording Quantity", INSBOUMaintInstructionLine.Quantity);
+          SUPRecordingLine."Description Customer" := INSBOUMaintInstructionLine.ShortDescription;
+          SUPRecordingLine."Description 2 Customer" := INSBOUMaintInstructionLine.LongDescription;
+          SUPRecordingLine.Comment := COPYSTR(INSBOUMaintInstructionLine.FreeText1, 1, MAXSTRLEN(SUPRecordingLine.Comment));
+          SUPRecordingLine."Base Service Order No." := ServiceOrder."Base Service Order No.";
+          IF SUPRecordingLine.INSERT THEN BEGIN
+            INSBOUMaintInstructionLine."Process Status" := INSBOUMaintInstructionLine."Process Status"::Processed;
+            INSBOUMaintInstructionLine."Line No. SUP Recording Line" := SUPRecordingLine."Line No.";
+            INSBOUMaintInstructionLine.MODIFY;
+            CreateDocumentLinkByMaintInstrLine(INSBOUMaintInstructionLine, SUPRecordingLine);
+          END;
+        UNTIL INSBOUMaintInstructionLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE DetermineVATProdPostingGroup@1100528400(Customer@1100528400 : Record 18;INSBOUMaintInstructionLine@1100528402 : Record 11072351;ReverseChargeIndicator@1100528501 : Code[10]) : Code[10];
+    VAR
+      CustomerVATPostingSetup@1100528500 : Record 325;
+      VATPostingSetup@1100528502 : Record 325;
+    BEGIN
+      IF INSBOUMaintInstructionLine."VAT Rate" <> 'S' THEN
+        EXIT('');
+      IF NOT CustomerVATPostingSetup.GET(Customer."VAT Bus. Posting Group", Customer."VAT Prod. Posting Group") THEN
+        EXIT('');
+      IF ((CustomerVATPostingSetup."VAT Calculation Type" <> CustomerVATPostingSetup."VAT Calculation Type"::"Reverse Charge VAT") AND (ReverseChargeIndicator = 'J')) THEN
+        ERROR(Text001);
+
+      VATPostingSetup.SETRANGE("VAT Bus. Posting Group", Customer."VAT Bus. Posting Group");
+      VATPostingSetup.SETRANGE("VAT %", INSBOUMaintInstructionLine."VAT Percentage");
+      IF ReverseChargeIndicator = 'J' THEN
+        VATPostingSetup.SETRANGE("VAT Calculation Type", VATPostingSetup."VAT Calculation Type"::"Reverse Charge VAT")
+      ELSE
+        VATPostingSetup.SETRANGE("VAT Calculation Type", CustomerVATPostingSetup."VAT Calculation Type");
+      IF VATPostingSetup.FINDFIRST THEN
+        EXIT(VATPostingSetup."VAT Prod. Posting Group");
+    END;
+
+    LOCAL PROCEDURE FindServiceLocation@1100528802(IRealEstateUnitNumber@1100528806 : Code[17];IPostalCode@1100528800 : Text[9];IHouseNumber@1100528801 : Text[7];IHouseNumberSuffix@1100528802 : Text[7];VAR OServiceLocationNo@1100528804 : Code[20]) : Boolean;
+    BEGIN
+      IF FindServiceLocationByRealEstateUnitNo(IRealEstateUnitNumber, OServiceLocationNo) THEN
+        EXIT(TRUE);
+
+      IF FindServiceLocationByPostCodeHouseNo(IPostalCode, IHouseNumber, IHouseNumberSuffix, OServiceLocationNo) THEN
+        EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE FindServiceLocationByRealEstateUnitNo@1100528817(IRealEstateUnitNumber@1100528806 : Code[17];VAR OServiceLocationNo@1100528804 : Code[20]) : Boolean;
+    VAR
+      ServiceLocation@1100528803 : Record 11012801;
+    BEGIN
+      IF IRealEstateUnitNumber = '' THEN
+        EXIT(FALSE);
+
+      ServiceLocation.SETRANGE("Real Estate Unit Number", IRealEstateUnitNumber);
+      IF ServiceLocation.FINDFIRST THEN BEGIN
+        OServiceLocationNo := ServiceLocation."No.";
+        EXIT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE FindServiceLocationByPostCodeHouseNo@1100528815(IPostalCode@1100528800 : Text[9];IHouseNumber@1100528801 : Text[7];IHouseNumberSuffix@1100528802 : Text[7];VAR OServiceLocationNo@1100528804 : Code[20]) : Boolean;
+    VAR
+      ServiceLocation@1100528803 : Record 11012801;
+      ObjectImpWorkSheetMgt@1100528807 : Codeunit 11012839;
+      NormalizedPostCode@1100528808 : Code[20];
+    BEGIN
+      IF (IPostalCode = '') OR (IHouseNumber = '') THEN
+        EXIT(FALSE);
+
+      ObjectImpWorkSheetMgt.NormalizePostCode(IPostalCode, '', NormalizedPostCode);
+
+      ServiceLocation.SETCURRENTKEY("Post Code", "House No.", "House No. Ext.");
+      ServiceLocation.SETRANGE("Post Code", NormalizedPostCode);
+      ServiceLocation.SETRANGE("House No.", IHouseNumber);
+      ServiceLocation.SETRANGE("House No. Ext.", IHouseNumberSuffix);
+      IF ServiceLocation.FINDFIRST THEN BEGIN
+        OServiceLocationNo := ServiceLocation."No.";
+        EXIT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE AddServiceTextToServiceOrder@1100528801(ServiceOrderNo@1100528801 : Code[20];IINSBOUMaintInstruction@1100528800 : Record 11072350);
+    VAR
+      ServiceText@1100528803 : Record 11012882;
+      FreeText@1100528802 : Text;
+      Comment@1100528804 : Text;
+      p@1100528805 : Integer;
+      NewLineNo@1100528806 : Integer;
+    BEGIN
+      ServiceText.SETRANGE("Table Name", ServiceText."Table Name"::"Service Order");
+      ServiceText.SETRANGE("Table Field", 90);
+      ServiceText.SETRANGE("No.", ServiceOrderNo);
+      IF ServiceText.FINDLAST THEN
+        NewLineNo := ServiceText."Line No.";
+
+      FreeText := IINSBOUMaintInstruction.FreeText1 +
+                  IINSBOUMaintInstruction.FreeText2 +
+                  IINSBOUMaintInstruction.FreeText3 +
+                  IINSBOUMaintInstruction.FreeText4;
+
+
+      WHILE STRLEN(FreeText) <> 0  DO BEGIN
+        IF STRLEN(FreeText) <= 80 THEN
+          p := STRLEN(FreeText)
+        ELSE BEGIN
+          Comment := '';
+          p := MAXSTRLEN(ServiceText.Comment)+1; //+1 for first loop
+          WHILE NOT(Comment IN [' ','.','!','?',';',',',':'])
+             AND (p > 0) AND ((STRLEN(FreeText) > 80)) DO BEGIN
+            p -= 1;
+            Comment := COPYSTR(FreeText,p,1)
+          END
+        END;
+        Comment := COPYSTR(FreeText, 1, p);
+        FreeText := COPYSTR(FreeText,p+1,STRLEN(FreeText));
+        NewLineNo += 10000;
+        ServiceText.INIT;
+        ServiceText."No." := ServiceOrderNo;
+        ServiceText."Table Name" := ServiceText."Table Name"::"Service Order";
+        ServiceText."Table Field" := 90;
+        ServiceText."Line No."  := NewLineNo;
+        ServiceText.Date  := IINSBOUMaintInstruction.InstructionDate;
+        ServiceText.Comment := Comment;
+        ServiceText."Active in FSA" := TRUE;
+        ServiceText.INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE AddLedoInformationToSupRecLineCommentLine@1100528809(ISupRecordingLine@1100528800 : Record 11071772;IINSBOUMaintInstructionLine@1100528801 : Record 11072351;IINSBOUMaintInstructionMessageDate@1100528804 : Date);
+    VAR
+      SUPRecLineCommentLine@1100528802 : Record 11072290;
+      LedoInformation@1100528803 : Text;
+      p@1100528805 : Integer;
+      Comment@1100528806 : Text[80];
+      NewLineNo@1100528807 : Integer;
+    BEGIN
+      SUPRecLineCommentLine.SETRANGE("Service Order No.", ISupRecordingLine."Service Order No.");
+      SUPRecLineCommentLine.SETRANGE("SUP Recording Line No.", ISupRecordingLine."Line No.");
+      IF SUPRecLineCommentLine.FINDLAST THEN
+        NewLineNo := SUPRecLineCommentLine."Line No.";
+
+      LedoInformation := IINSBOUMaintInstructionLine.LedoInformation1 + ' ' +
+                          IINSBOUMaintInstructionLine.LedoInformation2 + ' ' +
+                          IINSBOUMaintInstructionLine.LedoInformation3 + ' ' +
+                          IINSBOUMaintInstructionLine.LedoInformation4;
+
+      WHILE STRLEN(LedoInformation) <> 0  DO BEGIN
+        IF STRLEN(LedoInformation) <= 80 THEN
+          p := STRLEN(LedoInformation)
+        ELSE BEGIN
+          Comment := '';
+          p := MAXSTRLEN(SUPRecLineCommentLine.Comment)+1; //+1 for first loop
+          WHILE NOT(Comment IN [' ','.','!','?',';',',',':'])
+             AND (p > 0) AND ((STRLEN(LedoInformation) > 80)) DO BEGIN
+            p -= 1;
+            Comment := COPYSTR(LedoInformation,p,1)
+          END
+        END;
+        Comment := COPYSTR(LedoInformation, 1, p);
+        LedoInformation := COPYSTR(LedoInformation,p+1,STRLEN(LedoInformation));
+        NewLineNo += 10000;
+        SUPRecLineCommentLine.INIT;
+        SUPRecLineCommentLine."Service Order No." := ISupRecordingLine."Service Order No.";
+        SUPRecLineCommentLine."SUP Recording Line No." := ISupRecordingLine."Line No.";
+        SUPRecLineCommentLine."Line No."  := NewLineNo;
+        SUPRecLineCommentLine.Date  := IINSBOUMaintInstructionMessageDate;
+        SUPRecLineCommentLine.Comment := Comment;
+        SUPRecLineCommentLine.INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE AddInstructionLineFreeTextToSupRecLineCommentLine@1100528810(ISupRecordingLine@1100528800 : Record 11071772;IINSBOUMaintInstructionLine@1100528801 : Record 11072351;IINSBOUMaintInstructionMessageDate@1100528804 : Date);
+    VAR
+      SUPRecLineCommentLine@1100528802 : Record 11072290;
+      FreeText@1100528803 : Text;
+      p@1100528805 : Integer;
+      Comment@1100528806 : Text[80];
+      NewLineNo@1100528807 : Integer;
+    BEGIN
+      SUPRecLineCommentLine.SETRANGE("Service Order No.", ISupRecordingLine."Service Order No.");
+      SUPRecLineCommentLine.SETRANGE("SUP Recording Line No.", ISupRecordingLine."Line No.");
+      IF SUPRecLineCommentLine.FINDLAST THEN
+        NewLineNo := SUPRecLineCommentLine."Line No.";
+
+      FreeText := IINSBOUMaintInstructionLine.FreeText1 +
+                          IINSBOUMaintInstructionLine.FreeText2 +
+                          IINSBOUMaintInstructionLine.FreeText3 +
+                          IINSBOUMaintInstructionLine.FreeText4;
+
+      WHILE STRLEN(FreeText) <> 0  DO BEGIN
+        IF STRLEN(FreeText) <= 80 THEN
+          p := STRLEN(FreeText)
+        ELSE BEGIN
+          Comment := '';
+          p := MAXSTRLEN(SUPRecLineCommentLine.Comment)+1; //+1 for first loop
+          WHILE NOT(Comment IN [' ','.','!','?',';',',',':'])
+             AND (p > 0) AND ((STRLEN(FreeText) > 80)) DO BEGIN
+            p -= 1;
+            Comment := COPYSTR(FreeText,p,1)
+          END
+        END;
+        Comment := COPYSTR(FreeText, 1, p);
+        FreeText := COPYSTR(FreeText,p+1,STRLEN(FreeText));
+        NewLineNo += 10000;
+        SUPRecLineCommentLine.INIT;
+        SUPRecLineCommentLine."Service Order No." := ISupRecordingLine."Service Order No.";
+        SUPRecLineCommentLine."SUP Recording Line No." := ISupRecordingLine."Line No.";
+        SUPRecLineCommentLine."Line No."  := NewLineNo;
+        SUPRecLineCommentLine.Date  := IINSBOUMaintInstructionMessageDate;
+        SUPRecLineCommentLine.Comment := Comment;
+        SUPRecLineCommentLine.INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE GetLineNoSupRecordingLine@1100528807(ServiceOrderNo@1100528800 : Code[20]) : Integer;
+    VAR
+      SUPRecordingLine@1100528801 : Record 11071772;
+    BEGIN
+      SUPRecordingLine.SETRANGE("Service Order No.", ServiceOrderNo);
+      IF SUPRecordingLine.FINDLAST THEN
+        EXIT(SUPRecordingLine."Line No."+10000)
+      ELSE
+        EXIT(10000);
+    END;
+
+    LOCAL PROCEDURE GetServiceOrderDescription@1100528805(INSBOUMaintInstruction@1100528800 : Record 11072350) : Text[50];
+    VAR
+      Description@1100528801 : Text[50];
+    BEGIN
+      Description := COPYSTR(INSBOUMaintInstruction.FreeText1, 1, MAXSTRLEN(Description));
+      IF Description = '' THEN
+        Description := STRSUBSTNO(MaintenanceInstructionTxt, INSBOUMaintInstruction.MessageNumber);
+
+      EXIT(Description);
+    END;
+
+    LOCAL PROCEDURE GetContactPersonNumberByEmail@1100528806(ICustomer@1100528801 : Code[20];Email@1100528800 : Text[250]) : Code[20];
+    VAR
+      Contact@1100528802 : Record 5050;
+      Contact2@1100528803 : Record 5050;
+    BEGIN
+      Contact.GetContactByCustomer(ICustomer, Contact, FALSE);
+      Contact2.SETRANGE("Company No.", Contact."No.");
+      Contact2.SETRANGE("E-Mail", Email);
+      IF Contact2.FINDFIRST AND Contact2.IsContactPerson THEN
+        EXIT(Contact2."No.");
+    END;
+
+    LOCAL PROCEDURE GetServiceContractNoByExtContractNo@1100528808(CustomerNo@1100528802 : Code[20];ExtContractNo@1100528801 : Text) : Code[20];
+    VAR
+      ServiceContract@1100528800 : Record 11012812;
+      ContractNo@1100528803 : Text;
+    BEGIN
+      ExtContractNo := UPPERCASE(ExtContractNo);
+      ServiceContract.SETRANGE("Customer No.", CustomerNo);
+      IF ServiceContract.FINDSET THEN
+        REPEAT
+          ContractNo := UPPERCASE(ServiceContract."Your Reference");
+          IF ContractNo <> '' THEN
+            IF ContractNo = ExtContractNo THEN
+              EXIT(ServiceContract."No.");
+        UNTIL ServiceContract.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreateDocumentLinkByMaintInstrLine@1100528811(INSBOUMaintInstructionLine@1100528800 : Record 11072351;SUPRecordingLine@1100528815 : Record 11071772);
+    VAR
+      DocumentProperties@1100528803 : Record 11012746;
+      ServiceOrder@1100528806 : Record 11012823;
+      DocumentLinkManagement@1100528801 : Codeunit 11012401;
+      RecRef@1100528805 : RecordRef;
+      RecRef2@1100528804 : RecordRef;
+      NoOfDocuments@1100528802 : Integer;
+    BEGIN
+      RecRef.GETTABLE(INSBOUMaintInstructionLine);
+      DocumentLinkManagement.GetDocuments(DocumentProperties, RecRef);
+      DocumentProperties.MARKEDONLY(TRUE);
+      NoOfDocuments := DocumentProperties.COUNT;
+      IF NoOfDocuments > 0 THEN BEGIN
+        DocumentProperties.FINDSET;
+        REPEAT
+          RecRef2.GETTABLE(SUPRecordingLine);
+          DocumentLinkManagement.CreateOneDocumentLink(DocumentProperties, RecRef2.RECORDID);
+          RecRef2.RESET;
+          IF ServiceOrder.GET(SUPRecordingLine."Service Order No.") THEN BEGIN
+            RecRef2.GETTABLE(ServiceOrder);
+            DocumentLinkManagement.CreateOneDocumentLink(DocumentProperties, RecRef2.RECORDID);
+          END;
+        UNTIL DocumentProperties.NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateDocumentLinkByMaintInstr@1100528813(INSBOUMaintInstruction@1100528800 : Record 11072350;ServiceOrder@1100528815 : Record 11012823);
+    VAR
+      DocumentProperties@1100528803 : Record 11012746;
+      DocumentLinkManagement@1100528801 : Codeunit 11012401;
+      RecRef@1100528805 : RecordRef;
+      RecRef2@1100528804 : RecordRef;
+      NoOfDocuments@1100528802 : Integer;
+    BEGIN
+      RecRef.GETTABLE(INSBOUMaintInstruction);
+      DocumentLinkManagement.GetDocuments(DocumentProperties, RecRef);
+      DocumentProperties.MARKEDONLY(TRUE);
+      NoOfDocuments := DocumentProperties.COUNT;
+      IF NoOfDocuments > 0 THEN BEGIN
+        DocumentProperties.FINDSET;
+        REPEAT
+          RecRef2.GETTABLE(ServiceOrder);
+          DocumentLinkManagement.CreateOneDocumentLink(DocumentProperties, RecRef2.RECORDID);
+        UNTIL DocumentProperties.NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE LinkServiceOrder@1100529900(INSBOUMaintInstruction@1100528800 : Record 11072350;VAR OBaseServiceOrderNo@1100529900 : Code[20]) : Boolean;
+    BEGIN
+      CASE UPPERCASE(INSBOUMaintInstruction.ApplicationId) OF
+        'MAREON':
+          BEGIN
+            EXIT(IsNextServiceOrderMAREON(INSBOUMaintInstruction, OBaseServiceOrderNo));
+          END;
+        'CASIX':
+          BEGIN
+            EXIT(IsNextServiceOrderCASIX(INSBOUMaintInstruction, OBaseServiceOrderNo));
+          END;
+        ELSE
+          EXIT(FALSE);
+      END;
+    END;
+
+    LOCAL PROCEDURE IsNextServiceOrderMAREON@1100528818(INSBOUMaintInstruction@1100528800 : Record 11072350;VAR OBaseServiceOrderNo@1100528801 : Code[20]) : Boolean;
+    VAR
+      INSBOUMaintInstruction2@1100528802 : Record 11072350;
+      BaseInstructionNumber@1100528803 : Text[50];
+      FirstSubInstructionNumber@1100528804 : Integer;
+      CurrentSubInstructionNumber@1100528805 : Integer;
+    BEGIN
+      BaseInstructionNumber := GetBaseInstructionNumber(INSBOUMaintInstruction.InstructionNumber);
+      INSBOUMaintInstruction2.SETFILTER(InstructionNumber, '%1', BaseInstructionNumber + '/' + '*');
+      IF INSBOUMaintInstruction2.FINDSET THEN BEGIN
+        REPEAT
+          IF NOT (INSBOUMaintInstruction.InstructionNumber = INSBOUMaintInstruction2.InstructionNumber) THEN BEGIN
+            CurrentSubInstructionNumber := GetSubInstrNoAsIntegerMAREON(INSBOUMaintInstruction2.InstructionNumber);
+            IF (CurrentSubInstructionNumber <= FirstSubInstructionNumber) OR (FirstSubInstructionNumber = 0) THEN BEGIN
+              FirstSubInstructionNumber := CurrentSubInstructionNumber;
+              OBaseServiceOrderNo := INSBOUMaintInstruction2."Service Order No.";
+            END;
+          END;
+        UNTIL INSBOUMaintInstruction2.NEXT = 0;
+        IF NOT (OBaseServiceOrderNo = '') THEN
+          EXIT(TRUE);
+      END ELSE
+        EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE IsNextServiceOrderCASIX@1100528821(INSBOUMaintInstruction@1100528800 : Record 11072350;VAR OBaseServiceOrderNo@1100528801 : Code[20]) : Boolean;
+    VAR
+      INSBOUMaintInstruction2@1100528802 : Record 11072350;
+      BaseInstructionNumber@1100528803 : Text[50];
+      FirstSubInstructionNumber@1100528804 : Integer;
+      CurrentSubInstructionNumber@1100528805 : Integer;
+    BEGIN
+      BaseInstructionNumber := INSBOUMaintInstruction.InstructionNumber;
+      INSBOUMaintInstruction2.SETRANGE(InstructionNumber, BaseInstructionNumber);
+      IF INSBOUMaintInstruction2.FINDSET THEN BEGIN
+        REPEAT
+          IF NOT (INSBOUMaintInstruction.InstructionSubNumber = INSBOUMaintInstruction2.InstructionSubNumber) THEN BEGIN
+            CurrentSubInstructionNumber := GetSubInstrNoAsIntegerCASIX(BaseInstructionNumber, INSBOUMaintInstruction2.InstructionSubNumber);
+            IF (CurrentSubInstructionNumber <= FirstSubInstructionNumber) OR (FirstSubInstructionNumber = 0) THEN BEGIN
+              FirstSubInstructionNumber := CurrentSubInstructionNumber;
+              OBaseServiceOrderNo := INSBOUMaintInstruction2."Service Order No.";
+            END;
+          END;
+        UNTIL INSBOUMaintInstruction2.NEXT = 0;
+        IF NOT (OBaseServiceOrderNo = '') THEN
+          EXIT(TRUE);
+      END ELSE
+        EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE GetBaseInstructionNumber@1100528812(IInstructionNumber@1100528800 : Text) : Text;
+    VAR
+      p@1100528801 : Integer;
+    BEGIN
+      p := STRPOS(IInstructionNumber, '/');
+      EXIT(COPYSTR(IInstructionNumber, 1, p - 1));
+    END;
+
+    LOCAL PROCEDURE GetSubInstrNoAsIntegerMAREON@1100528829(IInstructionNumber@1100528800 : Text[50]) : Integer;
+    VAR
+      EvalutedInstructionNumber@1100528801 : Integer;
+    BEGIN
+      EVALUATE(EvalutedInstructionNumber, GetSubInstructionNumberMAREON(IInstructionNumber));
+      EXIT(EvalutedInstructionNumber);
+    END;
+
+    LOCAL PROCEDURE GetSubInstrNoAsIntegerCASIX@1100528823(IInstructionNumber@1100528800 : Text[50];IInstructionSubNumber@1100528802 : Text[50]) : Integer;
+    VAR
+      EvalutedInstructionNumber@1100528801 : Integer;
+    BEGIN
+      EVALUATE(EvalutedInstructionNumber, GetSubInstructionNumberCASIX(IInstructionNumber, IInstructionSubNumber));
+      EXIT(EvalutedInstructionNumber);
+    END;
+
+    LOCAL PROCEDURE GetSubInstructionNumberMAREON@1100528816(IInstructionNumber@1100528800 : Text[50]) : Text;
+    VAR
+      p@1100528801 : Integer;
+    BEGIN
+      p := STRPOS(IInstructionNumber, '/');
+      EXIT(COPYSTR(IInstructionNumber, p + 1));
+    END;
+
+    LOCAL PROCEDURE GetSubInstructionNumberCASIX@1100528824(IInstructionNumber@1100528800 : Text[50];IInstructionSubNumber@1100528802 : Text[50]) : Text;
+    VAR
+      TempInstructionNumber@1100528801 : Text;
+    BEGIN
+      TempInstructionNumber := DELSTR(IInstructionSubNumber, 1, STRLEN(IInstructionNumber) + 1);
+      EXIT(TempInstructionNumber);
+    END;
+
+    LOCAL PROCEDURE GetRoomFromLEDOIfExists@1100529901(CustomerNo@1100529900 : Code[20];InformationString@1100529901 : Text[250]) : Code[20];
+    VAR
+      SUPRoom@1100529902 : Record 11071950;
+      RoomCode@1100529903 : Code[20];
+    BEGIN
+      IF STRLEN(InformationString) > 20 THEN
+        EXIT('');
+
+      RoomCode := InformationString;
+
+      IF (CustomerNo <> '') AND (SUPRoom.GET(CustomerNo,RoomCode)) THEN
+        EXIT(SUPRoom.Code);
+
+      IF SUPRoom.GET('',RoomCode) THEN
+        EXIT(SUPRoom.Code);
+
+      EXIT('');
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

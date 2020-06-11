@@ -1,0 +1,101 @@
+OBJECT Codeunit 11130047 App Replication Msg. Manager
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1100528000 : TextConst 'ENU="No such app: %2 (%1 : %2 - %3 )   "';
+      BaseLib@1100528001 : Codeunit 11130048;
+
+    [External]
+    PROCEDURE ProcessJsonMessage@1100528002(JsonRequest@1100528001 : Text) JsonResponse : Text;
+    VAR
+      ReplicationMsg@1100528002 : Record 11130032;
+      SeqNo@1100528000 : BigInteger;
+    BEGIN
+      SeqNo := AddJsonMessageToQueue(JsonRequest);
+      ReplicationMsg.GET(SeqNo);
+      ProcessReplicationMessage(ReplicationMsg);
+
+      JsonResponse := GetJsonResponse(ReplicationMsg);
+    END;
+
+    [External]
+    PROCEDURE AddJsonMessageToQueue@1100528007(MessageText@1100528000 : Text) : BigInteger;
+    VAR
+      ReplicationMsg@1100528008 : Record 11130032;
+    BEGIN
+      ReplicationMsg.INIT;
+
+      ReplicationMsg.FromJson(MessageText);
+
+      ReplicationMsg."Queued at" := CURRENTDATETIME;
+      ReplicationMsg.Status := ReplicationMsg.Status::New;
+      ReplicationMsg.INSERT;
+      COMMIT;
+
+      EXIT(ReplicationMsg."Seq. No.");
+    END;
+
+    [External]
+    PROCEDURE ProcessReplicationMessage@1100528006(VAR ReplicationMsg@1100528000 : Record 11130032);
+    VAR
+      AppReplicationMsgProcessor@1100528007 : Codeunit 11130049;
+      DotNetExceptionHandler@1100528002 : Codeunit 1291;
+      ReplicationMessageError@1100528003 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      JsonConvert@1100528004 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.JsonConvert";
+      jsonText@1100528006 : Text;
+      JSONManagement@1100528700 : Codeunit 5459;
+    BEGIN
+      AppReplicationMsgProcessor.SetReplicationMessage(ReplicationMsg);
+
+      IF AppReplicationMsgProcessor.RUN THEN BEGIN
+        AppReplicationMsgProcessor.GetReplicationResponse(ReplicationMsg);
+        ReplicationMsg.Status := ReplicationMsg.Status::Completed;
+        CLEAR(ReplicationMsg."Last Error");
+      END ELSE BEGIN
+        CLEAR(JSONManagement);
+        ReplicationMsg.Status := ReplicationMsg.Status::Error;
+        ReplicationMsg."Last Error" := COPYSTR(GETLASTERRORTEXT, 1, 250);
+
+        ReplicationMessageError := ReplicationMessageError.JObject;
+
+        JSONManagement.ReplaceOrAddJPropertyInJObject(ReplicationMessageError, 'ErrorData' , ReplicationMsg."Last Error");
+        JSONManagement.ReplaceOrAddJPropertyInJObject(ReplicationMessageError, 'ErrorType' , 'TEXT');
+        JSONManagement.ReplaceOrAddJPropertyInJObject(ReplicationMessageError, 'CompanyName' , COMPANYNAME);
+        JSONManagement.ReplaceOrAddJPropertyInJObject(ReplicationMessageError, 'SequenceNo' , ReplicationMsg."Seq. No.");
+
+        jsonText := JsonConvert.SerializeObject(ReplicationMessageError);
+
+        ReplicationMsg.SetResponseData(BaseLib.ConvertUTF8ToBase64(jsonText));
+
+        ReplicationMsg."Response Type" := BaseLib.ResponseError;
+      END;
+
+      ReplicationMsg."Processed at" := CURRENTDATETIME;
+      ReplicationMsg.MODIFY;
+    END;
+
+    LOCAL PROCEDURE GetJsonResponse@1100528003(ReplicationMsg@1100528000 : Record 11130032) : Text;
+    BEGIN
+      CLEAR(ReplicationMsg."Request Data (JSON)"); //TODO.mseamari: check if this really clears the request BLOB
+
+      EXIT(ReplicationMsg.ToJson);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

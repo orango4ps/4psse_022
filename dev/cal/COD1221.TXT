@@ -1,0 +1,393 @@
+OBJECT Codeunit 1221 SEPA CT-Fill Export Buffer
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.03,NAVNO.FI;
+  }
+  PROPERTIES
+  {
+    TableNo=1226;
+    Permissions=TableData 1226=rimd;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      HasErrorsErr@1007 : TextConst 'ENU=The file export has one or more errors.\\For each line to be exported, resolve the errors displayed to the right and then try to export again.;NOR=Fileksporten har Çn eller flere feil.\\Lõs alle feil som vises til hõyre, for hver linje som skal eksporteres, og prõv deretter Ü eksportere pÜ nytt.;SVE=Det finns ett eller flera fel i filexporten.\\ètgÑrda felen som visas till hîger fîr varje rad som ska exporteras, och fîrsîk sedan att exportera pÜ nytt.';
+      FieldIsBlankErr@1006 : TextConst '@@@="%1=field name, e.g. Post Code.";ENU=Field %1 must be specified.;NOR=Feltet %1 mÜ angis.;SVE=FÑltet %1 mÜste specificeras.';
+      SameBankErr@1000 : TextConst 'ENU=All lines must have the same bank account as the balancing account.;NOR=Alle linjer mÜ ha samme bankkonto som motkontoen.;SVE=Alla rader mÜste ha samma bankkonto som balanskonto.';
+      RemitMsg@1001 : TextConst '@@@="%1=Document type, %2=Document no., e.g. Invoice A123";ENU=%1 %2;NOR=%1 %2;SVE=%1 %2';
+      RemittancePaymentOrder@1080000 : Record 11128504;
+
+    [External]
+    PROCEDURE FillExportBuffer@3(VAR GenJnlLine@1000 : Record 81;VAR PaymentExportData@1001 : Record 1226);
+    VAR
+      TempGenJnlLine@1011 : TEMPORARY Record 81;
+      GeneralLedgerSetup@1012 : Record 98;
+      BankAccount@1010 : Record 270;
+      Customer@1009 : Record 18;
+      Vendor@1008 : Record 23;
+      Employee@1013 : Record 5200;
+      TempInteger@1014 : TEMPORARY Record 2000000026;
+      VendorBankAccount@1007 : Record 288;
+      CustomerBankAccount@1006 : Record 287;
+      CreditTransferRegister@1005 : Record 1205;
+      CreditTransferEntry@1004 : Record 1206;
+      BankExportImportSetup@1003 : Record 1200;
+      RemittanceTools@1080000 : Codeunit 11128515;
+      RefPmtExp@1090000 : Record 11126182;
+      MessageID@1002 : Code[20];
+      GenJnlLineExt@111280000 : Record 11128091;
+    BEGIN
+      TempGenJnlLine.COPYFILTERS(GenJnlLine);
+      CODEUNIT.RUN(CODEUNIT::"SEPA CT-Prepare Source",TempGenJnlLine);
+
+      TempGenJnlLine.RESET;
+      TempGenJnlLine.FINDSET;
+      BankAccount.GET(TempGenJnlLine."Bal. Account No.");
+      BankAccount.TESTFIELD(IBAN);
+      BankAccount.GetBankExportImportSetup(BankExportImportSetup);
+      BankExportImportSetup.TESTFIELD("Check Export Codeunit");
+      TempGenJnlLine.DeletePaymentFileBatchErrors;
+      REPEAT
+        CODEUNIT.RUN(BankExportImportSetup."Check Export Codeunit",TempGenJnlLine);
+        IF TempGenJnlLine."Bal. Account No." <> BankAccount."No." THEN
+          TempGenJnlLine.InsertPaymentFileError(SameBankErr);
+      UNTIL TempGenJnlLine.NEXT = 0;
+
+      IF TempGenJnlLine.HasPaymentFileErrorsInBatch THEN BEGIN
+        COMMIT;
+        ERROR(HasErrorsErr);
+      END;
+
+      CreatePaymOrderHead;  //NAVNO
+
+      GeneralLedgerSetup.GET;
+      GeneralLedgerSetup.TESTFIELD("LCY Code");
+
+      MessageID := BankAccount.GetCreditTransferMessageNo;
+      CreditTransferRegister.CreateNew(MessageID,BankAccount."No.");
+
+      WITH PaymentExportData DO BEGIN
+        RESET;
+        IF FINDLAST THEN;
+
+        TempGenJnlLine.FINDSET;
+        REPEAT
+          INIT;
+          "Entry No." += 1;
+          SetPreserveNonLatinCharacters(BankExportImportSetup."Preserve Non-Latin Characters");
+          SetBankAsSenderBank(BankAccount);
+          "Transfer Date" := TempGenJnlLine."Posting Date";
+          "Document No." := TempGenJnlLine."Document No.";
+          "Applies-to Ext. Doc. No." := TempGenJnlLine."Applies-to Ext. Doc. No.";
+          Amount := TempGenJnlLine.Amount;
+          IF TempGenJnlLine."Currency Code" = '' THEN
+            "Currency Code" := GeneralLedgerSetup."LCY Code"
+          ELSE
+            "Currency Code" := TempGenJnlLine."Currency Code";
+
+          CASE TempGenJnlLine."Account Type" OF
+            TempGenJnlLine."Account Type"::Customer:
+              BEGIN
+                Customer.GET(TempGenJnlLine."Account No.");
+                CustomerBankAccount.GET(Customer."No.",TempGenJnlLine."Recipient Bank Account");
+                SetCustomerAsRecipient(Customer,CustomerBankAccount);
+              END;
+            TempGenJnlLine."Account Type"::Vendor:
+              BEGIN
+                Vendor.GET(TempGenJnlLine."Account No.");
+                VendorBankAccount.GET(Vendor."No.",TempGenJnlLine."Recipient Bank Account");
+                SetVendorAsRecipient(Vendor,VendorBankAccount);
+              END;
+            TempGenJnlLine."Account Type"::Employee:
+              BEGIN
+                Employee.GET(TempGenJnlLine."Account No.");
+                SetEmployeeAsRecipient(Employee);
+              END;
+            ELSE
+              OnFillExportBufferOnSetAsRecipient(GenJnlLine,PaymentExportData,TempGenJnlLine);
+          END;
+
+          VALIDATE("SEPA Instruction Priority","SEPA Instruction Priority"::NORMAL);
+          VALIDATE("SEPA Payment Method","SEPA Payment Method"::TRF);
+          VALIDATE("SEPA Charge Bearer","SEPA Charge Bearer"::SLEV);
+          "SEPA Batch Booking" := FALSE;
+          SetCreditTransferIDs(MessageID);  //NAVFI
+
+          IF "Applies-to Ext. Doc. No." <> '' THEN
+            AddRemittanceText(STRSUBSTNO(RemitMsg,TempGenJnlLine."Applies-to Doc. Type","Applies-to Ext. Doc. No."))
+          ELSE
+            AddRemittanceText(TempGenJnlLine.Description);
+          IF TempGenJnlLine."Message to Recipient" <> '' THEN
+            AddRemittanceText(TempGenJnlLine."Message to Recipient");
+          //>>NAVNO
+          GenJnlLineExt.InitGetLine(TempGenJnlLine);
+          IF GenJnlLineExt."Recipient Ref. 1" <> '' THEN
+            AddRemittanceText(GenJnlLineExt."Recipient Ref. 1");
+          IF GenJnlLineExt."Recipient Ref. 2" <> '' THEN
+            AddRemittanceText(GenJnlLineExt."Recipient Ref. 2");
+          VALIDATE(Urgent,GenJnlLineExt.Urgent);
+          //<<NAVNO
+
+          ValidatePaymentExportData(PaymentExportData,TempGenJnlLine);
+          INSERT(TRUE);
+          GetAppliesToDocEntryNumbers(TempGenJnlLine,TempInteger);
+          IF TempInteger.FINDSET THEN
+            REPEAT
+              CreditTransferEntry.CreateNew(
+                CreditTransferRegister."No.",0,
+                TempGenJnlLine."Account Type",TempGenJnlLine."Account No.",
+                TempInteger.Number,
+                "Transfer Date","Currency Code",Amount,COPYSTR("End-to-End ID",1,MAXSTRLEN("End-to-End ID")),
+                TempGenJnlLine."Recipient Bank Account",TempGenJnlLine."Message to Recipient");
+            UNTIL TempInteger.NEXT = 0;
+          //NAVNO
+          MoveToWaitingJournal(
+            TempGenJnlLine,COPYSTR("Message ID",1,20),COPYSTR("Payment Information ID",1,20),COPYSTR("Document No.",1,20),
+            COPYSTR("End-to-End ID",1,20));
+          RemittanceTools.MarkEntry(TempGenJnlLine,'REM',RemittancePaymentOrder.ID);
+        UNTIL TempGenJnlLine.NEXT = 0;
+        //>>NAVFI
+        IF GeneralLedgerSetup."Finnish localization active" THEN BEGIN
+          RefPmtExp.SETRANGE(Transferred,FALSE);
+          RefPmtExp.SETRANGE("Applied Payments",FALSE);
+          RefPmtExp.SETRANGE("SEPA Payment",TRUE);
+          IF RefPmtExp.FINDSET THEN
+          REPEAT
+            RefPmtExp.Transferred := TRUE;
+            RefPmtExp."Transfer Date" := TODAY;
+            RefPmtExp."Transfer Time" := TIME;
+            //RefPmtExp."Batch Code" := "Message ID";
+            RefPmtExp."Payment Execution Date" := RefPmtExp."Payment Date";
+            RefPmtExp.MODIFY;
+            RefPmtExp.MarkAffiliatedAsTransferred;
+          UNTIL RefPmtExp.NEXT = 0;
+        END;
+        CreditTransferRegister.SetStatus(CreditTransferRegister.Status::"File Created");
+        //<<NAVFI
+      END;
+    END;
+
+    LOCAL PROCEDURE GetAppliesToDocEntryNumbers@342(GenJournalLine@1000 : Record 81;VAR TempInteger@1004 : TEMPORARY Record 2000000026);
+    VAR
+      AccNo@1001 : Code[20];
+      AccType@1002 : Integer;
+    BEGIN
+      WITH GenJournalLine DO
+        IF "Bal. Account Type" IN ["Account Type"::Customer,"Account Type"::Vendor,"Account Type"::Employee] THEN BEGIN
+          AccType := "Bal. Account Type";
+          AccNo := "Bal. Account No.";
+        END ELSE BEGIN
+          AccType := "Account Type";
+          AccNo := "Account No.";
+        END;
+      CASE AccType OF
+        GenJournalLine."Account Type"::Customer:
+          GetAppliesToDocCustLedgEntries(GenJournalLine,TempInteger,AccNo);
+        GenJournalLine."Account Type"::Vendor:
+          GetAppliesToDocVendLedgEntries(GenJournalLine,TempInteger,AccNo);
+        GenJournalLine."Account Type"::Employee:
+          GetAppliesToDocEmplLedgEntries(GenJournalLine,TempInteger,AccNo);
+      END;
+    END;
+
+    LOCAL PROCEDURE GetAppliesToDocCustLedgEntries@343(GenJournalLine@1003 : Record 81;VAR TempInteger@1000 : TEMPORARY Record 2000000026;AccNo@1001 : Code[20]);
+    VAR
+      CustLedgEntry@1002 : Record 21;
+    BEGIN
+      WITH CustLedgEntry DO BEGIN
+        SETCURRENTKEY("Customer No.","Document No.");
+        SETRANGE("Customer No.",AccNo);
+        SETRANGE(Open,TRUE);
+        CASE TRUE OF
+          GenJournalLine."Applies-to Doc. No." <> '':
+            BEGIN
+              SETRANGE("Document Type",GenJournalLine."Applies-to Doc. Type");
+              SETRANGE("Document No.",GenJournalLine."Applies-to Doc. No.");
+            END;
+          GenJournalLine."Applies-to ID" <> '':
+            BEGIN
+              SETCURRENTKEY("Customer No.","Applies-to ID");
+              SETRANGE("Applies-to ID",GenJournalLine."Applies-to ID");
+            END;
+          ELSE
+            EXIT;
+        END;
+      END;
+      GetEntriesFromSet(TempInteger,CustLedgEntry);
+    END;
+
+    LOCAL PROCEDURE GetAppliesToDocVendLedgEntries@344(GenJournalLine@1003 : Record 81;VAR TempInteger@1001 : TEMPORARY Record 2000000026;AccNo@1000 : Code[20]);
+    VAR
+      VendLedgEntry@1002 : Record 25;
+    BEGIN
+      WITH VendLedgEntry DO BEGIN
+        SETCURRENTKEY("Vendor No.","Document No.");
+        SETRANGE("Vendor No.",AccNo);
+        SETRANGE(Open,TRUE);
+        CASE TRUE OF
+          GenJournalLine."Applies-to Doc. No." <> '':
+            BEGIN
+              SETRANGE("Document Type",GenJournalLine."Applies-to Doc. Type");
+              SETRANGE("Document No.",GenJournalLine."Applies-to Doc. No.");
+            END;
+          GenJournalLine."Applies-to ID" <> '':
+            BEGIN
+              SETCURRENTKEY("Vendor No.","Applies-to ID");
+              SETRANGE("Applies-to ID",GenJournalLine."Applies-to ID");
+            END;
+          ELSE
+            EXIT;
+        END;
+      END;
+      GetEntriesFromSet(TempInteger,VendLedgEntry);
+    END;
+
+    LOCAL PROCEDURE GetAppliesToDocEmplLedgEntries@345(GenJournalLine@1003 : Record 81;VAR TempInteger@1000 : TEMPORARY Record 2000000026;AccNo@1001 : Code[20]);
+    VAR
+      EmplLedgEntry@1002 : Record 5222;
+    BEGIN
+      WITH EmplLedgEntry DO BEGIN
+        SETCURRENTKEY("Employee No.","Document No.");
+        SETRANGE("Employee No.",AccNo);
+        SETRANGE(Open,TRUE);
+        CASE TRUE OF
+          GenJournalLine."Applies-to Doc. No." <> '':
+            BEGIN
+              SETRANGE("Document Type",GenJournalLine."Applies-to Doc. Type");
+              SETRANGE("Document No.",GenJournalLine."Applies-to Doc. No.");
+            END;
+          GenJournalLine."Applies-to ID" <> '':
+            BEGIN
+              SETCURRENTKEY("Employee No.","Applies-to ID");
+              SETRANGE("Applies-to ID",GenJournalLine."Applies-to ID");
+            END;
+          ELSE
+            EXIT;
+        END;
+      END;
+      GetEntriesFromSet(TempInteger,EmplLedgEntry);
+    END;
+
+    LOCAL PROCEDURE GetEntriesFromSet@6(VAR TempInteger@1001 : TEMPORARY Record 2000000026;RecVariant@1000 : Variant);
+    VAR
+      FieldRef@1002 : FieldRef;
+      RecordRef@1003 : RecordRef;
+    BEGIN
+      RecordRef.GETTABLE(RecVariant);
+      FieldRef := RecordRef.FIELDINDEX(1);
+      WITH RecordRef DO BEGIN
+        IF FINDSET THEN
+          REPEAT
+            TempInteger.Number := FieldRef.VALUE;
+            TempInteger.INSERT;
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE ValidatePaymentExportData@2(VAR PaymentExportData@1000 : Record 1226;VAR GenJnlLine@1001 : Record 81);
+    BEGIN
+      ValidatePaymentExportDataField(PaymentExportData,GenJnlLine,PaymentExportData.FIELDNAME("Sender Bank Account No."));
+      ValidatePaymentExportDataField(PaymentExportData,GenJnlLine,PaymentExportData.FIELDNAME("Recipient Name"));
+      ValidatePaymentExportDataField(PaymentExportData,GenJnlLine,PaymentExportData.FIELDNAME("Recipient Bank Acc. No."));
+      ValidatePaymentExportDataField(PaymentExportData,GenJnlLine,PaymentExportData.FIELDNAME("Transfer Date"));
+      ValidatePaymentExportDataField(PaymentExportData,GenJnlLine,PaymentExportData.FIELDNAME("Payment Information ID"));
+      ValidatePaymentExportDataField(PaymentExportData,GenJnlLine,PaymentExportData.FIELDNAME("End-to-End ID"));
+    END;
+
+    LOCAL PROCEDURE ValidatePaymentExportDataField@5(VAR PaymentExportData@1000 : Record 1226;VAR GenJnlLine@1001 : Record 81;FieldName@1003 : Text);
+    VAR
+      Field@1004 : Record 2000000041;
+      RecRef@1005 : RecordRef;
+      FieldRef@1002 : FieldRef;
+    BEGIN
+      RecRef.GETTABLE(PaymentExportData);
+      Field.SETRANGE(TableNo,RecRef.NUMBER);
+      Field.SETRANGE(FieldName,FieldName);
+      Field.FINDFIRST;
+      FieldRef := RecRef.FIELD(Field."No.");
+      IF (Field.Type = Field.Type::Text) AND (FORMAT(FieldRef.VALUE) <> '') THEN
+        EXIT;
+      IF (Field.Type = Field.Type::Code) AND (FORMAT(FieldRef.VALUE) <> '') THEN
+        EXIT;
+      IF (Field.Type = Field.Type::Decimal) AND (FORMAT(FieldRef.VALUE) <> '0') THEN
+        EXIT;
+      IF (Field.Type = Field.Type::Integer) AND (FORMAT(FieldRef.VALUE) <> '0') THEN
+        EXIT;
+      IF (Field.Type = Field.Type::Date) AND (FORMAT(FieldRef.VALUE) <> '0D') THEN
+        EXIT;
+
+      PaymentExportData.AddGenJnlLineErrorText(GenJnlLine,STRSUBSTNO(FieldIsBlankErr,Field."Field Caption"));
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnFillExportBufferOnSetAsRecipient@1(VAR GenJnlLine@1001 : Record 81;VAR PaymentExportData@1000 : Record 1226;VAR TempGenJnlLine@1002 : TEMPORARY Record 81);
+    BEGIN
+    END;
+
+    PROCEDURE MoveToWaitingJournal@13(GenJournalLine@1080000 : Record 81;MsgId@1080005 : Code[20];PaymentInfId@1080004 : Code[20];InstrId@1080002 : Code[20];EndToEndId@1080003 : Code[20]);
+    VAR
+      WaitingJournal@1080001 : Record 11128507;
+      GenJnlLineExt@111280000 : Record 11128091;
+    BEGIN
+      GenJnlLineExt.InitGetLine(GenJournalLine);//4PSSE
+      //NAVNO
+      WaitingJournal.INIT;
+      WaitingJournal.TRANSFERFIELDS(GenJournalLine);
+      WaitingJournal."Payment Order ID - Sent" := RemittancePaymentOrder.ID;
+      WaitingJournal."Remittance Status" := WaitingJournal."Remittance Status"::Sent;
+      WaitingJournal.Reference := NextWaitingJournalRef;
+      WaitingJournal.VALIDATE("Remittance Account Code",GenJnlLineExt."Remittance Account Code");
+      WaitingJournal."SEPA Msg. ID" := MsgId;
+      WaitingJournal."SEPA Payment Inf ID" := PaymentInfId;
+      WaitingJournal."SEPA Instr. ID" := InstrId;
+      WaitingJournal."SEPA End To End ID" := EndToEndId;
+      WaitingJournal.INSERT(TRUE);
+      WaitingJournal.CopyLineDimensions(GenJournalLine);
+    END;
+
+    LOCAL PROCEDURE NextWaitingJournalRef@600() : Integer;
+    VAR
+      WaitingJournal@1080000 : Record 11128507;
+    BEGIN
+      //NAVNO
+      WaitingJournal.LOCKTABLE;  // Serial no. depends on the existing Waiting journal.
+      WaitingJournal.INIT;
+      IF WaitingJournal.FINDLAST THEN
+        EXIT(WaitingJournal.Reference + 1);
+
+      EXIT(1);
+    END;
+
+    PROCEDURE CreatePaymOrderHead@4();
+    VAR
+      NextID@1080000 : Integer;
+    BEGIN
+      //NAVNO
+      // Create a PaymOrder for import.
+      // Select ID. Find next:
+      RemittancePaymentOrder.LOCKTABLE;
+      IF RemittancePaymentOrder.FINDLAST THEN
+        NextID := RemittancePaymentOrder.ID + 1
+      ELSE
+        NextID := 1;
+
+      // Insert new PaymOrder. Remaining data are processed later:
+      RemittancePaymentOrder.INIT;
+      RemittancePaymentOrder.ID := NextID;
+      RemittancePaymentOrder.Date := TODAY;
+      RemittancePaymentOrder.Time := TIME;
+      RemittancePaymentOrder.Type := RemittancePaymentOrder.Type::Export;
+      RemittancePaymentOrder.INSERT;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

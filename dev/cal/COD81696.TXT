@@ -1,0 +1,203 @@
+OBJECT Codeunit 81696 Hotfix XX helper
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=Automatic Data Conversion,4PSSE;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData 379=rimd,
+                TableData 380=rimd;
+    OnRun=VAR
+            CompanyDataUpgradeLog@1000000000 : Record 11229360;
+            Company@1000000001 : Record 2000000006;
+          BEGIN
+            //UpdateProjectInstallment;
+            //UpdatePostedhourline;
+            //UpdateVPpack;  //pure274986
+            Company.FINDSET;
+            REPEAT
+              CompanyDataUpgradeLog.CHANGECOMPANY(Company.Name);
+              CompanyDataUpgradeLog.SETFILTER("Entry No.",'81695001|81695004');
+              CompanyDataUpgradeLog.DELETEALL(FALSE);
+            UNTIL Company.NEXT=0;
+            Assemblindataupgrade.UpdateWorkorder;
+            Assemblindataupgrade.UpdateWorkorder2;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Company@1100285100 : Record 2000000006;
+      Assemblindataupgrade@1000000000 : Codeunit 81695;
+
+    LOCAL PROCEDURE UpdateVPpack@1100285101();
+    VAR
+      VPSetup@1100285100 : Record 11128066;
+      VPPackEntry@1100285101 : Record 11128063;
+    BEGIN
+      Company.FINDSET;
+      REPEAT
+        VPSetup.CHANGECOMPANY(Company.Name);
+        IF NOT VPSetup.GET THEN BEGIN
+          VPSetup.INIT;
+          VPSetup.INSERT;
+        END;
+        VPPackEntry.CHANGECOMPANY(Company.Name);
+        IF (VPSetup."Pack No." = 0) AND VPPackEntry.FINDLAST THEN BEGIN
+          VPSetup."Pack No." := VPPackEntry."Pack Entry No.";
+          VPSetup.MODIFY;
+        END;
+      UNTIL Company.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE fixar@1100285100();
+    VAR
+      UserSetup@1100285104 : Record 91;
+      VendorBankAccount@1100285103 : Record 288;
+      newCode@1100285102 : Code[20];
+      DetailedCustLedgEntry@1100285101 : Record 379;
+      DetailedVendorLedgEntry@1100285100 : Record 380;
+    BEGIN
+      Company.FINDSET;
+      REPEAT
+        UserSetup.CHANGECOMPANY(Company.Name);
+        IF NOT UserSetup.GET(USERID) THEN BEGIN
+          UserSetup.INIT;
+          UserSetup."User ID" := USERID;
+          UserSetup.INSERT;
+        END;
+
+      //pure270149 Girotypkod saknas p† SEPA
+        VendorBankAccount.CHANGECOMPANY(Company.Name);
+        newCode := 'PAIN001';
+        VendorBankAccount.SETRANGE(Code,newCode);
+        VendorBankAccount.SETRANGE("Giro Type Code",'');
+        VendorBankAccount.MODIFYALL("Giro Type Code",newCode,FALSE);
+
+        newCode := 'BG SE';
+        VendorBankAccount.SETRANGE(Code,newCode);
+        VendorBankAccount.SETRANGE("Giro Type Code",'');
+        VendorBankAccount.MODIFYALL("Giro Type Code",newCode,FALSE);
+
+        //pure270801 Belopp och Belopp (BVA)
+        WITH DetailedVendorLedgEntry DO BEGIN
+          CHANGECOMPANY(Company.Name);
+          SETRANGE("Ledger Entry Amount",FALSE);
+          SETFILTER("Entry Type",'<>%1&<>%2',
+            "Entry Type"::Application,
+            "Entry Type"::"Appln. Rounding");
+          MODIFYALL("Ledger Entry Amount",TRUE,FALSE);
+        END;
+        WITH DetailedCustLedgEntry DO BEGIN
+          CHANGECOMPANY(Company.Name);
+          SETRANGE("Ledger Entry Amount",FALSE);
+          SETFILTER("Entry Type",'<>%1&<>%2',
+            "Entry Type"::Application,
+            "Entry Type"::"Appln. Rounding");
+          MODIFYALL("Ledger Entry Amount",TRUE,FALSE);
+        END;
+
+      UNTIL Company.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateProjectInstallment@1000000001();
+    VAR
+      ProjectInstallment@1000000000 : Record 11012018;
+      AmounttoInvoice@1000000002 : Decimal;
+      SalesLine@1101285000 : Record 37;
+      SalesInvoiceLine@1101285001 : Record 113;
+      SalesCrMemoLine@1101285002 : Record 115;
+    BEGIN
+      // Company.FINDSET;
+      // REPEAT
+      //  ProjectInstallment.CHANGECOMPANY(Company.Name);
+        ProjectInstallment.SETRANGE(Points,0);
+        //ProjectInstallment.SETRANGE("Project No.",'3322000034'); //'1104001736');
+
+        IF ProjectInstallment.FINDSET(TRUE,FALSE) THEN REPEAT
+          ProjectInstallment.CALCFIELDS(
+            "Invoice in Process", "Credit Memo in Process","Invoiced Price",
+            "Withheld Amt. (In Process)", "Withheld Amt. (Invoiced)", "Withheld Amt. (Credit)");
+
+          IF (ProjectInstallment."Withheld Amount" = 0) AND (ProjectInstallment."Withheld Amount (LCY)" <>0) THEN BEGIN
+      //      ProjectInstallment.CALCFIELDS("Withheld Amt. (In Process)");
+            IF (ProjectInstallment."Withheld Amount (LCY)" = ProjectInstallment."Withheld Amt. (In Process)") AND (ProjectInstallment."Withheld Amt. (In Process)"<>0) THEN BEGIN
+              ProjectInstallment."Withheld Amount (LCY)" := 0;
+              ProjectInstallment.MODIFY(FALSE);
+            END;
+          END;
+
+
+          AmounttoInvoice :=
+            ProjectInstallment."Installment Amount"-
+            ProjectInstallment."Invoiced Price"-
+            ProjectInstallment."Invoice in Process" -
+            ProjectInstallment."Credit Memo in Process" -
+            ProjectInstallment."Withheld Amount" -
+            ProjectInstallment."Withheld Amt. (In Process)" -
+            ProjectInstallment."Withheld Amt. (Invoiced)" -
+            ProjectInstallment."Withheld Amt. (Credit)";
+
+          IF AmounttoInvoice <> ProjectInstallment."Amount to Invoice" THEN BEGIN
+            ProjectInstallment.SetSuspendAmountCheck;
+            ProjectInstallment."Amount to Invoice":=AmounttoInvoice;//VALIDATE("Amount to Invoice", AmounttoInvoice);
+            ProjectInstallment.MODIFY(FALSE);
+          END;
+
+        UNTIL ProjectInstallment.NEXT=0;
+
+      // UNTIL Company.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdatePostedhourline@1101285001();
+    VAR
+      PostedHourLine@1101285000 : Record 11012085;
+    BEGIN
+      Company.FINDSET;
+      REPEAT
+        PostedHourLine.CHANGECOMPANY(Company.Name);
+        PostedHourLine.SETRANGE("Component Type",PostedHourLine."Component Type"::"Expense hours");
+        PostedHourLine.SETRANGE("Excl. from Normal&Extra Hours",FALSE);
+        IF PostedHourLine.FINDSET(TRUE) THEN REPEAT
+          PostedHourLine."Excl. from Normal&Extra Hours" := (PostedHourLine."Component Type" = PostedHourLine."Component Type"::"Expense hours");
+          PostedHourLine.MODIFY(FALSE);
+        UNTIL PostedHourLine.NEXT =0;
+        COMMIT;
+      UNTIL Company.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreateSESetup@1100285102();
+    VAR
+      SESetup@1100285100 : Record 11128004;
+      JobQueueEntry@1100285101 : Record 472;
+    BEGIN
+      //171004 pure274810
+      //default setup for rep81691, if it exists in jobqueue
+      IF NOT SESetup.GET(SESetup."Line type"::Setup,'ANALYSIS','UPDATE') THEN BEGIN
+        JobQueueEntry.SETRANGE("Object Type to Run",JobQueueEntry."Object Type to Run"::Report);
+        JobQueueEntry.SETRANGE("Object ID to Run",81691);
+        IF (NOT JobQueueEntry.ISEMPTY) AND (NOT SESetup.GET(SESetup."Line type"::Setup,'ANALYSIS','UPDATE')) THEN BEGIN
+          SESetup.INIT;
+          SESetup."Line type" := SESetup."Line type"::Setup;
+          SESetup.Code := 'ANALYSIS';
+          SESetup."Code 2" := 'UPDATE';
+          SESetup."Value (int)" := 90;
+          SESetup."Value (bool)" := TRUE;
+          SESetup.Description := 'ReBuild Analysis by dimensions (report81691)';
+          SESetup.INSERT;
+        END;
+      END;
+    END;
+
+    BEGIN
+    {
+      171004 ITERO.DL pure274810 during rebuild of analysis views, dont replace postingdate
+    }
+    END.
+  }
+}
+

@@ -1,0 +1,1992 @@
+OBJECT Table 11012875 Service Order Budget Line
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnInsert=BEGIN
+               Advised := FALSE;
+               "Purchase Route Reference" := '';
+               "Price Agreement" := FALSE;
+               "Relation Contract-Installation" := '';
+               "Summary Line" := FALSE;
+               "Index Date" := TODAY;
+               "Quantity (Result Obligation)" := 0;  //DP01676
+               "Apply Obligation" := FALSE;  //DP01676
+               GetServOrder(TRUE);
+               VALIDATE("Cost Component");
+
+               CalcOverheadSurcharge;
+               UpdateCostControlStatus(UpdateAction::Insert);
+             END;
+
+    OnModify=BEGIN
+               GetServOrder(FALSE);
+
+               CalcOverheadSurcharge;
+               UpdateCostControlStatus(UpdateAction::Modify);
+
+               IF xRec."Additional Cost" = "Additional Cost" THEN
+                 CheckAdditionalCostService;
+             END;
+
+    OnDelete=VAR
+               ServiceOrderBudgetLine@1100525000 : Record 11012875;
+               BudgetLine@1100528600 : Record 11012001;
+               ServiceOrderExtension@1100528601 : Record 11071727;
+             BEGIN
+               ServiceOrderBudgetLine.SETCURRENTKEY("Service Order No.", "Attached to Line No.");
+               ServiceOrderBudgetLine.SETRANGE("Service Order No.", "Service Order No.");
+               ServiceOrderBudgetLine.SETRANGE("Service Contract No.", "Service Contract No.");
+               ServiceOrderBudgetLine.SETRANGE("Budget Type","Budget Type");
+               ServiceOrderBudgetLine.SETRANGE("Attached to Line No.", "Line No.");
+               IF "Source Type (Recipe/BOM)" = "Source Type (Recipe/BOM)"::" " THEN  //DP01560
+                 ServiceOrderBudgetLine.SETRANGE("Surcharge Line Budget", TRUE);
+               IF NOT ServiceOrderBudgetLine.ISEMPTY THEN
+                 ServiceOrderBudgetLine.DELETEALL(TRUE);
+
+               UpdateCostControlStatus(UpdateAction::Delete);
+
+               IF "Recording Line No." <> 0 THEN BEGIN
+                 ServiceOrderExtension.GetServOrderExtension("Service Order No.");
+                 IF ServiceOrderExtension."Master Project" <> '' THEN BEGIN
+                   BudgetLine.SETRANGE("Project No.", ServiceOrderExtension."Master Project");
+                   BudgetLine.SETRANGE(Element, ServiceOrderExtension."Master Element");
+                   BudgetLine.SETRANGE("Service Order No.", "Service Order No.");
+                   BudgetLine.SETRANGE("Service Company", '');
+                   BudgetLine.SETRANGE("Service Recording Line No.", "Recording Line No.");
+                   IF NOT BudgetLine.ISEMPTY THEN
+                     ERROR(Text006, FIELDCAPTION("Service Order No."), "Service Order No.", FIELDCAPTION("Line No."), "Line No.");
+                 END;
+               END;
+             END;
+
+    CaptionML=[ENU=Service Order Budget Line;
+               NOR=Serviceordre, Budsjettrad;
+               SVE=Budgetrad f”r serviceorder];
+    LookupPageID=Page11020694;
+    DrillDownPageID=Page11020694;
+  }
+  FIELDS
+  {
+    { 10  ;   ;Service Order No.   ;Code20        ;TableRelation="Service Order";
+                                                   OnValidate=VAR
+                                                                ServiceOrder@1100529600 : Record 11012823;
+                                                              BEGIN
+                                                                IF ServiceOrder.GET("Service Order No.") THEN
+                                                                  "Base Service Order No." := ServiceOrder."Base Service Order No.";
+                                                              END;
+
+                                                   CaptionML=[ENU=Service Order No.;
+                                                              NOR=Serviceordrenr.;
+                                                              SVE=Serviceordernr];
+                                                   Editable=No }
+    { 20  ;   ;Line No.            ;Integer       ;CaptionML=[ENU=Line No.;
+                                                              NOR=Linjenr.;
+                                                              SVE=Radnr] }
+    { 30  ;   ;Description         ;Text100       ;CaptionML=[ENU=Description;
+                                                              NOR=Beskrivelse;
+                                                              SVE=Beskrivning] }
+    { 35  ;   ;Description 2       ;Text50        ;CaptionML=[ENU=Description 2;
+                                                              NOR=Beskrivelse 2;
+                                                              SVE=Beskrivning 2] }
+    { 40  ;   ;Quantity            ;Decimal       ;OnValidate=BEGIN
+                                                                IF CurrFieldNo = FIELDNO(Quantity) THEN BEGIN
+                                                                  CheckRecipeTotals;  //DP01560
+                                                                  CheckBomLines;  //DP02339
+                                                                END;
+                                                                CalcTotals;
+                                                              END;
+
+                                                   CaptionML=[ENU=Quantity;
+                                                              NOR=Antall;
+                                                              SVE=Antal];
+                                                   DecimalPlaces=0:5;
+                                                   BlankZero=Yes }
+    { 50  ;   ;Unit of Measure     ;Code10        ;TableRelation="Unit of Measure".Code;
+                                                   OnValidate=BEGIN
+                                                                IF CurrFieldNo = FIELDNO("Unit of Measure") THEN
+                                                                  ValidateUnitOfMeasure("Unit of Measure");
+                                                              END;
+
+                                                   OnLookup=BEGIN
+                                                              HandleLookupUnit;
+                                                            END;
+
+                                                   CaptionML=[ENU=Unit of Measure;
+                                                              NOR=M†leenhet;
+                                                              SVE=Enhet] }
+    { 60  ;   ;Time Quantity       ;Decimal       ;InitValue=1;
+                                                   OnValidate=BEGIN
+                                                                CalcTotals;
+                                                              END;
+
+                                                   CaptionML=[ENU=Time Quantity;
+                                                              NOR=Tidskvantitet;
+                                                              SVE=Tidskvantitet];
+                                                   BlankZero=Yes }
+    { 70  ;   ;Unit of Time        ;Code10        ;TableRelation="Unit of Measure".Code;
+                                                   CaptionML=[ENU=Unit of Time;
+                                                              NOR=Tidsenhet;
+                                                              SVE=Tidsenhet] }
+    { 80  ;   ;Cost Type           ;Option        ;OnValidate=BEGIN
+                                                                IF "Cost Object" <> '' THEN BEGIN
+                                                                  IF "Cost Type" <> xRec."Cost Type" THEN
+                                                                    IF CONFIRM(Text004,TRUE) THEN BEGIN
+                                                                      "Cost Object" := '';
+                                                                      //only fill fields below for cost type material
+                                                                      "Item No." := '';
+                                                                      "Basic Item" := '';
+                                                                      "Trade Item" := '';
+                                                                      Manufacturer := '';
+                                                                      "Vendor (Trade Item)" := '';
+                                                                    END ELSE BEGIN
+                                                                      "Cost Type" := xRec."Cost Type";
+                                                                      EXIT;
+                                                                    END;
+                                                                END;
+                                                                IF ("Cost Type" = "Cost Type"::Labor) THEN BEGIN
+                                                                  Price := 0;
+                                                                END ELSE BEGIN
+                                                                  "Rate Code" := '';
+                                                                  Rate := 0;
+                                                                  IF ("Plant Rates in Hours" = FALSE) AND ("Subcontracting in Hours" = FALSE) THEN  //C053751
+                                                                    InitNormRelatedFields(0);
+                                                                END;
+                                                                IF ("Cost Type" <> "Cost Type"::Plant) THEN
+                                                                  "Plant Rates in Hours" := FALSE;  //DP02115
+                                                                IF ("Cost Type" <> "Cost Type"::Subcontracting) THEN
+                                                                  "Subcontracting in Hours" := FALSE;  //C053751
+                                                                CalcTotals;
+                                                                CheckAdditionalCostService;  //db, 24-02-10
+                                                              END;
+
+                                                   CaptionML=[ENU=Cost Type;
+                                                              NOR=Kostnadstype;
+                                                              SVE=Kostnadstyp];
+                                                   OptionCaptionML=[ENU=Labor,Material,Subcontracting,Plant,Sundry;
+                                                                    NOR=Arbeidskraft,Materiale,Underentrepen›r,Maskin,Diverse;
+                                                                    SVE=Arbetskraft,Material,Underentreprenad,Maskin,Diverse];
+                                                   OptionString=Labor,Material,Subcontracting,Plant,Sundry }
+    { 90  ;   ;Cost Object         ;Code20        ;TableRelation=IF (Cost Type=CONST(Labor)) "Dimension Value".Code WHERE (Cost Type=FILTER(Labor),
+                                                                                                                           Global Dimension No.=CONST(2))
+                                                                                                                           ELSE IF (Cost Type=CONST(Material)) "Dimension Value".Code WHERE (Cost Type=FILTER(Material),
+                                                                                                                                                                                             Global Dimension No.=CONST(2))
+                                                                                                                                                                                             ELSE IF (Cost Type=CONST(Plant)) "Dimension Value".Code WHERE (Cost Type=FILTER(Plant),
+                                                                                                                                                                                                                                                            Global Dimension No.=CONST(2))
+                                                                                                                                                                                                                                                            ELSE IF (Cost Type=CONST(Subcontracting)) "Dimension Value".Code WHERE (Cost Type=FILTER(Subcontracting),
+                                                                                                                                                                                                                                                                                                                                    Global Dimension No.=CONST(2))
+                                                                                                                                                                                                                                                                                                                                    ELSE IF (Cost Type=CONST(Sundry)) "Dimension Value".Code WHERE (Cost Type=FILTER(Sundry),
+                                                                                                                                                                                                                                                                                                                                                                                                    Global Dimension No.=CONST(2));
+                                                   OnValidate=BEGIN
+                                                                IF ("Cost Object" <> '') AND ("Item No." + "Trade Item" + "Basic Item" = '') THEN  //db, 17-04-08
+                                                                  IF xRec."Cost Object" = '' THEN
+                                                                    GetDefaultsCostObject()
+                                                                  ELSE
+                                                                    IF "Cost Object" <> xRec."Cost Object" THEN
+                                                                      IF CONFIRM(
+                                                                        Text000 +
+                                                                        Text001)
+                                                                      THEN
+                                                                        GetDefaultsCostObject();
+                                                              END;
+
+                                                   CaptionML=[ENU=Global Dimension 2 Code;
+                                                              NOR=Kostobjekt;
+                                                              SVE=Kostnadsobjekt];
+                                                   CaptionClass='1,1,2' }
+    { 100 ;   ;Norm                ;Decimal       ;OnValidate=BEGIN
+                                                                IF ("Cost Type" = "Cost Type"::Labor) OR ("Cost Type" = "Cost Type"::Subcontracting) OR ("Cost Type" = "Cost Type"::Plant) THEN  //DP01676
+                                                                  CalcTotals
+                                                                ELSE BEGIN
+                                                                  MESSAGE(Text002, "Cost Type");
+                                                                  Norm := 0;
+                                                                END;
+
+                                                                IF CurrFieldNo <> FIELDNO("Production Rate") THEN BEGIN
+                                                                  IF "Apply Obligation" THEN BEGIN  //DP01676
+                                                                    IF "Production Rate" <> 0 THEN
+                                                                      Norm := 1
+                                                                    ELSE
+                                                                      Norm := 0;
+                                                                  END ELSE BEGIN
+                                                                    IF Norm <> 0 THEN
+                                                                      "Production Rate" := 1 / Norm
+                                                                    ELSE
+                                                                      "Production Rate" := 0;
+                                                                  END;
+                                                                END;
+                                                              END;
+
+                                                   CaptionML=[ENU=Norm;
+                                                              NOR=Norm;
+                                                              SVE=Norm];
+                                                   DecimalPlaces=0:5;
+                                                   BlankZero=Yes }
+    { 110 ;   ;Rate Code           ;Code10        ;TableRelation="Budget Rate".Code WHERE (Project Filter=FILTER(''));
+                                                   OnValidate=VAR
+                                                                ServiceOrder@1100528601 : Record 11012823;
+                                                                BudgetHourRateManagement@1100528600 : Codeunit 11012358;
+                                                                BudgetRateFoundAt@1100528602 : Text[250];
+                                                                IndexDate@1100528603 : Date;
+                                                              BEGIN
+                                                                IF ("Cost Type" = "Cost Type"::Labor) OR ("Cost Type" = "Cost Type"::Subcontracting) THEN BEGIN
+                                                                  IF NOT ServiceOrder.GET("Service Order No.") THEN ServiceOrder.INIT;  //db, 08-04-13: C006883
+                                                                  IF "Index Date" = 0D THEN
+                                                                    IndexDate := TODAY
+                                                                  ELSE
+                                                                    IndexDate := "Index Date";
+                                                                  Rate :=
+                                                                    BudgetHourRateManagement.GetBudgetRate(
+                                                                      1, '', "Service Order No.", ServiceOrder."Service Contract No.", ServiceOrder."Global Dimension 1 Code",
+                                                                      "Rate Code", IndexDate, BudgetRateFoundAt);
+
+                                                                  IF ("Cost Type" = "Cost Type"::Subcontracting) THEN BEGIN
+                                                                    Price := Norm * Rate;
+                                                                    Rate := 0;
+                                                                  END;
+                                                                  CalcTotals;
+                                                                END ELSE BEGIN
+                                                                  IF "Rate Code" <> '' THEN BEGIN
+                                                                    MESSAGE(Text003, "Cost Type");
+                                                                    "Rate Code" := '';
+                                                                  END;
+                                                                  "Wage Component" := '';  //DP00236
+                                                                END;
+                                                              END;
+
+                                                   CaptionML=[ENU=Rate Code;
+                                                              NOR=Avgiftskode;
+                                                              SVE=Avgiftskod] }
+    { 120 ;   ;Rate                ;Decimal       ;OnValidate=BEGIN
+                                                                CalcTotals;
+                                                              END;
+
+                                                   CaptionML=[ENU=Rate;
+                                                              NOR=Avgift;
+                                                              SVE=Avgift];
+                                                   BlankZero=Yes;
+                                                   AutoFormatType=2 }
+    { 130 ;   ;Hours               ;Decimal       ;CaptionML=[ENU=Hours;
+                                                              NOR="Timer ";
+                                                              SVE=Timmar];
+                                                   BlankZero=Yes;
+                                                   Editable=No }
+    { 140 ;   ;Price               ;Decimal       ;OnValidate=BEGIN
+                                                                IF ("Cost Type" = "Cost Type"::Labor) AND ("Summary Line" = FALSE) THEN BEGIN  //db, 30-01-08
+                                                                  MESSAGE(Text005);
+                                                                  Price := 0;
+                                                                END ELSE BEGIN
+                                                                  IF "Gross Price" <> 0 THEN BEGIN
+                                                                    "Discount %" := (("Gross Price" - Price) / "Gross Price") * 100;
+                                                                  END;
+                                                                  CalcTotals;
+                                                                END;
+                                                              END;
+
+                                                   CaptionML=[ENU=Price;
+                                                              NOR=Pris;
+                                                              SVE=Pris];
+                                                   BlankZero=Yes;
+                                                   AutoFormatType=2 }
+    { 145 ;   ;Gross Price         ;Decimal       ;OnValidate=BEGIN
+                                                                CalculateNetPrice;
+                                                              END;
+
+                                                   CaptionML=[ENU=Gross Price;
+                                                              NOR=Bruttopris;
+                                                              SVE=Bruttopris];
+                                                   BlankZero=Yes;
+                                                   AutoFormatType=2 }
+    { 146 ;   ;Discount %          ;Decimal       ;OnValidate=BEGIN
+                                                                CalculateNetPrice;
+                                                                CalcTotals;
+                                                              END;
+
+                                                   CaptionML=[ENU=Discount %;
+                                                              NOR=Rabatt-%;
+                                                              SVE=Rabatt %];
+                                                   DecimalPlaces=0:5;
+                                                   BlankZero=Yes }
+    { 150 ;   ;Amount              ;Decimal       ;CaptionML=[ENU=Amount;
+                                                              NOR=Bel›p;
+                                                              SVE=Belopp];
+                                                   BlankZero=Yes;
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 160 ;   ;Item No.            ;Code20        ;TableRelation=Item;
+                                                   OnValidate=BEGIN
+                                                                IF ("Item No." <> xRec."Item No.") AND ("Item No." <> '') THEN
+                                                                  ValidateItem(ItemTypeOpt::Item);
+                                                                IF "Item No." <> xRec."Item No." THEN
+                                                                  "Variant Code" := '';
+                                                              END;
+
+                                                   CaptionML=[ENU=Item No.;
+                                                              NOR=Artikkelnr;
+                                                              SVE=Artikelnr] }
+    { 170 ;   ;Basic Item          ;Code20        ;TableRelation="Basic Item"."Product Code" WHERE (Manufacturer=FIELD(Manufacturer));
+                                                   OnValidate=BEGIN
+                                                                IF ("Basic Item" <> xRec."Basic Item") AND ("Basic Item" <> '') THEN
+                                                                  ValidateItem(ItemTypeOpt::"Basic Item");
+                                                              END;
+
+                                                   CaptionML=[ENU=Basic Item;
+                                                              NOR=Fabrikantartikkel;
+                                                              SVE=Basartikel] }
+    { 180 ;   ;Trade Item          ;Code20        ;TableRelation="Trade Item"."Item Code" WHERE (Vendor=FIELD("Vendor (Trade Item)"));
+                                                   OnValidate=BEGIN
+                                                                IF ("Trade Item" <> xRec."Trade Item") AND ("Trade Item" <> '') THEN
+                                                                  ValidateItem(ItemTypeOpt::"Trade Item");
+                                                              END;
+
+                                                   CaptionML=[ENU=Trade Item;
+                                                              NOR=Katalogartikkel;
+                                                              SVE=Anskaffningsartikel] }
+    { 190 ;   ;Vendor (Trade Item) ;Code15        ;TableRelation="ETIM Vendor - Central Mgt";
+                                                   OnValidate=VAR
+                                                                TradeItemRec@1100525000 : Record 11012317;
+                                                                lvExecValidate@1100485000 : Boolean;
+                                                              BEGIN
+                                                                IF ("Vendor (Trade Item)" <> xRec."Vendor (Trade Item)") AND ("Vendor (Trade Item)" <> '') THEN BEGIN
+                                                                  IF "Basic Item" <> '' THEN BEGIN
+                                                                    "Trade Item" := '';
+                                                                    lvExecValidate := TRUE;
+                                                                  END;
+                                                                  IF "Trade Item" <> '' THEN BEGIN
+                                                                    VALIDATE("Trade Item");
+                                                                    lvExecValidate := TRUE;
+                                                                  END;
+                                                                  //db.sn, 17-12-10: M18021
+                                                                  IF lvExecValidate THEN BEGIN
+                                                                    IF TradeItemRec.CheckReplaceVendor(
+                                                                      xRec."Vendor (Trade Item)", xRec."Trade Item",
+                                                                      "Vendor (Trade Item)", "Trade Item") THEN
+                                                                      ValidateItem(ItemTypeOpt::"Trade Item")
+                                                                    ELSE
+                                                                      ValidateItem(ItemTypeOpt::"Trade Vendor");
+                                                                  END;
+                                                                  //db.en, 17-12-10: M18021
+                                                                END;
+                                                              END;
+
+                                                   CaptionML=[ENU=Vendor (Trade Item);
+                                                              NOR=Leverand›r (katalogartikkel);
+                                                              SVE=Leverant”r (skaffningsartikel)] }
+    { 200 ;   ;Manufacturer        ;Code15        ;TableRelation="ETIM Vendor - Central Mgt";
+                                                   CaptionML=[ENU=Manufacturer;
+                                                              NOR=Produsent;
+                                                              SVE=Tillverkare] }
+    { 210 ;   ;Cost Component      ;Code20        ;TableRelation="Cost Component".Code;
+                                                   OnValidate=BEGIN
+                                                                ValidateCostComponent;
+                                                                IF CurrFieldNo <> FIELDNO("Cost Component") THEN BEGIN
+                                                                  CostCompRec.CheckDefaultCostComponent("Service Order No.", "Cost Component", '', "Cost Type",
+                                                                    "Additional Cost");  //db, 24-02-10
+                                                                END;
+                                                              END;
+
+                                                   CaptionML=[ENU=Cost Component;
+                                                              NOR=Kostnadskomponent;
+                                                              SVE=Kostnadsdel] }
+    { 220 ;   ;Purchase Route Reference;Code20    ;OnLookup=VAR
+                                                              lvRouteRefMgtCU@1100485000 : Codeunit 11012045;
+                                                            BEGIN
+                                                              lvRouteRefMgtCU.ShowReferenceList("Purchase Route Reference");
+                                                            END;
+
+                                                   CaptionML=[ENU=Purchase Route Reference;
+                                                              NOR=Referanse for Innkj›psrute;
+                                                              SVE=Referens f”r ink”psf”ljd];
+                                                   Editable=No }
+    { 230 ;   ;Price Agreement     ;Boolean       ;CaptionML=[ENU=Price Agreement;
+                                                              NOR=Prisavtale;
+                                                              SVE=Prisavtal] }
+    { 240 ;   ;Vendor              ;Code20        ;TableRelation=IF (Subcontracting Activity=FILTER(='')) Vendor.No.
+                                                                 ELSE IF (Subcontracting Activity=FILTER(<>'')) "Subcontracting Activity Price"."Subcontractor No." WHERE (Subcontracting Activity=FIELD(Subcontracting Activity));
+                                                   OnValidate=BEGIN
+                                                                IF "Subcontracting Activity" <> '' THEN
+                                                                  GetSubcontractorActivity(FIELDNO(Vendor));  //DP01958a
+                                                              END;
+
+                                                   CaptionML=[ENU=Vendor;
+                                                              NOR=Leverand›r;
+                                                              SVE=Leverant”r] }
+    { 245 ;   ;Vendor Name         ;Text100       ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup(Vendor.Name WHERE (No.=FIELD(Vendor)));
+                                                   CaptionML=[ENU=Vendor Name;
+                                                              NOR=Leverand›rsnavn;
+                                                              SVE=Leverant”rsnamn];
+                                                   Editable=No }
+    { 250 ;   ;Advised             ;Boolean       ;CaptionML=[ENU=Advised;
+                                                              NOR=Anbefalt;
+                                                              SVE=F”reslaget] }
+    { 260 ;   ;Finished            ;Boolean       ;OnValidate=BEGIN
+                                                                IF (Finished <> xRec.Finished) AND (NOT Finished) AND (NOT "Follow-up Job") AND (CurrFieldNo = FIELDNO(Finished)) THEN BEGIN
+                                                                  IF ServOrderRec.GET("Service Order No.") THEN BEGIN
+                                                                    IF (ServOrderRec."Date/Time Export to FSA" <> 0DT) AND  //db, 08-02-07
+                                                                       ((ServOrderRec.Status = ServOrderRec.Status::"Technical Finished") OR
+                                                                        (ServOrderRec.Status = ServOrderRec.Status::"Administrative Finished")) THEN
+                                                                      Finished := TRUE;
+                                                                  END;
+                                                                END;
+                                                              END;
+
+                                                   CaptionML=[ENU=Finished;
+                                                              NOR=Ferdig;
+                                                              SVE=Avslutad] }
+    { 261 ;   ;Follow-up Job       ;Boolean       ;CaptionML=[ENU=Follow-up Job;
+                                                              NOR=Oppf›lgingsjobb;
+                                                              SVE=Uppf”ljningsjobb] }
+    { 270 ;   ;Service Location No.;Code20        ;TableRelation="Service Location".No.;
+                                                   OnValidate=BEGIN
+                                                                IF ServOrderRec.GET("Service Order No.") THEN  //db, 05-03-08
+                                                                  TESTFIELD("Service Location No.", ServOrderRec."Service Location No.");
+                                                              END;
+
+                                                   CaptionML=[ENU=Service Location No.;
+                                                              NOR=Servicelokasjon Nr.;
+                                                              SVE=Serviceplatsnr] }
+    { 300 ;   ;Object No.          ;Code20        ;TableRelation=Service-Object.No.;
+                                                   OnValidate=BEGIN
+                                                                DetermineObjectCustomer;
+                                                                CALCFIELDS("Object Description", "Object Description 2");
+                                                              END;
+
+                                                   ValidateTableRelation=No;
+                                                   TestTableRelation=No;
+                                                   CaptionML=[ENU=Object No.;
+                                                              NOR=Objektnr.;
+                                                              SVE=Objektnr] }
+    { 301 ;   ;Object Description  ;Text100       ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup(Service-Object.Description WHERE (No.=FIELD(Object No.)));
+                                                   CaptionML=[ENU=Object Description;
+                                                              NOR=Objektbeskrivelse;
+                                                              SVE=Objektbeskrivning];
+                                                   Editable=No }
+    { 302 ;   ;Object Description 2;Text50        ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup(Service-Object."Description 2" WHERE (No.=FIELD(Object No.)));
+                                                   CaptionML=ENU=Object Description 2;
+                                                   Editable=No }
+    { 305 ;   ;Object Customer     ;Code20        ;CaptionML=[ENU=Object Customer;
+                                                              NOR=Objektkunde;
+                                                              SVE=Objektkund] }
+    { 310 ;   ;Building            ;Text30        ;CaptionML=[ENU=Building;
+                                                              NOR=Byggning;
+                                                              SVE=Byggnad] }
+    { 320 ;   ;Floor               ;Text30        ;CaptionML=[ENU=Floor;
+                                                              NOR=Gulv;
+                                                              SVE=V†ning] }
+    { 330 ;   ;Room                ;Text30        ;CaptionML=[ENU=Room;
+                                                              NOR=Rom;
+                                                              SVE=Rum] }
+    { 340 ;   ;Relation Contract-Installation;Text30;
+                                                   CaptionML=[ENU=Relation Contract-Installation;
+                                                              NOR=Relasjonen Kontraktinstallasjon;
+                                                              SVE=Relationen kontraktinstallation] }
+    { 350 ;   ;Discipline          ;Code10        ;TableRelation=Discipline;
+                                                   CaptionML=[ENU=Discipline;
+                                                              NOR=Disiplin;
+                                                              SVE=Disciplin] }
+    { 351 ;   ;Trade Speciality    ;Code10        ;TableRelation="Trade Speciality".Code WHERE (Discipline=FIELD(Discipline));
+                                                   CaptionML=[ENU=Trade Speciality;
+                                                              NOR=SNI-nummer;
+                                                              SVE=SNI-nummer] }
+    { 352 ;   ;Trade Expertise     ;Code10        ;TableRelation="Trade Expertise";
+                                                   OnValidate=BEGIN
+                                                                TradeExpRec.GetRelatedValue(Discipline, "Trade Speciality", "Trade Expertise");
+                                                              END;
+
+                                                   CaptionML=[ENU=Trade Expertise;
+                                                              NOR=Bransjeekspertise;
+                                                              SVE=Branschexpertis] }
+    { 360 ;   ;Index Date          ;Date          ;CaptionML=[ENU=Index Date;
+                                                              NOR=Indeksdato;
+                                                              SVE=Indexdatum] }
+    { 370 ;   ;Service Contract No.;Code20        ;TableRelation=Service-Contract.No.;
+                                                   CaptionML=[ENU=Service Contract No.;
+                                                              NOR=Servicekontraktnr;
+                                                              SVE=Servicekontraktnr] }
+    { 380 ;   ;Additional Cost     ;Boolean       ;OnValidate=BEGIN
+                                                                ValidateAdditionalCost;
+                                                              END;
+
+                                                   CaptionML=[ENU=Additional Cost;
+                                                              NOR=Tilleggskoster;
+                                                              SVE=Till„ggskostnader] }
+    { 381 ;   ;Add. Cost Changed Manually;Boolean ;CaptionML=ENU=Add. Cost Changed Manually }
+    { 390 ;   ;Source Type         ;Option        ;InitValue=Direct;
+                                                   CaptionML=[ENU=Source Type;
+                                                              NOR=Kildetype;
+                                                              SVE=Ursprungstyp];
+                                                   OptionCaptionML=[ENU=Call,Contract,Direct,Estimate,,,Modification,Replacement;
+                                                                    NOR=Samtale,Kontrakt,Direkte,Kalkyle,,,Endring,Erstatning;
+                                                                    SVE=Samtal,Kontrakt,Direkt,Kalkyl,,,Žndring,Ers„ttning];
+                                                   OptionString=Call,Contract,Direct,Estimate,,,Modification,Replacement;
+                                                   Editable=No }
+    { 400 ;   ;Total Labor         ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Service Order Budget Line".Amount WHERE (Service Order No.=FIELD(Service Order No.),
+                                                                                                             Cost Type=CONST(Labor),
+                                                                                                             Object No.=FIELD(Object Filter),
+                                                                                                             Maintenance Scheme=FIELD(Maintenance Scheme Filter)));
+                                                   CaptionML=[ENU=Total Labor;
+                                                              NOR=Total arbeidskraft;
+                                                              SVE=Total arbetskraft];
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 401 ;   ;Total Material      ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Service Order Budget Line".Amount WHERE (Service Order No.=FIELD(Service Order No.),
+                                                                                                             Cost Type=CONST(Material),
+                                                                                                             Object No.=FIELD(Object Filter),
+                                                                                                             Maintenance Scheme=FIELD(Maintenance Scheme Filter)));
+                                                   CaptionML=[ENU=Total Material;
+                                                              NOR=Totalt materiale;
+                                                              SVE=Totalt material];
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 402 ;   ;Total Subcontracting;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Service Order Budget Line".Amount WHERE (Service Order No.=FIELD(Service Order No.),
+                                                                                                             Cost Type=CONST(Subcontracting),
+                                                                                                             Object No.=FIELD(Object Filter),
+                                                                                                             Maintenance Scheme=FIELD(Maintenance Scheme Filter)));
+                                                   CaptionML=[ENU=Total Subcontracting;
+                                                              NOR=Underleverand›r Total;
+                                                              SVE=Underentreprenad totalt];
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 403 ;   ;Total Plant         ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Service Order Budget Line".Amount WHERE (Service Order No.=FIELD(Service Order No.),
+                                                                                                             Cost Type=CONST(Plant),
+                                                                                                             Object No.=FIELD(Object Filter),
+                                                                                                             Maintenance Scheme=FIELD(Maintenance Scheme Filter)));
+                                                   CaptionML=[ENU=Total Plant;
+                                                              NOR=Maskin total;
+                                                              SVE=Maskin totalt];
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 404 ;   ;Total Sundry        ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Service Order Budget Line".Amount WHERE (Service Order No.=FIELD(Service Order No.),
+                                                                                                             Cost Type=CONST(Sundry),
+                                                                                                             Object No.=FIELD(Object Filter),
+                                                                                                             Maintenance Scheme=FIELD(Maintenance Scheme Filter)));
+                                                   CaptionML=[ENU=Total Sundry;
+                                                              NOR=Totalt diverse;
+                                                              SVE=Totalt diverse];
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 405 ;   ;Total Amount        ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Service Order Budget Line".Amount WHERE (Service Order No.=FIELD(Service Order No.),
+                                                                                                             Object No.=FIELD(Object Filter),
+                                                                                                             Maintenance Scheme=FIELD(Maintenance Scheme Filter)));
+                                                   CaptionML=[ENU=Total Amount;
+                                                              NOR=Totalt bel›p;
+                                                              SVE=Total Amount];
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 406 ;   ;Total Hours         ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Service Order Budget Line".Hours WHERE (Service Order No.=FIELD(Service Order No.),
+                                                                                                            Object No.=FIELD(Object Filter),
+                                                                                                            Maintenance Scheme=FIELD(Maintenance Scheme Filter),
+                                                                                                            Cost Type=CONST(Labor)));
+                                                   CaptionML=[ENU=Total Hours;
+                                                              NOR=Timer totalt;
+                                                              SVE=Timmar totalt];
+                                                   Editable=No }
+    { 407 ;   ;Total Surcharge     ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Service Order Budget Line".Amount WHERE (Service Order No.=FIELD(Service Order No.),
+                                                                                                             Surcharge Line=CONST(Yes),
+                                                                                                             Object No.=FIELD(Object Filter),
+                                                                                                             Maintenance Scheme=FIELD(Maintenance Scheme Filter)));
+                                                   CaptionML=[ENU=Total Surcharge;
+                                                              NOR=Total tilleggsavgift;
+                                                              SVE=Till„ggsavgifter totalt];
+                                                   Editable=No }
+    { 408 ;   ;Total Hours Plant   ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Service Order Budget Line".Hours WHERE (Service Order No.=FIELD(Service Order No.),
+                                                                                                            Object No.=FIELD(Object Filter),
+                                                                                                            Maintenance Scheme=FIELD(Maintenance Scheme Filter),
+                                                                                                            Cost Type=CONST(Plant)));
+                                                   CaptionML=ENU=Total Hours Plant;
+                                                   Description=DP02115;
+                                                   Editable=No }
+    { 410 ;   ;External Text       ;Text250       ;OnValidate=BEGIN
+                                                                "External Text Block" := "External Text" <> '';
+                                                              END;
+
+                                                   CaptionML=[ENU=External Text;
+                                                              NOR=Ekstern Tekst;
+                                                              SVE=Extern text] }
+    { 411 ;   ;External Text Block ;Boolean       ;CaptionML=[ENU=External Text Block;
+                                                              NOR=Ekstern Tekstblokk;
+                                                              SVE=Externt textblock];
+                                                   Editable=No }
+    { 420 ;   ;Overhead Surcharge  ;Decimal       ;CaptionML=[ENU=Overhead Surcharge;
+                                                              NOR=Overheadkost;
+                                                              SVE=Overheadkostnad];
+                                                   Editable=No }
+    { 425 ;   ;Wage Component      ;Code10        ;TableRelation="Wage Component";
+                                                   OnValidate=BEGIN
+                                                                CalcTotals;  //DP00236
+                                                              END;
+
+                                                   CaptionML=[ENU=Wage Component;
+                                                              NOR=L›nnsart;
+                                                              SVE=L”neart] }
+    { 430 ;   ;Summary Line        ;Boolean       ;CaptionML=[ENU=Summary Line;
+                                                              NOR=Sammendragsrad;
+                                                              SVE=Summeringrad] }
+    { 435 ;   ;Surcharge Line      ;Boolean       ;CaptionML=[ENU=Surcharge Line;
+                                                              NOR=Tilleggsgebyrsrad;
+                                                              SVE=Till„ggsavgiftsrad] }
+    { 440 ;   ;Budget Type         ;Option        ;CaptionML=[ENU=Budget Type;
+                                                              NOR=Budsjettype;
+                                                              SVE=Budgettyp];
+                                                   OptionCaptionML=[ENU=Service Order,Service Contract;
+                                                                    NOR=Serviceordre,Servicekontrakt;
+                                                                    SVE=Serviceorder,Servicekontrakt];
+                                                   OptionString=Order,Contract }
+    { 470 ;   ;Code                ;Code20        ;CaptionML=[ENU=Code;
+                                                              NOR=Kode;
+                                                              SVE=Kod] }
+    { 490 ;   ;Line No. External Estimate;Integer ;CaptionML=[ENU=Line No. External Estimate;
+                                                              NOR=Radnr, Ekstern Kalkyle;
+                                                              SVE=Radnr, extern kalkyl];
+                                                   BlankZero=Yes }
+    { 500 ;   ;Surcharge Line Budget;Boolean      ;CaptionML=[ENU=Surcharge Line Budget;
+                                                              NOR=Tilleggsavgiftrad, budsjett;
+                                                              SVE=Till„ggsavgiftsrad, budget];
+                                                   Editable=No }
+    { 510 ;   ;Attached to Line No.;Integer       ;TableRelation="Service Order Budget Line"."Line No." WHERE (Budget Type=FIELD(Budget Type),
+                                                                                                               Service Order No.=FIELD(Service Order No.),
+                                                                                                               Service Contract No.=FIELD(Service Contract No.),
+                                                                                                               Object No.=FIELD(Object No.),
+                                                                                                               Maintenance Scheme=FIELD(Maintenance Scheme));
+                                                   CaptionML=[ENU=Attached to Line No.;
+                                                              NOR=Knyttet til linjenr.;
+                                                              SVE=Bifogad till radnr] }
+    { 520 ;   ;Part of Line        ;Integer       ;TableRelation="Service Order Budget Line"."Line No." WHERE (Budget Type=FIELD(Budget Type),
+                                                                                                               Service Order No.=FIELD(Service Order No.),
+                                                                                                               Service Contract No.=FIELD(Service Contract No.),
+                                                                                                               Object No.=FIELD(Object No.),
+                                                                                                               Maintenance Scheme=FIELD(Maintenance Scheme));
+                                                   OnValidate=BEGIN
+                                                                DetermineBOMLevel("Part of Line","Level BOM");
+                                                              END;
+
+                                                   CaptionML=[ENU=Part of Line;
+                                                              NOR=Del av Rad;
+                                                              SVE=Del av rad] }
+    { 525 ;   ;Original Quantity   ;Decimal       ;CaptionML=[ENU=Original Quantity;
+                                                              NOR=Opprinnelig antall;
+                                                              SVE=Ursprungligt antal];
+                                                   DecimalPlaces=0:5;
+                                                   BlankZero=Yes }
+    { 527 ;   ;Level BOM           ;Integer       ;CaptionML=[ENU=Level BOM;
+                                                              NOR=Niv† Í stykkliste;
+                                                              SVE=Niv†struktur];
+                                                   Description=Level after exploding BOM-Item;
+                                                   Editable=No }
+    { 528 ;   ;BOM Item No.        ;Code20        ;TableRelation=Item;
+                                                   CaptionML=[ENU=BOM Item No.;
+                                                              NOR=Strukturartikkelnr;
+                                                              SVE=Strukturartikelnr];
+                                                   Description=Original Item before exploding BOM }
+    { 530 ;   ;Scheme Code         ;Code15        ;CaptionML=[ENU=Scheme Code;
+                                                              NOR=Plankode;
+                                                              SVE=Plankod] }
+    { 531 ;   ;Comments            ;Text50        ;CaptionML=[ENU=Comments;
+                                                              NOR=Merknader;
+                                                              SVE=Kommentarer] }
+    { 532 ;   ;Supply              ;Boolean       ;CaptionML=[ENU=Supply;
+                                                              NOR=Tilf›rsel;
+                                                              SVE=F”rr†d] }
+    { 533 ;   ;Comments for Logistics;Text50      ;CaptionML=[ENU=Comments for Logistics;
+                                                              NOR=Kommentarer for logistikk;
+                                                              SVE=Kommentarer f”r logistik] }
+    { 534 ;   ;Material Sheet      ;Option        ;CaptionML=[ENU=Material Sheet;
+                                                              NOR=Materialeark;
+                                                              SVE=Materialark];
+                                                   OptionCaptionML=[ENU=Customer and Assemly,Customer Only,Assembly only,Do not report;
+                                                                    NOR="Kunde og montering,Kun kunde,Kun montering,Ikke Rapporter ";
+                                                                    SVE=Kund och montering,Endast kund,Endast montering,Rapportera inte];
+                                                   OptionString=Customer and Assemly,Customer Only,Assembly only,Do not report }
+    { 540 ;   ;Variant Code        ;Code10        ;TableRelation="Item Variant".Code WHERE (Item No.=FIELD(Item No.));
+                                                   OnValidate=BEGIN
+                                                                IF "Variant Code" <> '' THEN
+                                                                  TESTFIELD("Item No.");
+                                                              END;
+
+                                                   CaptionML=[ENU=Variant Code;
+                                                              NOR=Variantkode;
+                                                              SVE=Variantkod] }
+    { 550 ;   ;Work Line Type      ;Option        ;CaptionML=[ENU=Work Line Type;
+                                                              NOR=Abeidsradstype;
+                                                              SVE=Radtyp];
+                                                   OptionCaptionML=[ENU=Maintenance Scheme,Modification,Standard Object,Standard Object Deinstallation,Standard Object Installation,Object Installation,Object;
+                                                                    NOR=Vedlikeholdsskjema,Endring,Standardobjekt,Avinstallering av standardobjekt,Installering av standardobjekt,Installering av objekt,Objekt;
+                                                                    SVE=Underh†llsschema,Žndring,Standardobjekt,Standardobjekt avinstallation,Standardobjekt installation,Objektinstallation,Objekt];
+                                                   OptionString=Maintenance Scheme,Modification,Standard Object,Standard Object Deinstallation,Standard Object Installation,Object Installation,Object }
+    { 560 ;   ;Work Code           ;Code20        ;TableRelation=IF (Work Line Type=CONST(Maintenance Scheme)) "Maintenance Scheme".Code
+                                                                 ELSE IF (Work Line Type=CONST(Modification)) "Object Modification".No.
+                                                                 ELSE IF (Work Line Type=CONST(Standard Object)) "Standard Object".No.
+                                                                 ELSE IF (Work Line Type=CONST(Standard Object Deinstallation)) "Standard Object".No.
+                                                                 ELSE IF (Work Line Type=CONST(Standard Object Installation)) "Standard Object".No.
+                                                                 ELSE IF (Work Line Type=CONST(Object Installation)) Service-Object.No.
+                                                                 ELSE IF (Work Line Type=CONST(Object)) Service-Object.No.;
+                                                   CaptionML=[ENU=Work Code;
+                                                              NOR=Arbeidskode;
+                                                              SVE=Arbetskod];
+                                                   NotBlank=Yes }
+    { 570 ;   ;Work Index Date     ;Date          ;CaptionML=[ENU=Work Index Date;
+                                                              NOR=Arbeidsindeksdato;
+                                                              SVE=Arbetsindexdatum] }
+    { 600 ;   ;Glazing Service Call No.;Code20    ;TableRelation="Glazing Service Call";
+                                                   CaptionML=[ENU=Glazing Service Call No.;
+                                                              NOR=Servicesamtalenr. for Innglassing;
+                                                              SVE=Servicesamtalsnr f”r inglasning];
+                                                   Editable=No }
+    { 610 ;   ;Glazing Service Call Line No.;Integer;
+                                                   TableRelation="Glazing Service Call Line"."Line No." WHERE (Glazing Service Call No.=FIELD(Glazing Service Call No.));
+                                                   CaptionML=[ENU=Glazing Service Call Line No.;
+                                                              NOR=Servicesamtalsradnr. for Innglassing;
+                                                              SVE=Servicesamtalsradnr f”r inglasning];
+                                                   Editable=No }
+    { 620 ;   ;Maintenance Scheme Type;Option     ;CaptionML=ENU=Maintenance Scheme Type;
+                                                   OptionCaptionML=ENU=Service,Plant;
+                                                   OptionString=Service,Plant }
+    { 630 ;   ;Maintenance Scheme  ;Code20        ;TableRelation=IF (Maintenance Scheme Type=CONST(Plant)) "SO Plant Maintenance Scheme"."Maintenance Scheme" WHERE (Service Order No.=FIELD(Service Order No.))
+                                                                 ELSE "Maintenance Scheme";
+                                                   OnValidate=VAR
+                                                                MaintenanceScheme@1100529003 : Record 11071745;
+                                                                ServiceOrderBudgetLine@1100529000 : Record 11012875;
+                                                                SOPlantMaintenanceScheme@1100529001 : Record 11072210;
+                                                                MaintSchemeTypeFilter@1100529002 : Text;
+                                                              BEGIN
+                                                                IF "Maintenance Scheme" <> '' THEN BEGIN
+                                                                  IF "Maintenance Scheme Type" <> "Maintenance Scheme Type"::Plant THEN BEGIN
+                                                                    FILTERGROUP(4);
+                                                                    MaintSchemeTypeFilter := GETFILTER("Maintenance Scheme Type");
+                                                                    FILTERGROUP(0);
+                                                                    ServiceOrderBudgetLine.SETRANGE("Maintenance Scheme Type", "Maintenance Scheme Type"::Plant);
+                                                                    IF MaintSchemeTypeFilter = ServiceOrderBudgetLine.GETFILTER("Maintenance Scheme Type") THEN BEGIN
+                                                                      IF SOPlantMaintenanceScheme.GET("Service Order No.", "Maintenance Scheme") THEN
+                                                                        "Maintenance Scheme Type" := "Maintenance Scheme Type"::Plant;
+                                                                    END;
+                                                                  END;
+                                                                  IF "Maintenance Scheme Type" = "Maintenance Scheme Type"::Plant THEN
+                                                                    SOPlantMaintenanceScheme.GET("Service Order No.", "Maintenance Scheme")
+                                                                  ELSE
+                                                                    MaintenanceScheme.GET("Maintenance Scheme");
+                                                                END;
+                                                              END;
+
+                                                   ValidateTableRelation=No;
+                                                   CaptionML=[ENU=Maintenance Scheme;
+                                                              NOR=Vedlikeholdsskjema;
+                                                              SVE=Underh†llsschema] }
+    { 640 ;   ;Price History 0 Exists;Boolean     ;CaptionML=ENU=Price History 0 Exists;
+                                                   Editable=No }
+    { 650 ;   ;Recipe Group        ;Code10        ;TableRelation="Recipe Group".No.;
+                                                   CaptionML=[ENU=Recipe Group;
+                                                              NOR=Maltype;
+                                                              SVE=Malltyp];
+                                                   Description=DP01560 }
+    { 660 ;   ;Recipe              ;Code20        ;TableRelation="Base Recipe".No. WHERE (Recipe Group=FIELD(Recipe Group));
+                                                   CaptionML=[ENU=Recipe;
+                                                              NOR=Mal;
+                                                              SVE=Mall];
+                                                   Description=DP01560 }
+    { 670 ;   ;Source Type (Recipe/BOM);Option    ;CaptionML=ENU=Source Type  (Recipe/BOM);
+                                                   OptionCaptionML=[ENU=" ,Recipe Header,Recipe Line,BOM Header,BOM Line";
+                                                                    NOR=" ,Maltittel,Malrad,Stykklistetittel,Stykklisterad";
+                                                                    SVE=" ,Mallrubrik,Mallrad,Strukturrubrik,Strukturrad"];
+                                                   OptionString=[ ,Recipe Header,Recipe Line,BOM Header,BOM Line];
+                                                   Description=DP01560 }
+    { 680 ;   ;Base Service Order No.;Code20      ;TableRelation="Service Order".No.;
+                                                   DataClassification=ToBeClassified;
+                                                   CaptionML=[ENU=Base Service Order No.;
+                                                              SVE=Basserviceordernr];
+                                                   Editable=No }
+    { 699 ;   ;Subcontracting in Hours;Boolean    ;OnValidate=BEGIN
+                                                                //C053751.sn
+                                                                IF "Cost Type" = "Cost Type"::Subcontracting THEN BEGIN
+                                                                  IF NOT "Subcontracting in Hours" THEN BEGIN
+                                                                    Quantity := Hours;
+                                                                    InitNormRelatedFields(0);
+                                                                  END ELSE BEGIN
+                                                                    InitNormRelatedFields(1);
+                                                                  END;
+                                                                END;
+                                                                //C053751.en
+                                                                CalcTotals;
+                                                              END;
+
+                                                   DataClassification=ToBeClassified;
+                                                   CaptionML=ENU=Subcontracting in Hours;
+                                                   Description=C053751 }
+    { 700 ;   ;Subcontracting Activity;Code10     ;TableRelation="Subcontracting Activity".Code;
+                                                   OnValidate=BEGIN
+                                                                GetSubcontractorActivity(FIELDNO("Subcontracting Activity"));  //DP01958a
+                                                              END;
+
+                                                   CaptionML=ENU=Subcontracting Activity;
+                                                   Description=DP01492-2 }
+    { 740 ;   ;Unit Price Budget Line No.;Integer ;CaptionML=[ENU=Unit Price Budget Line No.;
+                                                              SVE=Enhetspris, radnr];
+                                                   NotBlank=Yes;
+                                                   Editable=No }
+    { 750 ;   ;Object Filter       ;Code250       ;FieldClass=FlowFilter;
+                                                   CaptionML=[ENU=Object Filter;
+                                                              NOR=Objektfilter;
+                                                              SVE=Objektfilter] }
+    { 760 ;   ;Maintenance Scheme Filter;Code250  ;FieldClass=FlowFilter;
+                                                   CaptionML=ENU=Maintenance Scheme Filter }
+    { 770 ;   ;SUP Room            ;Code20        ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup("SUP Recording Line".Room WHERE (Service Order No.=FIELD(Service Order No.),
+                                                                                                       Line No.=FIELD(Recording Line No.)));
+                                                   CaptionML=[ENU=SUP Room;
+                                                              SVE=Service, enhetspris rum];
+                                                   Editable=No }
+    { 780 ;   ;Recording Line No.  ;Integer       ;CaptionML=ENU=Recording Line No.;
+                                                   Editable=No }
+    { 790 ;   ;Plant Company       ;Text30        ;TableRelation=Company;
+                                                   OnValidate=BEGIN
+                                                                IF "Plant Company" = COMPANYNAME THEN
+                                                                  "Plant Company" := '';
+                                                                IF "Plant Company" <> '' THEN
+                                                                  TESTFIELD("Cost Type", "Cost Type"::Plant);
+                                                                IF "Plant Company" <> xRec."Plant Company" THEN
+                                                                  "Plant Type" := '';
+                                                              END;
+
+                                                   OnLookup=BEGIN
+                                                              LookupPlantCompany;
+                                                            END;
+
+                                                   CaptionML=[ENU=Plant Company;
+                                                              NOR=Maskinselskap;
+                                                              SVE=Maskinf”retag] }
+    { 800 ;   ;Plant Type          ;Code20        ;TableRelation="Plant Type";
+                                                   OnValidate=VAR
+                                                                PlantType@1100528600 : Record 11012551;
+                                                              BEGIN
+                                                                IF "Plant Type" <> '' THEN BEGIN
+                                                                  TESTFIELD("Cost Type", "Cost Type"::Plant);
+                                                                  IF ("Plant Company" <> '') AND ("Plant Company" <> COMPANYNAME) THEN
+                                                                    PlantType.CHANGECOMPANY("Plant Company");
+                                                                  //**4PS.sn DPA Plant
+                                                                  PlantType.Code := "Plant Type";
+                                                                  PlantType.DPA_FindRecWithDPAFilterAppld;
+                                                                  //**4PS.en DPA Plant
+                                                                  IF ("Plant Type" <> xRec."Plant Type") OR (Description = '') THEN BEGIN
+                                                                    PlantType.GET("Plant Type");
+                                                                    Description := PlantType.Description;
+                                                                    "Unit of Measure" := PlantType."Unit of Measure";
+                                                                    "Cost Object" := PlantType."Cost Object";
+                                                                    "Price Agreement" := FALSE;  //DP02115
+                                                                  END;
+                                                                  DeterminePlantPrice;  //DP02115
+                                                                END;
+                                                              END;
+
+                                                   OnLookup=BEGIN
+                                                              LookupPlantType;
+                                                            END;
+
+                                                   ValidateTableRelation=No;
+                                                   TestTableRelation=No;
+                                                   CaptionML=[ENU=Plant Type;
+                                                              NOR=Maskintype;
+                                                              SVE=Maskintyp] }
+    { 801 ;   ;Plant Price Type    ;Option        ;DataClassification=ToBeClassified;
+                                                   CaptionML=[ENU=Plant Price Type;
+                                                              SVE=Maskin pristyp];
+                                                   OptionCaptionML=[ENU=" ,Day,Week,,Month,,,,,Hour";
+                                                                    SVE=" ,Dag,Vecka,,M†nad,,,,,Timme"];
+                                                   OptionString=[ ,Day,Week,,Month,,,,,Hour];
+                                                   Description=DP02115;
+                                                   Editable=No }
+    { 805 ;   ;Plant Rates in Hours;Boolean       ;OnValidate=BEGIN
+                                                                //C053751.sn
+                                                                IF "Cost Type" = "Cost Type"::Plant THEN BEGIN
+                                                                  IF NOT "Plant Rates in Hours" THEN BEGIN
+                                                                    Quantity := Hours;
+                                                                    InitNormRelatedFields(0);
+                                                                  END ELSE BEGIN
+                                                                    InitNormRelatedFields(1);
+                                                                  END;
+                                                                END;
+                                                                //C053751.en
+                                                                DeterminePlantPrice;
+                                                                CalcTotals;
+                                                              END;
+
+                                                   DataClassification=ToBeClassified;
+                                                   CaptionML=[ENU=Plant Rates in Hours;
+                                                              SVE=Maskinavgifter i timmar];
+                                                   Description=DP02115 }
+    { 810 ;   ;Tender Paragraph    ;Text10        ;CaptionML=[ENU=Tender Paragraph;
+                                                              NOR=Tilbudsavsnitt;
+                                                              SVE=Anbudsstycke] }
+    { 820 ;   ;Production Rate     ;Decimal       ;OnValidate=BEGIN
+                                                                //DP01676
+                                                                IF "Apply Obligation" THEN BEGIN
+                                                                  IF "Production Rate" <> 0 THEN BEGIN
+                                                                    Norm := 1;
+                                                                    VALIDATE(Quantity, "Quantity (Result Obligation)" / "Production Rate")
+                                                                  END ELSE BEGIN
+                                                                    Norm := 0;
+                                                                    VALIDATE(Quantity, 0);
+                                                                  END;
+                                                                END ELSE BEGIN
+                                                                  IF "Production Rate" <> 0 THEN
+                                                                    VALIDATE(Norm, 1 / "Production Rate")
+                                                                  ELSE
+                                                                    VALIDATE(Norm, 0);
+                                                                END;
+                                                              END;
+
+                                                   CaptionML=[ENU=Production Rate;
+                                                              NOR=Produksjonsrate;
+                                                              SVE=Produktionstakt];
+                                                   DecimalPlaces=0:5;
+                                                   BlankZero=Yes;
+                                                   Description=GWW }
+    { 825 ;   ;Quantity (Result Obligation);Decimal;
+                                                   DataClassification=ToBeClassified;
+                                                   CaptionML=ENU=Quantity  (Result Obligation);
+                                                   DecimalPlaces=0:5;
+                                                   BlankZero=Yes;
+                                                   Description=DP01676;
+                                                   Editable=No }
+    { 826 ;   ;Apply Obligation    ;Boolean       ;DataClassification=ToBeClassified;
+                                                   CaptionML=ENU=Apply Obligation;
+                                                   Description=GWW;
+                                                   Editable=No }
+    { 830 ;   ;Unit Price Code     ;Code20        ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup("SUP Recording Line"."Unit Price Code" WHERE (Service Order No.=FIELD(Service Order No.),
+                                                                                                                    Line No.=FIELD(Recording Line No.)));
+                                                   CaptionML=[ENU=Unit Price Code;
+                                                              SVE=Enhetspriskod];
+                                                   Editable=No }
+    { 840 ;   ;Unit Price Description;Text50      ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup("SUP Recording Line".Description WHERE (Service Order No.=FIELD(Service Order No.),
+                                                                                                              Line No.=FIELD(Recording Line No.)));
+                                                   CaptionML=[ENU=Unit Price Description;
+                                                              SVE=Beskrivning av enhetspris];
+                                                   Editable=No }
+    { 850 ;   ;Unit Price Description 2;Text50    ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup("SUP Recording Line"."Description 2" WHERE (Service Order No.=FIELD(Service Order No.),
+                                                                                                                  Line No.=FIELD(Recording Line No.)));
+                                                   CaptionML=[ENU=Unit Price Description 2;
+                                                              SVE=Beskrivning 2 av enhetspris];
+                                                   Editable=No }
+    { 860 ;   ;Unit Price Description 3;Text50    ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup("SUP Recording Line"."Description 3" WHERE (Service Order No.=FIELD(Service Order No.),
+                                                                                                                  Line No.=FIELD(Recording Line No.)));
+                                                   CaptionML=ENU=Unit Price Description 3;
+                                                   Editable=No }
+  }
+  KEYS
+  {
+    {    ;Budget Type,Service Order No.,Service Contract No.,Object No.,Maintenance Scheme,Line No.;
+                                                   SumIndexFields=Hours,Amount,Overhead Surcharge;
+                                                   MaintainSIFTIndex=No;
+                                                   Clustered=Yes }
+    {    ;Service Contract No.,Source Type,Cost Component,Cost Type,Cost Object,Finished,Index Date;
+                                                   SumIndexFields=Hours,Amount,Overhead Surcharge }
+    {    ;Service Contract No.,Source Type,Cost Type,Cost Object,Finished,Index Date;
+                                                   SumIndexFields=Hours,Amount,Overhead Surcharge }
+    {    ;Service Location No.,Source Type,Cost Component,Finished,Index Date;
+                                                   SumIndexFields=Hours,Amount,Overhead Surcharge }
+    {    ;Service Location No.,Source Type,Cost Type,Cost Object,Finished,Index Date;
+                                                   SumIndexFields=Hours,Amount,Overhead Surcharge }
+    {    ;Service Order No.,Finished,Index Date   ;SumIndexFields=Hours,Amount,Overhead Surcharge }
+    {    ;Service Order No.,Cost Type,Cost Object,Finished,Index Date;
+                                                   SumIndexFields=Hours,Amount,Overhead Surcharge }
+    {    ;Service Order No.,Attached to Line No.   }
+    {    ;Service Order No.,Object No.,Cost Type  ;SumIndexFields=Hours,Amount,Overhead Surcharge }
+    {    ;Budget Type,Service Order No.,Line No.   }
+    {    ;Service Order No.,Surcharge Line        ;SumIndexFields=Hours,Amount,Overhead Surcharge }
+    {    ;Service Order No.,Cost Type,Surcharge Line;
+                                                   SumIndexFields=Hours,Amount,Overhead Surcharge }
+    {    ;Budget Type,Service Order No.,Object No.,Maintenance Scheme,Finished;
+                                                   SumIndexFields=Amount }
+    {    ;Base Service Order No.,Budget Type,Cost Type,Finished,Additional Cost;
+                                                   SumIndexFields=Amount,Hours }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+    VAR
+      ServOrderRec@1100485013 : Record 11012823;
+      ServContrRec@1100485011 : Record 11012812;
+      ServLocRec@1100485017 : Record 11012801;
+      TradeExpRec@1100485012 : Record 11020286;
+      ItemRec@1100485009 : Record 27;
+      CostCompRec@1100525001 : Record 11012012;
+      DimValRec@1100485008 : Record 349;
+      DimMgt@1100485007 : Codeunit 408;
+      ValidateCu@1100485001 : Codeunit 11012033;
+      GanttChartMgt@1100525000 : Codeunit 11012037;
+      ItemTypeOpt@1100485000 : 'Item,Basic Item,Trade Item,Trade Vendor';
+      Text000@1100485006 : TextConst 'ENU=Copy Data from new Cost Object?\\;NOR=Kopier data fra nytt Kostnadsobjekt?\\;SVE=Kopiera data fr†n nytt kostnadsobjekt?\\';
+      Text001@1100485005 : TextConst 'ENU=Empty fields only will be updated. Existing data will not be overruled.;NOR=Kun tomme felt vil oppdateres. Eksisterende data vil ikke bli overstyrt.;SVE=Endast tomma f„lt kommer att uppdateras. Befintliga data kommer inte att †sidos„ttas.';
+      Text002@1100485004 : TextConst 'ENU=Cost Type of Line is %1, input of norm not allowed;NOR=Kostnadstypen for raden er %1, Norm kan ikke angis;SVE=Kostnadstypen f”r raden „r %1, norm kan inte anges';
+      Text003@1100485003 : TextConst 'ENU=Cost Type of line is %1, input of rate code not allowed.;NOR=Kostnadstypen for raden er %1, satskode kan ikke angis.;SVE=Kostnadstypen f”r raden „r %1, avgiftskod kan inte anges';
+      Text004@1100485002 : TextConst 'ENU=Change Cost Type ?;NOR=Endre kostnadstype?;SVE=Žndra kostnadstyp?';
+      Text005@1100485014 : TextConst 'ENU=Unit Price not allowed because Cost Type of this record is Labor !;NOR=Enhetsprisen er ikke tillatt siden Kostnadstypen for denne posten er arbeidskraft!;SVE=Enhetspriset „r inte till†tet eftersom kostnadstypen f”r denna post „r arbetskraft!';
+      UpdateAction@1100485010 : 'Insert,Modify,Delete';
+      DontUpdateServiceOrderObject@1100528600 : Boolean;
+      Text006@1100528601 : TextConst 'ENU=Budget line %1 %2, %3 %4 is linked to a Project Budget Line, deletion not allowed.';
+
+    PROCEDURE CalcTotals@1();
+    VAR
+      WageCompRec@1100528900 : Record 11012014;
+      OverTimeFactor@1100528901 : Decimal;
+    BEGIN
+      //DP01676: redesign conform RAW
+      CASE "Cost Type" OF
+        "Cost Type"::Labor:
+          BEGIN
+            Hours := ROUND("Time Quantity" * Quantity * Norm);
+            IF Rate = 0 THEN
+              Amount := ROUND("Time Quantity" * Quantity * Price)
+            ELSE
+              Amount := ROUND("Time Quantity" * Quantity * Norm * Rate);
+            IF "Wage Component" <> '' THEN BEGIN
+              OverTimeFactor := WageCompRec.GetBudgetOverTimeFactor("Wage Component");
+              IF OverTimeFactor <> 0 THEN
+                Amount := Amount * OverTimeFactor;
+            END;
+          END;
+        "Cost Type"::Subcontracting,
+        "Cost Type"::Plant:
+          BEGIN
+            CASE Norm = 0 OF
+              TRUE:
+                BEGIN
+                  Hours := 0;
+                  Amount := ROUND("Time Quantity" * Quantity * Price);
+                END;
+              FALSE: // GWW
+                BEGIN
+                  Hours := ROUND("Time Quantity" * Quantity * Norm);
+                  Amount := ROUND("Time Quantity" * Quantity * Norm * Price);
+                END;
+            END;
+          END;
+        ELSE
+          BEGIN
+            Hours := 0;
+            Amount := ROUND("Time Quantity" * Quantity * Price);
+          END;
+      END;
+    END;
+
+    PROCEDURE GetDefaultsCostObject@3();
+    BEGIN
+      DimMgt.GetDimValueRec(2, "Cost Object", DimValRec, TRUE,'');
+
+      IF Description = '' THEN
+        Description := DimValRec.Name;
+      IF "Unit of Measure" = '' THEN
+        "Unit of Measure" := DimValRec."Unit of Measure";
+      IF "Unit of Time" = '' THEN
+        "Unit of Time" := DimValRec."Unit of Time";
+      IF "Cost Component" = '' THEN
+        "Cost Component" := DimValRec."Cost Component";
+
+      "Cost Type" := DimValRec."Cost Type";
+      CASE "Cost Type" OF
+        "Cost Type"::Labor:
+          BEGIN
+            IF Norm = 0 THEN
+              Norm := DimValRec.Norm;
+            IF ("Rate Code" = '') AND (Rate = 0) THEN
+              VALIDATE("Rate Code", DimValRec."Rate Code");
+          END;
+        ELSE
+          IF Price = 0 THEN
+            Price := DimValRec.Price;
+      END;
+      CalcTotals;
+    END;
+
+    PROCEDURE ValidateItem@31(LTypeArtOpt@11012000 : 'Item,Basic Item,Trade Item');
+    VAR
+      DummyDat@11012001 : Date;
+      lvRefDate@1100485003 : Date;
+      lvDiscRef1@1100485002 : Code[20];
+      lvDiscRef2@1100485001 : Code[20];
+      ServiceLocation@1100525000 : Record 11012801;
+      ServiceOrder@1100525001 : Record 11012823;
+    BEGIN
+      GetReferenceData(lvRefDate, lvDiscRef1, lvDiscRef2);
+      IF ServiceLocation.GET("Service Location No.") AND (ServiceLocation."Language Code" <> '') THEN
+        ValidateCu.SetLanguageCode(ServiceLocation."Language Code")
+      ELSE BEGIN
+        ServiceOrder.GET("Service Order No.");
+        ValidateCu.SetLanguageCode(ServiceOrder."Language Code");
+      END;
+
+      ValidateCu.ValidateItem(
+        LTypeArtOpt,"Trade Item","Item No.",Manufacturer,"Vendor (Trade Item)",
+        "Basic Item","Cost Object",Description,"Unit of Measure",Price,
+        "Discount %",DummyDat,"Gross Price","Description 2","Cost Component",
+        lvDiscRef1, lvDiscRef2, lvRefDate, '');
+
+      IF LTypeArtOpt = LTypeArtOpt::"Trade Item" THEN
+        "Price History 0 Exists" := ValidateCu.PriceHistory0Exists("Trade Item", "Vendor (Trade Item)", lvRefDate)
+      ELSE
+        "Price History 0 Exists" := FALSE;
+
+
+      VALIDATE("Cost Component");
+
+      IF ItemRec.GET("Item No.") THEN BEGIN
+        IF ItemRec.Text <> '' THEN
+          VALIDATE("External Text", ItemRec.Text);
+      END;
+
+      CalcTotals;  //db, 08-09-11
+    END;
+
+    PROCEDURE HandleLookupUnit@1210190008();
+    VAR
+      ItemUnitRec@1210190000 : Record 5404;
+      lvUnit@1210190001 : Code[10];
+    BEGIN
+      lvUnit := ItemUnitRec.HandleLookupUnit("Item No.", "Basic Item", "Trade Item", Manufacturer, "Vendor (Trade Item)");
+      IF (lvUnit <> '') AND (lvUnit <> "Unit of Measure") THEN BEGIN
+        xRec."Unit of Measure" := "Unit of Measure";  //db, 01-07-04: standard bug
+        VALIDATE("Unit of Measure", lvUnit);
+      END;
+    END;
+
+    PROCEDURE CheckItemUnitConversion@1210190010(VAR MainNewRec@1210190006 : Record 11012875;MainOldRec@1210190007 : Record 11012875);
+    VAR
+      ItemRec@1210190004 : Record 27;
+      UnitFactor@1210190005 : Decimal;
+      UnitFactorOld@1210190003 : Decimal;
+      UnitFactorNew@1210190002 : Decimal;
+      UnitControl@1210190001 : Codeunit 5402;
+    BEGIN
+      WITH MainNewRec DO BEGIN
+        UnitFactorOld := 1;
+        UnitFactorNew := 1;
+        IF "Trade Item" <> '' THEN BEGIN
+          ValidateCu.ValidateUnit(ItemTypeOpt::"Trade Item",
+            "Item No.","Basic Item","Trade Item",Manufacturer,"Vendor (Trade Item)",
+            Quantity,"Unit of Measure",UnitFactorNew);
+        END ELSE BEGIN
+          IF "Basic Item" <> '' THEN BEGIN
+            ValidateCu.ValidateUnit(ItemTypeOpt::"Basic Item",
+              "Item No.","Basic Item","Trade Item",Manufacturer,"Vendor (Trade Item)",
+              Quantity,"Unit of Measure",UnitFactorNew);
+          END ELSE BEGIN  //db, 07-04-08: M10070
+            IF "Item No." <> '' THEN BEGIN
+              ItemRec.GET("Item No.");
+              UnitFactorOld := UnitControl.GetQtyPerUnitOfMeasure(ItemRec, MainOldRec."Unit of Measure");
+              UnitFactorNew := UnitControl.GetQtyPerUnitOfMeasure(ItemRec, "Unit of Measure");
+              UnitFactor := UnitFactorOld;
+              ValidateCu.ValidateUnit(ItemTypeOpt::Item,
+                "Item No.","Basic Item","Trade Item",Manufacturer,"Vendor (Trade Item)",
+                Quantity,"Unit of Measure",UnitFactor);
+            END;
+          END;
+        END;
+        IF (UnitFactorNew * UnitFactorOld) <> 0 THEN BEGIN
+          IF UnitFactorNew <> UnitFactorOld THEN BEGIN //db, 20-04-11: M26826
+            IF "Gross Price" <> 0 THEN
+              VALIDATE("Gross Price", ("Gross Price" * UnitFactorNew / UnitFactorOld))
+            ELSE
+              VALIDATE(Price, (Price * UnitFactorNew / UnitFactorOld));
+          END;
+        END;
+      END;
+    END;
+
+    PROCEDURE CalculateNetPrice@1210190005();
+    BEGIN
+      IF "Gross Price" <> 0 THEN BEGIN
+        Price := "Gross Price" - (("Gross Price"/100) * "Discount %");
+      END;
+    END;
+
+    PROCEDURE GetServOrder@1100485000(lvInit@1100485001 : Boolean);
+    BEGIN
+      IF "Budget Type" = "Budget Type"::Contract THEN EXIT;  //db, 17-12-07
+
+      ServOrderRec.GET("Service Order No.");
+      "Service Location No." := ServOrderRec."Service Location No.";
+      "Service Contract No." := ServOrderRec."Service Contract No.";  //db, 25-09-06
+      "Source Type" := ServOrderRec."Source Type";  //db, 03-11-06
+      "Base Service Order No." := ServOrderRec."Base Service Order No.";
+      IF (NOT "Follow-up Job") AND
+         (ServOrderRec."Date/Time Export to FSA" <> 0DT) AND  //db, 08-02-07
+         ((ServOrderRec.Status = ServOrderRec.Status::"Technical Finished") OR
+          (ServOrderRec.Status = ServOrderRec.Status::"Administrative Finished")) THEN
+        Finished := TRUE; //db, 24-11-06
+
+      IF lvInit = TRUE THEN BEGIN
+        "Plant Rates in Hours" := ServOrderRec."Plant Rates in Hours";  //DP02115
+        "Subcontracting in Hours" := ServOrderRec."Subcontracting in Hours";  //C053751
+        CurrFieldNo := FIELDNO("Service Order No.");  //db, 24-02-10
+        CheckAdditionalCostService;  //db, 24-02-10
+      END;
+    END;
+
+    PROCEDURE CheckDateOutOfUse@1100485024() StartDate : Date;
+    BEGIN
+      //db, 14-11-07
+      StartDate := "Index Date";
+
+      IF StartDate = 0D THEN BEGIN
+        IF ServOrderRec.GET("Service Order No.") THEN BEGIN  //db, 05-03-08
+          IF ServOrderRec."Starting Date" <> 0D THEN
+            StartDate := ServOrderRec."Starting Date"
+          ELSE
+            StartDate := ServOrderRec."Order Date";
+        END;
+      END;
+
+      EXIT(StartDate);
+    END;
+
+    PROCEDURE CalcOverheadSurcharge@1100525006() lvTotalSurcharge : Decimal;
+    VAR
+      ServSetup@1100485001 : Record 11012800;
+      SurchargeRec@1210190000 : Record 11020208;
+      lvServType@1100485002 : Code[20];
+      lvWageComp@1100485000 : Code[20];
+      lvQuan@1100485003 : Decimal;
+      lvDate@1100485004 : Date;
+      DepartmentCode@1100525000 : Code[20];
+      lBudgetLineRec@1100525001 : Record 11012875;
+      lStartLine@1100525003 : Integer;
+      lvSurcharge@1100525004 : Decimal;
+      SurchDimValRec@1100525005 : Record 349;
+      EmplRec@1100409000 : Record 5200;
+      Resource@1100529000 : Record 11229278;
+      GLSetup@1100409001 : Record 98;
+    BEGIN
+      // New version 25-06-2010
+      IF "Budget Type" = "Budget Type"::Order THEN
+        EXIT;
+
+      lvTotalSurcharge := 0;
+
+      IF "Line No." = 0 THEN EXIT;
+      IF "Surcharge Line" THEN EXIT;
+
+      "Overhead Surcharge" := 0;
+
+      lBudgetLineRec.SETCURRENTKEY("Service Order No.", "Attached to Line No.");
+      lBudgetLineRec.SETRANGE("Service Order No.", "Service Order No.");
+      lBudgetLineRec.SETRANGE("Service Contract No.", "Service Contract No.");
+      lBudgetLineRec.SETRANGE("Budget Type","Budget Type");
+      lBudgetLineRec.SETRANGE("Attached to Line No.", "Line No.");
+      lBudgetLineRec.SETRANGE("Surcharge Line Budget", TRUE);
+      IF NOT lBudgetLineRec.ISEMPTY THEN
+        lBudgetLineRec.DELETEALL(TRUE);
+
+      IF "Cost Object" = '' THEN
+        EXIT;
+
+      DimMgt.GetDimValueRec(2, "Cost Object", DimValRec, TRUE, '');
+
+      ServSetup.GET;
+      IF "Wage Component" <> '' THEN
+        lvWageComp := "Wage Component"
+      ELSE
+        lvWageComp := ServSetup."Wage Component (Ovh. Surch.)";
+
+      lvQuan := Quantity;
+      IF "Time Quantity" <> 0 THEN
+        lvQuan := lvQuan * "Time Quantity";
+      //IF Norm <> 0 THEN  //db, 10-06-13: C007910
+      IF "Cost Type" = "Cost Type"::Labor THEN
+        lvQuan := lvQuan * Norm;
+
+      IF "Budget Type" = "Budget Type"::Order THEN BEGIN
+        ServOrderRec.GET("Service Order No.");
+        DepartmentCode := ServOrderRec."Global Dimension 1 Code";  //db, 01-10-12: C001629
+        IF "Additional Cost" = TRUE THEN
+          lvServType := ServOrderRec."Service Type (Other)"
+        ELSE
+          lvServType := ServOrderRec."Service Type";
+      END;
+      IF "Budget Type" = "Budget Type"::Contract THEN BEGIN
+        ServContrRec.GET("Service Contract No.");
+        //db.sn, 01-10-12: C001629
+        DepartmentCode := ServContrRec."Global Dimension 1 Code";
+        //db.en, 01-10-12: C001629
+        IF "Additional Cost" = TRUE THEN
+          lvServType := ServContrRec."Service Type (Other)"
+        ELSE
+          lvServType := ServContrRec."Service Type";
+      END;
+
+      //db.sn, 01-10-12: C001629
+      //IF NOT EmplRec.GET(ServOrderRec."Employee No.") THEN EmplRec.INIT;  //DP00465.o
+      GLSetup.GET;
+      IF GLSetup."Source Department Surcharge" = GLSetup."Source Department Surcharge"::Employee THEN BEGIN
+        //option not useful for subcontracting and not recommended for employee
+        //DP00465.sn
+        IF ServOrderRec."Employee No." <> '' THEN BEGIN
+          Resource.SETCURRENTKEY(Type, Company, "Source No.");
+          Resource.SETRANGE(Type, Resource.Type::Employee);
+          Resource.SETRANGE(Company, COMPANYNAME);
+          Resource.SETRANGE("Source No.", ServOrderRec."Employee No.");
+          IF Resource.FINDFIRST THEN BEGIN
+            IF NOT EmplRec.GET(Resource."Source No.") THEN
+              EmplRec.INIT;
+        //DP00465.en
+            IF EmplRec."Global Dimension 1 Code" <> '' THEN
+              DepartmentCode := EmplRec."Global Dimension 1 Code";
+          END;
+        END;
+      END;
+      //db.en, 01-10-12: C001629
+
+      IF "Index Date" = 0D THEN
+        lvDate := TODAY
+      ELSE
+        lvDate := "Index Date";
+
+      IF SurchargeRec.GetSurcharges(
+        1, lvServType, '', TRUE, DimValRec."Cost Type", "Cost Object", lvWageComp,
+        DepartmentCode, EmplRec."Trade Association",  //db, 01-10-12: C001629
+        "Cost Component", lvDate, SurchargeRec) THEN
+      BEGIN
+        lBudgetLineRec.INIT;
+        lBudgetLineRec.TRANSFERFIELDS(Rec);
+        lBudgetLineRec."Line No." := 0;
+        lBudgetLineRec.Price := 0;
+        lBudgetLineRec."Rate Code" := '';
+        lBudgetLineRec.Rate := 0;
+        lBudgetLineRec.Norm := 0;
+        lBudgetLineRec.CalcTotals;
+        lBudgetLineRec.VALIDATE("Cost Object", '');
+        lBudgetLineRec.VALIDATE("Cost Type");
+        lBudgetLineRec."Overhead Surcharge" := 0;
+        lStartLine := "Line No.";
+        REPEAT
+          IF SurchargeRec."Apply for Service Budget" THEN BEGIN
+            IF SurchargeRec.Percentage <> 0 THEN
+              IF SurchargeRec."Surcharge over Surcharge" THEN
+                lvSurcharge := ROUND((Amount + lvTotalSurcharge) * SurchargeRec.Percentage/100)
+              ELSE
+                lvSurcharge := ROUND(Amount * SurchargeRec.Percentage/100)
+            ELSE
+              lvSurcharge := ROUND(SurchargeRec.Amount * lvQuan);
+            lvTotalSurcharge := lvTotalSurcharge + lvSurcharge;
+            IF lvSurcharge <> 0 THEN BEGIN
+              lBudgetLineRec."Attached to Line No." := "Line No.";
+              lBudgetLineRec."Surcharge Line Budget" := TRUE;
+              lBudgetLineRec."Surcharge Line" := TRUE;
+              lBudgetLineRec."Overhead Surcharge" := lvSurcharge;
+              IF SurchargeRec."Source Type Cost Object" = SurchargeRec."Source Type Cost Object"::Fixed THEN BEGIN
+                SurchargeRec.GetSurchargeDimVal(DimValRec, SurchDimValRec);
+                lBudgetLineRec."Cost Object" := SurchDimValRec.Code;
+                lBudgetLineRec."Cost Type" := SurchDimValRec."Cost Type";
+              END;
+              IF SurchDimValRec."Cost Component" <> '' THEN
+                lBudgetLineRec."Cost Component" := SurchDimValRec."Cost Component";
+      //        IF SurchargeRec."Source Type Department" = SurchargeRec."Source Type Department"::Fixed THEN BEGIN
+      //           lBudgetLineRec."Global Dimension 1 Code" := SurchargeRec."Coverage Department";
+      //        END;
+              REPEAT
+                //lStartLine += 1; //**4PS.o
+                lStartLine += 500; //**4PS.n
+                lBudgetLineRec."Line No." := lStartLine;
+              UNTIL lBudgetLineRec.INSERT(TRUE);
+              //db.sn, 16-09-10
+              lBudgetLineRec."Index Date" := lvDate;
+              lBudgetLineRec.MODIFY;
+              //db.en, 16-09-10
+            END;
+          END;
+        UNTIL SurchargeRec.NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE UpdateCostControlStatus@10(lUpdateAction@1100485002 : 'Insert,Modify,Delete');
+    VAR
+      lvServOrderRec@1100485000 : Record 11012823;
+    BEGIN
+      IF "Budget Type" <> "Budget Type"::Order THEN
+        EXIT;
+      IF NOT lvServOrderRec.GET("Service Order No.") THEN
+        EXIT;
+
+      UpdateServHoursGanttChart(lUpdateAction); //20-07-09
+      UpdateBudgetSurchLinesFinished(lUpdateAction);
+      UpdateServiceOrderObject(lUpdateAction);
+    END;
+
+    PROCEDURE GetReferenceData@1100485002(VAR lvRefDate@1100485002 : Date;VAR lvDiscRef1@1100485001 : Code[20];VAR lvDiscRef2@1100485000 : Code[20]);
+    BEGIN
+      lvDiscRef1 := '';
+      lvDiscRef2 := '';
+      IF "Service Order No." <> '' THEN BEGIN
+        IF NOT ServOrderRec.GET("Service Order No.") THEN ServOrderRec.INIT;
+        lvRefDate := ValidateCu.GetRefDateServOrder(ServOrderRec);
+      //  lvDiscRef1 := ServOrderRec."Purch Discount Term Group 1";
+      //  lvDiscRef2 := ServOrderRec."Purch Discount Term Group 2";
+      END ELSE BEGIN
+        IF NOT ServLocRec.GET("Service Location No.") THEN ServLocRec.INIT;
+        IF NOT ServContrRec.GET("Service Contract No.") THEN ServContrRec.INIT;
+        lvRefDate := ValidateCu.GetRefDateServContract(ServContrRec);
+      END;
+    END;
+
+    PROCEDURE UpdateServHoursGanttChart@1100525000(UpdateAction@1100525000 : 'Insert,Modify,Delete,Rename');
+    VAR
+      ServiceOrderBudgetLine@1100528600 : Record 11012875;
+    BEGIN
+      //20-07-09
+      ServiceOrderBudgetLine := Rec;
+      IF NOT ServiceOrderBudgetLine.FIND('=') THEN
+        ServiceOrderBudgetLine.INIT;
+      GanttChartMgt.UpdateBudgetHours(UpdateAction,Rec,ServiceOrderBudgetLine);
+    END;
+
+    PROCEDURE CheckAdditionalCostService@1100525017();
+    BEGIN
+      //db, 24-02-10
+      IF "Service Order No." = '' THEN EXIT;
+      IF NOT ServOrderRec.GET("Service Order No.") THEN EXIT;
+
+      IF NOT "Add. Cost Changed Manually" THEN
+        "Additional Cost" :=
+          ServOrderRec.GetAdditionalCostService("Service Order No.","Cost Object","Cost Type"+1,'', Rec);
+      IF (CurrFieldNo = FIELDNO("Service Order No.")) OR (CurrFieldNo = FIELDNO("Cost Type")) THEN BEGIN
+        IF ("Service Order No." <> xRec."Service Order No.") OR
+           ("Cost Type" <> xRec."Cost Type") THEN BEGIN
+          VALIDATE("Cost Component");
+        END;
+      END;
+    END;
+
+    PROCEDURE ValidateAdditionalCost@1100525003();
+    VAR
+      SaveCostComp@1100525000 : Text[30];
+    BEGIN
+      SaveCostComp := "Cost Component";
+      IF CurrFieldNo = FIELDNO("Additional Cost") THEN
+        "Add. Cost Changed Manually" := TRUE;
+      TESTFIELD("Service Order No.");
+      VALIDATE("Service Order No.");
+      IF CurrFieldNo <> FIELDNO("Additional Cost") THEN EXIT;  //db, 18-03-10: T4641
+
+      CheckCostComponent(SaveCostComp);  //db, 07-06-10: M19425
+    END;
+
+    PROCEDURE CheckCostComponent@1100525004(CostComp@1100525000 : Text[30]);
+    VAR
+      CostCompRec@1100525001 : Record 11012012;
+    BEGIN
+      //db, 07-06-10: M19425 (also called by function CreateOrAddToServOrder from table 11012839)
+      IF CostCompRec.GET(CostComp) THEN BEGIN
+         "Cost Component" := CostComp;
+         IF ("Additional Cost" = TRUE) THEN BEGIN
+           IF (CostCompRec."Cost Component (Add.Cost)" <> '') THEN
+             "Cost Component" := CostCompRec."Cost Component (Add.Cost)";
+         END ELSE BEGIN
+           CostCompRec.SETRANGE("Cost Component (Add.Cost)", CostComp);
+           IF CostCompRec.FINDSET THEN BEGIN
+             REPEAT
+               IF (CostCompRec."Cost Component (Add.Cost)" = CostComp) THEN
+                 "Cost Component" := CostCompRec.Code;
+             UNTIL CostCompRec.NEXT = 0;
+           END;
+         END;
+      END;
+    END;
+
+    PROCEDURE ValidateCostComponent@1100525002();
+    VAR
+      CostCompRec@1100525000 : Record 11012012;
+      CostCompRec2@1100525001 : Record 11012012;
+    BEGIN
+      IF CurrFieldNo <> FIELDNO("Cost Component") THEN EXIT;  //db, 18-03-10: T4642
+
+      IF CostCompRec.GET("Cost Component") THEN BEGIN
+        //db.sn, 06-12-10: M24263
+        IF CostCompRec."Additional Cost (Service)" THEN BEGIN
+          CostCompRec2.SETRANGE("Cost Component (Add.Cost)", "Cost Component");
+          IF NOT CostCompRec2.FINDFIRST THEN EXIT;
+        END ELSE BEGIN
+          IF CostCompRec."Cost Component (Add.Cost)" = '' THEN EXIT;
+        END;
+        //db.en, 06-12-10: M24263
+        "Additional Cost" := CostCompRec."Additional Cost (Service)";
+      END;
+    END;
+
+    PROCEDURE ChangeQuantityExplodedLines@1100525005(QuantityFactor@1100525000 : Decimal);
+    VAR
+      SOBudgetLine2@1100525001 : Record 11012875;
+    BEGIN
+      //**4PS
+      SOBudgetLine2.RESET;
+      SOBudgetLine2.SETRANGE("Service Order No.","Service Order No.");
+      SOBudgetLine2.SETRANGE("Part of Line","Line No.");
+      SOBudgetLine2.SETFILTER("Line No.", '<>%1', "Line No.");
+      IF SOBudgetLine2.FINDSET(TRUE, FALSE) THEN
+        REPEAT
+          IF NOT ((SOBudgetLine2."Item No." = '') AND (SOBudgetLine2."Original Quantity" = 0)) THEN BEGIN
+            IF SOBudgetLine2."Item No." = '' THEN BEGIN
+              SOBudgetLine2.ChangeQuantityExplodedLines(QuantityFactor);
+              SOBudgetLine2."Original Quantity" := QuantityFactor * SOBudgetLine2."Original Quantity";
+            END ELSE
+              SOBudgetLine2.VALIDATE(Quantity, QuantityFactor * SOBudgetLine2.Quantity);
+            SOBudgetLine2.MODIFY;
+          END;
+        UNTIL SOBudgetLine2.NEXT = 0;
+    END;
+
+    PROCEDURE DetermineBOMLevel@1100525007(LineNo@1100525000 : Integer;VAR BOMLevel@1100525002 : Integer);
+    VAR
+      SOBudgetLine3@1100525003 : Record 11012875;
+    BEGIN
+      //**4PS
+      SOBudgetLine3.SETRANGE("Budget Type","Budget Type");
+      SOBudgetLine3.SETRANGE("Service Order No.","Service Order No.");
+      SOBudgetLine3.SETRANGE("Service Contract No.","Service Contract No.");
+      SOBudgetLine3.SETRANGE("Line No.",LineNo);
+      IF SOBudgetLine3.FINDFIRST THEN
+        BOMLevel := SOBudgetLine3."Level BOM" + 1;
+    END;
+
+    PROCEDURE UpdateServiceOrderObject@1100528600(IUpdateAction@1100528602 : 'Insert,Modify,Delete,Rename');
+    VAR
+      ServiceOrder@1100528603 : Record 11012823;
+      ServiceOrderObject@1100528600 : Record 11071724;
+      ServiceOrderBudgetLine@1100528601 : Record 11012875;
+    BEGIN
+      IF ("Service Order No." = '') OR ("Object No." = '') OR DontUpdateServiceOrderObject THEN
+        EXIT;
+      IF NOT ServiceOrder.GET("Service Order No.") THEN
+        EXIT;
+      IF NOT ServiceOrderObject.GET("Service Order No.", "Object No.", "Maintenance Scheme") THEN
+        EXIT;
+
+      ServiceOrderBudgetLine.SETRANGE("Budget Type", ServiceOrderBudgetLine."Budget Type"::Order);
+      ServiceOrderBudgetLine.SETRANGE("Service Order No.", "Service Order No.");
+      ServiceOrderBudgetLine.SETRANGE("Object No.", "Object No.");
+      ServiceOrderBudgetLine.SETRANGE("Maintenance Scheme", "Maintenance Scheme");
+      ServiceOrderBudgetLine.SETFILTER("Line No.", '<>%1', "Line No.");
+      ServiceOrderBudgetLine.SETRANGE(Finished, FALSE);
+      ServiceOrderObject.Finished := ServiceOrderBudgetLine.ISEMPTY AND (Finished OR (IUpdateAction = IUpdateAction::Delete));
+      IF ServiceOrderObject.Finished THEN
+        ServiceOrderObject."Execution Date" := TODAY;
+      ServiceOrderBudgetLine.SETRANGE(Finished);
+
+      ServiceOrderBudgetLine.SETRANGE("Follow-up Job", TRUE);
+      ServiceOrderObject."Follow-up Job" := NOT ServiceOrderBudgetLine.ISEMPTY OR
+        ("Follow-up Job" AND (IUpdateAction <> IUpdateAction::Delete));
+      ServiceOrderObject.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetUpdateSOObjectFinished@1100528603(IUpdateServiceOrderObject@1100528600 : Boolean);
+    BEGIN
+      DontUpdateServiceOrderObject := NOT IUpdateServiceOrderObject;
+    END;
+
+    PROCEDURE UpdateBudgetSurchLinesFinished@1100528601(IUpdateAction@1100528600 : 'Insert,Modify,Delete,Rename');
+    VAR
+      ServiceOrder@1100528602 : Record 11012823;
+      ServiceOrderBudgetLine@1100528601 : Record 11012875;
+    BEGIN
+      IF ("Service Order No." = '') OR NOT ServiceOrder.GET("Service Order No.") THEN
+        EXIT;
+      IF "Surcharge Line" THEN
+        EXIT;
+
+      ServiceOrderBudgetLine.SETRANGE("Budget Type", ServiceOrderBudgetLine."Budget Type"::Order);
+      ServiceOrderBudgetLine.SETRANGE("Service Order No.", "Service Order No.");
+      ServiceOrderBudgetLine.SETRANGE("Object No.", "Object No.");
+      ServiceOrderBudgetLine.SETRANGE("Maintenance Scheme", "Maintenance Scheme");
+      ServiceOrderBudgetLine.SETFILTER("Line No.", '<>%1', "Line No.");
+      ServiceOrderBudgetLine.SETRANGE("Surcharge Line", FALSE);
+      IF ServiceOrderBudgetLine.ISEMPTY AND (IUpdateAction = IUpdateAction::Delete) THEN BEGIN
+        ServiceOrderBudgetLine.SETRANGE("Surcharge Line", TRUE);
+        ServiceOrderBudgetLine.SETRANGE(Finished, TRUE);
+        ServiceOrderBudgetLine.MODIFYALL(Finished, FALSE);
+        EXIT;
+      END;
+      ServiceOrderBudgetLine.SETRANGE(Finished, FALSE);
+      IF ServiceOrderBudgetLine.ISEMPTY AND ("Surcharge Line" OR Finished OR (IUpdateAction = IUpdateAction::Delete)) THEN BEGIN
+        ServiceOrderBudgetLine.SETRANGE("Surcharge Line", TRUE);
+        ServiceOrderBudgetLine.SETRANGE(Finished, FALSE);
+        ServiceOrderBudgetLine.MODIFYALL(Finished, TRUE);
+      END ELSE BEGIN
+        ServiceOrderBudgetLine.SETRANGE("Surcharge Line", TRUE);
+        ServiceOrderBudgetLine.SETRANGE(Finished, TRUE);
+        ServiceOrderBudgetLine.MODIFYALL(Finished, FALSE);
+      END;
+    END;
+
+    PROCEDURE HandleAssistEditItem@1100528602(IFieldNo@1100528600 : Integer) ORefresh : Boolean;
+    VAR
+      WebshopItemMgt@1100528601 : Codeunit 11012306;
+      RecRef@1100528602 : RecordRef;
+    BEGIN
+      IF IFieldNo = FIELDNO("Trade Item") THEN BEGIN
+        RecRef.GETTABLE(Rec);
+        WebshopItemMgt.RunModalDialogForMultipleItems("Vendor (Trade Item)", "Trade Item", RecRef);
+        ORefresh := TRUE;
+      END;
+    END;
+
+    LOCAL PROCEDURE DetermineObjectCustomer@1100525010();
+    VAR
+      ServiceObject@1100525000 : Record 11071691;
+    BEGIN
+      IF ServiceObject.GET("Object No.") THEN
+        IF ServiceObject."Object Customer" <> '' THEN
+          VALIDATE("Object Customer", ServiceObject."Object Customer");
+    END;
+
+    PROCEDURE ValidateUnitOfMeasure@1100528400(UnitOfMeasureCode@1100528400 : Code[10]);
+    BEGIN
+      "Unit of Measure" := UnitOfMeasureCode;
+      IF ("Cost Type" = "Cost Type"::Material) THEN
+        IF "Unit of Measure" <>  xRec."Unit of Measure" THEN
+          CheckItemUnitConversion(Rec, xRec);
+      CalcTotals;
+    END;
+
+    PROCEDURE SelectRecipe@1100485005();
+    VAR
+      RecipePage@1100525000 : Page 11125073;
+    BEGIN
+      //DP01560
+      CLEAR(RecipePage);
+      RecipePage.SetSelection(DATABASE::"Service Order Budget Line",
+        "Service Order No.","Service Contract No.","Object No.","Maintenance Scheme",'','','','','',TRUE,"Line No.");
+      RecipePage.RUNMODAL;
+    END;
+
+    PROCEDURE CheckRecipeTotals@1210190009();
+    VAR
+      ServiceOrderBudgetLine@1210190000 : Record 11012875;
+      OldQuan@1210190001 : Decimal;
+      NewQuan@1210190002 : Decimal;
+    BEGIN
+      //DP01560
+      IF "Source Type (Recipe/BOM)" <> "Source Type (Recipe/BOM)"::"Recipe Header" THEN EXIT;
+
+      //DP02339.sn
+      OldQuan := xRec.Quantity;
+      NewQuan := Quantity;
+      //DP02339.en
+
+      ServiceOrderBudgetLine.SETRANGE("Service Order No.", "Service Order No.");
+      ServiceOrderBudgetLine.SETRANGE("Source Type (Recipe/BOM)", ServiceOrderBudgetLine."Source Type (Recipe/BOM)"::"Recipe Line");
+      ServiceOrderBudgetLine.SETRANGE("Recipe Group", "Recipe Group");
+      ServiceOrderBudgetLine.SETRANGE(Recipe, Recipe);
+      ServiceOrderBudgetLine.SETRANGE("Attached to Line No.", "Line No.");
+      IF ServiceOrderBudgetLine.FINDSET(TRUE, FALSE) THEN BEGIN
+        REPEAT
+          ServiceOrderBudgetLine.VALIDATE(Quantity, ServiceOrderBudgetLine.Quantity * NewQuan / OldQuan);
+          ServiceOrderBudgetLine.MODIFY(TRUE);
+        UNTIL ServiceOrderBudgetLine.NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE CheckBomLines@1100529400();
+    VAR
+      ServiceOrderBudgetLine@1210190000 : Record 11012875;
+      OldQuan@1210190001 : Decimal;
+      NewQuan@1210190002 : Decimal;
+    BEGIN
+      IF ("BOM Item No." = '') THEN EXIT;
+      IF ("Level BOM" <> 0) THEN EXIT;
+
+      //DP02339.sn
+      OldQuan := xRec.Quantity;
+      NewQuan := Quantity;
+      //DP02339.en
+
+      ServiceOrderBudgetLine.SETRANGE("Service Order No.", "Service Order No.");
+      ServiceOrderBudgetLine.SETRANGE("BOM Item No.", "BOM Item No.");
+      ServiceOrderBudgetLine.SETRANGE("Part of Line", "Line No.");
+      IF ServiceOrderBudgetLine.FINDSET(TRUE, FALSE) THEN BEGIN
+        REPEAT
+          IF OldQuan = 0 THEN
+            ServiceOrderBudgetLine.VALIDATE(Quantity, ServiceOrderBudgetLine."Original Quantity" * NewQuan)  //DP02339
+          ELSE
+            ServiceOrderBudgetLine.VALIDATE(Quantity, ServiceOrderBudgetLine.Quantity * NewQuan / OldQuan);
+          ServiceOrderBudgetLine.MODIFY(TRUE);
+        UNTIL ServiceOrderBudgetLine.NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE GetSubcontractorActivity@1100529900(CalledBy@1100528900 : Integer);
+    VAR
+      SubcontractingActivityPrice@1100529900 : Record 11229373;
+    BEGIN
+      TESTFIELD("Cost Type", "Cost Type"::Subcontracting);
+      SubcontractingActivityPrice.SETRANGE("Subcontracting Activity", "Subcontracting Activity");
+      IF CalledBy = FIELDNO("Subcontracting Activity") THEN  //DP01958a
+        SubcontractingActivityPrice.SETRANGE("Preferred Subcontractor", TRUE)
+      ELSE
+        SubcontractingActivityPrice.SETRANGE("Subcontractor No.", Vendor);
+      IF SubcontractingActivityPrice.FINDFIRST THEN BEGIN
+        VALIDATE(Price, SubcontractingActivityPrice.GetPrice("Index Date"));
+        IF CalledBy = FIELDNO("Subcontracting Activity") THEN BEGIN  //DP01958a
+          SubcontractingActivityPrice.CALCFIELDS("Activity Description");
+          Description := SubcontractingActivityPrice."Activity Description";
+        END;
+        "Unit of Measure" := SubcontractingActivityPrice."Unit of Measure";
+        "Cost Object" := SubcontractingActivityPrice."Cost Object";
+        Vendor := SubcontractingActivityPrice."Subcontractor No.";
+      END;
+      IF "Subcontracting in Hours" THEN BEGIN  //C053751
+        "Rate Code" := '';
+        InitRateRelatedFields;
+      END;
+    END;
+
+    LOCAL PROCEDURE LookupPlantCompany@1100529603();
+    VAR
+      PlantMgtCompany@1100529600 : Record 11020586;
+      TmpPlantMgtCompany@1100529601 : TEMPORARY Record 11020586;
+      NoOfPlantCompanies@1100528600 : Integer;
+    BEGIN
+      IF "Cost Type" <> "Cost Type"::Plant THEN
+        EXIT;
+
+      PlantMgtCompany.GetPlantCompany(TRUE, NoOfPlantCompanies, '');
+
+      IF NoOfPlantCompanies = 0 THEN BEGIN
+        PlantMgtCompany."Plant Company" := "Plant Company";
+        IF PlantMgtCompany."Plant Company" = '' THEN
+          PlantMgtCompany."Plant Company" := COMPANYNAME;
+        PAGE.RUNMODAL(0, PlantMgtCompany);
+      END ELSE BEGIN
+        TmpPlantMgtCompany."Plant Company" := "Plant Company";
+        IF TmpPlantMgtCompany."Plant Company" = '' THEN
+          TmpPlantMgtCompany."Plant Company" := COMPANYNAME;
+        IF PAGE.RUNMODAL(0, TmpPlantMgtCompany) = ACTION::LookupOK THEN
+          IF TmpPlantMgtCompany."Plant Company" <> "Plant Company" THEN
+            VALIDATE("Plant Company", TmpPlantMgtCompany."Plant Company");
+      END;
+    END;
+
+    LOCAL PROCEDURE LookupPlantType@1100529605();
+    VAR
+      PlantType@1100529600 : Record 11012551;
+    BEGIN
+      IF "Cost Type" <> "Cost Type"::Plant THEN
+        EXIT;
+
+      IF ("Plant Company" <> '') AND ("Plant Company" <> COMPANYNAME) THEN
+        PlantType.CHANGECOMPANY("Plant Company");
+      PlantType.Code := "Plant Type";
+      IF PAGE.RUNMODAL(0, PlantType) = ACTION::LookupOK THEN
+        IF PlantType.Code <> "Plant Type" THEN
+          VALIDATE("Plant Type", PlantType.Code);
+    END;
+
+    PROCEDURE DeterminePlantPrice@1100485011();
+    VAR
+      SearchRateCu@1100485000 : Codeunit 11012567;
+      RefDate@1100485001 : Date;
+      RentalType@1100525000 : Option;
+      DummyPlantPriceType@1100525002 : Option;
+      DummyRentalType@1100525003 : Option;
+      PlantDiscount@1100525004 : Decimal;
+      SalesPrice@1100525005 : Decimal;
+      BuyBackPrice@1100525006 : Decimal;
+      PlantTypeRec@1100525001 : Record 11012551;
+      PlantCompany@1100528500 : Text;
+      PlantLocation@1100528501 : Text;
+    BEGIN
+      //DP02115
+      IF ("Plant Type" = '') OR "Price Agreement" THEN
+        EXIT;
+
+      "Gross Price" := 0;
+      "Discount %" := 0;
+
+      ServOrderRec.GET("Service Order No.");
+      RefDate := TODAY;
+
+      RentalType := -1;  //0=rental, 1=sales, 2=buy-back, 3= hours
+      //db.sn, 04-12-18
+      IF "Plant Company" <> '' THEN
+        PlantCompany := "Plant Company"
+      ELSE
+        PlantCompany := ServOrderRec."Plant Company";
+      //IF "Plant Location" <> '' THEN
+      //  PlantLocation := "Plant Location"
+      //ELSE
+        PlantLocation := ServOrderRec."Plant Location";
+      IF PlantCompany <> '' THEN
+        PlantTypeRec.CHANGECOMPANY(PlantCompany);
+      //db.en, 04-12-18
+      PlantTypeRec.GET("Plant Type");
+      IF "Plant Rates in Hours" THEN BEGIN
+        "Rate Code" := '';
+        InitRateRelatedFields;
+        IF (PlantTypeRec."Rental Type" <> PlantTypeRec."Rental Type"::"Sales/Buy Back") THEN
+          RentalType := 3;
+      END;
+
+      VALIDATE(Price, SearchRateCu.CostRateFromEstimate("Plant Type",'',PlantLocation,RefDate,PlantCompany,RentalType,"Plant Price Type"));
+      VALIDATE("Gross Price",Price);
+      {
+      SalesPrice := SearchRateCu.SalesRateFromEstimate(
+        "Plant Type",'',PlantLocation,ServOrderRec."Customer No.",ServOrderRec."Kind of Plant Rate"+1,RefDate,PlantCompany,RentalType,"Plant Price Type");
+      IF RentalType = 1 THEN BEGIN
+        DummyRentalType := 2;
+        BuyBackPrice := SearchRateCu.SalesRateFromEstimate("Plant Type",'',PlantLocation,ServOrderRec."Customer No.",0,RefDate,PlantCompany,DummyRentalType,DummyPlantPriceType);
+      END;
+      PlantDiscount := SearchRateCu.SalesDiscountFromEstimate(
+        "Plant Type",'',PlantLocation,ServOrderRec."Customer No.",ServOrderRec."Customer Disc. Group",RefDate,PlantCompany,RentalType);
+      }
+    END;
+
+    PROCEDURE HandleLookupItem@1100528901(iFieldNo@1100525004 : Integer) lvRefresh : Boolean;
+    VAR
+      ItemRec@1100525012 : Record 27;
+      BasicItemRec@1100525011 : Record 11012316;
+      TradeItemRec@1100525010 : Record 11012317;
+      ItemFrm@1100525009 : Page 31;
+      BasicItemFrm@1100525008 : Page 11012333;
+      TradeItemFrm@1100525007 : Page 11012334;
+      RefDate@1100525003 : Date;
+      PurchDiscRef1@1100525002 : Code[20];
+      PurchDiscRef2@1100525001 : Code[20];
+      DiscType@1100525000 : 'Purchase,Sales';
+      g_ItemCode@1100525014 : Code[20];
+      g_Vendor@1100525013 : Code[20];
+      TempServOrderBudgetLine@1100528902 : TEMPORARY Record 11012875;
+    BEGIN
+      //DP02213
+      ServOrderRec.GET("Service Order No.");
+      ValidateCu.GetRefDiscServOrder(ServOrderRec, PurchDiscRef1, PurchDiscRef2, DiscType::Purchase);
+
+      IF Rec."Line No." <> xRec."Line No." THEN
+        xRec.INIT;
+
+      IF iFieldNo = FIELDNO("Item No.") THEN BEGIN
+        ItemFrm.LOOKUPMODE(TRUE);
+        ItemFrm.DetermineInterface(DATABASE::"Service Order Budget Line",
+          "Service Order No.",'','','',0,'','',"Line No.",'','');
+        IF ItemRec.GET("Item No.") THEN
+          ItemFrm.SETRECORD(ItemRec);
+        IF ItemFrm.RUNMODAL = ACTION::LookupOK THEN BEGIN
+          ItemFrm.GETRECORD(ItemRec);
+          VALIDATE("Item No.", ItemRec."No.");
+        END ELSE BEGIN
+          lvRefresh := ItemFrm.CheckMultiCopy;
+        END;
+      END;
+
+      IF iFieldNo = FIELDNO("Basic Item") THEN BEGIN
+        CLEAR(BasicItemFrm);
+        BasicItemFrm.LOOKUPMODE(TRUE);
+        BasicItemFrm.SetSelection(DATABASE::"Service Order Budget Line",
+          "Service Order No.",'','','',0,'','',"Line No.",'','');
+
+        BasicItemFrm.SetReference(RefDate, PurchDiscRef1, PurchDiscRef2);
+        BasicItemRec.InitLookup(BasicItemRec, "Basic Item", Manufacturer);
+        BasicItemFrm.SETRECORD(BasicItemRec);
+
+        IF BasicItemFrm.RUNMODAL = ACTION::LookupOK THEN BEGIN
+          BasicItemFrm.GETRECORD(BasicItemRec);
+          Manufacturer := BasicItemRec.Manufacturer;
+          VALIDATE("Basic Item", BasicItemRec."Product Code");
+        END ELSE BEGIN
+          lvRefresh := BasicItemFrm.CheckMultiCopy;
+        END;
+      END;
+
+      IF iFieldNo = FIELDNO("Trade Item") THEN BEGIN
+        IF "Item No." <> '' THEN BEGIN
+          TempServOrderBudgetLine.INIT;
+          TempServOrderBudgetLine."Budget Type" := "Budget Type";
+          TempServOrderBudgetLine."Service Order No." := "Service Order No.";
+          TempServOrderBudgetLine."Service Contract No." := "Service Contract No.";
+          TempServOrderBudgetLine.VALIDATE("Item No.","Item No.");
+          g_ItemCode := TempServOrderBudgetLine."Trade Item";
+          g_Vendor := TempServOrderBudgetLine."Vendor (Trade Item)";
+        END ELSE BEGIN
+          g_ItemCode := '';
+          g_Vendor := '';
+        END;
+
+        CLEAR(TradeItemFrm);
+        TradeItemFrm.LOOKUPMODE(TRUE);
+        TradeItemFrm.SetSelection(DATABASE::"Service Order Budget Line",
+          "Service Order No.", '', '','', 0, '', '', "Line No.", '', '',
+          "Vendor (Trade Item)", "Trade Item", Manufacturer, "Basic Item", g_ItemCode, g_Vendor);
+
+        TradeItemFrm.SetReference(RefDate, PurchDiscRef1, PurchDiscRef2);
+        TradeItemRec.InitLookup(TradeItemRec, "Basic Item", Manufacturer, "Trade Item", "Vendor (Trade Item)");
+        TradeItemFrm.SETRECORD(TradeItemRec);
+
+        IF TradeItemFrm.RUNMODAL = ACTION::LookupOK THEN BEGIN
+          TradeItemFrm.GETRECORD(TradeItemRec);
+          Manufacturer := TradeItemRec.Manufacturer;
+          "Basic Item" := TradeItemRec."Product Code";
+          "Vendor (Trade Item)" := TradeItemRec.Vendor;
+          VALIDATE("Trade Item", TradeItemRec."Item Code");
+        END ELSE BEGIN
+          lvRefresh := TradeItemFrm.CheckMultiCopy;
+        END;
+      END;
+      EXIT(lvRefresh);
+    END;
+
+    PROCEDURE InitRateRelatedFields@1100525033();
+    BEGIN
+      //C053751
+      Rate := 0;
+      "Wage Component" := '';
+    END;
+
+    PROCEDURE InitNormRelatedFields@1100525032(iValue@1100528900 : Decimal);
+    BEGIN
+      //C053751: 0=clear; 1=init (switch plant/norm in hours should be budget neutral)
+      Norm := 0;
+      "Production Rate" := 0;
+    END;
+
+    PROCEDURE ShowExternalText@8(EditableMode@1100529001 : Boolean);
+    VAR
+      EditTextField@1100529000 : Page 11012120;
+    BEGIN
+      EditTextField.SetSelection6(DATABASE::"Service Order Budget Line", "External Text");
+      IF NOT EditableMode THEN BEGIN
+        EditTextField.EDITABLE(FALSE);
+        EditTextField.RUNMODAL;
+      END ELSE BEGIN
+        EditTextField.LOOKUPMODE(TRUE);
+        IF EditTextField.RUNMODAL = ACTION::LookupOK THEN BEGIN
+          IF EditTextField.GetTextField <> "External Text" THEN
+            VALIDATE("External Text", EditTextField.GetTextField);
+        END;
+      END;
+    END;
+
+    BEGIN
+    {
+      4PS01 JD 14-02-08 Fill Cost Component  from SOType or Cost Object
+    }
+    END.
+  }
+}
+

@@ -1,0 +1,987 @@
+OBJECT Codeunit 11020231 Project Control Tree Mgt
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    TableNo=11072003;
+    OnRun=BEGIN
+            IF NOT GUIALLOWED THEN
+              HideWindow := TRUE;
+
+            JobsSetup.GET;
+            Project.COPY(Rec);
+            GetKeyTypeArray;
+
+            IF NOT HideWindow THEN BEGIN
+              Window.OPEN(Text000);
+              StageCount := 0;
+              GetTotalStageCount;
+            END;
+
+            ProcessProject;
+
+            IF NOT HideWindow THEN
+              Window.CLOSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1100529606 : TextConst 'ENU=Progress @1@@@@@@@@@@@@@';
+      JobsSetup@1100529600 : Record 315;
+      Project@1100529608 : Record 11072003;
+      TmpProjectControlTree@1100529604 : TEMPORARY Record 11229477;
+      TmpPrognosis@1100529613 : TEMPORARY Record 11012034;
+      TmpPrevPrognosis@1100529614 : TEMPORARY Record 11012034;
+      Window@11012007 : Dialog;
+      HideWindow@1210190002 : Boolean;
+      TotalStageCount@1100529607 : Integer;
+      StageCount@1100529605 : Integer;
+      KeyTypeArray@1100529601 : ARRAY [5] OF ' ,Cost Type,Cost Object,Cost Component,Element,Extension Contract';
+      LineProjectControlLevel@1100529602 : 'CostObject,Element/CostObject,CostComponent/CostObject,Element/CostComponent/CostObject,ExtensionContract/CostObject,ExtensionContract/Element/CostObject,,,,,,,,,,,,,,,CostObject/Element,CostComponent/CostObject/Element,ExtensionContract/CostObject/Element';
+      LastLineLevel@1100529603 : Integer;
+      MainProjectFilter@1100529612 : Text[30];
+      ProjectFilter@1100529611 : Text[30];
+      CumulationFilter@1100529610 : Text;
+      PeriodFilter@1100529609 : Text;
+      CumulationDate@1100528600 : Date;
+      Text001@1100528601 : TextConst 'DEU=Der %1 sollte ''%2'' sein, weil das Feld ''%3'' den Wert ''%4'' hat.;ENU=%1 should be %2 because %3 is %4.;NLD=De %1 zou ''%2'' moeten zijn omdat het veld ''%3'' de waarde ''%4'' heeft.';
+      Text002@1100528602 : TextConst 'DEU=Der %1 sollte %2 oder %3 sein.;ENU=The %1 should be %2 or %3.;NLD=De %1 zou %2 of %3 moeten zijn.';
+
+    LOCAL PROCEDURE ProcessProject@1100529615();
+    BEGIN
+      GetProjectFilters(FALSE);
+
+      CheckProjectValues;
+
+      DeleteOldProjectControlTree;
+      DeleteTmpLines;
+
+      CalcCurrValues;
+
+      ProcessSubProjects;
+      ProcessSingleProject(Project);
+
+      GetProjectFilters(TRUE);
+      CalcPrevPeriodValues;
+
+      InsertProjectControlTree(Project);
+    END;
+
+    LOCAL PROCEDURE CalcCurrValues@1100529621();
+    BEGIN
+      ProcessBudgetLines(CumulationFilter, FALSE);
+      ProcessProjectLegerEntry(CumulationFilter, 0);
+      ProcessPurchaseOrderControlLine(CumulationFilter, 0);
+      ProcessPurchaseOrderLine(CumulationFilter, FALSE);
+      ProcessItemJournalLine(CumulationFilter, FALSE);
+      ProcessItemJournalSurcharge(CumulationFilter, FALSE);
+      ProcessHourAccountingLine(CumulationFilter, 0);
+      ProcessHourAccountingSurcharge(CumulationFilter, FALSE);
+    END;
+
+    LOCAL PROCEDURE CalcCurrPeriodValues@1100529624();
+    BEGIN
+      ProcessProjectLegerEntry(PeriodFilter, 1);
+      ProcessPurchaseOrderControlLine(PeriodFilter, 1);
+      ProcessPurchaseOrderLine(PeriodFilter, TRUE);
+      ProcessItemJournalLine(PeriodFilter, TRUE);
+      ProcessItemJournalSurcharge(PeriodFilter, TRUE);
+      ProcessHourAccountingLine(PeriodFilter, 1);
+      ProcessHourAccountingSurcharge(PeriodFilter, TRUE);
+    END;
+
+    LOCAL PROCEDURE CalcPrevPeriodValues@1100529627();
+    BEGIN
+      ProcessBudgetLines(CumulationFilter, TRUE);
+      ProcessProjectLegerEntry(CumulationFilter, 2);
+      ProcessPurchaseOrderControlLine(CumulationFilter, 2);
+      ProcessHourAccountingLine(CumulationFilter, 2);
+    END;
+
+    PROCEDURE SetHideWindow@1100529600();
+    BEGIN
+      HideWindow := TRUE;
+    END;
+
+    LOCAL PROCEDURE GetTotalStageCount@1100529623();
+    VAR
+      SubProject@1100529601 : Record 11072003;
+    BEGIN
+      TotalStageCount := 19;
+      IF Project."Single/Main/Sub Project" = Project."Single/Main/Sub Project"::"Main Project" THEN BEGIN
+        SubProject.SETRANGE("Single/Main/Sub Project", SubProject."Single/Main/Sub Project"::"Sub Project");
+        SubProject.SETRANGE("Main Project", Project."No.");
+        TotalStageCount += SubProject.COUNT * 4
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateWindow@1100529601();
+    BEGIN
+      IF HideWindow THEN
+        EXIT;
+      StageCount += 1;
+      Window.UPDATE(1, ROUND(StageCount / TotalStageCount * 10000, 1));
+    END;
+
+    LOCAL PROCEDURE GetKeyTypeArray@1100529602();
+    VAR
+      i@1100529600 : Integer;
+    BEGIN
+      CLEAR(KeyTypeArray);
+      LineProjectControlLevel := JobsSetup."Project Control Level";
+
+      IF Project."Progress Method" = Project."Progress Method"::"Cost Object" THEN BEGIN
+        KeyTypeArray[1] := KeyTypeArray::"Cost Type";
+        KeyTypeArray[2] := KeyTypeArray::"Cost Object";
+      END ELSE IF Project."Progress Method" = Project."Progress Method"::"Element - Cost Object" THEN BEGIN
+        IF JobsSetup."Show Element on Lower Level" THEN BEGIN
+          KeyTypeArray[1] := KeyTypeArray::"Cost Type";
+          KeyTypeArray[2] := KeyTypeArray::"Cost Object";
+          KeyTypeArray[3] := KeyTypeArray::Element;
+          LineProjectControlLevel := LineProjectControlLevel::"CostObject/Element";
+        END ELSE BEGIN
+          KeyTypeArray[1] := KeyTypeArray::Element;
+          KeyTypeArray[2] := KeyTypeArray::"Cost Type";
+          KeyTypeArray[3] := KeyTypeArray::"Cost Object";
+        END;
+      END;
+
+      FOR i := 1 TO 5 DO
+        IF KeyTypeArray[i] = KeyTypeArray::" " THEN BEGIN
+          LastLineLevel := i - 1;
+          EXIT;
+        END;
+    END;
+
+    LOCAL PROCEDURE GetProjectFilters@1100529609(PrevPeriod@1100529605 : Boolean);
+    VAR
+      PeriodManagementForms@1100529601 : Codeunit 11012013;
+      PeriodType@1100529600 : 'Day,Week,Month,Quarter,Year,Accounting Period';
+    BEGIN
+      IF Project.GETFILTER("Period Type Filter") = '' THEN
+        PeriodType := PeriodType::Day
+      ELSE
+        PeriodType := Project.GETRANGEMAX("Period Type Filter");
+
+      IF PrevPeriod THEN
+        PeriodManagementForms.FindPeriod(Project, PeriodType, '<=')
+      ELSE
+        PeriodManagementForms.FindPeriod(Project, PeriodType, '');
+      CumulationDate := GetEndingDate;
+      CumulationFilter := STRSUBSTNO('..%1', CumulationDate);
+      PeriodFilter := Project.GETFILTER("Period Filter");
+
+      IF Project."Single/Main/Sub Project" = Project."Single/Main/Sub Project"::"Main Project" THEN BEGIN
+        MainProjectFilter := Project."No.";
+        ProjectFilter := '';
+      END ELSE BEGIN
+        MainProjectFilter := Project."Main Project";
+        ProjectFilter := Project."No.";
+      END;
+    END;
+
+    LOCAL PROCEDURE DeleteOldProjectControlTree@1100529603();
+    VAR
+      ProjectControlTree@1100529600 : Record 11229477;
+    BEGIN
+      UpdateWindow;
+      ProjectControlTree.SETFILTER("Main Project No.", MainProjectFilter);
+      ProjectControlTree.SETFILTER("Project No.", ProjectFilter);
+      IF ProjectControlTree.ISEMPTY THEN
+        EXIT;
+      ProjectControlTree.DELETEALL;
+    END;
+
+    LOCAL PROCEDURE DeleteTmpLines@1100529625();
+    BEGIN
+      TmpProjectControlTree.DELETEALL;
+      TmpPrognosis.DELETEALL;
+      TmpPrevPrognosis.DELETEALL;
+    END;
+
+    LOCAL PROCEDURE InsertProjectControlTree@1100529604(Project@1100529601 : Record 11072003);
+    VAR
+      ProjectControlTree@1100529600 : Record 11229477;
+      ProjectControlTree2@1100529613 : Record 11229477;
+      i@1100529610 : Integer;
+      LocLineLevel@1100529611 : Integer;
+      SupProject@1100529604 : Record 11072003;
+    BEGIN
+      UpdateWindow;
+      IF TmpProjectControlTree.ISEMPTY THEN
+        EXIT;
+
+      TmpProjectControlTree.FINDSET;
+      REPEAT
+        TmpProjectControlTree.SETRANGE("Project No.", TmpProjectControlTree."Project No.");
+        IF LastLineLevel >= 1 THEN
+          TmpProjectControlTree.SETRANGE("Key Code 1", TmpProjectControlTree."Key Code 1");
+        IF LastLineLevel >= 2 THEN
+          TmpProjectControlTree.SETRANGE("Key Code 2", TmpProjectControlTree."Key Code 2");
+        IF LastLineLevel >= 3 THEN
+          TmpProjectControlTree.SETRANGE("Key Code 3", TmpProjectControlTree."Key Code 3");
+        IF LastLineLevel >= 4 THEN
+          TmpProjectControlTree.SETRANGE("Key Code 4", TmpProjectControlTree."Key Code 4");
+        IF LastLineLevel >= 5 THEN
+          TmpProjectControlTree.SETRANGE("Key Code 5", TmpProjectControlTree."Key Code 5");
+        TmpProjectControlTree.CALCSUMS(
+          Budget, "Budget Hours", "Budget Surcharge Amount", "Original Budget Amount", "Original Budget Hours",
+          Adjustments, "Adjustments Hours", Extension, "Extension Hours", Options, "Purchase Budget",
+          Purchase, "Purchase Period", "Risc Coverage", "Risc Coverage Withdraw", "Open (Purchase) Period",
+          "Received/Not Invoiced Period", "Open Ovh. Srch. Soft (P.) Per.", "Open Ovh. Srch. Firm (P.) Per.");
+        TmpProjectControlTree.CALCSUMS(
+          "Actual Costs", "Actual Hours", "Open (Purchase)", "Received/Not Invoiced",
+          "Open Ovh. Surch. Soft (Purch.)", "Open Ovh. Surch. Firm (Purch.)", "Received/Not Inv. Hours",
+          "Progress Allowed Costs", "Progress Allowed Hours", "Prev.Progress Allowed Costs", "Prev.Progress Allowed Hours",
+          "Prev Period Budget", "Prev Period Budget Hours", "Prev Period Total Cost", "Prev Period Total Hours",
+          "Open (Inventory)", "Open (Inventory) Period", "Open Ovh. Surch. (Inventory)", "Open Ovh. Srch. (Inv.) Period");
+        TmpProjectControlTree.CALCSUMS(Prognosis, "Hours Prognosis", "Prognosis Total Cost", "Risc Coverage (Prognosis)",
+          "Prognosis Received/To Process", "Prognosis Previous Period", "Prognosis Hours Prev Period",
+          "Progn. Rec./To Proc. Prev Per", "Prognosis Total Cost  Prev Per",
+          "Open Amount (Hours)", "Open Hours", "Open Amount (Hours) Period", "Open Ovh. Srch. (Hours) Period",
+          "Open Ovh. Surch. (Hours)", "Actuals Period", "Actual Hours Period",
+          "Prognosis End Result", "Prognosis End Result Hours", "Prev Prognosis End Result", "Prev Progn. End Result Hours");
+        // Use calcsums, because there are several rows, only 1 row contains the percentage, but we don't know which one.
+        TmpProjectControlTree.CALCSUMS("Cumulative Progress %");
+
+        IF Project."Main Project" <> TmpProjectControlTree."Project No." THEN
+          LocLineLevel := LastLineLevel + 2
+        ELSE
+          LocLineLevel := LastLineLevel + 1;
+
+        ProjectControlTree := TmpProjectControlTree;
+        IF LastLineLevel >= 1 THEN
+          ProjectControlTree."Key Type 1" := KeyTypeArray[1];
+        IF LastLineLevel >= 2 THEN
+          ProjectControlTree."Key Type 2" := KeyTypeArray[2];
+        IF LastLineLevel >= 3 THEN
+          ProjectControlTree."Key Type 3" := KeyTypeArray[3];
+         IF LastLineLevel >= 4 THEN
+          ProjectControlTree."Key Type 4" := KeyTypeArray[4];
+         IF LastLineLevel >= 5 THEN
+          ProjectControlTree."Key Type 5" := KeyTypeArray[5];
+        IF Project."Main Project" <> TmpProjectControlTree."Project No." THEN
+          ProjectControlTree.Level := LastLineLevel + 2
+        ELSE
+          ProjectControlTree.Level := LastLineLevel + 1;
+        ProjectControlTree."Project Control Level" := LineProjectControlLevel;
+        ProjectControlTree."Main Project No." := Project."Main Project";
+        GetTmpPrognosis;
+        ProjectControlTree."Prognosis Date" := TmpPrognosis."Prognosis Date";
+        ProjectControlTree."Prognosis Fixed" := TmpPrognosis.Fixed;
+        ProjectControlTree."Prev Prognosis Date" := TmpPrevPrognosis."Prognosis Date";
+        ProjectControlTree."Prev Prognosis Fixed" := TmpPrevPrognosis.Fixed;
+        ProjectControlTree.CalcLastLevelTotalsAndResults;
+        ProjectControlTree.INSERT;
+
+        TmpProjectControlTree.FINDLAST;
+        TmpProjectControlTree.SETRANGE("Project No.");
+        TmpProjectControlTree.SETRANGE("Key Code 1");
+        TmpProjectControlTree.SETRANGE("Key Code 2");
+        TmpProjectControlTree.SETRANGE("Key Code 3");
+        TmpProjectControlTree.SETRANGE("Key Code 4");
+        TmpProjectControlTree.SETRANGE("Key Code 5");
+      UNTIL TmpProjectControlTree.NEXT = 0;
+
+      UpdateWindow;
+      CASE Project."Single/Main/Sub Project" OF
+        Project."Single/Main/Sub Project"::Single,
+        Project."Single/Main/Sub Project"::"Sub Project":
+          InsertSingleProjectControlTree(Project."No.", Project."Main Project", FALSE);
+
+        Project."Single/Main/Sub Project"::"Main Project":
+          BEGIN
+            SupProject.SETRANGE("Main Project", Project."Main Project");
+            SupProject.SETRANGE("Single/Main/Sub Project", SupProject."Single/Main/Sub Project"::"Sub Project");
+            IF SupProject.FINDSET THEN
+              REPEAT
+                InsertSingleProjectControlTree(SupProject."No.", SupProject."Main Project", FALSE);
+              UNTIL SupProject.NEXT = 0;
+            InsertSingleProjectControlTree(Project."No.", Project."Main Project", TRUE);
+          END;
+      END;
+    END;
+
+    LOCAL PROCEDURE InsertSingleProjectControlTree@1100529605(ProjectNo@1100529602 : Code[20];MainProjectNo@1100529603 : Code[20];MainProject@1100529604 : Boolean);
+    VAR
+      ProjectControlTree@1100529600 : Record 11229477;
+      ProjectControlTree2@1100529613 : Record 11229477;
+      i@1100529610 : Integer;
+      LocLineLevel@1100529601 : Integer;
+    BEGIN
+      ProjectControlTree.SETRANGE("Main Project No.", MainProjectNo);
+      ProjectControlTree.SETRANGE("Project No.", ProjectNo);
+      IF MainProjectNo <> ProjectNo THEN
+        ProjectControlTree.SETRANGE(Level, LastLineLevel + 2)
+      ELSE
+        ProjectControlTree.SETRANGE(Level, LastLineLevel + 1);
+      IF ProjectControlTree.ISEMPTY THEN
+        EXIT;
+
+      FOR i := LastLineLevel DOWNTO 1 DO BEGIN
+        IF MainProjectNo <> ProjectNo THEN
+          LocLineLevel := i + 2
+        ELSE
+          LocLineLevel := i + 1;
+        IF MainProject AND (i = 1) THEN
+          ProjectControlTree.SETRANGE("Project No.");
+        ProjectControlTree.SETRANGE(Level, LocLineLevel);
+        ProjectControlTree.FINDSET;
+        REPEAT
+          IF i >= 2 THEN
+            ProjectControlTree.SETRANGE("Key Code 1", ProjectControlTree."Key Code 1");
+          IF i >= 3 THEN
+            ProjectControlTree.SETRANGE("Key Code 2", ProjectControlTree."Key Code 2");
+          IF i >= 4 THEN
+            ProjectControlTree.SETRANGE("Key Code 3", ProjectControlTree."Key Code 3");
+          IF i >= 5 THEN
+            ProjectControlTree.SETRANGE("Key Code 4", ProjectControlTree."Key Code 4");
+          ProjectControlTree.CALCSUMS(
+            Budget, "Budget Hours", "Budget Surcharge Amount", "Original Budget Amount", "Original Budget Hours",
+            Adjustments, "Adjustments Hours", Extension, "Extension Hours", Options, "Purchase Budget",
+            Purchase, "Purchase Period", "Risc Coverage", "Risc Coverage Withdraw", "Open (Purchase) Period",
+            "Received/Not Invoiced Period", "Open Ovh. Srch. Soft (P.) Per.", "Open Ovh. Srch. Firm (P.) Per.");
+          ProjectControlTree.CALCSUMS(
+            "Actual Costs", "Actual Hours", "Open (Purchase)", "Received/Not Invoiced",
+            "Open Ovh. Surch. Soft (Purch.)", "Open Ovh. Surch. Firm (Purch.)", "Received/Not Inv. Hours",
+            "Progress Allowed Costs", "Progress Allowed Hours", "Prev.Progress Allowed Costs", "Prev.Progress Allowed Hours",
+            "Prev Period Budget", "Prev Period Budget Hours", "Prev Period Total Cost", "Prev Period Total Hours",
+            "Open (Inventory)", "Open (Inventory) Period", "Open Ovh. Surch. (Inventory)", "Open Ovh. Srch. (Inv.) Period");
+          ProjectControlTree.CALCSUMS(Prognosis, "Hours Prognosis", "Prognosis Total Cost", "Risc Coverage (Prognosis)",
+            "Prognosis Received/To Process", "Prognosis Previous Period", "Prognosis Hours Prev Period", "Prognosis Total Cost  Prev Per",
+            "Open Amount (Hours)", "Open Hours", "Open Amount (Hours) Period", "Open Ovh. Srch. (Hours) Period",
+            "Open Ovh. Surch. (Hours)", "Actuals Period", "Actual Hours Period",
+            "Prognosis End Result", "Prognosis End Result Hours", "Prev Prognosis End Result", "Prev Progn. End Result Hours");
+          ProjectControlTree.CALCSUMS(
+            "Total Cost", "Total Hours", "Allowed Costs", "Allowed Hours", "Allowed Costs Previous Period", "Allowed Hours Previous Period",
+            "Purchase Result", Result, "Hours Result", "Prev Result", "Prev Hours Result",
+            "Calc Progn Total Cost", "Calc Prev Progn Total Cost",
+            "Calc. Prognosis End Result", "Calc. Progn. End Result Hours", "Calc.Prev Prognosis End Result", "Calc.Prev Progn. End Res Hours");
+          // Use calcsums, because there are several rows, only 1 row contains the percentage, but we don't know which one.
+          ProjectControlTree.CALCSUMS("Cumulative Progress %");
+
+          ProjectControlTree2 := ProjectControlTree;
+          ProjectControlTree2.Level -= 1;
+          IF i < 2 THEN BEGIN
+            ProjectControlTree2."Key Code 1" := '';
+            ProjectControlTree2."Key Type 1" := 0;
+          END;
+          IF i < 3 THEN BEGIN
+            ProjectControlTree2."Key Code 2" := '';
+            ProjectControlTree2."Key Type 2" := 0;
+          END;
+          IF i < 4 THEN BEGIN
+            ProjectControlTree2."Key Code 3" := '';
+            ProjectControlTree2."Key Type 3" := 0;
+          END;
+          IF i < 5 THEN BEGIN
+            ProjectControlTree2."Key Code 4" := '';
+            ProjectControlTree2."Key Type 4" := 0;
+          END;
+          ProjectControlTree2.CalcAllowedAndResult;
+          ProjectControlTree2.INSERT;
+
+          ProjectControlTree.FINDLAST;
+          ProjectControlTree.SETRANGE("Key Code 1");
+          ProjectControlTree.SETRANGE("Key Code 2");
+          ProjectControlTree.SETRANGE("Key Code 3");
+          ProjectControlTree.SETRANGE("Key Code 4");
+        UNTIL ProjectControlTree.NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE InitTmpProjectControlTree@1100529618(ProjectNo@1100529602 : Code[20];CostTypeInt@1100529604 : Integer;CostObject@1100529605 : Code[20];CostComponent@1100529606 : Code[10];Element@1100529607 : Code[20];ExtensionContract@1100529608 : Code[10]);
+    VAR
+      KeyCode@1100529609 : ARRAY [5] OF Code[20];
+      i@1100529610 : Integer;
+    BEGIN
+      FOR i := 1 TO LastLineLevel DO
+       CASE KeyTypeArray[i] OF
+         KeyTypeArray::"Cost Component":
+           KeyCode[i] := CostComponent;
+         KeyTypeArray::"Cost Type":
+           KeyCode[i] := FORMAT(CostTypeInt);
+         KeyTypeArray::"Cost Object":
+           KeyCode[i] := CostObject;
+         KeyTypeArray::Element:
+           KeyCode[i] := Element;
+         KeyTypeArray::"Extension Contract":
+           KeyCode[i] := ExtensionContract;
+        END;
+
+      TmpProjectControlTree.INIT;
+      TmpProjectControlTree."Project No." := ProjectNo;
+      TmpProjectControlTree."Key Code 1" := KeyCode[1];
+      TmpProjectControlTree."Key Code 2" := KeyCode[2];
+      TmpProjectControlTree."Key Code 3" := KeyCode[3];
+      TmpProjectControlTree."Key Code 4" := KeyCode[4];
+      TmpProjectControlTree."Key Code 5" := KeyCode[5];
+      TmpProjectControlTree.Level += 1;
+      TmpProjectControlTree."Cost Type" := CostTypeInt;
+      TmpProjectControlTree."Cost Object" := CostObject;
+      TmpProjectControlTree."Cost Component" := CostComponent;
+      TmpProjectControlTree.Element := Element;
+      TmpProjectControlTree."Extension Contract" := ExtensionContract;
+    END;
+
+    LOCAL PROCEDURE ProcessSubProjects@1100529614();
+    VAR
+      SubProject@1100529600 : Record 11072003;
+    BEGIN
+      IF Project."Single/Main/Sub Project" = Project."Single/Main/Sub Project"::"Main Project" THEN BEGIN
+        SubProject.SETRANGE("Single/Main/Sub Project", SubProject."Single/Main/Sub Project"::"Sub Project");
+        SubProject.SETRANGE("Main Project", Project."No.");
+        Project.COPYFILTER("Period Type Filter", SubProject."Period Type Filter");
+        Project.COPYFILTER("Period Filter", SubProject."Period Filter");
+        Project.COPYFILTER("Cumulation Filter", SubProject."Cumulation Filter");
+        IF SubProject.FINDSET THEN
+          REPEAT
+            ProcessSingleProject(SubProject);
+          UNTIL SubProject.NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE ProcessSingleProject@1100529610(VAR LocProject@1100529600 : Record 11072003);
+    VAR
+      Prognosis@1100529603 : Record 11012034;
+      PrevPrognosis@1100529601 : Record 11012034;
+      DetermineProductionDate@1100529602 : Codeunit 11012014;
+    BEGIN
+      DetermineProductionDate.DetermineBothDates(LocProject, FALSE);
+      ProcessProgressLine(LocProject."No.", FORMAT(CumulationDate), LocProject.GETFILTER(PrevProgressFilter));
+
+      DeterminePrognosis(LocProject, Prognosis);
+      DeterminePreviousPrognosis(LocProject, PrevPrognosis);
+      ProcessPrognosisLine(LocProject."No.", Prognosis, PrevPrognosis);
+    END;
+
+    PROCEDURE DeterminePrognosis@1(VAR LocProject@11012000 : Record 11072003;VAR Prognosis@1100529600 : Record 11012034);
+    VAR
+      EndDat@11012001 : Date;
+      PrognosisManagement@1100528600 : Codeunit 11020217;
+    BEGIN
+      Prognosis.RESET;
+      IF LocProject."Single/Main/Sub Project" = LocProject."Single/Main/Sub Project"::"Main Project" THEN BEGIN
+        Prognosis.SETRANGE("Main Project No.", LocProject."No.");
+        Prognosis.SETCURRENTKEY("Main Project No.", "Prognosis Date");
+      END ELSE BEGIN
+        Prognosis.SETRANGE("Project No.", LocProject."No.");
+        Prognosis.SETCURRENTKEY("Project No.", "Prognosis Date");
+      END;
+      Prognosis.SETRANGE("Prognosis Date", CumulationDate);
+      IF NOT Prognosis.FINDLAST THEN BEGIN
+        Prognosis.INIT;
+        Prognosis.VALIDATE("Project No.", LocProject."No.");
+        Prognosis.VALIDATE("Prognosis Date", CumulationDate);
+        Prognosis.VALIDATE("Prognosis Level", Prognosis."Prognosis Level"::Detailed);
+        Prognosis.INSERT(TRUE);
+        Prognosis.SetupDetailedPrognosisOptions;
+        Prognosis.MODIFY(TRUE);
+        PrognosisManagement.ProcessPrognosis(Prognosis);
+      END;
+
+      TmpPrognosis := Prognosis;
+      IF LocProject."Single/Main/Sub Project" = LocProject."Single/Main/Sub Project"::"Main Project" THEN
+        TmpPrognosis."Project No." := LocProject."No.";
+      TmpPrognosis.INSERT;
+    END;
+
+    PROCEDURE DeterminePreviousPrognosis@2(VAR LocProject@1100529601 : Record 11072003;VAR PrevPrognosis@1100529600 : Record 11012034);
+    VAR
+      StartDate@11012001 : Date;
+      EndDatePrevPeriod@11012002 : Date;
+    BEGIN
+      StartDate := LocProject.GETRANGEMIN("Period Filter");
+      IF StartDate > 00000101D THEN
+        EndDatePrevPeriod := CALCDATE('<-1D>', StartDate);
+      PrevPrognosis.RESET;
+      IF LocProject."Single/Main/Sub Project" = LocProject."Single/Main/Sub Project"::"Main Project" THEN BEGIN
+        PrevPrognosis.SETRANGE("Main Project No.", LocProject."No.");
+        PrevPrognosis.SETCURRENTKEY("Main Project No.", "Prognosis Date");
+      END ELSE BEGIN
+        PrevPrognosis.SETRANGE("Project No.", LocProject."No.");
+        PrevPrognosis.SETCURRENTKEY("Project No.", "Prognosis Date");
+      END;
+
+      PrevPrognosis.SETRANGE("Prognosis Date", 0D, EndDatePrevPeriod);
+
+      IF PrevPrognosis.FINDLAST THEN BEGIN
+        TmpPrevPrognosis := PrevPrognosis;
+        IF LocProject."Single/Main/Sub Project" = LocProject."Single/Main/Sub Project"::"Main Project" THEN
+          TmpPrevPrognosis."Project No." := LocProject."No.";
+        TmpPrevPrognosis.INSERT;
+      END ELSE
+        CLEAR(PrevPrognosis);
+    END;
+
+    LOCAL PROCEDURE GetTmpPrognosis@1100529622();
+    BEGIN
+      IF TmpPrognosis."Project No." <> TmpProjectControlTree."Project No." THEN BEGIN
+        TmpPrognosis.SETRANGE("Project No.", TmpProjectControlTree."Project No.");
+        IF NOT TmpPrognosis.FINDFIRST THEN BEGIN
+          CLEAR(TmpPrognosis);
+          TmpPrognosis."Project No." := TmpProjectControlTree."Project No.";
+        END;
+      END;
+
+      IF TmpPrevPrognosis."Project No." <> TmpProjectControlTree."Project No." THEN BEGIN
+        TmpPrevPrognosis.SETRANGE("Project No.", TmpProjectControlTree."Project No.");
+        IF NOT TmpPrevPrognosis.FINDFIRST THEN BEGIN
+          CLEAR(TmpPrevPrognosis);
+          TmpPrevPrognosis."Project No." := TmpProjectControlTree."Project No.";
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE ProcessBudgetLines@1100529617(DateFilter@1100529601 : Text;PrevPeriod@1100529604 : Boolean);
+    VAR
+      BudgetLine@1100529600 : Query 11012020;
+      ProgressLine@1100528100 : Record 11012037;
+    BEGIN
+      UpdateWindow;
+      BudgetLine.SETFILTER(Main_Project_No, MainProjectFilter);
+      BudgetLine.SETFILTER(Project_No, ProjectFilter);
+      BudgetLine.SETFILTER(Version_Date, DateFilter);
+      BudgetLine.SETFILTER(Extension_Contract_Status, '%1|(>=%2&<%3)', BudgetLine.Extension_Contract_Status::"Not Applicable",
+        BudgetLine.Extension_Contract_Status::Order, BudgetLine.Extension_Contract_Status::Expired);
+      BudgetLine.OPEN;
+      WHILE BudgetLine.READ DO BEGIN
+        InitTmpProjectControlTree(
+          BudgetLine.Project_No, BudgetLine.Cost_Type, BudgetLine.Cost_Object,
+          BudgetLine.Cost_Component, BudgetLine.Element, BudgetLine.Extension_Contract);
+        IF PrevPeriod THEN BEGIN
+          TmpProjectControlTree."Prev Period Budget" := BudgetLine.Sum_Amount_LCY;
+          TmpProjectControlTree."Prev Period Budget Hours" := BudgetLine.Sum_Hours;
+        END ELSE BEGIN
+          TmpProjectControlTree.Budget := BudgetLine.Sum_Amount_LCY;
+          TmpProjectControlTree."Budget Hours" := BudgetLine.Sum_Hours;
+          TmpProjectControlTree."Budget Surcharge Amount" := BudgetLine.Sum_Surcharge_Amnt_from_Summar;
+          // Original budget
+          IF (BudgetLine.Adjustment = '') AND (BudgetLine.Extension_Contract = '') AND (BudgetLine.Option = '') THEN BEGIN
+            TmpProjectControlTree."Original Budget Amount"  := BudgetLine.Sum_Amount_LCY;
+            TmpProjectControlTree."Original Budget Hours" := BudgetLine.Sum_Hours;
+          END;
+          // Adjustments
+          IF BudgetLine.Adjustment <> '' THEN BEGIN
+            TmpProjectControlTree.Adjustments  := BudgetLine.Sum_Amount_LCY;
+            TmpProjectControlTree."Adjustments Hours" := BudgetLine.Sum_Hours;
+          END;
+          // Extension
+          IF (BudgetLine.Adjustment = '') AND (BudgetLine.Extension_Contract <> '') THEN BEGIN
+            TmpProjectControlTree.Extension  := BudgetLine.Sum_Amount_LCY;
+            TmpProjectControlTree."Extension Hours" := BudgetLine.Sum_Hours;
+          END;
+          // Option
+          IF (BudgetLine.Adjustment <> '') AND (BudgetLine.Option <> '') THEN
+            TmpProjectControlTree.Options := BudgetLine.Sum_Amount_LCY;
+        END;
+        TmpProjectControlTree.INSERT;
+      END;
+      BudgetLine.CLOSE;
+
+      IF PrevPeriod THEN
+        EXIT;
+
+      CLEAR(BudgetLine);
+      BudgetLine.SETFILTER(Main_Project_No, MainProjectFilter);
+      BudgetLine.SETFILTER(Project_No, ProjectFilter);
+      BudgetLine.SETFILTER(Purch_Action_Approval_Date, DateFilter);
+      BudgetLine.SETFILTER(Purchase_Action_Status, '>=%1', BudgetLine.Purchase_Action_Status::Approved);
+      BudgetLine.OPEN;
+      WHILE BudgetLine.READ DO BEGIN
+        InitTmpProjectControlTree(
+          BudgetLine.Project_No, BudgetLine.Cost_Type, BudgetLine.Cost_Object,
+          BudgetLine.Cost_Component, BudgetLine.Element, BudgetLine.Extension_Contract);
+        TmpProjectControlTree."Purchase Budget"  := BudgetLine.Sum_Amount_LCY;
+        TmpProjectControlTree.INSERT;
+      END;
+      BudgetLine.CLOSE;
+    END;
+
+    LOCAL PROCEDURE ProcessProjectLegerEntry@1100529606(DateFilter@1100529601 : Text;PeriodType@1100529602 : 'Current,CurrentPeriod,PreviousPeriod');
+    VAR
+      JobLedgerEntry@1100529600 : Query 11012021;
+    BEGIN
+      UpdateWindow;
+
+      JobLedgerEntry.SETFILTER(Main_Project_No, MainProjectFilter);
+      JobLedgerEntry.SETFILTER(Project_No, ProjectFilter);
+      JobLedgerEntry.SETFILTER(Posting_Date, DateFilter);
+      JobLedgerEntry.OPEN;
+      WHILE JobLedgerEntry.READ DO BEGIN
+        InitTmpProjectControlTree(
+          JobLedgerEntry.Project_No, JobLedgerEntry.Cost_Type, JobLedgerEntry.Cost_Object,
+          JobLedgerEntry.Cost_Component, JobLedgerEntry.Element, JobLedgerEntry.Extension_Contract);
+        CASE PeriodType OF
+          PeriodType::Current:
+            BEGIN
+              TmpProjectControlTree."Actual Costs" := JobLedgerEntry.Sum_Total_Cost_LCY;
+              IF (JobLedgerEntry.Entry_Type = JobLedgerEntry.Entry_Type::Usage) AND
+                 (JobLedgerEntry.Cost_Type = JobLedgerEntry.Cost_Type::Labor)
+              THEN
+                TmpProjectControlTree."Actual Hours" := JobLedgerEntry.Sum_Quantity;
+            END;
+          PeriodType::CurrentPeriod:
+            BEGIN
+              TmpProjectControlTree."Actuals Period" := JobLedgerEntry.Sum_Total_Cost_LCY;
+              IF (JobLedgerEntry.Entry_Type = JobLedgerEntry.Entry_Type::Usage) AND
+                 (JobLedgerEntry.Cost_Type = JobLedgerEntry.Cost_Type::Labor)
+              THEN
+                TmpProjectControlTree."Actual Hours Period" := JobLedgerEntry.Sum_Quantity;
+            END;
+          PeriodType::PreviousPeriod:
+            BEGIN
+              TmpProjectControlTree."Prev Period Total Cost" := JobLedgerEntry.Sum_Total_Cost_LCY;
+              IF (JobLedgerEntry.Entry_Type = JobLedgerEntry.Entry_Type::Usage) AND
+                 (JobLedgerEntry.Cost_Type = JobLedgerEntry.Cost_Type::Labor)
+              THEN
+                TmpProjectControlTree."Prev Period Total Hours" := JobLedgerEntry.Sum_Quantity;
+            END;
+        END;
+        TmpProjectControlTree.INSERT;
+      END;
+      JobLedgerEntry.CLOSE;
+    END;
+
+    LOCAL PROCEDURE ProcessPurchaseOrderControlLine@1100529607(DateFilter@1100529601 : Text;PeriodType@1100529603 : 'Current,CurrentPeriod,PreviousPeriod');
+    VAR
+      PurchaseOrderControlLine@1100529600 : Query 11012022;
+    BEGIN
+      UpdateWindow;
+
+      PurchaseOrderControlLine.SETFILTER(Main_Project_No, MainProjectFilter);
+      PurchaseOrderControlLine.SETFILTER(Project_No, ProjectFilter);
+      PurchaseOrderControlLine.SETFILTER(Date, DateFilter);
+      PurchaseOrderControlLine.OPEN;
+      WHILE PurchaseOrderControlLine.READ DO BEGIN
+        InitTmpProjectControlTree(
+          PurchaseOrderControlLine.Project_No, PurchaseOrderControlLine.Cost_Type - 1, PurchaseOrderControlLine.Cost_Object,
+          PurchaseOrderControlLine.Cost_Component, PurchaseOrderControlLine.Element, PurchaseOrderControlLine.Extension_Contract);
+        CASE PeriodType OF
+          PeriodType::Current:
+            BEGIN
+              TmpProjectControlTree."Open (Purchase)" := PurchaseOrderControlLine.Sum_Outstanding_Amount;
+              TmpProjectControlTree."Received/Not Invoiced" := PurchaseOrderControlLine.Sum_Amt_Rcd_Not_Invoiced;
+              TmpProjectControlTree."Open Ovh. Surch. Soft (Purch.)" := PurchaseOrderControlLine.Sum_Overhead_Surcharge_Soft;
+              TmpProjectControlTree."Open Ovh. Surch. Firm (Purch.)" := PurchaseOrderControlLine.Sum_Overhead_Surcharge_Firm;
+              TmpProjectControlTree."Received/Not Inv. Hours" := PurchaseOrderControlLine.Sum_Hours_Rcd_Not_Invoiced;
+            END;
+          PeriodType::CurrentPeriod:
+            BEGIN
+              TmpProjectControlTree."Open (Purchase) Period" := PurchaseOrderControlLine.Sum_Outstanding_Amount;
+              TmpProjectControlTree."Received/Not Invoiced Period" := PurchaseOrderControlLine.Sum_Amt_Rcd_Not_Invoiced;
+              TmpProjectControlTree."Open Ovh. Srch. Soft (P.) Per." := PurchaseOrderControlLine.Sum_Overhead_Surcharge_Soft;
+              TmpProjectControlTree."Open Ovh. Srch. Firm (P.) Per." := PurchaseOrderControlLine.Sum_Overhead_Surcharge_Firm;
+            END;
+          PeriodType::PreviousPeriod:
+            BEGIN
+              TmpProjectControlTree."Prev Period Total Cost" :=
+                PurchaseOrderControlLine.Sum_Amt_Rcd_Not_Invoiced +
+                PurchaseOrderControlLine.Sum_Overhead_Surcharge_Firm;
+              IF NOT JobsSetup."Total Cost Excl. Open Purchase" THEN
+                TmpProjectControlTree."Prev Period Total Cost" +=
+                  PurchaseOrderControlLine.Sum_Outstanding_Amount +
+                  PurchaseOrderControlLine.Sum_Overhead_Surcharge_Soft;
+              TmpProjectControlTree."Prev Period Total Hours" := PurchaseOrderControlLine.Sum_Hours_Rcd_Not_Invoiced;
+            END;
+        END;
+        TmpProjectControlTree.INSERT;
+      END;
+      PurchaseOrderControlLine.CLOSE;
+    END;
+
+    LOCAL PROCEDURE ProcessPurchaseOrderLine@1100529612(DateFilter@1100529601 : Text;AmtInPeriod@1100529604 : Boolean);
+    VAR
+      PurchaseOrderLine@1100529600 : Query 11012024;
+    BEGIN
+      UpdateWindow;
+
+      PurchaseOrderLine.SETFILTER(Main_Project_No, MainProjectFilter);
+      PurchaseOrderLine.SETFILTER(Project_No, ProjectFilter);
+      PurchaseOrderLine.SETFILTER(Order_Date, DateFilter);
+      PurchaseOrderLine.OPEN;
+      WHILE PurchaseOrderLine.READ DO BEGIN
+        InitTmpProjectControlTree(
+          PurchaseOrderLine.Project_No, PurchaseOrderLine.Cost_Type - 1, PurchaseOrderLine.Cost_Object,
+          PurchaseOrderLine.Cost_Component, PurchaseOrderLine.Element, PurchaseOrderLine.Extension_Contract);
+        IF AmtInPeriod THEN
+          TmpProjectControlTree."Purchase Period" := PurchaseOrderLine.Sum_Amount_LCY
+        ELSE BEGIN
+          TmpProjectControlTree.Purchase := PurchaseOrderLine.Sum_Amount_LCY;
+          TmpProjectControlTree."Risc Coverage" := PurchaseOrderLine.Sum_Risc_Coverage_Amount_LCY;
+          TmpProjectControlTree."Risc Coverage Withdraw" := PurchaseOrderLine.Sum_Release_Risc_Coverage_LCY;
+        END;
+        TmpProjectControlTree.INSERT;
+      END;
+      PurchaseOrderLine.CLOSE;
+    END;
+
+    LOCAL PROCEDURE ProcessItemJournalLine@1100529613(DateFilter@1100529601 : Text;AmtInPeriod@1100529604 : Boolean);
+    VAR
+      ItemJournalLine@1100529600 : Query 11012026;
+    BEGIN
+      UpdateWindow;
+
+      ItemJournalLine.SETFILTER(Main_Project_No, MainProjectFilter);
+      ItemJournalLine.SETFILTER(Project_No, ProjectFilter);
+      ItemJournalLine.SETFILTER(Posting_Date, DateFilter);
+      ItemJournalLine.OPEN;
+      WHILE ItemJournalLine.READ DO BEGIN
+        InitTmpProjectControlTree(
+          ItemJournalLine.Project_No, ItemJournalLine.Cost_Type - 1, ItemJournalLine.Cost_Object,
+          ItemJournalLine.Cost_Component, ItemJournalLine.Element, ItemJournalLine.Extension_Contract);
+        IF AmtInPeriod THEN
+          TmpProjectControlTree."Open (Inventory) Period" := ItemJournalLine.Sum_Amount
+        ELSE
+          TmpProjectControlTree."Open (Inventory)" := ItemJournalLine.Sum_Amount;
+        TmpProjectControlTree.INSERT;
+      END;
+      ItemJournalLine.CLOSE;
+    END;
+
+    LOCAL PROCEDURE ProcessItemJournalSurcharge@1100529616(DateFilter@1100529601 : Text;AmtInPeriod@1100529604 : Boolean);
+    VAR
+      ItemJournalSurcharge@1100529600 : Query 11012027;
+    BEGIN
+      UpdateWindow;
+
+      ItemJournalSurcharge.SETFILTER(Main_Project_No, MainProjectFilter);
+      ItemJournalSurcharge.SETFILTER(Project_No, ProjectFilter);
+      ItemJournalSurcharge.SETFILTER(Posting_Date, DateFilter);
+      ItemJournalSurcharge.OPEN;
+      WHILE ItemJournalSurcharge.READ DO BEGIN
+        InitTmpProjectControlTree(
+          ItemJournalSurcharge.Project_No, ItemJournalSurcharge.Cost_Type - 1, ItemJournalSurcharge.Cost_Object,
+          ItemJournalSurcharge.Cost_Component, ItemJournalSurcharge.Element, ItemJournalSurcharge.Extension_Contract);
+        IF AmtInPeriod THEN
+          TmpProjectControlTree."Open Ovh. Surch. (Inventory)" := ItemJournalSurcharge.Sum_Overhead_Surcharge_Project
+        ELSE
+          TmpProjectControlTree."Open Ovh. Srch. (Inv.) Period" := ItemJournalSurcharge.Sum_Overhead_Surcharge_Project;
+        TmpProjectControlTree.INSERT;
+      END;
+      ItemJournalSurcharge.CLOSE;
+    END;
+
+    LOCAL PROCEDURE ProcessHourAccountingLine@1100529619(DateFilter@1100529601 : Text;PeriodType@1100529602 : 'Current,CurrentPeriod,PreviousPeriod');
+    VAR
+      HourAccountingLine@1100529600 : Query 11012028;
+    BEGIN
+      UpdateWindow;
+
+      HourAccountingLine.SETFILTER(Main_Project_No, MainProjectFilter);
+      HourAccountingLine.SETFILTER(Project_No, ProjectFilter);
+      HourAccountingLine.SETFILTER(Posting_Date, DateFilter);
+      HourAccountingLine.OPEN;
+      WHILE HourAccountingLine.READ DO BEGIN
+        InitTmpProjectControlTree(
+          HourAccountingLine.Project_No, HourAccountingLine.Cost_Type, HourAccountingLine.Cost_Object,
+          HourAccountingLine.Cost_Component, HourAccountingLine.Element, HourAccountingLine.Extension_Contract);
+        CASE PeriodType OF
+          PeriodType::Current:
+            BEGIN
+              TmpProjectControlTree."Open Amount (Hours)" := HourAccountingLine.Sum_Amount_LCY;
+              TmpProjectControlTree."Open Hours" := HourAccountingLine.Sum_Total_Line;
+            END;
+          PeriodType::CurrentPeriod:
+            TmpProjectControlTree."Open Amount (Hours) Period" := HourAccountingLine.Sum_Amount_LCY;
+          PeriodType::PreviousPeriod:
+            BEGIN
+              TmpProjectControlTree."Prev Period Total Cost" := HourAccountingLine.Sum_Amount_LCY;
+              TmpProjectControlTree."Prev Period Total Hours" := HourAccountingLine.Sum_Total_Line;
+            END;
+        END;
+        TmpProjectControlTree.INSERT;
+      END;
+      HourAccountingLine.CLOSE;
+    END;
+
+    LOCAL PROCEDURE ProcessHourAccountingSurcharge@1100529620(DateFilter@1100529601 : Text;AmtInPeriod@1100529604 : Boolean);
+    VAR
+      HourAccountingSurcharge@1100529600 : Query 11012029;
+    BEGIN
+      UpdateWindow;
+
+      HourAccountingSurcharge.SETFILTER(Main_Project_No, MainProjectFilter);
+      HourAccountingSurcharge.SETFILTER(Project_No, ProjectFilter);
+      HourAccountingSurcharge.SETFILTER(Posting_Date, DateFilter);
+      HourAccountingSurcharge.OPEN;
+      WHILE HourAccountingSurcharge.READ DO BEGIN
+        InitTmpProjectControlTree(
+          HourAccountingSurcharge.Project_No, HourAccountingSurcharge.Cost_Type, HourAccountingSurcharge.Cost_Object,
+          HourAccountingSurcharge.Cost_Component, HourAccountingSurcharge.Element, HourAccountingSurcharge.Extension_Contract);
+        IF AmtInPeriod THEN
+          TmpProjectControlTree."Open Ovh. Srch. (Hours) Period" := HourAccountingSurcharge.Sum_Overhead_Surcharge_Project
+        ELSE
+          TmpProjectControlTree."Open Ovh. Surch. (Hours)" := HourAccountingSurcharge.Sum_Overhead_Surcharge_Project;
+        TmpProjectControlTree.INSERT;
+      END;
+      HourAccountingSurcharge.CLOSE;
+    END;
+
+    LOCAL PROCEDURE ProcessProgressLine@1100529608(LocProjectFilter@1100529600 : Text[30];PeriodFilter@1100529602 : Text;PrevPeriodFilter@1100529603 : Text);
+    VAR
+      ProgressLineQuery@1100529604 : Query 11012023;
+      ProgressLine@1100528600 : Record 11012037;
+      ProgressLevel@1100528601 : Record 11012036;
+      Progress@1100528602 : Page 11012077;
+    BEGIN
+      UpdateWindow;
+      ProgressLineQuery.SETFILTER(Main_Project_No, MainProjectFilter);
+      ProgressLineQuery.SETFILTER(Project_No, LocProjectFilter);
+
+      IF (PeriodFilter <> '') AND (PeriodFilter <> '''''') THEN BEGIN
+        ProgressLineQuery.SETFILTER(Progress_Date, PeriodFilter);
+        ProgressLineQuery.OPEN;
+        WHILE ProgressLineQuery.READ DO BEGIN
+          InitTmpProjectControlTree(
+            ProgressLineQuery.Project_No, ProgressLineQuery.Cost_Type, ProgressLineQuery.Cost_Object,
+            ProgressLineQuery.Cost_Component, ProgressLineQuery.Element, ProgressLineQuery.Extension_Contract);
+          TmpProjectControlTree."Progress Allowed Costs" := ProgressLineQuery.Sum_Allowed_Amount;
+          TmpProjectControlTree."Progress Allowed Hours" := ProgressLineQuery.Sum_Allowed_Hours;
+          TmpProjectControlTree.INSERT;
+        END;
+        ProgressLineQuery.CLOSE;
+      END;
+
+      IF NOT ProgressLevel.GET(LocProjectFilter, CumulationDate) THEN BEGIN
+        ProgressLevel.VALIDATE("Project No.", LocProjectFilter);
+        ProgressLevel.VALIDATE("Progress Date", CumulationDate);
+        ProgressLevel.INSERT(TRUE);
+        Progress.SETRECORD(ProgressLevel);
+        CODEUNIT.RUN(CODEUNIT::"Create Progress Lines",ProgressLevel);
+        Progress.CopyPreviousProgress;
+      END;
+      ProgressLine.SETFILTER("Project No.", LocProjectFilter);
+      ProgressLine.SETFILTER("Main Project No.", MainProjectFilter);
+      ProgressLine.SETRANGE("Progress Date", CumulationDate);
+      IF ProgressLine.FINDSET THEN BEGIN
+        REPEAT
+          InitTmpProjectControlTree(
+            ProgressLine."Project No.", ProgressLine."Cost Type", ProgressLine."Cost Object",
+            ProgressLine."Cost Component", ProgressLine.Element, ProgressLine."Extension Contract");
+          TmpProjectControlTree."Cumulative Progress %" := ProgressLine."Cumulative Progress %";
+          TmpProjectControlTree.INSERT;
+        UNTIL ProgressLine.NEXT = 0;
+      END;
+
+      UpdateWindow;
+      IF (PrevPeriodFilter <> '') AND (PrevPeriodFilter <> '''''') THEN BEGIN
+        ProgressLineQuery.SETFILTER(Progress_Date, PrevPeriodFilter);
+        ProgressLineQuery.OPEN;
+        WHILE ProgressLineQuery.READ DO BEGIN
+          InitTmpProjectControlTree(
+            ProgressLineQuery.Project_No, ProgressLineQuery.Cost_Type, ProgressLineQuery.Cost_Object,
+            ProgressLineQuery.Cost_Component, ProgressLineQuery.Element, ProgressLineQuery.Extension_Contract);
+          TmpProjectControlTree."Prev.Progress Allowed Costs" := ProgressLineQuery.Sum_Allowed_Amount;
+          TmpProjectControlTree."Prev.Progress Allowed Hours" := ProgressLineQuery.Sum_Allowed_Hours;
+          TmpProjectControlTree.INSERT;
+        END;
+        ProgressLineQuery.CLOSE;
+      END;
+    END;
+
+    LOCAL PROCEDURE ProcessPrognosisLine@1100529611(LocProjectFilter@1100529600 : Text[30];Prognosis@1100529601 : Record 11012034;PrevPrognosis@1100529602 : Record 11012034);
+    VAR
+      PrognosisLine@1100529604 : Query 11012025;
+    BEGIN
+      UpdateWindow;
+      PrognosisLine.SETFILTER(Main_Project_No, MainProjectFilter);
+      PrognosisLine.SETFILTER(Project_No, LocProjectFilter);
+
+      IF Prognosis."Prognosis Date" <> 0D THEN BEGIN
+        PrognosisLine.SETRANGE(Prognosis_Date, Prognosis."Prognosis Date");
+        PrognosisLine.OPEN;
+        WHILE PrognosisLine.READ DO BEGIN
+          InitTmpProjectControlTree(
+            PrognosisLine.Project_No, PrognosisLine.Cost_Type, PrognosisLine.Cost_Object,
+            PrognosisLine.Cost_Component, PrognosisLine.Element, '');
+          TmpProjectControlTree.Prognosis := PrognosisLine.Sum_Amount_incl_Surcharge;
+          IF PrognosisLine.Cost_Type = PrognosisLine.Cost_Type::Labor THEN
+            TmpProjectControlTree."Hours Prognosis" := PrognosisLine.Sum_Quantity;
+          TmpProjectControlTree."Prognosis Total Cost" := PrognosisLine.Sum_Prognosis_Total_Cost;
+          TmpProjectControlTree."Risc Coverage (Prognosis)" := PrognosisLine.Sum_Risc_Coverage;
+          TmpProjectControlTree."Prognosis Received/To Process" := PrognosisLine.Sum_Received_To_Process;
+          IF JobsSetup."Fix Prognosis Line" OR Prognosis."Fix Prognosis Line" THEN
+            IF PrognosisLine.Fix_Prognosis_Line THEN BEGIN
+              TmpProjectControlTree."Prognosis End Result" := PrognosisLine.Sum_Prognosis_End_Result;
+              TmpProjectControlTree."Prognosis End Result Hours" := PrognosisLine.Sum_Prognosis_End_Result_Hours;
+            END;
+          TmpProjectControlTree.INSERT;
+        END;
+        PrognosisLine.CLOSE;
+      END;
+
+      UpdateWindow;
+      IF PrevPrognosis."Prognosis Date" <> 0D THEN BEGIN
+        PrognosisLine.SETRANGE(Prognosis_Date, PrevPrognosis."Prognosis Date");
+        PrognosisLine.OPEN;
+        WHILE PrognosisLine.READ DO BEGIN
+          InitTmpProjectControlTree(
+            PrognosisLine.Project_No, PrognosisLine.Cost_Type, PrognosisLine.Cost_Object,
+            PrognosisLine.Cost_Component, PrognosisLine.Element, '');
+          TmpProjectControlTree."Prognosis Previous Period" := PrognosisLine.Sum_Amount_incl_Surcharge;
+          IF PrognosisLine.Cost_Type = PrognosisLine.Cost_Type::Labor THEN
+            TmpProjectControlTree."Prognosis Hours Prev Period" := PrognosisLine.Sum_Quantity;
+          TmpProjectControlTree."Prognosis Total Cost  Prev Per" := PrognosisLine.Sum_Prognosis_Total_Cost;
+          TmpProjectControlTree."Prev Period Total Cost" := PrognosisLine.Sum_Risc_Coverage;
+          TmpProjectControlTree."Progn. Rec./To Proc. Prev Per" := PrognosisLine.Sum_Received_To_Process;
+          IF JobsSetup."Fix Prognosis Line" OR PrevPrognosis."Fix Prognosis Line" THEN
+            IF PrognosisLine.Fix_Prognosis_Line THEN BEGIN
+              TmpProjectControlTree."Prev Prognosis End Result" := PrognosisLine.Sum_Prognosis_End_Result;
+              TmpProjectControlTree."Prev Progn. End Result Hours" := PrognosisLine.Sum_Prognosis_End_Result_Hours;
+            END;
+          TmpProjectControlTree.INSERT;
+        END;
+        PrognosisLine.CLOSE;
+      END;
+    END;
+
+    PROCEDURE GetEndingDate@1100528601() : Date;
+    VAR
+      SiteManagerFormSetup@1100528603 : Record 11125525;
+      PassDataofRunFormsSMF@1100528602 : Codeunit 11125528;
+      Year@1100528600 : Integer;
+      Week@1100528601 : Integer;
+    BEGIN
+      SiteManagerFormSetup.GET;
+      PassDataofRunFormsSMF.GetWorkingYearWeekAndDate(Year, Week);
+      EXIT(DWY2DATE(SiteManagerFormSetup."Last Working Day of the Week" + 1, Week, Year));
+    END;
+
+    LOCAL PROCEDURE CheckProjectValues@1100528600();
+    BEGIN
+      Project.TESTFIELD("Prognosis Level", Project."Prognosis Level"::Detailed);
+      Project.TESTFIELD("Progress Registry", Project."Progress Registry"::Percentages);
+
+      IF Project."Progress Method" = Project."Progress Method"::"Element - Cost Object" THEN
+        IF NOT Project."Prognosis per Element" THEN
+          ERROR(
+            Text001, Project.FIELDCAPTION("Prognosis per Element"),
+            FORMAT(NOT Project."Prognosis per Element"),
+            Project.FIELDCAPTION("Progress Method"),
+            FORMAT(Project."Progress Method"::"Element - Cost Object"))
+      ELSE IF Project."Progress Method" = Project."Progress Method"::"Cost Object" THEN
+        IF Project."Prognosis per Element" THEN
+          ERROR(
+            Text001, Project.FIELDCAPTION("Prognosis per Element"),
+            FORMAT(NOT Project."Prognosis per Element"),
+            Project.FIELDCAPTION("Progress Method"),
+            FORMAT(Project."Progress Method"::"Cost Object"))
+      ELSE
+        ERROR(Text002, Project.FIELDCAPTION("Progress Method"),
+          FORMAT(Project."Progress Method"::"Element - Cost Object"),
+          FORMAT(Project."Progress Method"::"Cost Object"));
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

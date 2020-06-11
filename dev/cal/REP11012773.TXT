@@ -1,0 +1,207 @@
+OBJECT Report 11012773 Mail Subcontr. Inv. not Receiv
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    CaptionML=[DEU=Mail an Subunternehmer Rechnung nicht eingegangen;
+               ENU=Mail Subcontractor Invoice not Received;
+               NLD=E-mail onderaannemer factuur niet ontvangen;
+               NOR=Mailen Underentrepen›r faktura er ikke mottatt];
+    ProcessingOnly=Yes;
+    OnInitReport=BEGIN
+                   NoOfDays := 7;
+                 END;
+
+    OnPreReport=BEGIN
+                  IF NoOfDays > 0 THEN BEGIN
+                    FilterClosingDate := TRUE;
+                    NoOfDaysToUse := NoOfDays;
+                  END ELSE
+                    NoOfDaysToUse := NoOfDaysAfter;
+                END;
+
+    UsageCategory=Tasks;
+  }
+  DATASET
+  {
+    { 3182;    ;DataItem;                    ;
+               DataItemTable=Table23;
+               DataItemTableView=SORTING(No.)
+                                 WHERE(Subcontractor Type=FILTER(Subcontractor|Self Employed|Employment Agency));
+               OnAfterGetRecord=BEGIN
+                                  SubcontractorNo := Vendor.GetResourceNo;
+                                  IF SubcontractorNo = '' THEN
+                                    CurrReport.SKIP;
+                                END;
+
+               ReqFilterFields=No. }
+
+    { 1100528100;1;DataItem;                 ;
+               DataItemTable=Table11012823 }
+
+    { 1100528101;2;DataItem;                 ;
+               DataItemTable=Table11229279;
+               DataItemTableView=SORTING(Resource No.,Export to FSA)
+                                 WHERE(Source Type=CONST(ServiceOrder),
+                                       Resource Type=CONST(Subcontractor));
+               OnPreDataItem=BEGIN
+                               SETRANGE("Source Company", COMPANYNAME);
+                               SETRANGE("Resource No.", SubcontractorNo);
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  IF WorkOrderHasOpenPurchOrder("No.", SubcontractorNo, NoOfDaysToUse, FilterClosingDate) THEN
+                                    ServiceSubcontrEmailMgt.SendSOListMail(Vendor."No.", 1, NoOfDays, 3031);
+                                END;
+
+               ReqFilterFields=No.;
+               DataItemLink=Source No.=FIELD(No.) }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      SaveValues=Yes;
+    }
+    CONTROLS
+    {
+      { 1100409000;;Container;
+                  ContainerType=ContentArea }
+
+      { 1100409001;1;Group  ;
+                  CaptionML=[DEU=Optionen;
+                             ENU=Options;
+                             NLD=Opties;
+                             NOR=Alternativer;
+                             SVE=Alternativ];
+                  GroupType=Group }
+
+      { 1100409002;2;Field  ;
+                  Name=NoOfDays;
+                  CaptionML=[DEU=Periode (Tage) nach Technischem Abschluss;
+                             ENU=Period (Days) after Technical Finished;
+                             NLD=Periode (dagen) na technisch gereed;
+                             NOR=Periode (dager) etter teknisk ferdig];
+                  SourceExpr=NoOfDays;
+                  MinValue=0;
+                  OnValidate=BEGIN
+                               IF NoOfDays <> 0 THEN
+                                 NoOfDaysAfter := 0;
+                             END;
+                              }
+
+      { 1100528100;2;Field  ;
+                  Name=NoOfDaysAfter;
+                  CaptionML=[DEU=Anzahl Tage nachdem der Arbeitsauftrag fertig ist;
+                             ENU=X days after work orders is finished;
+                             NLD=Aantal dagen nadat de werkorder gereed is];
+                  SourceExpr=NoOfDaysAfter;
+                  MinValue=0;
+                  OnValidate=BEGIN
+                               IF NoOfDaysAfter <> 0 THEN
+                                 NoOfDays := 0;
+                             END;
+                              }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      ServiceSubcontrEmailMgt@1100528101 : Codeunit 11012857;
+      SubcontractorNo@1100528100 : Code[20];
+      NoOfDays@1100409001 : Integer;
+      NoOfDaysAfter@1100528104 : Integer;
+      NoOfDaysToUse@1100528103 : Integer;
+      FilterClosingDate@1100528102 : Boolean;
+
+    PROCEDURE WorkOrderHasOpenPurchOrder@1100528601(IWorkOrderNo@1100526102 : Code[20];ISubcontractorNo@1100528600 : Code[20];INoOfDays@1100526103 : Integer;FilterOnClosingDate@1100528100 : Boolean) : Boolean;
+    VAR
+      WorkOrder@1100528604 : Record 11229279;
+      ResourceWOP@1100528101 : Record 11229278;
+      VendorNo@1100528102 : Code[20];
+    BEGIN
+      IF NOT ResourceWOP.GET(ISubcontractorNo) THEN
+        EXIT(FALSE);
+
+      VendorNo := ResourceWOP.GetVendorNo;
+
+      IF IWorkOrderNo <> '' THEN
+        WorkOrder.SETRANGE("No.", IWorkOrderNo)
+      ELSE
+        WorkOrder.SETRANGE("Resource No.");
+      WorkOrder.SETRANGE("Resource Type", WorkOrder."Resource Type"::Subcontractor);
+      WorkOrder.SETRANGE("Resource No.", ISubcontractorNo);
+      WorkOrder.SETRANGE("Source Type", WorkOrder."Source Type"::ServiceOrder);
+      WorkOrder.SETRANGE("Source Company", COMPANYNAME);
+      WorkOrder.SETFILTER("Actual Field Service Status", '%1|%2|%3', '65', '67', '70');
+      IF FilterOnClosingDate THEN
+        WorkOrder.SETFILTER("Closing Date", '<>%1&<%2', 0D, TODAY - INoOfDays + 1);
+      IF WorkOrder.FINDSET THEN
+        REPEAT
+          IF FilterOnClosingDate OR WorkOrderReferencePointWithinFilter(WorkOrder, INoOfDays) THEN
+            IF AdviceOrderLineHasOpenPurchOrder(WorkOrder, VendorNo) THEN
+              EXIT(TRUE);
+        UNTIL WorkOrder.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE AdviceOrderLineHasOpenPurchOrder@1100528100(VAR WorkOrder@1100528100 : Record 11229279;VendorNo@1100528102 : Code[20]) : Boolean;
+    VAR
+      AdviceOrderLine@1100528107 : Record 11012055;
+      PurchaseRouteReference@1100528106 : Record 11012079;
+      PurchaseHeader@1100528105 : Record 38;
+      PurchRouteRefManagement@1100528103 : Codeunit 11012045;
+      OpenPurchaseOrder@1100528101 : Boolean;
+    BEGIN
+      AdviceOrderLine.SETRANGE("Record Type", AdviceOrderLine."Record Type"::ServOrder);
+      AdviceOrderLine.SETRANGE("Service Order No.", WorkOrder."Source No.");
+      AdviceOrderLine.SETRANGE(Vendor, VendorNo);
+      AdviceOrderLine.SETRANGE("Work Order No.", WorkOrder."No.");
+      AdviceOrderLine.SETFILTER("Purchase Route Reference", '<>%1', '');
+      IF AdviceOrderLine.FINDSET THEN BEGIN
+        REPEAT
+          PurchRouteRefManagement.UpdateReferenceLines(AdviceOrderLine."Purchase Route Reference");
+          PurchaseRouteReference.SETRANGE(Type, PurchaseRouteReference.Type::Reference);
+          PurchaseRouteReference.SETRANGE("Reference No.", AdviceOrderLine."Purchase Route Reference");
+          PurchaseRouteReference.SETRANGE("Line Type", PurchaseRouteReference."Line Type"::"Purchase Order Line");
+          IF PurchaseRouteReference.FINDSET THEN
+            REPEAT
+              IF PurchaseHeader.GET(PurchaseHeader."Document Type"::Order, PurchaseRouteReference."No.") THEN
+                IF PurchaseHeader.Status < PurchaseHeader.Status::Closed THEN
+                  OpenPurchaseOrder := TRUE;
+            UNTIL OpenPurchaseOrder OR (PurchaseRouteReference.NEXT = 0);
+          PurchaseRouteReference.SETRANGE("Line Type");
+          PurchaseRouteReference.DELETEALL(TRUE);
+          IF OpenPurchaseOrder THEN
+            EXIT(TRUE);
+        UNTIL AdviceOrderLine.NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE WorkOrderReferencePointWithinFilter@1100528101(VAR WorkOrder@1100528100 : Record 11229279;NoOfDays@1100528102 : Integer) : Boolean;
+    VAR
+      WorkOrderReferencePoint@1100528101 : Record 11229282;
+    BEGIN
+      WorkOrderReferencePoint.SETRANGE("Work Order No.", WorkOrder."No.");
+      WorkOrderReferencePoint.SETRANGE("Field Service Status", WorkOrder."Actual Field Service Status");
+      WorkOrderReferencePoint.SETFILTER("Date/Time Registrated", '<%1', CREATEDATETIME(TODAY - NoOfDays + 1, 0T));
+      EXIT(NOT WorkOrderReferencePoint.ISEMPTY);
+    END;
+
+    BEGIN
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

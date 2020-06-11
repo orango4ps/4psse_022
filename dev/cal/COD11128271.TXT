@@ -1,0 +1,692 @@
+OBJECT Codeunit 11128271 Agda Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PSSE;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+            // Only exports dimensions:
+            ExportAgda(TRUE, FALSE, FALSE, '', '', '', FALSE);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      OnlyNotExported@1100285002 : Boolean;
+      JobSetup@1100285001 : Record 315;
+      Job@1100409000 : Record 11072003;
+      Service@1100285300 : Record 11012823;
+      DimVal@1100409001 : Record 349;
+      PHLine@1100409007 : Record 11012085;
+      PHLine2@1100285101 : Record 11012085;
+      FileMgmt@1100409003 : Codeunit 419;
+      Filename@1100409004 : Text[250];
+      TAB@1100409005 : Char;
+      LF@1100285008 : Char;
+      CR@1100285009 : Char;
+      Status@1100409006 : Text[30];
+      Value@1100409008 : Text[30];
+      Text001@1100409010 : TextConst 'ENU=Done;NOR=Ferdig;SVE=Klar';
+      Employee@1100285000 : Record 5200;
+      DocumentFilter@1100285003 : Text[50];
+      EmployerFilter@1100285004 : Text[50];
+      gDateFilter@1100285500 : Text[50];
+      OutStr@1100285005 : OutStream;
+      TempBlob@1100285006 : Record 99008535;
+      txtNotAGDA@1100285007 : TextConst 'ENU=Salary Program  must be AGDA in Job setup > Salary Program;NOR=L›nnsprogram m† v‘re AGDA i prosjektinnstillinger > L›nnsprogram;SVE=L”neprogram m†ste vara AGDA i Projektinst„llningar > L”neprogram';
+      ExportedHour@1100285013 : Record 11012041;
+      TotLine@1100285014 : Text[30];
+      AmountLCY@1100285015 : Text[30];
+      WageComponent@1100285016 : Record 11012014;
+      txtNothing@1100285017 : TextConst 'ENU=No hours/abscence exported.;NOR=Ingen timer/frav‘r eksportert;SVE=Inga timmar/fr†nvaro exporterades.';
+      NoTimeExported@1100285018 : Boolean;
+      NoAbscenceExported@1100285501 : Boolean;
+      SEUtils@1100285503 : Codeunit 11128000;
+      SESetup@1101285000 : Record 11128004;
+      HumanResourcesSetup@1100583000 : Record 5218;
+
+    PROCEDURE ExportAgda@1100285011(Dimensions@1100285000 : Boolean;Time@1100285001 : Boolean;Absence@1100285002 : Boolean;DocFilter@1100285003 : Text[50];EmpFilter@1100285004 : Text[50];DateFilter@1100285500 : Text[50];NotExportedLines@1100285005 : Boolean);
+    VAR
+      SESetup@1101285000 : Record 11128004;
+    BEGIN
+      // This function is called from report 11128024 Export AGDA
+      // and from this it calles the three different File-export functions for Dimensions, Time and Absence
+      // Setup-records are initiated from this function, hence do not calll the three other functions from somewhere else.
+
+      JobSetup.GET;
+      HumanResourcesSetup.GET;
+      // Makes sure its is AGDA as Salary Program
+      IF (HumanResourcesSetup."Salary Application" <> HumanResourcesSetup."Salary Application"::"AGDA/Hogia") THEN
+        ERROR(txtNotAGDA);
+
+      // Copies the possible filters from local to Global variables used in the functions below.
+      OnlyNotExported := NotExportedLines;
+      EmployerFilter  := EmpFilter;
+      DocumentFilter  := DocFilter;
+      gDateFilter     := DateFilter;         //140129 ENH010
+      NoTimeExported := FALSE;               //140214
+      NoAbscenceExported := FALSE;           //140214
+
+      IF SESetup.GET(SESetup."Line type"::Setup,'HOGIA','COMPID') THEN
+        IF SESetup."Value (bool)" THEN BEGIN
+          Absence := FALSE;
+          Dimensions := FALSE;
+        END;
+
+
+      IF Dimensions THEN ExportAGDADimension;
+      IF Time       THEN ExportTime;
+      IF Absence    THEN ExportAbsence;
+
+      //>>140214
+      IF NoTimeExported AND NoAbscenceExported AND GUIALLOWED THEN BEGIN
+      //<<140214
+        MESSAGE(txtNothing);
+        COMMIT;
+        REPORT.RUN(11128024);
+        EXIT;
+      END;
+
+
+      IF (NOT NoTimeExported) OR (NOT NoAbscenceExported) THEN          //140214
+        FillLogBook;
+
+      // END-message if not autmatically run.
+      IF GUIALLOWED() THEN
+        MESSAGE(Text001);
+    END;
+
+    PROCEDURE ExportAGDADimension@1100285000();
+    VAR
+      lInStream@1100285500 : InStream;
+      lTempFileAbsPathName@1100285501 : Text;
+      ServerFileHelper@1100285502 : DotNet "'mscorlib, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.File";
+      lOutStream@1100285505 : OutStream;
+      lOutputFile@1100285503 : File;
+      ProjectName@1100285504 : Text[250];
+      Servicename@1100285300 : Text[250];
+    BEGIN
+      // Exports agda dimensions to a file
+      JobSetup.GET; //ENH032
+      HumanResourcesSetup.GET;
+      TAB := 9;
+
+      CR := 13;
+      LF := 10;
+
+      //>>ENH032
+      Filename := //JobSetup."Pathname Files to Salary" + 'AGDA-Dimensioner.txt';
+        JobSetup."Pathname Dimfiles (AGDA)" + 'AGDA-Dimensioner-' + HumanResourcesSetup."Delivering Company (SCAB)" + '.txt';
+      //<<ENH032
+
+      TempBlob.Blob.CREATEOUTSTREAM(OutStr);
+
+      // Projekt
+      Job.RESET();
+      IF Job.FINDSET() THEN REPEAT
+        // I honestly think this is supposed be DimValue, but who am I to..
+        Status := '™ppen';
+        IF Job."Project Status" IN [Job."Project Status"::"Administrative Finished"
+          ,Job."Project Status"::Finished
+          ,Job."Project Status"::Archive
+          ,Job."Project Status"::Archived
+          ]
+        THEN
+          Status := 'St„ngd';
+        ProjectName := SEUtils.CleanTextFromNonPrintable(Job.Description);        //ITERO.WG 150427
+        OutStr.WRITETEXT(
+          SEUtils.Ascii2Ansi(
+            HumanResourcesSetup."Delivering Company (SCAB)"+FORMAT(TAB) +  //ENH032
+            //>>ITERO.WG 150427
+            'PROJEKT' +FORMAT(TAB) +Job."No." +FORMAT(TAB) +ProjectName +FORMAT(TAB) +Status) + FORMAT(CR) + FORMAT(LF));
+            //'PROJEKT' +FORMAT(TAB) +Job."No." +FORMAT(TAB) +Job.Description +FORMAT(TAB) +Status) + FORMAT(CR) + FORMAT(LF));
+            //<<ITERO.WG 150427
+      UNTIL Job.NEXT = 0;
+
+      //>>SC004131
+      //Service
+      Service.RESET;
+      IF Service.FINDSET(FALSE) THEN REPEAT
+          Status := '™ppen';
+          IF Service.Status  >= Service.Status::"Administrative Finished" THEN
+            Status := 'St„ngd';
+          Servicename := SEUtils.CleanTextFromNonPrintable(Service.Description);
+        OutStr.WRITETEXT(
+          SEUtils.Ascii2Ansi(
+            HumanResourcesSetup."Delivering Company (SCAB)"+FORMAT(TAB) +  //ENH032
+            'SERVICE' +FORMAT(TAB) +Service."No." +FORMAT(TAB) +Servicename +FORMAT(TAB) +Status) + FORMAT(CR) + FORMAT(LF));
+      UNTIL Service.NEXT = 0;
+      //<<SC004131
+
+      //Kostnadsst„lle
+      DimVal.RESET;
+      DimVal.SETRANGE("Dimension Code",'KOSTNADSSTŽLLE'); // :-)
+      IF DimVal.FINDSET(FALSE) THEN REPEAT
+        Status := '™ppen';
+        IF DimVal.Blocked THEN
+          Status := 'St„ngd';
+        OutStr.WRITETEXT(
+          SEUtils.Ascii2Ansi(
+            HumanResourcesSetup."Delivering Company (SCAB)"+FORMAT(TAB) +  //ENH032
+            FORMAT(DimVal."Dimension Code")) +FORMAT(TAB) +DimVal.Code +FORMAT(TAB) +SEUtils.Ascii2Ansi(DimVal.Name) +FORMAT(TAB) +SEUtils.Ascii2Ansi(Status) + FORMAT(CR) + FORMAT(LF));
+      UNTIL DimVal.NEXT() = 0;
+      //>>ENH032
+      //FileMgmt.BLOBExport4PS(TempBlob, Filename, FALSE, FALSE);
+      IF GUIALLOWED THEN
+        FileMgmt.BLOBExport4PS(TempBlob, Filename, FALSE, FALSE)
+      ELSE BEGIN
+      //NAS
+        IF NOT TempBlob.Blob.HASVALUE THEN
+          EXIT;
+        TempBlob.Blob.CREATEINSTREAM(lInStream);
+        //DOWNLOADFROMSTREAM(NVInStream, '', FileMgmt.Magicpath, '', TempFileAbsPathName);
+
+        lTempFileAbsPathName := FileMgmt.ServerTempFileName('');
+        lOutputFile.WRITEMODE(TRUE);
+        lOutputFile.CREATE(lTempFileAbsPathName);
+        lOutputFile.CREATEOUTSTREAM(lOutStream);
+        TempBlob.Blob.CREATEINSTREAM(lInStream);
+        COPYSTREAM(lOutStream,lInStream);
+        lOutputFile.CLOSE;
+
+        IF ServerFileHelper.Exists(Filename) THEN
+          ServerFileHelper.Delete(Filename);
+        ServerFileHelper.Copy(lTempFileAbsPathName, Filename, TRUE);
+        IF ServerFileHelper.Exists(lTempFileAbsPathName) THEN
+          ServerFileHelper.Delete(lTempFileAbsPathName);
+      END;
+      //<<ENH032
+
+      CLEAR(TempBlob.Blob);
+    END;
+
+    PROCEDURE ExportTime@1100285001();
+    VAR
+      lvTeamCode@1100285500 : Code[30];
+      lvWageCompSalaryApplication@1100285501 : Record 11128109;
+      lvExportNo@1000000000 : Code[20];
+      SESetup@1101285000 : Record 11128004;
+      ExportHogiaLon@1100285100 : XMLport 11128021;
+      HumanResourcesSetup@1000000001 : Record 5218;
+    BEGIN
+      // Exports AGDA time reports to a file
+      HumanResourcesSetup.GET;
+
+      //>>161129
+      CR := 13;
+      LF := 10;
+      //<<161129
+
+      TempBlob.Blob.CREATEOUTSTREAM(OutStr);
+
+      Filename := HumanResourcesSetup."Pathname Files to Salary" + 'AGDA-Tid-' + DELCHR(FORMAT(TODAY), '=', '-') + '_' + DELCHR(FORMAT(TIME), '=', ':') + '.txt';
+
+      PHLine.RESET;
+      IF (EmployerFilter <> '') THEN
+         PHLine.SETFILTER(Employer, EmployerFilter);
+      IF (DocumentFilter <> '') THEN
+         PHLine.SETFILTER("Document No.", DocumentFilter);
+      //>>140129 ENH010
+      IF (gDateFilter <> '') THEN
+      //>>141103 ENH050
+      //   PHLine.SETFILTER("Posting Date", gDateFilter);
+         PHLine.SETFILTER("Actual date of line", gDateFilter);
+      //<<141103 ENH050
+      //<<140129 ENH010
+      IF OnlyNotExported THEN                           //140214
+        PHLine.SETRANGE(Exported,FALSE);                 //140214
+      PHLine.SETRANGE("Leave Type",'');
+
+
+      IF SESetup.GET(SESetup."Line type"::Setup,'HOGIA','COMPID') THEN
+        IF SESetup."Value (bool)" THEN BEGIN
+          PHLine.SETRANGE("Leave Type");
+          Filename := HumanResourcesSetup."Pathname Files to Salary" + '\'+ HumanResourcesSetup."Receiving Company (SCAB)"+ '_' + FORMAT(TODAY,0,'<Month Text>') + '.xml';
+      //    ExportHogiaLon.FILENAME(Filename);
+          ExportHogiaLon.SETDESTINATION(OutStr);
+          ExportHogiaLon.SETTABLEVIEW(PHLine);
+          ExportHogiaLon.EXPORT;
+          FileMgmt.BLOBExport4PS(TempBlob, Filename, FALSE, FALSE);
+          EXIT;
+        END;
+
+
+      IF PHLine.FINDSET(TRUE) THEN BEGIN
+        REPEAT
+
+          Value := PHLine."Department Code";
+          Employee.GET(PHLine."Employee No.");
+
+          WageComponent.GET(PHLine."Wage Component");
+
+          //4PSSE.sn 180319
+          IF Employee.CAO <> JobSetup."CAO AGDA Abcence" THEN BEGIN
+            IF ((Employee.CAO = JobSetup."CAO AGDA Overtime Expence") AND (PHLine.Overtime = TRUE)) OR
+              (Employee.CAO = JobSetup."CAO AGDA Overtime Expence") AND (PHLine.Quantity <> 0) OR
+              (Employee.CAO <> JobSetup."CAO AGDA Overtime Expence") THEN BEGIN
+          //4PSSE.en 180319
+            CASE WageComponent."Component Type" OF
+              WageComponent."Component Type"::Hours: BEGIN
+                TotLine := FORMAT(PHLine."Total Line",0,9);  //IME487
+                AmountLCY := '';
+              END;
+
+              WageComponent."Component Type"::Days: BEGIN
+                TotLine := FORMAT(PHLine.Quantity,0,9);  //IME487
+                AmountLCY := '';
+              END;
+
+              WageComponent."Component Type"::Expenses: BEGIN
+                TotLine := FORMAT(PHLine.Quantity,0,9);
+                //>>ITERO.PR 160105
+                IF JobSetup."No Kilometer Amount To AGDA" THEN BEGIN
+                  //IF WageComponent."Kilometer Expense" THEN BEGIN //4PSSE.o 180327
+                  IF WageComponent."Export Quantity i.s.o. Amount" THEN BEGIN //4PSSE.n 180327
+                    AmountLCY := '';
+                  END ELSE BEGIN
+                    AmountLCY := FORMAT(PHLine."Amount (LCY)", 0, 9);
+                  END;
+                END ELSE BEGIN
+                //<<ITERO.PR 160105
+                  AmountLCY := FORMAT(PHLine."Amount (LCY)", 0, 9);
+                END;
+
+                //190605 ORANGO.EE >>
+                IF SESetup.GET(SESetup."Line type"::Setup,'AGDA','EXPENSE') THEN
+                  IF SESetup."Value (bool)" THEN
+                    AmountLCY := FORMAT(PHLine."Unit Cost (LCY)");
+                //<<
+
+              END;
+
+              WageComponent."Component Type"::"Expense hours": BEGIN
+                TotLine := FORMAT(PHLine."Total Line",0,9);  //IME487
+      //>>RFC1271
+      //          AmountLCY := FORMAT(PHLine."Amount (LCY)", 0, 9);
+                AmountLCY := FORMAT(PHLine."Unit Cost (LCY)");
+      //<<RFC1271
+              END;
+            END; //4PSSE.n 180319
+          // 140312 ENH022 <<
+          lvTeamCode := PHLine."Team Code";
+          IF (PHLine.Type = PHLine.Type::Indirect) THEN
+             lvTeamCode := '';
+          IF Employee.UTA THEN
+             lvTeamCode := '';
+          // 140312 ENH022 >>
+
+        //>>SC004131
+          CASE PHLine.Type OF
+            PHLine.Type::Project:
+              //190709 ORANGO.EE BYGG >>
+              IF SESetup.GET(SESetup."Line type"::Setup, 'PROJECTNO','COMMA') AND SESetup."Value (bool)" = TRUE THEN
+                lvExportNo := DELCHR(PHLine."Project No.",'=',DELCHR(PHLine."Project No.", '=', '1234567890'))
+              ELSE
+              //<<
+                lvExportNo := PHLine."Project No.";
+            PHLine.Type::Service:  lvExportNo := PHLine."Service Order No.";
+            PHLine.Type::Indirect: lvExportNo := '';
+          END;
+        //<<SC004131
+
+          IF Value = '' THEN
+            Value := PHLine."Department Code Employee";
+          OutStr.WRITETEXT(SEUtils.Ascii2Ansi(HumanResourcesSetup."Delivering Company (SCAB)")
+            +';' +SEUtils.Ascii2Ansi(Employee."Salary No.")
+            +';' +SEUtils.Ascii2Ansi(PHLine."Wage Component")
+        //    +';' +SEUtils.Ascii2Ansi(PHLine."Project No.")  //[INC #127685]
+            +';' +SEUtils.Ascii2Ansi(lvExportNo)
+            +';' +SEUtils.Ascii2Ansi(Value)
+            +';' +TotLine
+        //>>141103 ENH050
+        //    +';' +FORMAT(PHLine."Posting Date", 0, 9)
+            +';' +FORMAT(PHLine."Actual date of line", 0, 9)
+        //<<141103 ENH050
+            +';' +AmountLCY
+            +';' +SEUtils.Ascii2Ansi(lvTeamCode) // 140312 Replaced PHLine."Team Code" with lvTeamCode.
+            +FORMAT(CR) + FORMAT(LF)
+           );
+           // 140312 ENH022 <<
+           IF (lvWageCompSalaryApplication.GET(PHLine."Wage Component")) THEN BEGIN
+             IF (lvWageCompSalaryApplication."Generate Additional Line" = lvWageCompSalaryApplication."Generate Additional Line"::Always)
+                OR
+                ((lvWageCompSalaryApplication."Generate Additional Line" = lvWageCompSalaryApplication."Generate Additional Line"::"Non-UTA") AND (Employee.UTA = FALSE))
+             THEN BEGIN
+              OutStr.WRITETEXT(SEUtils.Ascii2Ansi(HumanResourcesSetup."Receiving Company (SCAB)")
+                +';' +SEUtils.Ascii2Ansi(Employee."Salary No.")
+                +';' +SEUtils.Ascii2Ansi(lvWageCompSalaryApplication."Wage Component Additional Line")
+                +';' +SEUtils.Ascii2Ansi(lvExportNo)  //[INC #127685]
+                +';' +SEUtils.Ascii2Ansi(Value)
+                +';' +TotLine
+      //>>141103 ENH050
+      //    +';' +FORMAT(PHLine."Posting Date", 0, 9)
+          +';' +FORMAT(PHLine."Actual date of line", 0, 9)
+      //<<141103 ENH050
+                +';' +AmountLCY
+                +';' +SEUtils.Ascii2Ansi(lvTeamCode)
+                +FORMAT(CR) + FORMAT(LF)
+                );
+             END;
+           END;
+           // 140312 ENH022 >>
+
+      //        PHLine.Exported := TRUE;
+      //        PHLine."Exported on" := CURRENTDATETIME;
+      //        PHLine.MODIFY();
+              PHLine2.GET(PHLine.Year,PHLine.Week,PHLine."Employee No.",PHLine."Line No.");
+              PHLine2.Exported := TRUE;
+              PHLine2."Exported on" := CURRENTDATETIME;
+              PHLine2.MODIFY;
+           END; //4PSSE.n 180319
+           //4PSSE 1805121
+          END ELSE BEGIN
+            IF (JobSetup."CAO AGDA Abcence" = '') AND (JobSetup."CAO AGDA Overtime Expence" = '') THEN BEGIN
+              TotLine := '';
+              AmountLCY := '';
+              CASE WageComponent."Component Type" OF
+                WageComponent."Component Type"::Hours,WageComponent."Component Type"::Addition: BEGIN
+                  TotLine := FORMAT(PHLine."Total Line",0,9);  //IME487
+                  AmountLCY := '';
+                END;
+
+                WageComponent."Component Type"::Days: BEGIN
+                  TotLine := FORMAT(PHLine.Quantity,0,9);  //IME487
+                  AmountLCY := '';
+                END;
+
+                WageComponent."Component Type"::Expenses: BEGIN
+                  TotLine := FORMAT(PHLine.Quantity,0,9);
+                  //>>ITERO.PR 160105
+                  IF JobSetup."No Kilometer Amount To AGDA" THEN BEGIN
+                    IF WageComponent."Kilometer Expense" THEN BEGIN
+                      AmountLCY := '';
+                    END ELSE BEGIN
+                      AmountLCY := FORMAT(PHLine."Amount (LCY)", 0, 9);
+                    END;
+                  END ELSE BEGIN
+                  //<<ITERO.PR 160105
+                    AmountLCY := FORMAT(PHLine."Amount (LCY)", 0, 9);
+                  END;
+                //190605 ORANGO.EE >>
+                  IF SESetup.GET(SESetup."Line type"::Setup,'AGDA','EXPENSE') THEN
+                    IF SESetup."Value (bool)" THEN
+                      AmountLCY := FORMAT(PHLine."Unit Cost (LCY)");
+                END;
+
+                WageComponent."Component Type"::"Expense hours": BEGIN
+                  TotLine := FORMAT(PHLine."Total Line",0,9);  //IME487
+      //>>RFC1271
+      //            AmountLCY := FORMAT(PHLine."Amount (LCY)", 0, 9);
+                  AmountLCY := FORMAT(PHLine."Unit Cost (LCY)");
+      //<<RFC1271
+                END;
+              END; //4PSSE.n 180319
+            // 140312 ENH022 <<
+            lvTeamCode := PHLine."Team Code";
+            IF (PHLine.Type = PHLine.Type::Indirect) THEN
+               lvTeamCode := '';
+            IF Employee.UTA THEN
+               lvTeamCode := '';
+            // 140312 ENH022 >>
+
+          //>>SC004131
+            CASE PHLine.Type OF
+              PHLine.Type::Project:
+              //190709 ORANGO.EE BYGG >>
+              IF SESetup.GET(SESetup."Line type"::Setup, 'PROJECTNO','COMMA')  AND SESetup."Value (bool)" = TRUE THEN
+                lvExportNo := DELCHR(PHLine."Project No.",'=',DELCHR(PHLine."Project No.", '=', '1234567890'))
+              ELSE
+                //<<
+                lvExportNo := PHLine."Project No.";
+              PHLine.Type::Service:  lvExportNo := PHLine."Service Order No.";
+              PHLine.Type::Indirect: lvExportNo := '';
+            END;
+          //<<SC004131
+
+            IF Value = '' THEN
+              Value := PHLine."Department Code Employee";
+            OutStr.WRITETEXT(SEUtils.Ascii2Ansi(HumanResourcesSetup."Delivering Company (SCAB)")
+              +';' +SEUtils.Ascii2Ansi(Employee."Salary No.")
+              +';' +SEUtils.Ascii2Ansi(PHLine."Wage Component")
+          //    +';' +SEUtils.Ascii2Ansi(PHLine."Project No.")  //[INC #127685]
+              +';' +SEUtils.Ascii2Ansi(lvExportNo)
+              +';' +SEUtils.Ascii2Ansi(Value)
+              +';' +TotLine
+          //>>141103 ENH050
+          //    +';' +FORMAT(PHLine."Posting Date", 0, 9)
+              +';' +FORMAT(PHLine."Actual date of line", 0, 9)
+          //<<141103 ENH050
+              +';' +AmountLCY
+              +';' +SEUtils.Ascii2Ansi(lvTeamCode) // 140312 Replaced PHLine."Team Code" with lvTeamCode.
+              +FORMAT(CR) + FORMAT(LF)
+             );
+             // 140312 ENH022 <<
+             IF (lvWageCompSalaryApplication.GET(PHLine."Wage Component")) THEN BEGIN
+               IF (lvWageCompSalaryApplication."Generate Additional Line" = lvWageCompSalaryApplication."Generate Additional Line"::Always)
+                  OR
+                  ((lvWageCompSalaryApplication."Generate Additional Line" = lvWageCompSalaryApplication."Generate Additional Line"::"Non-UTA") AND (Employee.UTA = FALSE))
+               THEN BEGIN
+                OutStr.WRITETEXT(SEUtils.Ascii2Ansi(HumanResourcesSetup."Receiving Company (SCAB)")
+                  +';' +SEUtils.Ascii2Ansi(Employee."Salary No.")
+                  +';' +SEUtils.Ascii2Ansi(lvWageCompSalaryApplication."Wage Component Additional Line")
+                  +';' +SEUtils.Ascii2Ansi(lvExportNo)  //[INC #127685]
+                  +';' +SEUtils.Ascii2Ansi(Value)
+                  +';' +TotLine
+        //>>141103 ENH050
+        //    +';' +FORMAT(PHLine."Posting Date", 0, 9)
+            +';' +FORMAT(PHLine."Actual date of line", 0, 9)
+        //<<141103 ENH050
+                  +';' +AmountLCY
+                  +';' +SEUtils.Ascii2Ansi(lvTeamCode)
+                  +FORMAT(CR) + FORMAT(LF)
+                  );
+               END;
+             END;
+             // 140312 ENH022 >>
+
+              PHLine2.GET(PHLine.Year,PHLine.Week,PHLine."Employee No.",PHLine."Line No.");
+              PHLine2.Exported := TRUE;
+              PHLine2."Exported on" := CURRENTDATETIME;
+              PHLine2.MODIFY;
+             END; //4PSSE.n 180319
+           //4PSSE 1805121
+          END; //4PSSE.n 180319
+        UNTIL PHLine.NEXT = 0 END ELSE BEGIN
+          NoTimeExported := TRUE;
+      END;
+
+      IF NOT NoTimeExported THEN BEGIN
+        FileMgmt.BLOBExport4PS(TempBlob, Filename, FALSE, FALSE);
+      END;
+
+      CLEAR(TempBlob.Blob);
+
+      COMMIT; //IME421
+    END;
+
+    PROCEDURE ExportAbsence@1100285002();
+    VAR
+      lvTeamCode@1100285500 : Code[20];
+    BEGIN
+      // Exports AGDA abscence to a file
+      //>>161129
+      CR := 13;
+      LF := 10;
+      //<<161129
+      HumanResourcesSetup.GET;
+      TempBlob.Blob.CREATEOUTSTREAM(OutStr);
+
+      Filename := HumanResourcesSetup."Pathname Files to Salary" + 'AGDA-TidFranvaro-' + DELCHR(FORMAT(TODAY), '=', '-') + '_' + DELCHR(FORMAT(TIME), '=', ':') + '.txt';
+
+      PHLine.RESET;
+      IF (EmployerFilter <> '') THEN
+         PHLine.SETFILTER(Employer, EmployerFilter);
+      IF (DocumentFilter <> '') THEN
+         PHLine.SETFILTER("Document No.", DocumentFilter);
+      //>>140131 ENH010
+      IF (gDateFilter <> '') THEN
+      //>>141103 ENH050
+      //   PHLine.SETFILTER("Posting Date", gDateFilter);
+         PHLine.SETFILTER("Actual date of line", gDateFilter);
+      //<<141103 ENH050
+      //<<140131 ENH010
+      IF (OnlyNotExported) THEN
+         PHLine.SETRANGE(Exported,FALSE);
+
+      PHLine.SETFILTER("Leave Type",'<>''''');
+      IF PHLine.FINDSET(TRUE) THEN REPEAT
+        Employee.GET(PHLine."Employee No.");
+        IF Value = '' THEN
+          Value := PHLine."Department Code Employee";
+
+        // 140317 ENH022 <<
+        lvTeamCode := PHLine."Team Code";
+        IF (PHLine.Type = PHLine.Type::Indirect) THEN
+           lvTeamCode := '';
+        IF (Employee.UTA) THEN
+           lvTeamCode := '';
+        // 140317 ENH022 >>
+
+
+        OutStr.WRITETEXT(SEUtils.Ascii2Ansi(HumanResourcesSetup."Delivering Company (SCAB)"
+          +';' +Employee."Salary No."
+          +';' +PHLine."Wage Component"
+          +';' +PHLine."Project No."
+          +';' +Value
+          //+';' +FORMAT(PHLine."Total Line")  //IME487
+          +';' +FORMAT(PHLine."Total Line",0,9)  //IME487
+      //>>141103 ENH050
+      //    +';' +FORMAT(PHLine."Posting Date", 0, 9)
+          +';' +FORMAT(PHLine."Actual date of line", 0, 9)
+      //<<141103 ENH050
+          +';' +lvTeamCode // 140317
+          + FORMAT(CR) + FORMAT(LF)
+        ));
+      //  Nothing := FALSE;                          //140214
+         PHLine.Exported := TRUE;
+         PHLine."Exported on" := CURRENTDATETIME;
+         PHLine.MODIFY();
+      UNTIL PHLine.NEXT() = 0 ELSE
+         NoAbscenceExported := TRUE;                //140214
+
+
+      IF NOT (NoAbscenceExported) THEN BEGIN        //140214
+         FileMgmt.BLOBExport4PS(TempBlob, Filename, FALSE, FALSE);
+      END;
+
+      CLEAR(TempBlob.Blob);
+
+      COMMIT; //IME421
+    END;
+
+    PROCEDURE ImportNamePhoneEmail@1100285100();
+    VAR
+      ImportEmplPhoneEmail@1100285100 : XMLport 11128023;
+      DirectoryInfo@1000000008 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.DirectoryInfo";
+      FileInfo@1000000007 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.FileInfo";
+      List@1000000006 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Collections.Generic.List`1";
+      enumerator@1000000005 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Collections.IEnumerator";
+      errText@1000000004 : Text;
+      varXmlFile@1000000001 : File;
+      varInputStream@1000000000 : InStream;
+    BEGIN
+      //RFC112
+      JobSetup.GET;
+      HumanResourcesSetup.GET;
+      HumanResourcesSetup.TESTFIELD("Pathname Files from Salary");
+      HumanResourcesSetup.TESTFIELD("Pathname Salary Backup Files");
+
+      ImportEmplPhoneEmail.TEXTENCODING := TEXTENCODING::Windows;
+
+      DirectoryInfo := DirectoryInfo.DirectoryInfo(HumanResourcesSetup."Pathname Files from Salary");
+      //List := DirectoryInfo.GetFiles('*.xml');
+      List := DirectoryInfo.GetFiles('*_export_user_data_to4ps.txt');
+      enumerator := List.GetEnumerator();
+
+      WHILE enumerator.MoveNext DO BEGIN
+        FileInfo:= enumerator.Current();
+        varXmlFile.OPEN(FileInfo.FullName);
+        varXmlFile.CREATEINSTREAM(varInputStream);
+        ImportEmplPhoneEmail.SetFileName(FileInfo.FullName);
+        ImportEmplPhoneEmail.SETSOURCE(varInputStream);
+        IF ImportEmplPhoneEmail.IMPORT THEN BEGIN
+          varXmlFile.CLOSE;
+          //move to archive
+          IF (HumanResourcesSetup."Pathname Files from Salary" <> HumanResourcesSetup."Pathname Salary Backup Files") THEN BEGIN
+            IF EXISTS(HumanResourcesSetup."Pathname Salary Backup Files" + FileInfo.Name) THEN
+              ERASE(HumanResourcesSetup."Pathname Salary Backup Files" + FileInfo.Name);
+            FileInfo.MoveTo(HumanResourcesSetup."Pathname Salary Backup Files" + FileInfo.Name);
+          END;
+        END
+        ELSE BEGIN
+          varXmlFile.CLOSE;
+          //move to error-folder
+          IF EXISTS(HumanResourcesSetup."Pathname Salary Backup Files" + '\Error\' + FileInfo.Name) THEN
+            ERASE(HumanResourcesSetup."Pathname Salary Backup Files" + '\Error\' + FileInfo.Name);
+          FileInfo.MoveTo(HumanResourcesSetup."Pathname Salary Backup Files" + '\Error\' + FileInfo.Name);
+
+          //ERROR('Failed to read '+FileInfo.FullName);
+          //SymbrioErrorLog.InsertNewErrorLine('Failed to read '+FileInfo.Name,'ImportOrders','')
+        END;
+        COMMIT;
+      END;
+    END;
+
+    PROCEDURE FillLogBook@33();
+    VAR
+      LineNoInt@1100285000 : Integer;
+    BEGIN
+      ExportedHour.RESET;
+      IF ExportedHour.FIND('+') THEN
+        LineNoInt := ExportedHour."Line No." + 1
+      ELSE
+        LineNoInt := 1;
+
+      ExportedHour.INIT;
+      ExportedHour."Line No." := LineNoInt;
+      ExportedHour."Document No." :=  PHLine."Document No.";
+      ExportedHour."User ID" := USERID;
+      ExportedHour.Date := TODAY;
+      ExportedHour.Time := TIME;
+      ExportedHour.INSERT;
+    END;
+
+    BEGIN
+    {
+
+      130923 ** MH ** Hotfix: Fixed wrong †„” when exporting. + Emplyee No.
+      131015 ** MH ** Major Hotfix: Seperated all functions - added call from report - added filter possiblity. Modified export variables
+      131107 ** MH ** Hotfix
+      140129 ITERO.DJ ENH010 added Datefilter to ExportAgda/ExportTime
+      140131 ITERO.DJ ENH010 same datefilter on abscence
+      140214 ITERO.MH Exported Hours Only in Time
+      140312 ITERO.MH ENH022 Team Code not exported
+      140317 ITERO.MH ENHO22 Team Code not exporterd (indirect hours)
+      140408 ITERO.DL ENH032 added JobSetup."Delivering Company (SCAB)"+FORMAT(TAB)  to ExportAGDADimension
+      141103 ITERO.WG ENH050 changed Posting Date to Actual Date Of Line
+      150427 ITERO.WG CleanTextFromNonPrintable(Job.Description)
+      151015 ITERO.WG SC004131 Added export of Service orders
+      151015 ITERO.WG IME421 added commit after export.
+      160105 ITERO.PR Added code if Jobs Setup."Kilometer Amount To AGDA"
+      160830 ITERO.DL RFC112 import contact data from AGDA
+      160927 ITERO.DL IME487 moved/updated Ansi2Ascii,Ascii2Ansi to cod11128000
+                             Fel i exportfiler (tid) till Agda
+      161129 ITERO.DL wrong file format if functions are called separatly
+      170630 ITERO.DL [INC #127685] dual columns during export ExportTime()
+      180229 ITERO.PR New Code for CAO
+      180327 ITERO.WG Change in export expenses
+      180521 ITERO.PR New Code - If JobSetup."CAO AGDA Abcence" = '' and JobSetup."CAO AGDA Overtime Expence" = ''
+      190605 ORANGO.EE Possibility to send Unit Cost insted of Total Amount in file
+      190709 ORANGO.EE New code for including only numbers in AGDA
+      190923 ORANGO.DL RFC226 #25845 handle WageComponent."Component Type"::Addition same as WageComponent."Component Type"::Hours
+      200113 ORANGO.DL RFC1271 alter values in export after RFC226
+    }
+    END.
+  }
+}
+

@@ -1,0 +1,405 @@
+OBJECT Codeunit 11012454 Document Portal WS
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      OK@1100525002 : TextConst 'ENU=Ok;NOR=OK;SVE=OK';
+      NOK@1100528302 : TextConst 'ENU=Not Ok';
+      Text000@1100525000 : TextConst 'ENU=Document cannot be updated (%1 must be filled).';
+      Text001@1100528300 : TextConst 'ENU=Modified in Document Portal.';
+      Text005@1100525001 : TextConst 'ENU=Portal Type can not be determined.;SVE=Portaltyp kan ej avg”ras.';
+      DPTSetup@1100525006 : Record 11229823;
+      DPTType@1100525005 : 'Unknown,Project,ServiceLocation';
+      SHAREPOINTSPLITSTRING@1100527800 : TextConst 'ENU=";#";SVE=";#"';
+      VendorNotFoundTxt@1100527801 : TextConst 'ENU=%1 %2 not found in %3.';
+
+    [External]
+    PROCEDURE TestOK@1100528302() : Text;
+    BEGIN
+      EXIT(OK);
+    END;
+
+    [External]
+    PROCEDURE TestNOK@1100528332() : Text;
+    BEGIN
+      ERROR(NOK);
+    END;
+
+    [External]
+    PROCEDURE DeleteDocument@1100529402(SourceType@1100525000 : Integer;NAVDocumentNo@1100528304 : Code[20];WebLink@1100528300 : Text) : Text;
+    VAR
+      DocumentProperties@1100528303 : Record 11012746;
+      DocumentLink@1100528302 : Record 11012747;
+    BEGIN
+      DPTType := SourceType;
+      CheckLicense;
+
+      IF (NAVDocumentNo <> '') THEN BEGIN
+        DocumentProperties.GET(NAVDocumentNo);
+        DocumentLink.SETRANGE("Document No.", DocumentProperties."No.");
+        DocumentLink.DELETEALL;
+        DocumentProperties.DELETE;
+      END ELSE BEGIN
+        DocumentProperties.SETRANGE("Web link", WebLink);
+        IF (DocumentProperties.FINDSET(TRUE, TRUE)) THEN BEGIN
+          REPEAT
+            DocumentLink.SETRANGE("Document No.", DocumentProperties."No.");
+            DocumentLink.DELETEALL;
+            DocumentProperties.DELETE;
+          UNTIL (DocumentProperties.NEXT = 0);
+        END;
+      END;
+      EXIT(OK);
+    END;
+
+    [External]
+    PROCEDURE GetNewDocumentNo@1100528321(SourceType@1100525000 : Integer) : Code[20];
+    VAR
+      DocumentMgtSetup@1100525001 : Record 11071831;
+      NoSeriesMgt@1100525002 : Codeunit 396;
+    BEGIN
+      DPTType := SourceType;
+      CheckLicense;
+
+      DocumentMgtSetup.GET;
+      DocumentMgtSetup.TESTFIELD("External Document Nos.");
+      EXIT(NoSeriesMgt.GetNextNo(DocumentMgtSetup."External Document Nos.", TODAY, TRUE));
+    END;
+
+    [External]
+    PROCEDURE SendPurchaseActionReminderMail@1100527800(ProjectNo@1100527800 : Code[20];PurchaseActionCode@1100527801 : Code[20];ContactNo@1100527802 : Code[20]) : Text;
+    VAR
+      Contact@1100527805 : Record 5050;
+      VendorsbyPurchaseAction@1100527803 : Record 11012068;
+      CTRLProcessManagement@1100528300 : Codeunit 11012495;
+      MailTemplateNo@1100527806 : Integer;
+    BEGIN
+      IF (NOT VendorsbyPurchaseAction.GetVendorPurchActionByContactNo(0, ProjectNo, PurchaseActionCode, ContactNo)) THEN
+        ERROR(VendorNotFoundTxt, Contact.TABLECAPTION, ContactNo, VendorsbyPurchaseAction.TABLECAPTION);
+      IF (VendorsbyPurchaseAction."Contact Person No." <> '') THEN
+        Contact.GET(VendorsbyPurchaseAction."Contact Person No.")
+      ELSE
+        Contact.GET(ContactNo);
+      Contact.TESTFIELD("E-Mail 2");
+      MailTemplateNo := 50;  //DPTQuoteReminder
+
+      CTRLProcessManagement.AddMailEvent(VendorsbyPurchaseAction.RECORDID, MailTemplateNo);
+      EXIT(OK);
+    END;
+
+    [External]
+    PROCEDURE SyncAuthorityPermissions@1100528301(SourceType@1100525001 : Integer;SourceNo@1100528302 : Code[20];ContactNo@1100528300 : Code[20];ContactPersonNo@1100528301 : Code[20]) : Text;
+    BEGIN
+      DPTType := SourceType;
+      CheckLicense;
+
+      CASE DPTType OF
+        DPTType::Project:
+          SyncAuthorityPermissionsProject(SourceNo, ContactNo, ContactPersonNo);
+        DPTType::ServiceLocation:
+          SyncAuthorityPermissionsServiceLocation(SourceNo, ContactNo, ContactPersonNo);
+        ELSE
+          ERROR(Text005);
+      END;
+      EXIT(OK);
+    END;
+
+    [External]
+    PROCEDURE SyncDocument@1100528322(SourceType@1100525003 : Integer;SourceNo@1100525005 : Code[20];NAVDocumentNo@1100525000 : Code[20];Description@1100528301 : Text[50];SubsiteCode@1100528303 : Code[20];DocumentTypeCode@1100528302 : Code[50];CompanyId@1100528304 : Text[50];Version@1100525002 : Text[10];WebLink@1100528307 : Text[250];ProjectElementCode@1100528315 : Code[20];ContactNo@1100528320 : Code[20];ContactPersonNo@1100528314 : Code[20];UserId@1100528316 : Code[50];UserInternalExternal@1100525001 : Text[10];CreatedBy@1100528313 : Text[132];CreatedOn@1100528312 : Text[20];DocumentDate@1100528309 : Text[10];DocModificationDate@1100528311 : Text[10];DocumentNo@1100528318 : Code[20];StatusId@1100528319 : Integer;Remark@1100529400 : Text;PlotNo@1100527800 : Text) : Code[20];
+    VAR
+      DocumentProperties@1100528306 : Record 11012746;
+      Job@1100528300 : Record 11072003;
+      ServiceLocation@1100525004 : Record 11012801;
+      RecRef@1100528308 : RecordRef;
+      IsNewDocument@1100528317 : Boolean;
+      Plot@1100527801 : Record 11012500;
+    BEGIN
+      DPTType := SourceType;
+      CheckLicense;
+      IF (SourceNo = '') THEN
+        ERROR(Text000, 'SourceNo');
+
+      IsNewDocument := FALSE;
+      IF (NAVDocumentNo = '') THEN
+        NAVDocumentNo := GetNewDocumentNo(DPTType);
+      IF (NOT DocumentProperties.GET(NAVDocumentNo)) THEN BEGIN
+        DocumentProperties.INIT;
+        DocumentProperties."No." := NAVDocumentNo;
+        DocumentProperties."External Document" := TRUE;
+        DocumentProperties."Document Type" := DocumentTypeCode;
+        DocumentProperties.INSERT(TRUE);
+        IsNewDocument := TRUE;
+      END;
+
+      CASE DPTType OF
+        DPTType::Project: BEGIN
+          Job.GET(SourceNo);
+          RecRef.GETTABLE(Job);
+        END;
+        DPTType::ServiceLocation: BEGIN
+          ServiceLocation.GET(SourceNo);
+          RecRef.GETTABLE(ServiceLocation);
+        END;
+      END;
+
+      DocumentProperties.SetDPTFields(RecRef.RECORDID);
+      UpdateDocumentProperties(DocumentProperties, SourceNo, Description, SubsiteCode, DocumentTypeCode, CompanyId, WebLink,
+        ProjectElementCode, ContactNo, ContactPersonNo, UserId, UserInternalExternal, CreatedBy, CreatedOn, DocumentDate,
+        DocModificationDate, DocumentNo, StatusId);
+
+      IF (IsNewDocument) THEN BEGIN
+        CASE DPTType OF
+          DPTType::Project:
+            DocumentProperties.CreateDocumentLink(RecRef.RECORDID);
+          DPTType::ServiceLocation:
+            DocumentProperties.CreateDocumentLink(RecRef.RECORDID);
+        END;
+      END;
+
+      IF (DPTType = DPTType::Project) THEN BEGIN
+        Job.GET(SourceNo);
+        RecRef.GETTABLE(Job);
+        CreatePlotDocumentLinks(DocumentProperties,PlotNo,SourceNo);
+      END;
+
+      IF (Version <> '') THEN
+        UpdateDocumentVersion(SourceType, SourceNo, DocumentProperties."No.", Version, FALSE, '');
+      IF (Remark <> '') THEN
+        UpdateDocumentRemark(DocumentProperties."No.", Remark);
+
+      EXIT(DocumentProperties."No.");
+    END;
+
+    LOCAL PROCEDURE "---Locals---"@1100528325();
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE CheckLicense@1100528300();
+    BEGIN
+      DPTSetup.GET;
+      DPTSetup.TESTFIELD("Portal URL");
+      CASE DPTType OF
+        DPTType::Project:
+          DPTSetup.TESTFIELD("Use Project Portal", TRUE);
+        DPTType::ServiceLocation:
+          DPTSetup.TESTFIELD("Use Location Portal", TRUE);
+        ELSE ERROR(Text005);
+      END;
+    END;
+
+    LOCAL PROCEDURE DeleteDocumentCommentLines@1100525015(DocumentNo@1100529400 : Code[20]);
+    VAR
+      CommentLine@1100529401 : Record 97;
+    BEGIN
+      CommentLine.SETRANGE("Table Name", CommentLine."Table Name"::"Document Properties");
+      CommentLine.SETRANGE("No.", DocumentNo);
+      CommentLine.DELETEALL;
+    END;
+
+    LOCAL PROCEDURE SetDocumentModificationDate@1100528342(DocumentProperties@1100528300 : Record 11012746);
+    VAR
+      DocumentModificationDate@1100528303 : Record 11012406;
+      LastLineNo@1100528304 : Integer;
+    BEGIN
+      DocumentModificationDate.SETRANGE("Document No.", DocumentProperties."No.");
+      IF (DocumentModificationDate.FINDLAST) THEN
+        LastLineNo := DocumentModificationDate."Line No."
+      ELSE
+        DocumentModificationDate.INIT;
+
+      IF (DocumentModificationDate.Date <> DocumentProperties."Modification Date") THEN BEGIN
+        DocumentModificationDate.INIT;
+        DocumentModificationDate."Document No." := DocumentProperties."No.";
+        DocumentModificationDate."Line No." := LastLineNo + 10000;
+        DocumentModificationDate.Date := DocumentProperties."Modification Date";
+        DocumentModificationDate.Comment := STRSUBSTNO(Text001);
+        DocumentModificationDate.INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE SetDocumentUser@1100528343(VAR DocumentProperties@1100525002 : Record 11012746;UserId@1100525001 : Code[50];InternalExternal@1100525000 : Text[10]);
+    VAR
+      Employee@1100525003 : Record 5200;
+      UserSetup@1100525004 : Record 91;
+      Contact@1100525005 : Record 5050;
+      DocumentPortalManagement@1100528300 : Codeunit 11012203;
+    BEGIN
+      CASE InternalExternal OF
+        DocumentPortalManagement.GetInternTxt: BEGIN
+          IF (Employee.GET(UserId)) THEN BEGIN
+            UserSetup.SETRANGE("Employee No.", UserId);
+            IF (NOT UserSetup.FINDFIRST) THEN
+              UserSetup."User ID" := UserId;
+            DocumentProperties."User ID" := UserSetup."User ID";
+            DocumentProperties.Editor := Employee."No.";
+          END;
+        END;
+        DocumentPortalManagement.GetExternTxt: BEGIN
+          IF (Contact.GET(UserId)) THEN BEGIN
+            DocumentProperties.Sender := Contact."No.";
+          END;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateDocumentProperties@1100525012(VAR DocumentProperties@1100525003 : Record 11012746;SourceNo@1100525000 : Code[20];Description@1100528301 : Text[50];SubsiteCode@1100528303 : Code[20];DocumentTypeCode@1100528302 : Code[50];CompanyId@1100528304 : Text[50];WebLink@1100528307 : Text[250];ProjectElementCode@1100528315 : Code[20];ContactNo@1100528320 : Code[20];ContactPersonNo@1100528314 : Code[20];UserId@1100528316 : Code[50];UserInternalExternal@1100525001 : Text[10];CreatedBy@1100528313 : Text[132];CreatedOn@1100528312 : Text[20];DocumentDate@1100528309 : Text[10];ModificationDate@1100528311 : Text[10];DocumentNo@1100528318 : Code[20];StatusId@1100528319 : Integer) : Code[20];
+    VAR
+      XMLFormat4PS@1100528310 : Codeunit 11020221;
+      DocModificationDate@1100528321 : Date;
+    BEGIN
+      DocumentProperties.Description := Description;
+      DocumentProperties."Document Portal Subsite" := SubsiteCode;
+      DocumentProperties."Document Type" := DocumentTypeCode;
+      DocumentProperties."Web link" := WebLink;
+      DocumentProperties."Storage Type" := DocumentProperties."Storage Type"::DPTDUAL;
+      IF (DPTType = DPTType::Project) THEN
+        DocumentProperties."Project Element" := ProjectElementCode;
+      DocumentProperties."Document Portal Private Doc" := (CompanyId <> '');
+      DocumentProperties."Document No." := DocumentNo;
+      DocumentProperties.Status := StatusId;
+      DocumentProperties."Contact No." := ContactNo;
+      DocumentProperties."Contact Person No." := ContactPersonNo;
+      IF (STRLEN(CreatedOn) >= 19) THEN
+        XMLFormat4PS.EvaluateDateAndTime(CreatedOn, DocumentProperties."Creation Date",
+          DocumentProperties."Creation Time");
+
+      XMLFormat4PS.EvaluateDate(DocumentDate, DocumentProperties."Document Date");
+      XMLFormat4PS.EvaluateDate(ModificationDate, DocModificationDate);
+      SetDocumentUser(DocumentProperties, UserId, UserInternalExternal);
+
+      DocumentProperties.FillModificationData;
+      SetDocumentModificationDate(DocumentProperties);
+
+      DocumentProperties.MODIFY;
+    END;
+
+    LOCAL PROCEDURE UpdateDocumentRemark@1100525013(DocumentNo@1100529401 : Code[20];Remark@1100529400 : Text);
+    VAR
+      CommentLine@1100529403 : Record 97;
+      StringFunctions@1100529405 : Codeunit 11012273;
+      TmpTextString@1100529404 : Text;
+      SpacePos@1100529406 : Integer;
+      LastLineNo@1100529407 : Integer;
+    BEGIN
+      DeleteDocumentCommentLines(DocumentNo);
+      IF (Remark = '') THEN
+        EXIT;
+
+      LastLineNo := 0;
+      REPEAT
+        TmpTextString := COPYSTR(Remark, 1, MAXSTRLEN(CommentLine.Comment));
+        SpacePos := StringFunctions.RSTRPOS(TmpTextString, ' ');
+        IF (SpacePos < 0) THEN
+            SpacePos := STRLEN(Remark);
+        LastLineNo += 10000;
+        CommentLine.INIT;
+        CommentLine."Table Name" := CommentLine."Table Name"::"Document Properties";
+        CommentLine."No." := DocumentNo;
+        CommentLine.Comment := COPYSTR(Remark, 1, SpacePos);
+        CommentLine."Line No." := LastLineNo;
+        CommentLine.Date := TODAY;
+        CommentLine.INSERT(TRUE);
+        Remark := COPYSTR(Remark, SpacePos + 1);
+      UNTIL (Remark = '');
+    END;
+
+    LOCAL PROCEDURE UpdateDocumentVersion@1100528345(SourceType@1100529900 : Option;SourceCode@1100525003 : Code[20];DocumentNo@1100525000 : Code[20];Version@1100525001 : Text[10];Published@1100525002 : Boolean;WebLink@1100525004 : Text[250]);
+    VAR
+      DPTDocumentVersion@1100529400 : Record 11229944;
+    BEGIN
+      IF (NOT DPTDocumentVersion.GET(SourceType, SourceCode, DocumentNo, Version)) THEN BEGIN
+        DPTDocumentVersion.INIT;
+        DPTDocumentVersion."Source Type" := SourceType;
+        DPTDocumentVersion."Source Code" := SourceCode;
+        DPTDocumentVersion."Document No." := DocumentNo;
+        DPTDocumentVersion.Version := Version;
+        DPTDocumentVersion.INSERT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE SyncAuthorityPermissionsProject@1100525000(SourceNo@1100528302 : Code[20];ContactNo@1100528300 : Code[20];ContactPersonNo@1100528301 : Code[20]) : Text;
+    VAR
+      Job@1100528306 : Record 11072003;
+      ProjectAuthority@1100528305 : Record 11020216;
+      DPTEventLog@1100528303 : Record 11229822;
+      SeqNo@1100528304 : Integer;
+    BEGIN
+      Job.GET(SourceNo);
+      IF (NOT Job.IsDocumentPortalDualProject) THEN
+        EXIT;
+
+      ProjectAuthority.SETRANGE("Project No.", SourceNo);
+      ProjectAuthority.SETRANGE("Contact No.", ContactNo);
+      ProjectAuthority.SETRANGE("Contact Person No.", ContactPersonNo);
+      IF (ProjectAuthority.FINDFIRST) THEN BEGIN
+        SeqNo := DPTEventLog.AddEventLog(DPTEventLog.GetSyncAuthorityText, 1, Job."No.", Job.RECORDID, Job.RECORDID);
+        DPTEventLog.AddEventLogParameter(SeqNo, DATABASE::"Project Authority", ProjectAuthority.FIELDNO("Contact No."),
+          ProjectAuthority."Contact No.");
+        DPTEventLog.AddEventLogParameter(SeqNo, DATABASE::"Project Authority", ProjectAuthority.FIELDNO("Contact Person No."),
+          ProjectAuthority."Contact Person No.");
+      END;
+    END;
+
+    LOCAL PROCEDURE SyncAuthorityPermissionsServiceLocation@1100525001(SourceNo@1100528302 : Code[20];ContactNo@1100528300 : Code[20];ContactPersonNo@1100528301 : Code[20]) : Text;
+    VAR
+      ServiceLocation@1100528306 : Record 11012801;
+      ServiceAuthorityDPT@1100528305 : Record 11072298;
+      DPTEventLog@1100528303 : Record 11229822;
+      SeqNo@1100528304 : Integer;
+    BEGIN
+      ServiceLocation.GET(SourceNo);
+      IF (NOT ServiceLocation.IsDocumentPortalServiceLocation) THEN
+        EXIT;
+
+      ServiceAuthorityDPT.SETRANGE("Source Type", ServiceAuthorityDPT."Source Type"::ServLocation);
+      ServiceAuthorityDPT.SETRANGE("Source Code", SourceNo);
+      ServiceAuthorityDPT.SETRANGE("Contact No.", ContactNo);
+      ServiceAuthorityDPT.SETRANGE("Contact Person No.", ContactPersonNo);
+      IF (ServiceAuthorityDPT.FINDFIRST) THEN BEGIN
+        SeqNo := DPTEventLog.AddEventLog(DPTEventLog.GetSyncAuthorityText, 2, ServiceLocation."No.", ServiceLocation.RECORDID, ServiceLocation.RECORDID);
+        DPTEventLog.AddEventLogParameter(SeqNo, DATABASE::"Service Authority DPT", ServiceAuthorityDPT.FIELDNO("Contact No."),
+          ServiceAuthorityDPT."Contact No.");
+        DPTEventLog.AddEventLogParameter(SeqNo, DATABASE::"Service Authority DPT", ServiceAuthorityDPT.FIELDNO("Contact Person No."),
+          ServiceAuthorityDPT."Contact Person No.");
+      END;
+    END;
+
+    LOCAL PROCEDURE CreatePlotDocumentLinks@1100525006(VAR DocumentProperties@1100525000 : Record 11012746;VAR PlotNumbers@1100525001 : Text;ProjectNo@1100525005 : Code[20]);
+    VAR
+      Plots@1100525003 : ARRAY [100] OF Text;
+      StringFunctions@1100525002 : Codeunit 11012273;
+      i@1100525004 : Integer;
+      Plot@1100525006 : Record 11012500;
+      DocumentLink@1100527800 : Record 11012747;
+    BEGIN
+
+      StringFunctions.SplitString(PlotNumbers,SHAREPOINTSPLITSTRING,Plots);
+
+      DocumentLink.SETRANGE("Document No.",DocumentProperties."No.");
+      DocumentLink.SETRANGE("Table No.",DATABASE::Plot);
+      DocumentLink.DELETEALL;
+
+      FOR i:= 1 TO ARRAYLEN(Plots) DO BEGIN
+          IF (Plot.GET(ProjectNo,Plots[i])) THEN BEGIN
+            DocumentProperties.CreateDocumentLink(Plot.RECORDID);
+          END;
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

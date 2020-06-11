@@ -1,0 +1,219 @@
+OBJECT Table 1432 Net Promoter Score Setup
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.00;
+  }
+  PROPERTIES
+  {
+    DataPerCompany=No;
+    CaptionML=[ENU=Net Promoter Score Setup;
+               NOR=Poengoppsett for anbefalingssystem;
+               SVE=Inst„llningar f”r kundlojalitetsindex];
+  }
+  FIELDS
+  {
+    { 1   ;   ;Primary Key         ;Code10        ;DataClassification=SystemMetadata;
+                                                   CaptionML=[ENU=Primary Key;
+                                                              NOR=Prim‘rn›kkel;
+                                                              SVE=Prim„rnyckel] }
+    { 2   ;   ;API URL             ;BLOB          ;DataClassification=SystemMetadata;
+                                                   CaptionML=[ENU=API URL;
+                                                              NOR=URL-adresse for API;
+                                                              SVE=API-URL] }
+    { 3   ;   ;Expire Time         ;DateTime      ;DataClassification=SystemMetadata;
+                                                   CaptionML=[ENU=Expire Time;
+                                                              NOR=Utl›pstid] }
+    { 4   ;   ;Time Between Requests;Integer      ;ObsoleteState=Removed;
+                                                   ObsoleteReason=This field is not needed and it is not used anymore.;
+                                                   CaptionML=[ENU=Time Between Requests;
+                                                              NOR=Tid mellom foresp›rsler] }
+    { 5   ;   ;Request Timeout     ;Integer       ;DataClassification=SystemMetadata;
+                                                   CaptionML=[ENU=Request Timeout;
+                                                              NOR=Foresp›rselen ble tidsavbrutt] }
+  }
+  KEYS
+  {
+    {    ;Primary Key                             ;Clustered=Yes }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+    VAR
+      NpsApiUrlTxt@1002 : TextConst '@@@={Locked};ENU=NpsApiUrl;NOR=NpsApiUrl';
+      NpsRequestTimeoutTxt@1000 : TextConst '@@@={Locked};ENU=NpsRequestTimeout;NOR=NpsRequestTimeout';
+      NpsCacheLifeTimeTxt@1001 : TextConst '@@@={Locked};ENU=NpsCacheLifeTime;NOR=NpsCacheLifeTime';
+      NpsParametersTxt@1003 : TextConst '@@@={Locked};ENU=NpsParameters;NOR=NpsParameters';
+      NpsCategoryTxt@1004 : TextConst '@@@={Locked};ENU=AL NPS Prompt;NOR=AL NPS Prompt';
+      SecretNotFoundMsg@1005 : TextConst '@@@={Locked};ENU=Secret %1 is not found.;NOR=Secret %1 is not found.';
+      ParameterNotFoundMsg@1006 : TextConst '@@@={Locked};ENU=Parameter %1 is not found.;NOR=Parameter %1 is not found.';
+
+    [Internal]
+    PROCEDURE GetApiUrl@2() : Text;
+    VAR
+      InStream@1000 : InStream;
+      ApiUrl@1001 : Text;
+    BEGIN
+      SetApiUrl;
+
+      IF NOT GET THEN
+        EXIT('');
+
+      ApiUrl := '';
+      CALCFIELDS("API URL");
+      IF "API URL".HASVALUE THEN BEGIN
+        "API URL".CREATEINSTREAM(InStream);
+        InStream.READ(ApiUrl);
+      END;
+      EXIT(ApiUrl);
+    END;
+
+    LOCAL PROCEDURE SetApiUrl@8();
+    VAR
+      AzureKeyVaultManagement@1001 : Codeunit 2200;
+      OutStream@1005 : OutStream;
+      ApiUrl@1003 : Text;
+      CacheLifeTime@1006 : Integer;
+      RequestTimeout@1000 : Integer;
+    BEGIN
+      IF GET THEN
+        IF CURRENTDATETIME < "Expire Time" THEN
+          EXIT;
+
+      RequestTimeout := DefaultRequestTimeout;
+      CacheLifeTime := DefaultCacheLifeTime;
+      IF AzureKeyVaultManagement.IsEnabled THEN
+        IF NOT GetNetPromoterScoreParameters(ApiUrl,RequestTimeout,CacheLifeTime) THEN
+          IF AzureKeyVaultManagement.GetAzureKeyVaultSecret(ApiUrl,NpsApiUrlTxt) THEN
+            CacheLifeTime := GetCacheLifeTimeFromAzureKeyVault;
+
+      LOCKTABLE;
+
+      IF NOT GET THEN BEGIN
+        INIT;
+        "Primary Key" := '';
+        INSERT;
+      END;
+
+      IF ApiUrl = '' THEN
+        CLEAR("API URL")
+      ELSE BEGIN
+        "API URL".CREATEOUTSTREAM(OutStream);
+        OutStream.WRITE(ApiUrl);
+      END;
+
+      "Request Timeout" := RequestTimeout;
+      "Expire Time" := CURRENTDATETIME + CacheLifeTime * MillisecondsInMinute;
+      MODIFY;
+
+      COMMIT;
+    END;
+
+    PROCEDURE GetRequestTimeout@1() : Integer;
+    BEGIN
+      IF NOT GET THEN
+        EXIT(DefaultRequestTimeout);
+      IF "Request Timeout" <= 0 THEN
+        EXIT(DefaultRequestTimeout);
+      IF "Request Timeout" < MinRequestTimeout THEN
+        EXIT(MinRequestTimeout);
+      EXIT("Request Timeout");
+    END;
+
+    LOCAL PROCEDURE GetCacheLifeTimeFromAzureKeyVault@9() : Integer;
+    VAR
+      AzureKeyVaultManagement@1001 : Codeunit 2200;
+      CacheLifeTimeValue@1004 : Text;
+      CacheLifeTimeNumber@1008 : Integer;
+    BEGIN
+      IF AzureKeyVaultManagement.GetAzureKeyVaultSecret(CacheLifeTimeValue,NpsCacheLifeTimeTxt) THEN
+        IF EVALUATE(CacheLifeTimeNumber,CacheLifeTimeValue) THEN BEGIN
+          IF CacheLifeTimeNumber < MinCacheLifeTime THEN
+            CacheLifeTimeNumber := MinCacheLifeTime;
+          EXIT(CacheLifeTimeNumber);
+        END;
+      EXIT(DefaultCacheLifeTime);
+    END;
+
+    LOCAL PROCEDURE GetNetPromoterScoreParameters@5(VAR ApiUrl@1003 : Text;VAR RequestTimeoutMilliseconds@1002 : Integer;VAR CacheLifeTimeMinutes@1001 : Integer) : Boolean;
+    VAR
+      AzureKeyVaultManagement@1004 : Codeunit 2200;
+      JSONManagement@1007 : Codeunit 5459;
+      JsonObject@1011 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      SecretValue@1006 : Text;
+      RequestTimeoutValueTxt@1012 : Text;
+      CacheLifeTimeValueTxt@1013 : Text;
+    BEGIN
+      AzureKeyVaultManagement.AddAllowedSecretName(NpsParametersTxt);
+      IF NOT AzureKeyVaultManagement.GetAzureKeyVaultSecret(SecretValue,NpsParametersTxt) THEN BEGIN
+        SENDTRACETAG('0000832',NpsCategoryTxt,VERBOSITY::Warning,
+          STRSUBSTNO(SecretNotFoundMsg,NpsParametersTxt),DATACLASSIFICATION::SystemMetadata);
+        EXIT(FALSE);
+      END;
+
+      JSONManagement.InitializeObject(SecretValue);
+      JSONManagement.GetJSONObject(JsonObject);
+
+      IF NOT JSONManagement.GetStringPropertyValueFromJObjectByName(JsonObject,NpsApiUrlTxt,ApiUrl) THEN BEGIN
+        SENDTRACETAG('0000833',NpsCategoryTxt,VERBOSITY::Warning,
+          STRSUBSTNO(ParameterNotFoundMsg,NpsApiUrlTxt),DATACLASSIFICATION::SystemMetadata);
+        EXIT(FALSE);
+      END;
+
+      IF JSONManagement.GetStringPropertyValueFromJObjectByName(JsonObject,NpsRequestTimeoutTxt,RequestTimeoutValueTxt) THEN
+        IF EVALUATE(RequestTimeoutMilliseconds,RequestTimeoutValueTxt) THEN
+          IF (RequestTimeoutMilliseconds > 0) AND (RequestTimeoutMilliseconds < MinRequestTimeout) THEN
+            RequestTimeoutMilliseconds := MinRequestTimeout;
+      IF RequestTimeoutMilliseconds = 0 THEN BEGIN
+        SENDTRACETAG('0000834',NpsCategoryTxt,VERBOSITY::Warning,
+          STRSUBSTNO(ParameterNotFoundMsg,NpsRequestTimeoutTxt),DATACLASSIFICATION::SystemMetadata);
+        RequestTimeoutMilliseconds := DefaultRequestTimeout;
+      END;
+
+      IF JSONManagement.GetStringPropertyValueFromJObjectByName(JsonObject,NpsCacheLifeTimeTxt,CacheLifeTimeValueTxt) THEN
+        IF EVALUATE(CacheLifeTimeMinutes,CacheLifeTimeValueTxt) THEN
+          IF CacheLifeTimeMinutes < MinCacheLifeTime THEN
+            CacheLifeTimeMinutes := MinCacheLifeTime;
+      IF CacheLifeTimeMinutes = 0 THEN BEGIN
+        SENDTRACETAG('0000835',NpsCategoryTxt,VERBOSITY::Warning,
+          STRSUBSTNO(ParameterNotFoundMsg,NpsCacheLifeTimeTxt),DATACLASSIFICATION::SystemMetadata);
+        CacheLifeTimeMinutes := DefaultCacheLifeTime;
+      END;
+
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE MinCacheLifeTime@4() : Integer;
+    BEGIN
+      EXIT(1); // one minute
+    END;
+
+    LOCAL PROCEDURE DefaultCacheLifeTime@18() : Integer;
+    BEGIN
+      EXIT(1440); // 24 hours
+    END;
+
+    LOCAL PROCEDURE MinRequestTimeout@6() : Integer;
+    BEGIN
+      EXIT(250); // 250 milliseconds
+    END;
+
+    LOCAL PROCEDURE DefaultRequestTimeout@10() : Integer;
+    BEGIN
+      EXIT(5000); // 5 seconds
+    END;
+
+    LOCAL PROCEDURE MillisecondsInMinute@24() : Integer;
+    BEGIN
+      EXIT(60000);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

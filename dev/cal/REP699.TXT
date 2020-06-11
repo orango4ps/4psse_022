@@ -1,0 +1,421 @@
+OBJECT Report 699 Calculate Plan - Req. Wksh.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.04,4PS14.00;
+  }
+  PROPERTIES
+  {
+    CaptionML=[DEU=Planung ber. - Best.-Vorschlag;
+               ENU=Calculate Plan - Req. Wksh.;
+               NLD=Plan berekenen - Ink.-voorstel;
+               NOR=Beregn plan - best.forslag];
+    ProcessingOnly=Yes;
+    OnPreReport=VAR
+                  ProductionForecastEntry@1000 : Record 99000852;
+                BEGIN
+                  Counter := 0;
+                  IF FromDate = 0D THEN
+                    ERROR(Text002);
+                  IF ToDate = 0D THEN
+                    ERROR(Text003);
+                  PeriodLength := ToDate - FromDate + 1;
+                  IF PeriodLength <= 0 THEN
+                    ERROR(Text004);
+
+                  IF (Item.GETFILTER("Variant Filter") <> '') AND
+                     (MfgSetup."Current Production Forecast" <> '')
+                  THEN BEGIN
+                    ProductionForecastEntry.SETRANGE("Production Forecast Name",MfgSetup."Current Production Forecast");
+                    Item.COPYFILTER("No.",ProductionForecastEntry."Item No.");
+                    IF MfgSetup."Use Forecast on Locations" THEN
+                      Item.COPYFILTER("Location Filter",ProductionForecastEntry."Location Code");
+                    IF NOT ProductionForecastEntry.ISEMPTY THEN
+                      ERROR(Text005);
+                  END;
+
+                  ReqLine.SETRANGE("Worksheet Template Name",CurrTemplateName);
+                  ReqLine.SETRANGE("Journal Batch Name",CurrWorksheetName);
+
+                  Window.OPEN(
+                    Text006 +
+                    Text007);
+                END;
+
+  }
+  DATASET
+  {
+    { 8129;    ;DataItem;                    ;
+               DataItemTable=Table27;
+               DataItemTableView=SORTING(Low-Level Code)
+                                 WHERE(Type=CONST(Inventory));
+               OnPreDataItem=BEGIN
+                               SKU.SETCURRENTKEY("Item No.");
+                               COPYFILTER("Variant Filter",SKU."Variant Code");
+                               COPYFILTER("Location Filter",SKU."Location Code");
+
+                               COPYFILTER("Variant Filter",PlanningAssignment."Variant Code");
+                               COPYFILTER("Location Filter",PlanningAssignment."Location Code");
+                               PlanningAssignment.SETRANGE(Inactive,FALSE);
+                               PlanningAssignment.SETRANGE("Net Change Planning",TRUE);
+
+                               ReqLineExtern.SETCURRENTKEY(Type,"No.","Variant Code","Location Code");
+                               COPYFILTER("Variant Filter",ReqLineExtern."Variant Code");
+                               COPYFILTER("Location Filter",ReqLineExtern."Location Code");
+
+                               PurchReqLine.SETCURRENTKEY(
+                                 Type,"No.","Variant Code","Location Code","Sales Order No.","Planning Line Origin","Due Date");
+                               PurchReqLine.SETRANGE(Type,PurchReqLine.Type::Item);
+                               COPYFILTER("Variant Filter",PurchReqLine."Variant Code");
+                               COPYFILTER("Location Filter",PurchReqLine."Location Code");
+                               PurchReqLine.SETFILTER("Worksheet Template Name",ReqWkshTemplateFilter);
+                               PurchReqLine.SETFILTER("Journal Batch Name",ReqWkshFilter);
+
+                               OnAfterItemOnPreDataItem(Item);
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  IsHandled@1000 : Boolean;
+                                BEGIN
+                                  IF Counter MOD 5 = 0 THEN
+                                    Window.UPDATE(1,"No.");
+                                  Counter := Counter + 1;
+
+                                  IF SkipPlanningForItemOnReqWksh(Item) THEN
+                                    CurrReport.SKIP;
+
+                                  PlanningAssignment.SETRANGE("Item No.","No.");
+
+                                  ReqLine.LOCKTABLE;
+                                  ActionMessageEntry.LOCKTABLE;
+
+                                  IsHandled := FALSE;
+                                  OnBeforeDeleteReqLines(Item,PurchReqLine,ReqLineExtern,IsHandled);
+                                  IF NOT IsHandled THEN BEGIN
+                                    PurchReqLine.SETRANGE("No.","No.");
+                                    PurchReqLine.MODIFYALL("Accept Action Message",FALSE);
+                                    PurchReqLine.DELETEALL(TRUE);
+
+                                    ReqLineExtern.SETRANGE(Type,ReqLine.Type::Item);
+                                    ReqLineExtern.SETRANGE("No.","No.");
+                                    IF ReqLineExtern.FIND('-') THEN
+                                      REPEAT
+                                        ReqLineExtern.DELETE(TRUE);
+                                      UNTIL ReqLineExtern.NEXT = 0;
+                                  END;
+
+                                  InvtProfileOffsetting.SetParm(UseForecast,ExcludeForecastBefore,CurrWorksheetType);
+                                  InvtProfileOffsetting.SetParmReqPlan(ShortDimCode1, DeliverType, ShipToLocation); //**4PS.n
+                                  InvtProfileOffsetting.SetSkipBlocked(SkipBlocked); //**4PS.n //CALL C018091
+                                  InvtProfileOffsetting.CalculatePlanFromWorksheet(
+                                    Item,
+                                    MfgSetup,
+                                    CurrTemplateName,
+                                    CurrWorksheetName,
+                                    FromDate,
+                                    ToDate,
+                                    TRUE,
+                                    RespectPlanningParm);
+
+                                  IF PlanningAssignment.FIND('-') THEN
+                                    REPEAT
+                                      IF PlanningAssignment."Latest Date" <= ToDate THEN BEGIN
+                                        PlanningAssignment.Inactive := TRUE;
+                                        PlanningAssignment.MODIFY;
+                                      END;
+                                    UNTIL PlanningAssignment.NEXT = 0;
+
+                                  COMMIT;
+                                END;
+
+               OnPostDataItem=BEGIN
+                                OnAfterItemOnPostDataItem(Item);
+                              END;
+
+               ReqFilterFields=No.,Search Description,Location Filter }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      SaveValues=Yes;
+      OnOpenPage=BEGIN
+                   MfgSetup.GET;
+                   UseForecast := MfgSetup."Current Production Forecast";
+
+                   //**4PS.sn
+                   ShortDimCode1 := '';
+                   DeliverType := DeliverType::" ";
+                   ShipToLocation := '';
+                   //**4PS.en
+
+                   OnAfterOnOpenPage;
+                 END;
+
+    }
+    CONTROLS
+    {
+      { 1900000001;0;Container;
+                  ContainerType=ContentArea }
+
+      { 1900000002;1;Group  ;
+                  CaptionML=[DEU=Optionen;
+                             ENU=Options;
+                             NLD=Opties;
+                             NOR=Alternativer;
+                             SVE=Alternativ] }
+
+      { 1   ;2   ;Field     ;
+                  Name=StartingDate;
+                  CaptionML=[DEU=Startdatum;
+                             ENU=Starting Date;
+                             NLD=Begindatum;
+                             NOR=Startdato;
+                             SVE=Startdatum];
+                  ToolTipML=[DEU=Gibt das Datum an, das fr neue Auftr„ge verwendet werden soll. Anhand dieses Datums wird der Lagerbestand bewertet.;
+                             ENU=Specifies the date to use for new orders. This date is used to evaluate the inventory.;
+                             NLD=Hiermee wordt de datum opgegeven die voor nieuwe orders wordt gebruikt. Deze datum wordt gebruikt bij de voorraadwaardering.;
+                             NOR=Angir datoen som skal brukes for nye ordrer. Denne datoen brukes til † evaluere lageret.;
+                             SVE=Anger det datum som ska anv„ndas f”r nya order. Detta datum anv„nds f”r att inventera lagret.];
+                  ApplicationArea=#Planning;
+                  SourceExpr=FromDate }
+
+      { 3   ;2   ;Field     ;
+                  Name=EndingDate;
+                  CaptionML=[DEU=Enddatum;
+                             ENU=Ending Date;
+                             NLD=Einddatum;
+                             NOR=Sluttdato;
+                             SVE=Slutdatum];
+                  ToolTipML=[DEU=Gibt das Datum an, an dem die Planungsperiode endet. Der Bedarf wird nach diesem Datum nicht einbezogen.;
+                             ENU=Specifies the date where the planning period ends. Demand is not included beyond this date.;
+                             NLD=Hiermee wordt de datum opgegeven waarop de planningsperiode eindigt. Vraag van na deze datum wordt niet opgenomen.;
+                             NOR=Angir datoen da planleggingsperioden slutter. Behovet er ikke inkludert etter denne datoen.;
+                             SVE=Anger det datum d† planeringsperioden slutar. Efterfr†gan inkluderas inte efter detta datum.];
+                  ApplicationArea=#Planning;
+                  SourceExpr=ToDate }
+
+      { 6   ;2   ;Field     ;
+                  CaptionML=[DEU=Planung verwenden;
+                             ENU=Use Forecast;
+                             NLD=Prognose gebruiken;
+                             NOR=Bruk prognose;
+                             SVE=Anv„nd prognos];
+                  ToolTipML=[DEU=Gibt eine Planung an, die als Bedarf einbezogen werden soll, wenn die Planungsstapelverarbeitung ausgefhrt wird.;
+                             ENU=Specifies a forecast that should be included as demand when running the planning batch job.;
+                             NLD=Hiermee wordt een prognose opgegeven die als vraag wordt opgenomen bij de batchtaak voor de planning.;
+                             NOR=Angir en prognose som skal tas med som behov n†r du utf›rer planleggingskj›rselen.;
+                             SVE=Anger en prognos som ska inkluderas som efterfr†gan n„r batchjobbet k”rs.];
+                  ApplicationArea=#Planning;
+                  SourceExpr=UseForecast;
+                  TableRelation="Production Forecast Name".Name }
+
+      { 7   ;2   ;Field     ;
+                  CaptionML=[DEU=Planung vorher ausschlieáen;
+                             ENU=Exclude Forecast Before;
+                             NLD=Prognose uitsluiten voor;
+                             NOR=Utelat prognose f›r;
+                             SVE=Undanta prognos f”re];
+                  ToolTipML=[DEU=Gibt an, wie viel der gew„hlten Planung einbezogen werden soll, indem Sie ein Datum eingeben, vor dem kein Planungsbedarf einbezogen wird.;
+                             ENU=Specifies how much of the selected forecast to include, by entering a date before which forecast demand is not included.;
+                             NLD=Hiermee wordt opgegeven hoeveel van de geselecteerde prognose moet worden opgenomen, doordat een datum wordt ingevoerd waarv¢¢r prognosevraag niet wordt opgenomen.;
+                             NOR=Angir hvor mye av den valgte prognosen som skal inkluderes, ved † angi en dato som prognosebehovet ikke er inkludert f›r.];
+                  ApplicationArea=#Planning;
+                  SourceExpr=ExcludeForecastBefore }
+
+      { 4   ;2   ;Field     ;
+                  Name=RespectPlanningParm;
+                  CaptionML=[DEU=Planungsparameter fr durch Sicherheitsbestand bedingten Bedarf bercksichtigen;
+                             ENU=Respect Planning Parameters for Supply Triggered by Safety Stock;
+                             NLD=Planningsparameters voor veiligheidsvoorraad respecteren;
+                             NOR=Respekter planleggingsparametre for forsyning utl›st av sikkerhetslager];
+                  ToolTipML=[DEU=Legt fest, dass die durch den Sicherheitsbestand ausgel”sten Planungszeilen die folgenden Planungsparameter bercksichtigen: Meldebestand, Bestellmenge und Maximalbestand sowie alle Auftragsmodifikatoren. Wenn Sie dieses Kontrollk„stchen nicht aktivieren, decken durch den Sicherheitsbestand ausgel”ste Planungspositionen nur die genaue Bedarfsmenge ab.;
+                             ENU=Specifies that planning lines triggered by safety stock will respect the following planning parameters: Reorder Point, Reorder Quantity, Reorder Point, and Maximum Inventory in addition to all order modifiers. If you do not select this check box, planning lines triggered by safety stock will only cover the exact demand quantity.;
+                             NLD=Hiermee wordt opgegeven dat bij de planningsregels die worden geactiveerd door veiligheidsvoorraad, naast orderaanpassingsfuncties, rekening wordt gehouden met de volgende parameters: Bestelpunt, Bestelaantal en Maximale voorraad. Als u dit selectievakje niet inschakelt, dekken planningsregels die worden geactiveerd door veiligheidsvoorraad, alleen het vraagaantal.;
+                             NOR=Angir at planleggingslinjer utl›ses av sikkerhetslager vil respektere f›lgende planleggingsparametere: Gjenbestillingspunktet, Gjenbestillingsantall, Gjenbestillingspunkt og Maks. beholdning i tillegg til alle ordremodifikatorer. Hvis du ikke merker av for dette alternativet, vil planleggingslinjer som utl›ses av sikkerhetslager bare dekke den n›yaktige behovsmengden.];
+                  ApplicationArea=#Planning;
+                  SourceExpr=RespectPlanningParm }
+
+      { 1100525000;2;Field  ;
+                  SourceExpr=ShortDimCode1;
+                  CaptionClass='1,1,1';
+                  TableRelation="Dimension Value".Code WHERE (Global Dimension No.=CONST(1)) }
+
+      { 1100525001;2;Field  ;
+                  CaptionML=[DEU=Abliefern;
+                             ENU=Deliver;
+                             NLD=Afleveren;
+                             SVE=Leverera];
+                  SourceExpr=DeliverType }
+
+      { 1100525002;2;Field  ;
+                  CaptionML=[DEU=Wareneingang Lagerort;
+                             ENU=Ship To Location;
+                             NLD=Ontvangstlocatie;
+                             SVE=Leverera till lagerst„lle];
+                  SourceExpr=ShipToLocation;
+                  OnLookup=BEGIN
+                             LookupShipToLocation; //**4PS.n
+                           END;
+                            }
+
+      { 1100409000;2;Field  ;
+                  CaptionML=[DEU=Blockierten Einkauf nicht prfen;
+                             ENU=Do not check Purchase Blocked;
+                             NLD=Negeer check op Geblokkeerd voor inkoop];
+                  SourceExpr=SkipBlocked }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      Text002@1000 : TextConst 'DEU=Geben Sie ein Startdatum ein.;ENU=Enter a starting date.;NLD=Geef een begindatum op.;NOR=Angi en startdato.;SVE=Ange ett startdatum.';
+      Text003@1001 : TextConst 'DEU=Geben Sie ein Enddatum ein.;ENU=Enter an ending date.;NLD=Geef een einddatum op.;NOR=Angi en sluttdato.;SVE=Ange ett slutdatum.';
+      Text004@1002 : TextConst 'DEU=Das Enddatum darf nicht vor dem Bestelldatum liegen.;ENU=The ending date must not be before the order date.;NLD=De einddatum mag niet voor de orderdatum vallen.;NOR=Sluttdatoen skal ikke komme f›r bestillingsdatoen.;SVE=Slutdatum f†r inte vara f”re orderdatum.';
+      Text005@1003 : TextConst 'DEU=Sie drfen keinen Variantenfilter verwenden, wenn die Prod.-Programmplanung aus der Absatzplanung berechnet wird.;ENU=You must not use a variant filter when calculating MPS from a forecast.;NLD=U mag geen variantfilter gebruiken bij de berekening van MPS op basis van een prognose.;NOR=Du m† ikke bruke variantfiltre n†r du beregner MPS fra en prognose.;SVE=Du f†r inte anv„nda ett variantfilter vid kalkylering av produktion fr†n en prognos.';
+      Text006@1004 : TextConst 'DEU=Plan berechnen...\\;ENU=Calculating the plan...\\;NLD=Berekenen plan...\\;NOR=Beregner planen...\\;SVE=Ber„knar plan...\\';
+      Text007@1005 : TextConst 'DEU=Artikelnr. #1##################;ENU=Item No.  #1##################;NLD=Art.-nr.  #1##################;NOR=Varenr.   #1##################';
+      ReqLine@1006 : Record 246;
+      ActionMessageEntry@1007 : Record 99000849;
+      ReqLineExtern@1008 : Record 246;
+      PurchReqLine@1009 : Record 246;
+      SKU@1010 : Record 5700;
+      PlanningAssignment@1012 : Record 99000850;
+      MfgSetup@1018 : Record 99000765;
+      InvtProfileOffsetting@1020 : Codeunit 99000854;
+      Window@1015 : Dialog;
+      CurrWorksheetType@1022 : 'Requisition,Planning';
+      PeriodLength@1024 : Integer;
+      CurrTemplateName@1025 : Code[10];
+      CurrWorksheetName@1026 : Code[10];
+      FromDate@1027 : Date;
+      ToDate@1028 : Date;
+      ReqWkshTemplateFilter@1030 : Code[50];
+      ReqWkshFilter@1031 : Code[50];
+      Counter@1032 : Integer;
+      UseForecast@1014 : Code[10];
+      ExcludeForecastBefore@1013 : Date;
+      RespectPlanningParm@1011 : Boolean;
+      ShortDimCode1@1100525000 : Code[20];
+      DeliverType@1100525001 : ' ,Vestiging,Projectlocatie,Servicelocatie';
+      ShipToLocation@1100525002 : Code[20];
+      SkipBlocked@1100525003 : Boolean;
+
+    [External]
+    PROCEDURE SetTemplAndWorksheet@2(TemplateName@1000 : Code[10];WorksheetName@1001 : Code[10]);
+    BEGIN
+      CurrTemplateName := TemplateName;
+      CurrWorksheetName := WorksheetName;
+    END;
+
+    [External]
+    PROCEDURE InitializeRequest@1(StartDate@1000 : Date;EndDate@1001 : Date);
+    BEGIN
+      FromDate := StartDate;
+      ToDate := EndDate;
+    END;
+
+    LOCAL PROCEDURE SkipPlanningForItemOnReqWksh@3(Item@1000 : Record 27) : Boolean;
+    VAR
+      SkipPlanning@1001 : Boolean;
+      IsHandled@1002 : Boolean;
+    BEGIN
+      IsHandled := FALSE;
+      SkipPlanning := FALSE;
+
+      OnBeforeSkipPlanningForItemOnReqWksh(Item,SkipPlanning,IsHandled);
+      IF IsHandled THEN
+        EXIT(SkipPlanning);
+
+      WITH Item DO
+        IF (CurrWorksheetType = CurrWorksheetType::Requisition) AND
+           ("Replenishment System" = "Replenishment System"::Purchase) AND
+           ("Reordering Policy" <> "Reordering Policy"::" ")
+        THEN
+          EXIT(FALSE);
+
+      WITH SKU DO BEGIN
+        SETRANGE("Item No.",Item."No.");
+        IF FIND('-') THEN
+          REPEAT
+            IF (CurrWorksheetType = CurrWorksheetType::Requisition) AND
+               ("Replenishment System" IN ["Replenishment System"::Purchase,
+                                           "Replenishment System"::Transfer]) AND
+               ("Reordering Policy" <> "Reordering Policy"::" ")
+            THEN
+              EXIT(FALSE);
+          UNTIL NEXT = 0;
+      END;
+
+      SkipPlanning := TRUE;
+      OnAfterSkipPlanningForItemOnReqWksh(Item,SkipPlanning);
+      EXIT(SkipPlanning);
+    END;
+
+    [Integration(DEFAULT,TRUE)]
+    LOCAL PROCEDURE OnAfterOnOpenPage@4();
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterItemOnPreDataItem@7(VAR Item@1000 : Record 27);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterItemOnPostDataItem@8(VAR Item@1000 : Record 27);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterSkipPlanningForItemOnReqWksh@5(Item@1000 : Record 27;VAR SkipPlanning@1001 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeSkipPlanningForItemOnReqWksh@6(Item@1001 : Record 27;VAR SkipPlanning@1000 : Boolean;VAR IsHandled@1002 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeDeleteReqLines@9(Item@1000 : Record 27;VAR PurchReqLine@1001 : Record 246;VAR ReqLineExtern@1002 : Record 246;VAR IsHandled@1003 : Boolean);
+    BEGIN
+    END;
+
+    PROCEDURE LookupShipToLocation@1100525000();
+    VAR
+      Location@1100525000 : Record 14;
+      LocationList@1100525001 : Page 15;
+    BEGIN
+      //**4PS
+      CASE DeliverType OF
+        DeliverType::Vestiging:
+          BEGIN;
+            CLEAR(LocationList);
+            Location.RESET;
+            Location.SETCURRENTKEY(Code);
+            LocationList.SETTABLEVIEW(Location);
+            LocationList.LOOKUPMODE := TRUE;
+            IF LocationList.RUNMODAL = ACTION::LookupOK THEN BEGIN;
+              LocationList.GETRECORD(Location);
+              ShipToLocation := Location.Code;
+            END;
+          END;
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

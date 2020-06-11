@@ -1,0 +1,1404 @@
+OBJECT Codeunit 11012244 Control Snapshot Mgt.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00,4PSSE;
+  }
+  PROPERTIES
+  {
+    OnRun=VAR
+            Project@1210190000 : Record 11072003;
+            Company@1100529600 : Record 2000000006;
+          BEGIN
+            IF RunSpecificProject THEN
+              BuildAllSnapshotsForOneProject(RunProject,RunSnapshotDate)
+            ELSE BEGIN
+              IF RunInAllCompanies THEN BEGIN
+                Company.FINDSET;
+                REPEAT
+                  RunInCompanyName := Company.Name;
+
+                  Project.RESET;
+                  Project.CHANGECOMPANY(RunInCompanyName);
+                  Project.SETCURRENTKEY("Project Status");
+                  Project.SETFILTER("Project Status",'<%1',Project."Project Status"::Finished);
+
+                  BuildSnapshot(Project, TODAY);
+
+                UNTIL Company.NEXT = 0;
+              END ELSE BEGIN
+                RunInCompanyName := COMPANYNAME;
+
+                Project.SETCURRENTKEY("Project Status");
+                Project.SETFILTER("Project Status",'<%1',Project."Project Status"::Finished);
+
+                BuildSnapshot(Project, TODAY);
+              END;
+
+            END;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ProjSetup@1100525000 : Record 315;
+      InventSetup@1100525006 : Record 313;
+      CostContMgt@1100525004 : Codeunit 11012006;
+      Text001@1100525007 : TextConst 'ENU=Project  @1@@@@@@@@@@@@@;SVE=Projekt  @1@@@@@@@@@@@@@';
+      Window@1100525008 : Dialog;
+      DummyDec@1100525005 : Decimal;
+      RunSpecificProject@1100525001 : Boolean;
+      RunProject@1100525002 : Record 11072003;
+      RunSnapshotDate@1100525003 : Date;
+      RunInAllCompanies@1100529600 : Boolean;
+      RunInCompanyName@1100529601 : Text[30];
+
+    PROCEDURE BuildSnapshot@1100525000(VAR Project@1210190000 : Record 11072003;SnapshotDate@1100525000 : Date);
+    VAR
+      Counter@1100525002 : Integer;
+      NoOfRecords@1100525001 : Integer;
+      ControlSnapshotMgt@1100525003 : Codeunit 11012244;
+    BEGIN
+      IF RunInCompanyName <> COMPANYNAME THEN BEGIN
+        ProjSetup.CHANGECOMPANY(RunInCompanyName);
+        InventSetup.CHANGECOMPANY(RunInCompanyName);
+      END;
+
+      ProjSetup.GET;
+      InventSetup.GET;
+
+      IF GUIALLOWED THEN
+        Window.OPEN(Text001);
+
+      WITH Project DO BEGIN
+        SETRANGE("Excl. from Project Control",FALSE);
+        IF FINDSET THEN BEGIN
+          NoOfRecords := COUNT;
+          SETRANGE("Period Filter",SnapshotDate);
+          SETFILTER("Cumulation Filter",'..%1',SnapshotDate);
+          REPEAT
+            Counter := Counter + 1;
+            IF GUIALLOWED THEN BEGIN
+              Window.UPDATE(1,ROUND(Counter/NoOfRecords*100,1) * 100);
+              BuildAllSnapshotsForOneProject(Project,SnapshotDate);
+            END ELSE BEGIN
+              //DP01482
+              CLEARLASTERROR;
+              ControlSnapshotMgt.SetRunSpecificProject(Project,SnapshotDate,RunInCompanyName,RunInAllCompanies);
+              IF NOT ControlSnapshotMgt.RUN THEN
+                WriteEventLog;
+            END;
+          UNTIL NEXT = 0;
+        END;
+      END;
+
+      IF GUIALLOWED THEN
+        Window.CLOSE;
+    END;
+
+    PROCEDURE BuildAllSnapshotsForOneProject@1100525012(VAR Project@1100525000 : Record 11072003;SnapshotDate@1100525005 : Date);
+    VAR
+      Job@1100525004 : Record 11072003;
+      CostControlProjectElement@1100525003 : Record 11012048;
+      DetermineProductionDate@1100525002 : Codeunit 11012014;
+      DeterminePrognosisDate@1100525001 : Codeunit 11012029;
+    BEGIN
+      //DP01482
+      WITH Project DO BEGIN
+        IF NOT "Cost Control Up to Date" THEN
+          BuildCostControl;
+
+        IF NOT RunInAllCompanies THEN BEGIN
+          Job := Project;
+          CODEUNIT.RUN(CODEUNIT::CreateControlLinesElemCostObj,Job); //Must be done first, cost control level proj/element is updated here
+          Job.SETRANGE("Multipurpose Filter");
+          CODEUNIT.RUN(CODEUNIT::CreateControlLinesProjCostType,Job);
+          CostControlProjectElement.SETRANGE("Project No.","No.");
+          IF CostControlProjectElement.FINDSET THEN BEGIN
+            REPEAT
+              Job.SETRANGE("Multipurpose Filter",CostControlProjectElement.Element);
+              CODEUNIT.RUN(CODEUNIT::CreateControlLinesProjCostType,Job);
+            UNTIL CostControlProjectElement.NEXT = 0;
+          END;
+        END;
+
+        DetermineProductionDate.DetermineBothDates(Project,FALSE);
+        DeterminePrognosisDate.DetermineBothDates(Project);
+
+        IF RunInAllCompanies THEN BEGIN
+          CostContMgt.SetCompany(RunInCompanyName);
+          BuildProjSnapshotInCompany(SnapshotDate,Project);
+          BuildProjCostObjectSnapshotInCompany(SnapshotDate,Project);
+        END ELSE BEGIN
+          BuildProjSnapshot(SnapshotDate,Project);
+          BuildProjCostTypeSnapshot(SnapshotDate,Project);
+          BuildProjCostObjectSnapshot(SnapshotDate,Project);
+          BuildProjElemSnapshot(SnapshotDate,Project);
+          BuildProjElemCTSnapshot(SnapshotDate,Project);
+          BuildProjElemCOSnapshot(SnapshotDate,Project);
+          BuildProjExtSnapshot(SnapshotDate,Project);
+          BuildProjExtCTSnapshot(SnapshotDate,Project);
+          BuildProjExtCOSnapshot(SnapshotDate,Project);
+          BuildProjCostCompSnapshot(SnapshotDate,Project);
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE BuildProjSnapshot@1100525010(SnapshotDate@1100525001 : Date;VAR Project@1100525000 : Record 11072003);
+    VAR
+      ControlProjectSnapshot@1100525003 : Record 11020609;
+      ProjFilter@1100525002 : Text[250];
+    BEGIN
+      WITH Project DO BEGIN
+        IF ControlProjectSnapshot.GET(SnapshotDate,"No.") THEN
+          ControlProjectSnapshot.DELETE(TRUE);
+
+        ControlProjectSnapshot.INIT;
+        ControlProjectSnapshot."Snapshot Date" := SnapshotDate;
+        ControlProjectSnapshot."Project No." := "No.";
+        ControlProjectSnapshot."Global Dimension 1 Code" := "Global Dimension 1 Code";
+
+        FillProjectFilter(ProjFilter);
+        SETFILTER("Project Filter",ProjFilter);
+
+        CALCFIELDS(
+          Revenues,
+          "Extension Quoted Amount","Options Contract Amount",
+          "Actual Preclosure Result",
+          "Provision Loss",
+          "Principal Name",
+          "Name Expediter",
+          "Name Site Manager",
+          "Name Project Engineer",
+          "Name Project Manager");
+
+        CostContMgt.CalcFieldsProject(Project);
+
+        CostContMgt.AllowedAndPurchProject(
+          Project,
+          ControlProjectSnapshot.Allowed,ControlProjectSnapshot."Allowed Hours",
+          DummyDec,DummyDec,TRUE,
+          DummyDec,ControlProjectSnapshot."Estimated Purchase Result",
+          DummyDec,
+          ControlProjectSnapshot."Actual Purchase Result",
+          ControlProjectSnapshot."Total Purchase Result",TRUE);
+
+        ControlProjectSnapshot."Project Contract Amount" := "Project Contract Amount";
+        ControlProjectSnapshot."Extension Quoted Amount" := "Extension Quoted Amount";
+        ControlProjectSnapshot."Extension Contract Amount" := "Extension Contract Amount";
+        ControlProjectSnapshot."Options Contract Amount" := "Options Contract Amount";
+        ControlProjectSnapshot."Contr. Amt. incl. Ext.and Opt." :=
+          "Project Contract Amount" + "Extension Contract Amount" + "Options Contract Amount";
+        ControlProjectSnapshot.Budget := Budget;
+        ControlProjectSnapshot."Budget Hours" := "Budget Hours (Entire Project)";
+        ControlProjectSnapshot."Budget Result" := CostContMgt.BudgetResultProject(Project,FALSE);
+        ControlProjectSnapshot."Budget Result %" := CostContMgt.BudgetResultPercProject(Project,FALSE);
+        ControlProjectSnapshot."Purchase Budget" := "Purchase Budget";
+        ControlProjectSnapshot.Purchase := Purchase;
+        ControlProjectSnapshot."Open (Purchase)" := "Open (Purchase)";
+        ControlProjectSnapshot."Received/Not Invoiced" := "Received/Not Invoiced";
+        ControlProjectSnapshot."Received/Not Inv. Hours" := "Received/Not Inv. Hours";
+        ControlProjectSnapshot."Open Ovh. Surch. Firm (Purch.)" := "Open Ovh. Surch. Firm (Purch.)";
+        ControlProjectSnapshot."Open Ovh. Surch. Soft (Purch.)" := "Open Ovh. Surch. Soft (Purch.)";
+        ControlProjectSnapshot."Risc Coverage (Prognosis)" := "Risc Coverage (Prognosis)";
+        ControlProjectSnapshot."Risc Coverage" := "Risc Coverage";
+        ControlProjectSnapshot."Risc Coverage Withdraw" := "Risc Coverage Withdraw";
+        ControlProjectSnapshot."Open (Inventory)" := "Open (Inventory)";
+        ControlProjectSnapshot."Open Ovh. Surch. (Inventory)" := "Open Ovh. Surch. (Inventory)" ;
+        ControlProjectSnapshot."Open Amount (Hours)" := "Open Amount (Hours)";
+        ControlProjectSnapshot."Open Hours" := "Open Hours";
+        ControlProjectSnapshot."Open Ovh. Surch. (Hours)" := "Open Ovh. Surch. (Hours)";
+        ControlProjectSnapshot."Preregistered WIP" := "Preregistered WIP";
+        ControlProjectSnapshot."Actual Costs" := "Actual Costs";
+        ControlProjectSnapshot."Actual Hours" := "Actual Hours";
+        ControlProjectSnapshot."Total Cost" := CostContMgt.TotCostProject(Project,FALSE);
+        ControlProjectSnapshot."Total Hours" := CostContMgt.TotHoursProject(Project,FALSE);
+        IF EVALUATE(ControlProjectSnapshot."Progress Date",GETFILTER("Progress Filter")) THEN;
+        ControlProjectSnapshot.Available := Budget - CostContMgt.TotCostProject(Project,FALSE);
+        ControlProjectSnapshot."Allowed %" := CostContMgt.AllowedPercProject(Project,FALSE);
+        ControlProjectSnapshot."Purchase Result" := CostContMgt.PurchResultProject(Project,FALSE);
+        ControlProjectSnapshot.Result := CostContMgt.ResultProject(Project,FALSE);
+        ControlProjectSnapshot."Result %" := CostContMgt.ResultPercProject(Project,FALSE);
+        ControlProjectSnapshot."Hours Result" := CostContMgt.ResultHoursProject(Project,FALSE);
+        ControlProjectSnapshot."Calculated End Result" := CostContMgt.CalculatedEndResultProject(Project,FALSE);
+        ControlProjectSnapshot."Calc. End Res. Versus Budget" := CostContMgt.CalcEndResVersusBudgetProject(Project,FALSE);
+        IF EVALUATE(ControlProjectSnapshot."Prognosis Date",GETFILTER("Prognosis Filter")) THEN;
+        ControlProjectSnapshot.Prognosis := Prognosis;
+        ControlProjectSnapshot."Hours Prognosis" := "Hours Prognosis";
+        ControlProjectSnapshot."Prognosis Total Hours" := CostContMgt.PrognTotHoursProject(Project,FALSE);
+        ControlProjectSnapshot."Prognosis End Result" := CostContMgt.PrognEndResultProject(Project,FALSE);
+        ControlProjectSnapshot."Prognosis End Result Hours" := CostContMgt.PrognEndResultHoursProject(Project,FALSE);
+        ControlProjectSnapshot."Progn End Result vs Budget %" := CostContMgt.PrognEndResVersusBudgetProject(Project,FALSE);
+        ControlProjectSnapshot."Prognosis Result" := CostContMgt.PrognResultProject(Project,FALSE);
+        ControlProjectSnapshot.Revenues := Revenues;
+        ControlProjectSnapshot."Gross WIP Position" := "Actual Costs" - Revenues;
+        ControlProjectSnapshot."Closed Costs" := "Closed Costs";
+        ControlProjectSnapshot."Closed Revenues" := "Closed Revenues";
+        ControlProjectSnapshot."WIP Position" := ("Actual Costs" + "Closed Costs") - ( Revenues - "Closed Revenues");
+        ControlProjectSnapshot."Progn. End Res. vs Contr. Pr." := CostContMgt.PrognEndResVrsContrAmtProject(Project,FALSE);
+        ControlProjectSnapshot."Progn. End Res. vs Contr. Pr.%" := CostContMgt.PrognEndResVrsContrAmtProjPerc(Project,FALSE);
+        IF InventSetup.JobInventoryByLocationShelf("No.") OR InventSetup.JobInventoryByStockRelease("No.") THEN
+          ControlProjectSnapshot."Project Inventory" := CostContMgt.InventoryProject(Project,FALSE);
+        ControlProjectSnapshot."Actual Preclosure Result" := "Actual Preclosure Result";
+        ControlProjectSnapshot."Provision Loss Result" := "Provision Loss";
+
+        CostContMgt.PrognTotFinResultProject(
+          Project,
+          FALSE,
+          ControlProjectSnapshot."Prognosis Total Cost",
+          ControlProjectSnapshot."Prognosis Revenue",
+          ControlProjectSnapshot."Prognosis Total Revenue",
+          ControlProjectSnapshot."Prognosis Financial Result",
+          ControlProjectSnapshot."Expected Finishing Date",
+          ControlProjectSnapshot."Prognosis Level");
+
+        ControlProjectSnapshot.Description := Description;
+        ControlProjectSnapshot.Principal := "Bill-to Customer No.";
+        ControlProjectSnapshot."Principal Name" := "Principal Name";
+        ControlProjectSnapshot."Main Project" := "Main Project";
+        ControlProjectSnapshot.Expediter := Expediter;
+        ControlProjectSnapshot."Name Expediter" := "Name Expediter";
+        ControlProjectSnapshot."Site Manager" := "Site Manager";
+        ControlProjectSnapshot."Name Site Manager" := "Name Site Manager";
+        ControlProjectSnapshot."Project Engineer" := "Project Engineer";
+        ControlProjectSnapshot."Name Project Engineer" := "Name Project Engineer";
+        ControlProjectSnapshot."Project Manager" := "Project Manager";
+        ControlProjectSnapshot."Name Project Manager" := "Name Project Manager";
+        ControlProjectSnapshot."Project Status" := "Project Status";
+        ControlProjectSnapshot."Project Type" := "Project Type";
+
+        ControlProjectSnapshot.INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE BuildProjCostTypeSnapshot@1100525001(SnapshotDate@1100525002 : Date;VAR Project@1100525003 : Record 11072003);
+    VAR
+      ControlProjectCostType@1100525001 : Record 11012046;
+      ControlProjCostTypeSnapshot@1100525000 : Record 11020610;
+    BEGIN
+      WITH ControlProjectCostType DO BEGIN
+        SETRANGE("Project No.",Project."No.");
+
+        Project.COPYFILTER("Cumulation Filter","Cumulation Filter");
+        Project.COPYFILTER("Period Filter","Period Filter");
+        Project.COPYFILTER("Progress Filter","Progress Filter");
+        Project.COPYFILTER("Prognosis Filter","Prognosis Filter");
+
+        IF FINDSET THEN
+          REPEAT
+            ControlProjCostTypeSnapshot.INIT;
+            ControlProjCostTypeSnapshot."Snapshot Date" := SnapshotDate;
+            ControlProjCostTypeSnapshot."Project No." := Project."No.";
+            ControlProjCostTypeSnapshot."Cost Type" := "Cost Type";
+
+            CostContMgt.CalcFieldsCostType(ControlProjectCostType);
+
+            CostContMgt.AllowedAndPurchCostType(
+              ControlProjectCostType,
+              ControlProjCostTypeSnapshot.Allowed,ControlProjCostTypeSnapshot."Allowed Hours",
+              DummyDec,DummyDec,
+              DummyDec,ControlProjCostTypeSnapshot."Estimated Purchase Result",
+              DummyDec,ControlProjCostTypeSnapshot."Actual Purchase Result",
+              ControlProjCostTypeSnapshot."Total Purchase Result",TRUE);
+
+            ControlProjCostTypeSnapshot.Budget := Budget;
+            ControlProjCostTypeSnapshot."Purchase Budget" := "Purchase Budget";
+            ControlProjCostTypeSnapshot.Purchase := Purchase;
+            ControlProjCostTypeSnapshot."Open (Purchase)" := "Open (Purchase)";
+            ControlProjCostTypeSnapshot."Received/Not Invoiced" := "Received/Not Invoiced";
+            ControlProjCostTypeSnapshot."Received/Not Inv. Hours" := "Received/Not Inv. Hours";
+            ControlProjCostTypeSnapshot."Open Ovh. Surch. Firm (Purch.)" := "Open Ovh. Surch. Firm (Purch.)";
+            ControlProjCostTypeSnapshot."Open Ovh. Surch. Soft (Purch.)" := "Open Ovh. Surch. Soft (Purch.)";
+            ControlProjCostTypeSnapshot."Risc Coverage (Prognosis)" := "Risc Coverage (Prognosis)";
+            ControlProjCostTypeSnapshot."Risc Coverage" := "Risc Coverage";
+            ControlProjCostTypeSnapshot."Risc Coverage Withdraw" := "Risc Coverage Withdraw";
+            ControlProjCostTypeSnapshot."Open (Inventory)" := "Open (Inventory)";
+            ControlProjCostTypeSnapshot."Open Ovh. Surch. (Inventory)" := "Open Ovh. Surch. (Inventory)" ;
+            ControlProjCostTypeSnapshot."Open Amount (Hours)" := "Open Amount (Hours)";
+            ControlProjCostTypeSnapshot."Open Hours" := "Open Hours";
+            ControlProjCostTypeSnapshot."Open Ovh. Surch. (Hours)" := "Open Ovh. Surch. (Hours)";
+            ControlProjCostTypeSnapshot."Actual Costs" := "Actual Costs";
+            ControlProjCostTypeSnapshot."Total Cost" := CostContMgt.TotCostCostType(ControlProjectCostType,FALSE);
+            ControlProjCostTypeSnapshot."Total Hours" := CostContMgt.TotHoursCostType(ControlProjectCostType,FALSE);
+            ControlProjCostTypeSnapshot.Available := Budget - CostContMgt.TotCostCostType(ControlProjectCostType,FALSE);
+            ControlProjCostTypeSnapshot."Allowed %" := CostContMgt.AllowedPercCostType(ControlProjectCostType,FALSE);
+            ControlProjCostTypeSnapshot."Purchase Result" := CostContMgt.PurchResultCostType(ControlProjectCostType,FALSE);
+            ControlProjCostTypeSnapshot.Result := CostContMgt.ResultCostType(ControlProjectCostType,FALSE);
+            ControlProjCostTypeSnapshot."Hours Result" := CostContMgt.ResultHoursCostType(ControlProjectCostType,FALSE);
+            ControlProjCostTypeSnapshot.Prognosis := Prognosis;
+            IF "Cost Type" = "Cost Type"::Labor THEN
+              ControlProjCostTypeSnapshot."Hours Prognosis" := "Hours Prognosis";
+            ControlProjCostTypeSnapshot."Prognosis Total Cost" := CostContMgt.PrognTotCostCostType(ControlProjectCostType,FALSE);
+            ControlProjCostTypeSnapshot."Prognosis Total Hours" := CostContMgt.PrognTotHoursCostType(ControlProjectCostType,FALSE);
+            ControlProjCostTypeSnapshot."Prognosis End Result" := CostContMgt.PrognEndResultCostType(ControlProjectCostType,FALSE);
+            ControlProjCostTypeSnapshot."Prognosis End Result Hours" :=
+              CostContMgt.PrognEndResultHoursCostType(ControlProjectCostType,FALSE);
+            ControlProjCostTypeSnapshot."Prognosis Result" := CostContMgt.PrognResultCostType(ControlProjectCostType,FALSE);
+            ControlProjCostTypeSnapshot.Revenues := Revenues;
+            ControlProjCostTypeSnapshot."WIP Position" := ("Actual Costs" - Revenues); //differs from project level
+            ControlProjCostTypeSnapshot.Result := CostContMgt.ResultCostType(ControlProjectCostType,FALSE);
+
+            ControlProjCostTypeSnapshot.INSERT;
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE BuildProjCostObjectSnapshot@1100525002(SnapshotDate@1100525002 : Date;VAR Project@1100525003 : Record 11072003);
+    VAR
+      ControlProjectCostObject@1100525001 : Record 11012047;
+      ControlProjCostObjSnapshot@1100525000 : Record 11020611;
+    BEGIN
+      WITH ControlProjectCostObject DO BEGIN
+        SETRANGE("Project No.",Project."No.");
+
+        Project.COPYFILTER("Cumulation Filter","Cumulation Filter");
+        Project.COPYFILTER("Period Filter","Period Filter");
+        Project.COPYFILTER("Progress Filter","Progress Filter");
+        Project.COPYFILTER("Prognosis Filter","Prognosis Filter");
+
+        IF FINDSET THEN
+          REPEAT
+            ControlProjCostObjSnapshot.INIT;
+            ControlProjCostObjSnapshot."Snapshot Date" := SnapshotDate;
+            ControlProjCostObjSnapshot."Project No." := Project."No.";
+            ControlProjCostObjSnapshot."Cost Type" := "Cost Type";
+            ControlProjCostObjSnapshot."Cost Object" := "Cost Object";
+            ControlProjCostObjSnapshot."Cost Component" := "Cost Component";
+
+            CostContMgt.CalcFieldsCostObj(ControlProjectCostObject);
+
+            CostContMgt.AllowedAndPurchCostObj(
+              ControlProjectCostObject,
+              ControlProjCostObjSnapshot.Allowed,ControlProjCostObjSnapshot."Allowed Hours",
+              DummyDec,DummyDec,
+              DummyDec,ControlProjCostObjSnapshot."Estimated Purchase Result",
+              DummyDec,
+              ControlProjCostObjSnapshot."Actual Purchase Result",
+              ControlProjCostObjSnapshot."Total Purchase Result",TRUE);
+
+            ControlProjCostObjSnapshot."Original Budget Amount" := "Original Budget Amount";
+            ControlProjCostObjSnapshot."Original Budget Hours" := "Original Budget Hours";
+            ControlProjCostObjSnapshot.Adjustments := Adjustments;
+            ControlProjCostObjSnapshot."Adjustments Hours" := "Adjustments Hours";
+            ControlProjCostObjSnapshot.Extension := Extension;
+            ControlProjCostObjSnapshot."Extension Hours" := "Extension Hours";
+            ControlProjCostObjSnapshot.Options := Options;
+            ControlProjCostObjSnapshot."Option Hours" := "Option Hours";
+            ControlProjCostObjSnapshot.Budget := Budget;
+            ControlProjCostObjSnapshot."Budget Hours (Total)" := "Budget Hours";
+            ControlProjCostObjSnapshot."Purchase Budget" := "Purchase Budget";
+            ControlProjCostObjSnapshot.Purchase := Purchase;
+            ControlProjCostObjSnapshot."Open (Purchase)" := "Open (Purchase)";
+            ControlProjCostObjSnapshot."Received/Not Invoiced" := "Received/Not Invoiced";
+            ControlProjCostObjSnapshot."Received/Not Inv. Hours" := "Received/Not Inv. Hours";
+            ControlProjCostObjSnapshot."Open Ovh. Surch. Firm (Purch.)" := "Open Ovh. Surch. Firm (Purch.)";
+            ControlProjCostObjSnapshot."Open Ovh. Surch. Soft (Purch.)" := "Open Ovh. Surch. Soft (Purch.)";
+            ControlProjCostObjSnapshot."Risc Coverage (Prognosis)" := "Risc Coverage (Prognosis)";
+            ControlProjCostObjSnapshot."Risc Coverage" := "Risc Coverage";
+            ControlProjCostObjSnapshot."Risc Coverage Withdraw" := "Risc Coverage Withdraw";
+            ControlProjCostObjSnapshot."Open (Inventory)" := "Open (Inventory)";
+            ControlProjCostObjSnapshot."Open Ovh. Surch. (Inventory)" := "Open Ovh. Surch. (Inventory)" ;
+            ControlProjCostObjSnapshot."Open Amount (Hours)" := "Open Amount (Hours)";
+            ControlProjCostObjSnapshot."Open Hours" := "Open Hours";
+            ControlProjCostObjSnapshot."Open Ovh. Surch. (Hours)" := "Open Ovh. Surch. (Hours)";
+            ControlProjCostObjSnapshot."Actual Costs" := "Actual Costs";
+            ControlProjCostObjSnapshot."Actual Hours" := "Actual Hours";
+            ControlProjCostObjSnapshot."Total Cost" := CostContMgt.TotCostCostObj(ControlProjectCostObject,FALSE);
+            ControlProjCostObjSnapshot.Available := Budget - CostContMgt.TotCostCostObj(ControlProjectCostObject,FALSE);
+            ControlProjCostObjSnapshot."Allowed %" := CostContMgt.AllowedPercCostObj(ControlProjectCostObject,FALSE);
+            ControlProjCostObjSnapshot."Purchase Result" := CostContMgt.PurchResultCostObj(ControlProjectCostObject,FALSE);
+            ControlProjCostObjSnapshot.Result := CostContMgt.ResultCostObj(ControlProjectCostObject,FALSE);
+            ControlProjCostObjSnapshot.Prognosis := Prognosis;
+            IF "Cost Type" = "Cost Type"::Labor THEN BEGIN
+              ControlProjCostObjSnapshot."Total Hours" := CostContMgt.TotHoursCostObj(ControlProjectCostObject,FALSE);
+              ControlProjCostObjSnapshot."Hours Prognosis" := "Hours Prognosis";
+              ControlProjCostObjSnapshot."Hours Result" := CostContMgt.ResultHoursCostObj(ControlProjectCostObject,FALSE);
+              ControlProjCostObjSnapshot."Prognosis Total Hours" := CostContMgt.PrognTotHoursCostObj(ControlProjectCostObject,FALSE);
+              ControlProjCostObjSnapshot."Prognosis End Result Hours" :=
+                CostContMgt.PrognEndResultHoursCostObj(ControlProjectCostObject,FALSE);
+            END;
+            ControlProjCostObjSnapshot."Prognosis Total Cost" := CostContMgt.PrognTotCostCostObj(ControlProjectCostObject,FALSE);
+            ControlProjCostObjSnapshot."Prognosis End Result" := CostContMgt.PrognEndResultCostObj(ControlProjectCostObject,FALSE);
+            ControlProjCostObjSnapshot."Prognosis Result" := CostContMgt.PrognResultCostObj(ControlProjectCostObject,FALSE);
+            ControlProjCostObjSnapshot.Result := CostContMgt.ResultCostObj(ControlProjectCostObject,FALSE);
+
+            ControlProjCostObjSnapshot.INSERT;
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE BuildProjElemSnapshot@1100525003(SnapshotDate@1100525000 : Date;VAR Project@1100525004 : Record 11072003);
+    VAR
+      ControlProjectElem@1100525002 : Record 11012048;
+      ControlProjElemSnapshot@1100525001 : Record 11020612;
+      CreateControlLinesElemCostObj@1100525003 : Codeunit 11012032;
+    BEGIN
+      CreateControlLinesElemCostObj.SetHideWindow;
+      CreateControlLinesElemCostObj.CreateCostControlProjElem(Project);
+
+      WITH ControlProjectElem DO BEGIN
+        SETRANGE("Project No.",Project."No.");
+
+        Project.COPYFILTER("Cumulation Filter","Cumulation Filter");
+        Project.COPYFILTER("Period Filter","Period Filter");
+        Project.COPYFILTER("Progress Filter","Progress Filter");
+        Project.COPYFILTER("Prognosis Filter","Prognosis Filter");
+
+        IF FINDSET THEN
+          REPEAT
+            ControlProjElemSnapshot.INIT;
+            ControlProjElemSnapshot."Snapshot Date" := SnapshotDate;
+            ControlProjElemSnapshot."Project No." := "Project No.";
+            ControlProjElemSnapshot.Element := Element;
+
+            SETRANGE("Element Filter",Element);
+            CostContMgt.CalcFieldsElem(ControlProjectElem);
+            CALCFIELDS(Revenues);
+
+            CostContMgt.AllowedAndPurchElem(
+              ControlProjectElem,
+              ControlProjElemSnapshot.Allowed,ControlProjElemSnapshot."Allowed Hours",
+              DummyDec,DummyDec,TRUE);
+
+            ControlProjElemSnapshot.Budget := Budget;
+            ControlProjElemSnapshot."Budget Hours" := "Budget Hours";
+            ControlProjElemSnapshot."Purchase Budget" := "Purchase Budget";
+            ControlProjElemSnapshot.Purchase := Purchase;
+            ControlProjElemSnapshot."Open (Purchase)" := "Open (Purchase)";
+            ControlProjElemSnapshot."Received/Not Invoiced" := "Received/Not Invoiced";
+            ControlProjElemSnapshot."Received/Not Inv. Hours" := "Received/Not Inv. Hours";
+            ControlProjElemSnapshot."Open Ovh. Surch. Firm (Purch.)" := "Open Ovh. Surch. Firm (Purch.)";
+            ControlProjElemSnapshot."Open Ovh. Surch. Soft (Purch.)" := "Open Ovh. Surch. Soft (Purch.)";
+            ControlProjElemSnapshot."Risc Coverage (Prognosis)" := "Risc Coverage (Prognosis)";
+            ControlProjElemSnapshot."Risc Coverage" := "Risc Coverage";
+            ControlProjElemSnapshot."Risc Coverage Withdraw" := "Risc Coverage Withdraw";
+            ControlProjElemSnapshot."Open (Inventory)" := "Open (Inventory)";
+            ControlProjElemSnapshot."Open Ovh. Surch. (Inventory)" := "Open Ovh. Surch. (Inventory)" ;
+            ControlProjElemSnapshot."Open Amount (Hours)" := "Open Amount (Hours)";
+            ControlProjElemSnapshot."Open Hours" := "Open Hours";
+            ControlProjElemSnapshot."Open Ovh. Surch. (Hours)" := "Open Ovh. Surch. (Hours)";
+            ControlProjElemSnapshot."Actual Costs" := "Actual Costs";
+            ControlProjElemSnapshot."Actual Hours" := "Actual Hours";
+            ControlProjElemSnapshot."Total Cost" := CostContMgt.TotCostElem(ControlProjectElem,FALSE);
+            ControlProjElemSnapshot."Total Hours" := CostContMgt.TotHoursElem(ControlProjectElem,FALSE);
+            ControlProjElemSnapshot.Available := Budget - CostContMgt.TotCostElem(ControlProjectElem,FALSE);
+            ControlProjElemSnapshot."Allowed %" := CostContMgt.AllowedPercElem(ControlProjectElem,FALSE);
+            ControlProjElemSnapshot."Purchase Result" := CostContMgt.PurchResultElem(ControlProjectElem,FALSE);
+            ControlProjElemSnapshot.Result := CostContMgt.ResultElem(ControlProjectElem,FALSE);
+            ControlProjElemSnapshot."Hours Result" := CostContMgt.ResultHoursElem(ControlProjectElem,FALSE);
+            ControlProjElemSnapshot.Prognosis := Prognosis;
+            ControlProjElemSnapshot."Hours Prognosis" := "Hours Prognosis";
+            ControlProjElemSnapshot."Prognosis Total Hours" := CostContMgt.PrognTotHoursElem(ControlProjectElem,FALSE);
+            ControlProjElemSnapshot."Prognosis End Result" := CostContMgt.PrognEndResultElem(ControlProjectElem,FALSE);
+            ControlProjElemSnapshot."Prognosis End Result Hours" := CostContMgt.PrognEndResultHoursElem(ControlProjectElem,FALSE);
+            ControlProjElemSnapshot."Prognosis Result" := CostContMgt.PrognResultElem(ControlProjectElem,FALSE);
+            ControlProjElemSnapshot.Revenues := Revenues;
+            ControlProjElemSnapshot."WIP Position" := "Actual Costs" - Revenues;
+            ControlProjElemSnapshot."Prognosis Total Cost" := CostContMgt.PrognTotCostElem(ControlProjectElem,FALSE);
+
+            ControlProjElemSnapshot.INSERT;
+
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE BuildProjElemCTSnapshot@1100525004(SnapshotDate@1100525000 : Date;VAR Project@1100525003 : Record 11072003);
+    VAR
+      ControlProjectElemCostType@1100525002 : Record 11012049;
+      ControlProjElemCTSnapshot@1100525001 : Record 11020613;
+    BEGIN
+      WITH ControlProjectElemCostType DO BEGIN
+        SETRANGE("Project No.",Project."No.");
+
+        Project.COPYFILTER("Cumulation Filter","Cumulation Filter");
+        Project.COPYFILTER("Period Filter","Period Filter");
+        Project.COPYFILTER("Progress Filter","Progress Filter");
+        Project.COPYFILTER("Prognosis Filter","Prognosis Filter");
+
+        IF FINDSET THEN
+          REPEAT
+            ControlProjElemCTSnapshot.INIT;
+            ControlProjElemCTSnapshot."Snapshot Date" := SnapshotDate;
+            ControlProjElemCTSnapshot."Project No." := "Project No.";
+            ControlProjElemCTSnapshot.Element := Element;
+            ControlProjElemCTSnapshot."Cost Type" := "Cost Type";
+
+            CostContMgt.CalcFieldsElemCostType(ControlProjectElemCostType);
+
+            CostContMgt.AllowedAndPurchElemCostType(
+              ControlProjectElemCostType,
+              ControlProjElemCTSnapshot.Allowed,DummyDec,
+              DummyDec,DummyDec,TRUE);
+
+            ControlProjElemCTSnapshot.Budget := Budget;
+            ControlProjElemCTSnapshot."Purchase Budget" := "Purchase Budget";
+            ControlProjElemCTSnapshot.Purchase := Purchase;
+            ControlProjElemCTSnapshot."Open (Purchase)" := "Open (Purchase)";
+            ControlProjElemCTSnapshot."Received/Not Invoiced" := "Received/Not Invoiced";
+            ControlProjElemCTSnapshot."Received/Not Inv. Hours" := "Received/Not Inv. Hours";
+            ControlProjElemCTSnapshot."Open Ovh. Surch. Firm (Purch.)" := "Open Ovh. Surch. Firm (Purch.)";
+            ControlProjElemCTSnapshot."Open Ovh. Surch. Soft (Purch.)" := "Open Ovh. Surch. Soft (Purch.)";
+            ControlProjElemCTSnapshot."Risc Coverage (Prognosis)" := "Risc Coverage (Prognosis)";
+            ControlProjElemCTSnapshot."Risc Coverage" := "Risc Coverage";
+            ControlProjElemCTSnapshot."Risc Coverage Withdraw" := "Risc Coverage Withdraw";
+            ControlProjElemCTSnapshot."Open (Inventory)" := "Open (Inventory)";
+            ControlProjElemCTSnapshot."Open Ovh. Surch. (Inventory)" := "Open Ovh. Surch. (Inventory)" ;
+            ControlProjElemCTSnapshot."Open Amount (Hours)" := "Open Amount (Hours)";
+            ControlProjElemCTSnapshot."Open Hours" := "Open Hours";
+            ControlProjElemCTSnapshot."Open Ovh. Surch. (Hours)" := "Open Ovh. Surch. (Hours)";
+            ControlProjElemCTSnapshot."Actual Costs" := "Actual Costs";
+            ControlProjElemCTSnapshot."Total Cost" := CostContMgt.TotCostElemCostType(ControlProjectElemCostType,FALSE);
+            ControlProjElemCTSnapshot."Total Hours" := CostContMgt.TotHoursElemCostType(ControlProjectElemCostType,FALSE);
+            ControlProjElemCTSnapshot.Available := Budget - CostContMgt.TotCostElemCostType(ControlProjectElemCostType,FALSE);
+            ControlProjElemCTSnapshot."Purchase Result" := CostContMgt.PurchResultElemCostType(ControlProjectElemCostType,FALSE);
+            ControlProjElemCTSnapshot.Result := CostContMgt.ResultElemCostType(ControlProjectElemCostType,FALSE);
+            ControlProjElemCTSnapshot."Hours Result" := CostContMgt.ResultHoursElemCostType(ControlProjectElemCostType,FALSE);
+            ControlProjElemCTSnapshot.Prognosis := Prognosis;
+            IF "Cost Type" = "Cost Type"::Labor THEN BEGIN
+              ControlProjElemCTSnapshot."Hours Prognosis" := "Hours Prognosis";
+              ControlProjElemCTSnapshot."Prognosis Total Hours" :=
+                CostContMgt.PrognTotHoursElemCostType(ControlProjectElemCostType,FALSE);
+            END;
+            ControlProjElemCTSnapshot."Prognosis End Result" :=
+              CostContMgt.PrognEndResultElemCostType(ControlProjectElemCostType,FALSE);
+            ControlProjElemCTSnapshot."Prognosis End Result Hours" :=
+              CostContMgt.PrognEndResultHoursElemCostTyp(ControlProjectElemCostType,FALSE);
+            ControlProjElemCTSnapshot."Prognosis Result" := CostContMgt.PrognResultElemCostType(ControlProjectElemCostType,FALSE);
+            ControlProjElemCTSnapshot."Prognosis Total Cost" := CostContMgt.PrognTotCostElemCostType(ControlProjectElemCostType,FALSE);
+
+            ControlProjElemCTSnapshot.INSERT;
+
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE BuildProjElemCOSnapshot@1100525005(SnapshotDate@1100525000 : Date;VAR Project@1100525003 : Record 11072003);
+    VAR
+      ControlProjectElemCostObject@1100525002 : Record 11012050;
+      ControlProjElemCOSnapshot@1100525001 : Record 11020614;
+    BEGIN
+      WITH ControlProjectElemCostObject DO BEGIN
+        SETRANGE("Project No.",Project."No.");
+
+        Project.COPYFILTER("Cumulation Filter","Cumulation Filter");
+        Project.COPYFILTER("Period Filter","Period Filter");
+        Project.COPYFILTER("Progress Filter","Progress Filter");
+        Project.COPYFILTER("Prognosis Filter","Prognosis Filter");
+
+        IF FINDSET THEN
+          REPEAT
+            ControlProjElemCOSnapshot.INIT;
+            ControlProjElemCOSnapshot."Snapshot Date" := SnapshotDate;
+            ControlProjElemCOSnapshot."Project No." := "Project No.";
+            ControlProjElemCOSnapshot.Element := Element;
+            ControlProjElemCOSnapshot."Cost Type" := "Cost Type";
+            ControlProjElemCOSnapshot."Cost Object" := "Cost Object";
+
+            CostContMgt.CalcFieldsElemCostObj(ControlProjectElemCostObject);
+
+            CostContMgt.AllowedAndPurchElemCostObj(
+              ControlProjectElemCostObject,
+              ControlProjElemCOSnapshot.Allowed,ControlProjElemCOSnapshot."Allowed Hours",
+              DummyDec,DummyDec,
+              DummyDec,DummyDec,DummyDec,DummyDec,DummyDec,TRUE);
+
+            ControlProjElemCOSnapshot.Budget := Budget;
+            ControlProjElemCOSnapshot."Budget Hours" := "Budget Hours";
+            ControlProjElemCOSnapshot."Purchase Budget" := "Purchase Budget";
+            ControlProjElemCOSnapshot.Purchase := Purchase;
+            ControlProjElemCOSnapshot."Open (Purchase)" := "Open (Purchase)";
+            ControlProjElemCOSnapshot."Received/Not Invoiced" := "Received/Not Invoiced";
+            ControlProjElemCOSnapshot."Received/Not Inv. Hours" := "Received/Not Inv. Hours";
+            ControlProjElemCOSnapshot."Open Ovh. Surch. Firm (Purch.)" := "Open Ovh. Surch. Firm (Purch.)";
+            ControlProjElemCOSnapshot."Open Ovh. Surch. Soft (Purch.)" := "Open Ovh. Surch. Soft (Purch.)";
+            ControlProjElemCOSnapshot."Risc Coverage (Prognosis)" := "Risc Coverage (Prognosis)";
+            ControlProjElemCOSnapshot."Risc Coverage" := "Risc Coverage";
+            ControlProjElemCOSnapshot."Risc Coverage Withdraw" := "Risc Coverage Withdraw";
+            ControlProjElemCOSnapshot."Open (Inventory)" := "Open (Inventory)";
+            ControlProjElemCOSnapshot."Open Ovh. Surch. (Inventory)" := "Open Ovh. Surch. (Inventory)" ;
+            ControlProjElemCOSnapshot."Open Amount (Hours)" := "Open Amount (Hours)";
+            ControlProjElemCOSnapshot."Open Hours" := "Open Hours";
+            ControlProjElemCOSnapshot."Open Ovh. Surch. (Hours)" := "Open Ovh. Surch. (Hours)";
+            ControlProjElemCOSnapshot."Actual Costs" := "Actual Costs";
+            ControlProjElemCOSnapshot."Actual Hours" := "Actual Hours";
+            ControlProjElemCOSnapshot."Total Cost" := CostContMgt.TotCostElemCostObj(ControlProjectElemCostObject,FALSE);
+            ControlProjElemCOSnapshot."Total Hours" := CostContMgt.TotHoursElemCostObj(ControlProjectElemCostObject,FALSE);
+            ControlProjElemCOSnapshot.Available := Budget - CostContMgt.TotCostElemCostObj(ControlProjectElemCostObject,FALSE);
+            ControlProjElemCOSnapshot."Purchase Result" := CostContMgt.PurchResultElemCostObj(ControlProjectElemCostObject,FALSE);
+            ControlProjElemCOSnapshot.Result := CostContMgt.ResultElemCostObj(ControlProjectElemCostObject,FALSE);
+            ControlProjElemCOSnapshot."Hours Result" := CostContMgt.ResultHoursElemCostObj(ControlProjectElemCostObject,FALSE);
+            ControlProjElemCOSnapshot.Prognosis := Prognosis;
+            IF "Cost Type" = "Cost Type"::Labor THEN BEGIN
+              ControlProjElemCOSnapshot."Hours Prognosis" := "Hours Prognosis";
+              ControlProjElemCOSnapshot."Prognosis Total Hours" :=
+                CostContMgt.PrognTotHoursElemCostObj(ControlProjectElemCostObject,FALSE);
+            END;
+            ControlProjElemCOSnapshot."Prognosis End Result" :=
+              CostContMgt.PrognEndResultElemCostObj(ControlProjectElemCostObject,FALSE);
+            ControlProjElemCOSnapshot."Prognosis End Result Hours" :=
+              CostContMgt.PrognEndResultHoursElemCostObj(ControlProjectElemCostObject,FALSE);
+            ControlProjElemCOSnapshot."Prognosis Result" := CostContMgt.PrognResultElemCostObj(ControlProjectElemCostObject,FALSE);
+            ControlProjElemCOSnapshot."Prognosis Total Cost" :=
+              CostContMgt.PrognTotCostElemCostObj(ControlProjectElemCostObject,FALSE);
+
+            ControlProjElemCOSnapshot.INSERT;
+
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE BuildProjExtSnapshot@1100525006(SnapshotDate@1100525000 : Date;VAR Project@1100525004 : Record 11072003);
+    VAR
+      ExtensionContract@1100525002 : Record 11012004;
+      ControlProjExtSnapshot@1100525001 : Record 11020615;
+      CreateControlLinesExtCostObj@1100525003 : Codeunit 11012056;
+    BEGIN
+      CreateControlLinesExtCostObj.SetHideWindow;
+      CreateControlLinesExtCostObj.RUN(Project);
+
+      WITH ExtensionContract DO BEGIN
+        SETRANGE("Project No.",Project."No.");
+
+        Project.COPYFILTER("Cumulation Filter","Cumulation Filter");
+        Project.COPYFILTER("Period Filter","Period Filter");
+        Project.COPYFILTER("Progress Filter","Progress Filter");
+
+        IF FINDSET THEN
+          REPEAT
+            ControlProjExtSnapshot.INIT;
+            ControlProjExtSnapshot."Snapshot Date" := SnapshotDate;
+            ControlProjExtSnapshot."Project No." := "Project No.";
+            ControlProjExtSnapshot."Extension Contract" := "Contract No.";
+
+            CostContMgt.CalcFieldsExt(ExtensionContract);
+
+            CostContMgt.AllowedAndPurchExt(
+              ExtensionContract,
+              ControlProjExtSnapshot.Allowed,ControlProjExtSnapshot."Allowed Hours",
+              DummyDec,DummyDec,TRUE);
+
+            ControlProjExtSnapshot."Contract Amount" := "Contract Amount (LCY)";
+            ControlProjExtSnapshot.Budget := Budget;
+            ControlProjExtSnapshot."Budget Hours" := "Budget Hours";
+            ControlProjExtSnapshot."Purchase Budget" := "Purchase Budget";
+            ControlProjExtSnapshot.Purchase := Purchase;
+            ControlProjExtSnapshot."Open (Purchase)" := "Open (Purchase)";
+            ControlProjExtSnapshot."Received/Not Invoiced" := "Received/Not Invoiced";
+            ControlProjExtSnapshot."Received/Not Inv. Hours" := "Received/Not Inv. Hours";
+            ControlProjExtSnapshot."Open Ovh. Surch. Firm (Purch.)" := "Open Ovh. Surch. Firm (Purch.)";
+            ControlProjExtSnapshot."Open Ovh. Surch. Soft (Purch.)" := "Open Ovh. Surch. Soft (Purch.)";
+            ControlProjExtSnapshot."Risc Coverage" := "Risc Coverage";
+            ControlProjExtSnapshot."Risc Coverage Withdraw" := "Risc Coverage Withdraw";
+            ControlProjExtSnapshot."Open (Inventory)" := "Open (Inventory)";
+            ControlProjExtSnapshot."Open Ovh. Surch. (Inventory)" := "Open Ovh. Surch. (Inventory)" ;
+            ControlProjExtSnapshot."Open Amount (Hours)" := "Open Amount (Hours)";
+            ControlProjExtSnapshot."Open Hours" := "Open Hours";
+            ControlProjExtSnapshot."Open Ovh. Surch. (Hours)" := "Open Ovh. Surch. (Hours)";
+            ControlProjExtSnapshot."Actual Costs" := "Actual Costs";
+            ControlProjExtSnapshot."Actual Hours" := "Actual Hours";
+            ControlProjExtSnapshot."Total Cost" := CostContMgt.TotCostExt(ExtensionContract,FALSE);
+            ControlProjExtSnapshot."Total Hours" := CostContMgt.TotHoursExt(ExtensionContract,FALSE);
+            ControlProjExtSnapshot.Available := Budget - CostContMgt.TotCostExt(ExtensionContract,FALSE);
+            ControlProjExtSnapshot."Purchase Result" := CostContMgt.PurchResultExt(ExtensionContract,FALSE);
+            ControlProjExtSnapshot.Result := CostContMgt.ResultExt(ExtensionContract,FALSE);
+            ControlProjExtSnapshot.Revenues := Revenues;
+            ControlProjExtSnapshot."WIP Position" := ("Actual Costs" - Revenues); //differs from project level
+            ControlProjExtSnapshot.Result := CostContMgt.ResultExt(ExtensionContract,FALSE);
+
+            ControlProjExtSnapshot.INSERT;
+
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE BuildProjExtCTSnapshot@1100525007(SnapshotDate@1100525000 : Date;VAR Project@1100525003 : Record 11072003);
+    VAR
+      ControlProjExtCostType@1100525002 : Record 11020222;
+      ControlProjExtCTSnapshot@1100525001 : Record 11020616;
+    BEGIN
+      WITH ControlProjExtCostType DO BEGIN
+        SETRANGE("Project No.",Project."No.");
+
+        Project.COPYFILTER("Cumulation Filter","Cumulation Filter");
+        Project.COPYFILTER("Period Filter","Period Filter");
+        Project.COPYFILTER("Progress Filter","Progress Filter");
+
+        IF FINDSET THEN
+          REPEAT
+            ControlProjExtCTSnapshot.INIT;
+            ControlProjExtCTSnapshot."Snapshot Date" := SnapshotDate;
+            ControlProjExtCTSnapshot."Project No." := "Project No.";
+            ControlProjExtCTSnapshot."Extension Contract" := "Extension Contract";
+            ControlProjExtCTSnapshot."Cost Type" := "Cost Type";
+
+            CostContMgt.CalcFieldsExtCostType(ControlProjExtCostType);
+
+            CostContMgt.AllowedAndPurchExtCostType(
+              ControlProjExtCostType,
+              ControlProjExtCTSnapshot.Allowed,DummyDec,
+              DummyDec,DummyDec,TRUE);
+
+            ControlProjExtCTSnapshot.Budget := Budget;
+            ControlProjExtCTSnapshot."Purchase Budget" := "Purchase Budget";
+            ControlProjExtCTSnapshot.Purchase := Purchase;
+            ControlProjExtCTSnapshot."Open (Purchase)" := "Open (Purchase)";
+            ControlProjExtCTSnapshot."Received/Not Invoiced" := "Received/Not Invoiced";
+            ControlProjExtCTSnapshot."Received/Not Inv. Hours" := "Received/Not Inv. Hours";
+            ControlProjExtCTSnapshot."Open Ovh. Surch. Firm (Purch.)" := "Open Ovh. Surch. Firm (Purch.)";
+            ControlProjExtCTSnapshot."Open Ovh. Surch. Soft (Purch.)" := "Open Ovh. Surch. Soft (Purch.)";
+            ControlProjExtCTSnapshot."Risc Coverage" := "Risc Coverage";
+            ControlProjExtCTSnapshot."Risc Coverage Withdraw" := "Risc Coverage Withdraw";
+            ControlProjExtCTSnapshot."Open (Inventory)" := "Open (Inventory)";
+            ControlProjExtCTSnapshot."Open Ovh. Surch. (Inventory)" := "Open Ovh. Surch. (Inventory)" ;
+            ControlProjExtCTSnapshot."Open Amount (Hours)" := "Open Amount (Hours)";
+            ControlProjExtCTSnapshot."Open Hours" := "Open Hours";
+            ControlProjExtCTSnapshot."Open Ovh. Surch. (Hours)" := "Open Ovh. Surch. (Hours)";
+            ControlProjExtCTSnapshot."Actual Costs" := "Actual Costs";
+            ControlProjExtCTSnapshot."Total Cost" := CostContMgt.TotCostExtCostType(ControlProjExtCostType,FALSE);
+            ControlProjExtCTSnapshot."Total Hours" := CostContMgt.TotHoursExtCostType(ControlProjExtCostType,FALSE);
+            ControlProjExtCTSnapshot.Available := Budget - CostContMgt.TotCostExtCostType(ControlProjExtCostType,FALSE);
+            ControlProjExtCTSnapshot."Purchase Result" := CostContMgt.PurchResultExtCostType(ControlProjExtCostType,FALSE);
+            ControlProjExtCTSnapshot.Result := CostContMgt.ResultExtCostType(ControlProjExtCostType,FALSE);
+
+            ControlProjExtCTSnapshot.INSERT;
+
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE BuildProjExtCOSnapshot@1100525008(SnapshotDate@1100525000 : Date;VAR Project@1100525003 : Record 11072003);
+    VAR
+      ControlProjExtCostObject@1100525002 : Record 11020223;
+      ControlProjExtCOSnapshot@1100525001 : Record 11020617;
+    BEGIN
+      WITH ControlProjExtCostObject DO BEGIN
+        SETRANGE("Project No.",Project."No.");
+
+        Project.COPYFILTER("Cumulation Filter","Cumulation Filter");
+        Project.COPYFILTER("Period Filter","Period Filter");
+        Project.COPYFILTER("Progress Filter","Progress Filter");
+
+        IF FINDSET THEN
+          REPEAT
+            ControlProjExtCOSnapshot.INIT;
+            ControlProjExtCOSnapshot."Snapshot Date" := SnapshotDate;
+            ControlProjExtCOSnapshot."Project No." := "Project No.";
+            ControlProjExtCOSnapshot."Extension Contract" := "Extension Contract";
+            ControlProjExtCOSnapshot."Cost Type" := "Cost Type";
+            ControlProjExtCOSnapshot."Cost Object" := "Cost Object";
+
+            CostContMgt.CalcFieldsExtCostObj(ControlProjExtCostObject);
+
+            CostContMgt.AllowedAndPurchExtCostObj(
+              ControlProjExtCostObject,
+              ControlProjExtCOSnapshot.Allowed,ControlProjExtCOSnapshot."Allowed Hours",
+              DummyDec,DummyDec,TRUE);
+
+            ControlProjExtCOSnapshot.Budget := Budget;
+            ControlProjExtCOSnapshot."Budget Hours" := "Budget Hours";
+            ControlProjExtCOSnapshot."Purchase Budget" := "Purchase Budget";
+            ControlProjExtCOSnapshot.Purchase := Purchase;
+            ControlProjExtCOSnapshot."Open (Purchase)" := "Open (Purchase)";
+            ControlProjExtCOSnapshot."Received/Not Invoiced" := "Received/Not Invoiced";
+            ControlProjExtCOSnapshot."Received/Not Inv. Hours" := "Received/Not Inv. Hours";
+            ControlProjExtCOSnapshot."Open Ovh. Surch. Firm (Purch.)" := "Open Ovh. Surch. Firm (Purch.)";
+            ControlProjExtCOSnapshot."Open Ovh. Surch. Soft (Purch.)" := "Open Ovh. Surch. Soft (Purch.)";
+            ControlProjExtCOSnapshot."Risc Coverage" := "Risc Coverage";
+            ControlProjExtCOSnapshot."Risc Coverage Withdraw" := "Risc Coverage Withdraw";
+            ControlProjExtCOSnapshot."Open (Inventory)" := "Open (Inventory)";
+            ControlProjExtCOSnapshot."Open Ovh. Surch. (Inventory)" := "Open Ovh. Surch. (Inventory)" ;
+            ControlProjExtCOSnapshot."Open Amount (Hours)" := "Open Amount (Hours)";
+            ControlProjExtCOSnapshot."Open Hours" := "Open Hours";
+            ControlProjExtCOSnapshot."Open Ovh. Surch. (Hours)" := "Open Ovh. Surch. (Hours)";
+            ControlProjExtCOSnapshot."Actual Costs" := "Actual Costs";
+            ControlProjExtCOSnapshot."Actual Hours" := "Actual Hours";
+            ControlProjExtCOSnapshot."Total Cost" := CostContMgt.TotCostExtCostObj(ControlProjExtCostObject,FALSE);
+            ControlProjExtCOSnapshot."Total Hours" := CostContMgt.TotHoursExtCostObj(ControlProjExtCostObject,FALSE);
+            ControlProjExtCOSnapshot.Available := Budget - CostContMgt.TotCostExtCostObj(ControlProjExtCostObject,FALSE);
+            ControlProjExtCOSnapshot."Purchase Result" := CostContMgt.PurchResultExtCostObj(ControlProjExtCostObject,FALSE);
+            ControlProjExtCOSnapshot.Result := CostContMgt.ResultExtCostObj(ControlProjExtCostObject,FALSE);
+
+            ControlProjExtCOSnapshot.INSERT;
+
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE BuildProjCostCompSnapshot@1100525009(SnapshotDate@1100525000 : Date;VAR Project@1100525004 : Record 11072003);
+    VAR
+      ControlProjectCostComponent@1100525002 : Record 11020297;
+      ControlProjCostCompSnapshot@1100525001 : Record 11020618;
+      CreateControlLinesProjCostObj@1100525003 : Codeunit 11012011;
+    BEGIN
+      CreateControlLinesProjCostObj.ControlCostComponent(Project);
+
+      WITH ControlProjectCostComponent DO BEGIN
+        SETRANGE("Project No.",Project."No.");
+
+        Project.COPYFILTER("Cumulation Filter","Cumulation Filter");
+        Project.COPYFILTER("Period Filter","Period Filter");
+        Project.COPYFILTER("Progress Filter","Progress Filter");
+
+        IF FINDSET THEN
+          REPEAT
+
+            ControlProjCostCompSnapshot.INIT;
+            ControlProjCostCompSnapshot."Snapshot Date" := SnapshotDate;
+            ControlProjCostCompSnapshot."Project No." := "Project No.";
+            ControlProjCostCompSnapshot."Cost Component" := "Cost Component";
+
+            CostContMgt.CalcFieldsCostComp(ControlProjectCostComponent);
+
+            ControlProjCostCompSnapshot.Budget := Budget;
+            ControlProjCostCompSnapshot."Budget Hours" := "Budget Hours";
+            ControlProjCostCompSnapshot."Purchase Budget" := "Purchase Budget";
+            ControlProjCostCompSnapshot.Purchase := Purchase;
+            ControlProjCostCompSnapshot."Open (Purchase)" := "Open (Purchase)";
+            ControlProjCostCompSnapshot."Received/Not Invoiced" := "Received/Not Invoiced";
+            ControlProjCostCompSnapshot."Received/Not Inv. Hours" := "Received/Not Inv. Hours";
+            ControlProjCostCompSnapshot."Open Ovh. Surch. Firm (Purch.)" := "Open Ovh. Surch. Firm (Purch.)";
+            ControlProjCostCompSnapshot."Open Ovh. Surch. Soft (Purch.)" := "Open Ovh. Surch. Soft (Purch.)";
+            ControlProjCostCompSnapshot."Risc Coverage" := "Risc Coverage";
+            ControlProjCostCompSnapshot."Risc Coverage Withdraw" := "Risc Coverage Withdraw";
+            ControlProjCostCompSnapshot."Open (Inventory)" := "Open (Inventory)";
+            ControlProjCostCompSnapshot."Open Ovh. Surch. (Inventory)" := "Open Ovh. Surch. (Inventory)" ;
+            ControlProjCostCompSnapshot."Open Amount (Hours)" := "Open Amount (Hours)";
+            ControlProjCostCompSnapshot."Open Ovh. Surch. (Hours)" := "Open Ovh. Surch. (Hours)";
+            ControlProjCostCompSnapshot."Actual Costs" := "Actual Costs";
+            ControlProjCostCompSnapshot."Actual Hours" := "Actual Hours";
+            ControlProjCostCompSnapshot."Total Cost" := CostContMgt.TotCostCostComp(ControlProjectCostComponent,FALSE);
+            ControlProjCostCompSnapshot."Total Hours" := CostContMgt.TotHoursCostComp(ControlProjectCostComponent,FALSE);
+            ControlProjCostCompSnapshot.Available := Budget - CostContMgt.TotCostCostComp(ControlProjectCostComponent,FALSE);
+
+            ControlProjCostCompSnapshot.INSERT;
+
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE SetRunSpecificProject@1100525017(VAR Project@1100525001 : Record 11072003;SnapshotDate@1100525000 : Date;SnapshotCompanyName@1100529600 : Text[30];RunInAllCompaniesNew@1100529601 : Boolean);
+    BEGIN
+      //DP01482
+      RunSpecificProject := TRUE;
+      IF SnapshotCompanyName <> '' THEN
+        RunProject.CHANGECOMPANY(SnapshotCompanyName);
+      RunProject.COPY(Project);
+      RunSnapshotDate := SnapshotDate;
+      RunInCompanyName := SnapshotCompanyName;
+      RunInAllCompanies := RunInAllCompaniesNew;
+    END;
+
+    LOCAL PROCEDURE WriteEventLog@1100525011();
+    VAR
+      EventLog@1100525000 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Diagnostics.EventLog";
+      EventLogEntryType@1100525001 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Diagnostics.EventLogEntryType";
+      ServerEnvironmentManagement@1100525002 : Codeunit 11012284;
+      LF@1100525003 : Char;
+      CR@1100525004 : Char;
+    BEGIN
+      //DP01482
+      LF:=10;
+      CR:=13;
+
+      EventLog.WriteEntry(
+        'MicrosoftDynamicsNavServer',
+        'Databasename: ' + ServerEnvironmentManagement.GetDatabaseName + FORMAT(CR,0,'<CHAR>') + FORMAT(LF,0,'<CHAR>') +
+        'Companyname: ' + COMPANYNAME + FORMAT(CR,0,'<CHAR>') + FORMAT(LF,0,'<CHAR>') +
+        'Building snapshot ' + FORMAT(CR,0,'<CHAR>') + FORMAT(LF,0,'<CHAR>') +
+        GETLASTERRORTEXT,
+        EventLogEntryType.Error);
+    END;
+
+    PROCEDURE SetRunInAllCompanies@1100529600(RunInAllCompaniesNew@1100529600 : Boolean);
+    BEGIN
+      RunInAllCompanies := RunInAllCompaniesNew;
+    END;
+
+    LOCAL PROCEDURE BuildProjSnapshotInCompany@1100529604(SnapshotDate@1100525001 : Date;VAR Project@1100525000 : Record 11072003);
+    VAR
+      ControlProjectSnapshotComp@1100525003 : Record 11229379;
+      ProjFilter@1100525002 : Text[250];
+    BEGIN
+      WITH Project DO BEGIN
+        IF ControlProjectSnapshotComp.GET(RunInCompanyName, SnapshotDate, "No.") THEN
+          ControlProjectSnapshotComp.DELETE(TRUE);
+
+        ControlProjectSnapshotComp.INIT;
+        ControlProjectSnapshotComp."Company Name" := RunInCompanyName;
+        ControlProjectSnapshotComp."Snapshot Date" := SnapshotDate;
+        ControlProjectSnapshotComp."Project No." := "No.";
+        ControlProjectSnapshotComp."Global Dimension 1 Code" := "Global Dimension 1 Code";
+
+        FillProjectFilter(ProjFilter);
+        SETFILTER("Project Filter",ProjFilter);
+
+        CALCFIELDS(
+          Revenues,
+          "Extension Quoted Amount","Options Contract Amount",
+          "Actual Preclosure Result",
+          "Provision Loss",
+          "Principal Name",
+          "Name Expediter",
+          "Name Site Manager",
+          "Name Project Engineer",
+          "Name Project Manager");
+
+        CostContMgt.CalcFieldsProject(Project);
+
+        CostContMgt.AllowedAndPurchProject(
+          Project,
+          ControlProjectSnapshotComp.Allowed,ControlProjectSnapshotComp."Allowed Hours",
+          DummyDec,DummyDec,TRUE,
+          DummyDec,ControlProjectSnapshotComp."Estimated Purchase Result",
+          DummyDec,
+          ControlProjectSnapshotComp."Actual Purchase Result",
+          ControlProjectSnapshotComp."Total Purchase Result",TRUE);
+
+        ControlProjectSnapshotComp."Project Contract Amount" := "Project Contract Amount";
+        ControlProjectSnapshotComp."Extension Quoted Amount" := "Extension Quoted Amount";
+        ControlProjectSnapshotComp."Extension Contract Amount" := "Extension Contract Amount";
+        ControlProjectSnapshotComp."Options Contract Amount" := "Options Contract Amount";
+        ControlProjectSnapshotComp."Contr. Amt. incl. Ext.and Opt." :=
+          "Project Contract Amount" + "Extension Contract Amount" + "Options Contract Amount";
+        ControlProjectSnapshotComp.Budget := Budget;
+        ControlProjectSnapshotComp."Budget Hours" := "Budget Hours (Entire Project)";
+        ControlProjectSnapshotComp."Budget Result" := CostContMgt.BudgetResultProject(Project,FALSE);
+        ControlProjectSnapshotComp."Budget Result %" := CostContMgt.BudgetResultPercProject(Project,FALSE);
+        ControlProjectSnapshotComp."Purchase Budget" := "Purchase Budget";
+        ControlProjectSnapshotComp.Purchase := Purchase;
+        ControlProjectSnapshotComp."Open (Purchase)" := "Open (Purchase)";
+        ControlProjectSnapshotComp."Received/Not Invoiced" := "Received/Not Invoiced";
+        ControlProjectSnapshotComp."Received/Not Inv. Hours" := "Received/Not Inv. Hours";
+        ControlProjectSnapshotComp."Open Ovh. Surch. Firm (Purch.)" := "Open Ovh. Surch. Firm (Purch.)";
+        ControlProjectSnapshotComp."Open Ovh. Surch. Soft (Purch.)" := "Open Ovh. Surch. Soft (Purch.)";
+        ControlProjectSnapshotComp."Risc Coverage (Prognosis)" := "Risc Coverage (Prognosis)";
+        ControlProjectSnapshotComp."Risc Coverage" := "Risc Coverage";
+        ControlProjectSnapshotComp."Risc Coverage Withdraw" := "Risc Coverage Withdraw";
+        ControlProjectSnapshotComp."Open (Inventory)" := "Open (Inventory)";
+        ControlProjectSnapshotComp."Open Ovh. Surch. (Inventory)" := "Open Ovh. Surch. (Inventory)" ;
+        ControlProjectSnapshotComp."Open Amount (Hours)" := "Open Amount (Hours)";
+        ControlProjectSnapshotComp."Open Hours" := "Open Hours";
+        ControlProjectSnapshotComp."Open Ovh. Surch. (Hours)" := "Open Ovh. Surch. (Hours)";
+        ControlProjectSnapshotComp."Preregistered WIP" := "Preregistered WIP";
+        ControlProjectSnapshotComp."Actual Costs" := "Actual Costs";
+        ControlProjectSnapshotComp."Actual Hours" := "Actual Hours";
+        ControlProjectSnapshotComp."Total Cost" := CostContMgt.TotCostProject(Project,FALSE);
+        ControlProjectSnapshotComp."Total Hours" := CostContMgt.TotHoursProject(Project,FALSE);
+        IF EVALUATE(ControlProjectSnapshotComp."Progress Date",GETFILTER("Progress Filter")) THEN;
+        ControlProjectSnapshotComp.Available := Budget - CostContMgt.TotCostProject(Project,FALSE);
+        ControlProjectSnapshotComp."Allowed %" := CostContMgt.AllowedPercProject(Project,FALSE);
+        ControlProjectSnapshotComp."Purchase Result" := CostContMgt.PurchResultProject(Project,FALSE);
+        ControlProjectSnapshotComp.Result := CostContMgt.ResultProject(Project,FALSE);
+        ControlProjectSnapshotComp."Result %" := CostContMgt.ResultPercProject(Project,FALSE);
+        ControlProjectSnapshotComp."Hours Result" := CostContMgt.ResultHoursProject(Project,FALSE);
+        ControlProjectSnapshotComp."Calculated End Result" := CostContMgt.CalculatedEndResultProject(Project,FALSE);
+        ControlProjectSnapshotComp."Calc. End Res. Versus Budget" := CostContMgt.CalcEndResVersusBudgetProject(Project,FALSE);
+        IF EVALUATE(ControlProjectSnapshotComp."Prognosis Date",GETFILTER("Prognosis Filter")) THEN;
+        ControlProjectSnapshotComp.Prognosis := Prognosis;
+        ControlProjectSnapshotComp."Hours Prognosis" := "Hours Prognosis";
+        ControlProjectSnapshotComp."Prognosis Total Hours" := CostContMgt.PrognTotHoursProject(Project,FALSE);
+        ControlProjectSnapshotComp."Prognosis End Result" := CostContMgt.PrognEndResultProject(Project,FALSE);
+        ControlProjectSnapshotComp."Prognosis End Result Hours" := CostContMgt.PrognEndResultHoursProject(Project,FALSE);
+        ControlProjectSnapshotComp."Progn End Result vs Budget %" := CostContMgt.PrognEndResVersusBudgetProject(Project,FALSE);
+        ControlProjectSnapshotComp."Prognosis Result" := CostContMgt.PrognResultProject(Project,FALSE);
+        ControlProjectSnapshotComp.Revenues := Revenues;
+        ControlProjectSnapshotComp."Gross WIP Position" := "Actual Costs" - Revenues;
+        ControlProjectSnapshotComp."Closed Costs" := "Closed Costs";
+        ControlProjectSnapshotComp."Closed Revenues" := "Closed Revenues";
+        ControlProjectSnapshotComp."WIP Position" := ("Actual Costs" + "Closed Costs") - ( Revenues - "Closed Revenues");
+        ControlProjectSnapshotComp."Progn. End Res. vs Contr. Pr." := CostContMgt.PrognEndResVrsContrAmtProject(Project,FALSE);
+        ControlProjectSnapshotComp."Progn. End Res. vs Contr. Pr.%" := CostContMgt.PrognEndResVrsContrAmtProjPerc(Project,FALSE);
+        IF InventSetup.JobInventoryByLocationShelf("No.") OR InventSetup.JobInventoryByStockRelease("No.") THEN
+          ControlProjectSnapshotComp."Project Inventory" := CostContMgt.InventoryProject(Project,FALSE);
+        ControlProjectSnapshotComp."Actual Preclosure Result" := "Actual Preclosure Result";
+        ControlProjectSnapshotComp."Provision Loss Result" := "Provision Loss";
+
+        CostContMgt.PrognTotFinResultProject(
+          Project,
+          FALSE,
+          ControlProjectSnapshotComp."Prognosis Total Cost",
+          ControlProjectSnapshotComp."Prognosis Revenue",
+          ControlProjectSnapshotComp."Prognosis Total Revenue",
+          ControlProjectSnapshotComp."Prognosis Financial Result",
+          ControlProjectSnapshotComp."Expected Finishing Date",
+          ControlProjectSnapshotComp."Prognosis Level");
+
+        ControlProjectSnapshotComp.Description := Description;
+        ControlProjectSnapshotComp.Supervisor := Supervisor;
+        ControlProjectSnapshotComp.Estimator := Estimator;
+        ControlProjectSnapshotComp.Buyercontact := Buyercontact;
+        ControlProjectSnapshotComp."Purchaser Code" := "Purchaser Code";
+        ControlProjectSnapshotComp.Principal := "Bill-to Customer No.";
+        ControlProjectSnapshotComp."Principal Name" := "Principal Name";
+        ControlProjectSnapshotComp."Main Project" := "Main Project";
+        ControlProjectSnapshotComp.Expediter := Expediter;
+        ControlProjectSnapshotComp."Name Expediter" := "Name Expediter";
+        ControlProjectSnapshotComp."Site Manager" := "Site Manager";
+        ControlProjectSnapshotComp."Name Site Manager" := "Name Site Manager";
+        ControlProjectSnapshotComp."Project Engineer" := "Project Engineer";
+        ControlProjectSnapshotComp."Name Project Engineer" := "Name Project Engineer";
+        ControlProjectSnapshotComp."Project Manager" := "Project Manager";
+        ControlProjectSnapshotComp."Name Project Manager" := "Name Project Manager";
+        ControlProjectSnapshotComp."Project Status" := "Project Status";
+
+        ControlProjectSnapshotComp.INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE BuildProjCostObjectSnapshotInCompany@1100529603(SnapshotDate@1100525002 : Date;VAR Project@1100525003 : Record 11072003);
+    VAR
+      ControlProjectCostObject@1100525001 : Record 11012047;
+      ContrPrCostObjSnpComp@1100525000 : Record 11229380;
+    BEGIN
+      WITH ControlProjectCostObject DO BEGIN
+        IF RunInCompanyName = '' THEN
+          CHANGECOMPANY(COMPANYNAME)
+        ELSE
+          CHANGECOMPANY(RunInCompanyName);
+
+        SETRANGE("Project No.",Project."No.");
+
+        Project.COPYFILTER("Cumulation Filter","Cumulation Filter");
+        Project.COPYFILTER("Period Filter","Period Filter");
+        Project.COPYFILTER("Progress Filter","Progress Filter");
+        Project.COPYFILTER("Prognosis Filter","Prognosis Filter");
+
+        IF FINDSET THEN
+          REPEAT
+            ContrPrCostObjSnpComp.INIT;
+            ContrPrCostObjSnpComp."Company Name" := RunInCompanyName;
+            ContrPrCostObjSnpComp."Snapshot Date" := SnapshotDate;
+            ContrPrCostObjSnpComp."Project No." := Project."No.";
+            ContrPrCostObjSnpComp."Cost Type" := "Cost Type";
+            ContrPrCostObjSnpComp."Cost Object" := "Cost Object";
+            ContrPrCostObjSnpComp."Cost Component" := "Cost Component";
+
+            CALCFIELDS(Description, "Project Related Name");
+            ContrPrCostObjSnpComp.Description := Description;
+            ContrPrCostObjSnpComp."Project Cost Object Desc." := "Project Related Name";
+
+            CostContMgt.CalcFieldsCostObj(ControlProjectCostObject);
+
+            CostContMgt.AllowedAndPurchCostObj(
+              ControlProjectCostObject,
+              ContrPrCostObjSnpComp.Allowed,ContrPrCostObjSnpComp."Allowed Hours",
+              DummyDec,DummyDec,
+              DummyDec,ContrPrCostObjSnpComp."Estimated Purchase Result",
+              DummyDec,
+              ContrPrCostObjSnpComp."Actual Purchase Result",
+              ContrPrCostObjSnpComp."Total Purchase Result",TRUE);
+
+            ContrPrCostObjSnpComp."Original Budget Amount" := "Original Budget Amount";
+            ContrPrCostObjSnpComp."Original Budget Hours" := "Original Budget Hours";
+            ContrPrCostObjSnpComp.Adjustments := Adjustments;
+            ContrPrCostObjSnpComp."Adjustments Hours" := "Adjustments Hours";
+            ContrPrCostObjSnpComp.Extension := Extension;
+            ContrPrCostObjSnpComp."Extension Hours" := "Extension Hours";
+            ContrPrCostObjSnpComp.Options := Options;
+            ContrPrCostObjSnpComp."Option Hours" := "Option Hours";
+            ContrPrCostObjSnpComp.Budget := Budget;
+            ContrPrCostObjSnpComp."Budget Hours (Total)" := "Budget Hours";
+            ContrPrCostObjSnpComp."Purchase Budget" := "Purchase Budget";
+            ContrPrCostObjSnpComp.Purchase := Purchase;
+            ContrPrCostObjSnpComp."Open (Purchase)" := "Open (Purchase)";
+            ContrPrCostObjSnpComp."Received/Not Invoiced" := "Received/Not Invoiced";
+            ContrPrCostObjSnpComp."Received/Not Inv. Hours" := "Received/Not Inv. Hours";
+            ContrPrCostObjSnpComp."Open Ovh. Surch. Firm (Purch.)" := "Open Ovh. Surch. Firm (Purch.)";
+            ContrPrCostObjSnpComp."Open Ovh. Surch. Soft (Purch.)" := "Open Ovh. Surch. Soft (Purch.)";
+            ContrPrCostObjSnpComp."Risc Coverage (Prognosis)" := "Risc Coverage (Prognosis)";
+            ContrPrCostObjSnpComp."Risc Coverage" := "Risc Coverage";
+            ContrPrCostObjSnpComp."Risc Coverage Withdraw" := "Risc Coverage Withdraw";
+            ContrPrCostObjSnpComp."Open (Inventory)" := "Open (Inventory)";
+            ContrPrCostObjSnpComp."Open Ovh. Surch. (Inventory)" := "Open Ovh. Surch. (Inventory)" ;
+            ContrPrCostObjSnpComp."Open Amount (Hours)" := "Open Amount (Hours)";
+            ContrPrCostObjSnpComp."Open Hours" := "Open Hours";
+            ContrPrCostObjSnpComp."Open Ovh. Surch. (Hours)" := "Open Ovh. Surch. (Hours)";
+            ContrPrCostObjSnpComp."Actual Costs" := "Actual Costs";
+            ContrPrCostObjSnpComp."Actual Hours" := "Actual Hours";
+            ContrPrCostObjSnpComp."Total Cost" := CostContMgt.TotCostCostObj(ControlProjectCostObject,FALSE);
+            ContrPrCostObjSnpComp.Available := Budget - CostContMgt.TotCostCostObj(ControlProjectCostObject,FALSE);
+            ContrPrCostObjSnpComp."Allowed %" := CostContMgt.AllowedPercCostObj(ControlProjectCostObject,FALSE);
+            ContrPrCostObjSnpComp."Purchase Result" := CostContMgt.PurchResultCostObj(ControlProjectCostObject,FALSE);
+            ContrPrCostObjSnpComp.Result := CostContMgt.ResultCostObj(ControlProjectCostObject,FALSE);
+            ContrPrCostObjSnpComp.Prognosis := Prognosis;
+            IF "Cost Type" = "Cost Type"::Labor THEN BEGIN
+              ContrPrCostObjSnpComp."Total Hours" := CostContMgt.TotHoursCostObj(ControlProjectCostObject,FALSE);
+              ContrPrCostObjSnpComp."Hours Prognosis" := "Hours Prognosis";
+              ContrPrCostObjSnpComp."Hours Result" := CostContMgt.ResultHoursCostObj(ControlProjectCostObject,FALSE);
+              ContrPrCostObjSnpComp."Prognosis Total Hours" := CostContMgt.PrognTotHoursCostObj(ControlProjectCostObject,FALSE);
+              ContrPrCostObjSnpComp."Prognosis End Result Hours" :=
+                CostContMgt.PrognEndResultHoursCostObj(ControlProjectCostObject,FALSE);
+            END;
+            ContrPrCostObjSnpComp."Prognosis Total Cost" := CostContMgt.PrognTotCostCostObj(ControlProjectCostObject,FALSE);
+            ContrPrCostObjSnpComp."Prognosis End Result" := CostContMgt.PrognEndResultCostObj(ControlProjectCostObject,FALSE);
+            ContrPrCostObjSnpComp."Prognosis Result" := CostContMgt.PrognResultCostObj(ControlProjectCostObject,FALSE);
+            ContrPrCostObjSnpComp.Result := CostContMgt.ResultCostObj(ControlProjectCostObject,FALSE);
+
+            ContrPrCostObjSnpComp.INSERT;
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE CalcProjBudgetProc@1100285005(pProject@1100285002 : Record 11072003;pMaterial@1100285003 : Boolean) : Decimal;
+    VAR
+      lvBudgetLinePurchGoal@1100285000 : Record 11128042;
+      lvTotal@1100285001 : Decimal;
+    BEGIN
+      CLEAR(lvBudgetLinePurchGoal);
+      lvBudgetLinePurchGoal.SETRANGE("Project No." , pProject."No.");
+      IF pMaterial THEN
+         lvBudgetLinePurchGoal.SETRANGE("Cost Type"   , lvBudgetLinePurchGoal."Cost Type" :: Material);
+      //>>IME424x
+      //IF lvBudgetLinePurchGoal.FINDFIRST THEN REPEAT
+      IF lvBudgetLinePurchGoal.FINDSET(FALSE) THEN REPEAT
+      //<<IME424x
+         lvTotal := lvTotal + lvBudgetLinePurchGoal."Procurement target amount";
+      UNTIL lvBudgetLinePurchGoal.NEXT = 0;
+      EXIT(lvTotal);
+    END;
+
+    PROCEDURE CalcProjCostTypeBudgetProc@1100285000(pProjectCostType@1100285002 : Record 11012046) : Decimal;
+    VAR
+      lvBudgetLinePurchGoal@1100285000 : Record 11128042;
+      lvTotal@1100285001 : Decimal;
+    BEGIN
+      CLEAR(lvBudgetLinePurchGoal);
+      lvBudgetLinePurchGoal.SETRANGE("Project No." , pProjectCostType."Project No.");
+      lvBudgetLinePurchGoal.SETRANGE("Cost Type"   , pProjectCostType."Cost Type");
+      //>>IME424x
+      //IF lvBudgetLinePurchGoal.FINDFIRST THEN REPEAT
+      IF lvBudgetLinePurchGoal.FINDSET(FALSE) THEN REPEAT
+      //<<IME424x
+         lvTotal := lvTotal + lvBudgetLinePurchGoal."Procurement target amount";
+      UNTIL lvBudgetLinePurchGoal.NEXT = 0;
+      EXIT(lvTotal);
+    END;
+
+    PROCEDURE CalcProjCostObjectBudgetProc@1100285001(pProjectCostObject@1100285002 : Record 11012047;pMaterial@1100285003 : Boolean) : Decimal;
+    VAR
+      lvBudgetLinePurchGoal@1100285000 : Record 11128042;
+      lvTotal@1100285001 : Decimal;
+    BEGIN
+      CLEAR(lvBudgetLinePurchGoal);
+      lvBudgetLinePurchGoal.SETRANGE("Project No." , pProjectCostObject."Project No.");
+      IF pMaterial THEN
+         lvBudgetLinePurchGoal.SETRANGE("Cost Type"   , lvBudgetLinePurchGoal."Cost Type" :: Material);
+      lvBudgetLinePurchGoal.SETRANGE("Cost Object" , pProjectCostObject."Cost Object");
+      //>>IME424x
+      //IF lvBudgetLinePurchGoal.FINDFIRST THEN REPEAT
+      IF lvBudgetLinePurchGoal.FINDSET(FALSE) THEN REPEAT
+      //<<IME424x
+         lvTotal := lvTotal + lvBudgetLinePurchGoal."Procurement target amount";
+      UNTIL lvBudgetLinePurchGoal.NEXT = 0;
+      EXIT(lvTotal);
+    END;
+
+    PROCEDURE CalcProjElemBudgetProc@1100285002(pProjectElem@1100285002 : Record 11012048) : Decimal;
+    VAR
+      lvBudgetLinePurchGoal@1100285000 : Record 11128042;
+      lvTotal@1100285001 : Decimal;
+    BEGIN
+      CLEAR(lvBudgetLinePurchGoal);
+      lvBudgetLinePurchGoal.SETRANGE("Project No." , pProjectElem."Project No.");
+      lvBudgetLinePurchGoal.SETRANGE(Element       , pProjectElem.Element);
+      //>>IME424x
+      //IF lvBudgetLinePurchGoal.FINDFIRST THEN REPEAT
+      IF lvBudgetLinePurchGoal.FINDSET(FALSE) THEN REPEAT
+      //<<IME424x
+         lvTotal := lvTotal + lvBudgetLinePurchGoal."Procurement target amount";
+      UNTIL lvBudgetLinePurchGoal.NEXT = 0;
+      EXIT(lvTotal);
+    END;
+
+    PROCEDURE CalcProjElemCTBudgetProc@1100285003(pProjectElemCT@1100285002 : Record 11012049) : Decimal;
+    VAR
+      lvBudgetLinePurchGoal@1100285000 : Record 11128042;
+      lvTotal@1100285001 : Decimal;
+    BEGIN
+      CLEAR(lvBudgetLinePurchGoal);
+      lvBudgetLinePurchGoal.SETRANGE("Project No." , pProjectElemCT."Project No.");
+      lvBudgetLinePurchGoal.SETRANGE(Element       , pProjectElemCT.Element);
+      lvBudgetLinePurchGoal.SETRANGE("Cost Type"   , pProjectElemCT."Cost Type");
+      //>>IME424x
+      //IF lvBudgetLinePurchGoal.FINDFIRST THEN REPEAT
+      IF lvBudgetLinePurchGoal.FINDSET(FALSE) THEN REPEAT
+      //<<IME424x
+         lvTotal := lvTotal + lvBudgetLinePurchGoal."Procurement target amount";
+      UNTIL lvBudgetLinePurchGoal.NEXT = 0;
+      EXIT(lvTotal);
+    END;
+
+    PROCEDURE CalcProjElemCOBudgetProc@1100285004(pProjectElemCO@1100285002 : Record 11012050;pMaterial@1100285003 : Boolean) : Decimal;
+    VAR
+      lvBudgetLinePurchGoal@1100285000 : Record 11128042;
+      lvTotal@1100285001 : Decimal;
+    BEGIN
+      CLEAR(lvBudgetLinePurchGoal);
+      lvBudgetLinePurchGoal.SETRANGE("Project No." , pProjectElemCO."Project No.");
+      lvBudgetLinePurchGoal.SETRANGE(Element       , pProjectElemCO.Element);
+      IF pMaterial THEN
+         lvBudgetLinePurchGoal.SETRANGE("Cost Type"   , lvBudgetLinePurchGoal."Cost Type" :: Material)
+      ELSE
+         lvBudgetLinePurchGoal.SETRANGE("Cost Type"   , pProjectElemCO."Cost Type");
+      lvBudgetLinePurchGoal.SETRANGE("Cost Object" , pProjectElemCO."Cost Object");
+      //>>IME424x
+      //IF lvBudgetLinePurchGoal.FINDFIRST THEN REPEAT
+      IF lvBudgetLinePurchGoal.FINDSET(FALSE) THEN REPEAT
+      //<<IME424x
+         lvTotal := lvTotal + lvBudgetLinePurchGoal."Procurement target amount";
+      UNTIL lvBudgetLinePurchGoal.NEXT = 0;
+      EXIT(lvTotal);
+    END;
+
+    PROCEDURE CalcProjExtBudgetProc@1100285006(pProjectExt@1100285002 : Record 11012004) : Decimal;
+    VAR
+      lvBudgetLinePurchGoal@1100285000 : Record 11128042;
+      lvTotal@1100285001 : Decimal;
+    BEGIN
+      CLEAR(lvBudgetLinePurchGoal);
+      lvBudgetLinePurchGoal.SETRANGE("Project No."          , pProjectExt."Project No.");
+      lvBudgetLinePurchGoal.SETRANGE("Extension Contract"   , pProjectExt."Contract No.");
+      //>>IME424x
+      //IF lvBudgetLinePurchGoal.FINDFIRST THEN REPEAT
+      IF lvBudgetLinePurchGoal.FINDSET(FALSE) THEN REPEAT
+      //<<IME424x
+         lvTotal := lvTotal + lvBudgetLinePurchGoal."Procurement target amount";
+      UNTIL lvBudgetLinePurchGoal.NEXT = 0;
+      EXIT(lvTotal);
+    END;
+
+    PROCEDURE CalcProjExtCTBudgetProc@1100285010(pProjectExtCT@1100285002 : Record 11020222) : Decimal;
+    VAR
+      lvBudgetLinePurchGoal@1100285000 : Record 11128042;
+      lvTotal@1100285001 : Decimal;
+    BEGIN
+      CLEAR(lvBudgetLinePurchGoal);
+      lvBudgetLinePurchGoal.SETRANGE("Project No."          , pProjectExtCT."Project No.");
+      lvBudgetLinePurchGoal.SETRANGE("Extension Contract"   , pProjectExtCT."Extension Contract");
+      lvBudgetLinePurchGoal.SETRANGE("Cost Type"            , pProjectExtCT."Cost Type");
+      //>>IME424x
+      //IF lvBudgetLinePurchGoal.FINDFIRST THEN REPEAT
+      IF lvBudgetLinePurchGoal.FINDSET(FALSE) THEN REPEAT
+      //<<IME424x
+         lvTotal := lvTotal + lvBudgetLinePurchGoal."Procurement target amount";
+      UNTIL lvBudgetLinePurchGoal.NEXT = 0;
+      EXIT(lvTotal);
+    END;
+
+    PROCEDURE CalcProjExtCOBudgetProc@1100285013(pProjectExtCO@1100285002 : Record 11020223;pMaterial@1100285003 : Boolean) : Decimal;
+    VAR
+      lvBudgetLinePurchGoal@1100285000 : Record 11128042;
+      lvTotal@1100285001 : Decimal;
+    BEGIN
+      CLEAR(lvBudgetLinePurchGoal);
+      lvBudgetLinePurchGoal.SETRANGE("Project No."          , pProjectExtCO."Project No.");
+      lvBudgetLinePurchGoal.SETRANGE("Extension Contract"   , pProjectExtCO."Extension Contract");
+      lvBudgetLinePurchGoal.SETRANGE("Cost Type"            , pProjectExtCO."Cost Type");
+      IF pMaterial THEN
+         lvBudgetLinePurchGoal.SETRANGE("Cost Type"   , lvBudgetLinePurchGoal."Cost Type" :: Material)
+      ELSE
+         lvBudgetLinePurchGoal.SETRANGE("Cost Object"          , pProjectExtCO."Cost Object");
+      //>>IME424x
+      //IF lvBudgetLinePurchGoal.FINDFIRST THEN REPEAT
+      IF lvBudgetLinePurchGoal.FINDSET(FALSE) THEN REPEAT
+      //<<IME424x
+         lvTotal := lvTotal + lvBudgetLinePurchGoal."Procurement target amount";
+      UNTIL lvBudgetLinePurchGoal.NEXT = 0;
+      EXIT(lvTotal);
+    END;
+
+    PROCEDURE CalcProjCostCompBudgetProc@1100285016(pProjectCostComp@1100285002 : Record 11020297) : Decimal;
+    VAR
+      lvBudgetLinePurchGoal@1100285000 : Record 11128042;
+      lvTotal@1100285001 : Decimal;
+    BEGIN
+      CLEAR(lvBudgetLinePurchGoal);
+      lvBudgetLinePurchGoal.SETRANGE("Project No."          , pProjectCostComp."Project No.");
+      lvBudgetLinePurchGoal.SETRANGE("Cost Component"       , pProjectCostComp."Cost Component");
+      //>>IME424x
+      //IF lvBudgetLinePurchGoal.FINDFIRST THEN REPEAT
+      IF lvBudgetLinePurchGoal.FINDSET(FALSE) THEN REPEAT
+      //<<IME424x
+         lvTotal := lvTotal + lvBudgetLinePurchGoal."Procurement target amount";
+      UNTIL lvBudgetLinePurchGoal.NEXT = 0;
+      EXIT(lvTotal);
+    END;
+
+    PROCEDURE UpdateBudgetLine@1100285007(pProject@1100285001 : Record 11072003);
+    VAR
+      lvBudgetLinePurchGoal@1100285003 : Record 11128042;
+      lvBudgetLine@1100285004 : Record 11012001;
+      lvTotal@1100285002 : Decimal;
+      lvTargetAmount@1100285005 : Decimal;
+      lvTargetPerc@1100285006 : Decimal;
+      lvBudgetSubPage@1100285007 : Page 11012004;
+      lvBudgetLinePGModify@1100285000 : Record 11128042;
+    BEGIN
+      CLEAR(lvBudgetLinePurchGoal);
+      CLEAR(lvBudgetLine);
+      lvBudgetLine.SETRANGE("Project No." , pProject."No.");
+      //>>IME424x
+      //IF lvBudgetLine.FINDFIRST THEN REPEAT
+      IF lvBudgetLine.FINDSET(FALSE) THEN REPEAT
+      //<<IME424x
+         //lvBudgetLinePurchGoal.BudgetGoalFind()
+         //BudgetTargetAmount := Amount - ( BudgetTargetPerc / 100 ) * Amount ;
+         //BudgetTargetPerc := ( (Amount - BudgetTargetAmount) / Amount ) * 100;
+         lvBudgetLinePurchGoal.BudgetGoalFind(lvBudgetLine,lvTargetAmount,lvTargetPerc);
+         IF lvBudgetLine."Amount (LCY)" <> lvTargetAmount THEN BEGIN
+            lvTargetPerc := ( (lvBudgetLine."Amount (LCY)" - lvTargetAmount) / lvBudgetLine."Amount (LCY)" ) * 100;
+            //lvBudgetLinePurchGoal.BudgetGoalUpdate(lvBudgetLine,lvTargetAmount,lvTargetPerc);
+            CLEAR(lvBudgetLinePGModify);
+            lvBudgetLinePGModify.SETRANGE("Project No."        , lvBudgetLine."Project No.");
+            lvBudgetLinePGModify.SETRANGE(Adjustment           , lvBudgetLine.Adjustment);
+            lvBudgetLinePGModify.SETRANGE("Extension Contract" , lvBudgetLine."Extension Contract");
+            lvBudgetLinePGModify.SETRANGE(Option               , lvBudgetLine.Option);
+            lvBudgetLinePGModify.SETRANGE("Line No."           , lvBudgetLine."Line No.");
+            IF NOT lvBudgetLinePGModify.FINDFIRST THEN BEGIN
+               lvBudgetLinePGModify.INIT;
+               lvBudgetLinePGModify.TRANSFERFIELDS(lvBudgetLine);
+               lvBudgetLinePGModify."Procurement target percentage" := lvTargetPerc;
+               lvBudgetLinePGModify."Procurement target amount"     := lvTargetAmount;
+               //>>4PS-013 - correction on old Data
+               IF ( lvBudgetLine."Amount (LCY)" <> 0 ) AND
+                  ( lvTargetPerc         = 0 ) AND
+                  ( lvTargetAmount       = 0 ) THEN
+                    lvBudgetLinePGModify."Procurement target amount" := lvBudgetLine."Amount (LCY)";
+               //
+               IF ( lvBudgetLine."Amount (LCY)" <> 0 ) AND
+                  ( lvTargetPerc        =100 ) THEN
+                    lvBudgetLinePGModify."Procurement target amount" := 0 ;
+               //<<4PS-13
+               lvBudgetLinePurchGoal.INSERT(TRUE);
+             END
+            ELSE
+             BEGIN
+               lvBudgetLinePurchGoal.TRANSFERFIELDS(lvBudgetLine);
+               lvBudgetLinePurchGoal."Procurement target percentage"  := lvTargetPerc;
+               lvBudgetLinePurchGoal."Procurement target amount"      := lvTargetAmount;
+               lvBudgetLinePurchGoal.MODIFY(FALSE);
+              END;
+
+          END
+         ELSE
+          BEGIN
+          END;
+         lvTargetAmount := 0;
+         lvTargetPerc   := 0;
+      UNTIL lvBudgetLine.NEXT = 0;
+    END;
+
+    BEGIN
+    {
+
+      GHE //018+++   Purchase Goals
+          //>>IME034 Change Purchase Goals Calculation
+      160229 ITERO.DL IME424x repace 'findfirst then repeat' (causes locking) with 'findset(false) then repeat'
+    }
+    END.
+  }
+}
+

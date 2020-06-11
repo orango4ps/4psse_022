@@ -1,0 +1,454 @@
+OBJECT Codeunit 11012183 Copy Estimate Lines
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    TableNo=39;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      EstRec@1100485009 : Record 11012151;
+      EstLineRec@11012000 : Record 11072072;
+      RcplineRec@1100485006 : Record 11072075;
+      ItemRec@1100485000 : Record 27;
+      DimValRec@11012001 : Record 349;
+      PurchLineRec@1210190002 : Record 39;
+      PurchHeaderRec@1210190001 : Record 38;
+      TmpEstLineRec@1100485008 : TEMPORARY Record 11072072;
+      DimMgt@1210190003 : Codeunit 408;
+      UOMMgt@1210190000 : Codeunit 5402;
+      NextLineNo@1210190005 : Integer;
+      PurchLineCounter@1100485001 : Integer;
+      EstimateLineRAW@1100528500 : Record 11125698;
+      TmpEstimateLineRAW@1100528501 : TEMPORARY Record 11125698;
+      TmpEstimateRecipeLine@1100528502 : TEMPORARY Record 11072075;
+
+    PROCEDURE CopyLines@1210190000(IEstPurchActionRec@1210190002 : Record 11012366;IPurchLineRec@1210190001 : Record 39;ICloseLine@1210190000 : Boolean);
+    BEGIN
+      InsertPurchLines(IPurchLineRec, IEstPurchActionRec."Estimate No.", IEstPurchActionRec.Code, ICloseLine);
+
+      IF ICloseLine THEN BEGIN
+        IF PurchHeaderRec."Document Type" = PurchHeaderRec."Document Type"::Quote THEN
+          IF IEstPurchActionRec."Activate for" < IEstPurchActionRec."Activate for"::Quote THEN
+            IEstPurchActionRec."Activate for" := IEstPurchActionRec."Activate for"::Quote;
+        IF PurchHeaderRec."Document Type" = PurchHeaderRec."Document Type"::Order THEN
+          IF IEstPurchActionRec."Activate for" < IEstPurchActionRec."Activate for"::Purchase THEN
+            IEstPurchActionRec."Activate for" := IEstPurchActionRec."Activate for"::Purchase;
+        IEstPurchActionRec.MODIFY;
+      END;
+    END;
+
+    PROCEDURE CopyMarkedBudgetLines@1210190001(VAR IBudgetRec@1210190002 : Record 11012001;IPurchLineRec@1210190001 : Record 39;ICloseBudgetLine@1210190000 : Boolean);
+    BEGIN
+      //Not yet implemented
+    END;
+
+    PROCEDURE InsertPurchLines@1210190005(IPurchLineRec@1210190000 : Record 39;IEstimateNo@1100528500 : Code[20];IPurchAction@1100485004 : Code[10];ICloseLine@1210190001 : Boolean);
+    VAR
+      lvAdmiCodeRec@1100485003 : Record 11012390;
+      CompressedTotal@1210190002 : Decimal;
+      SavedCostObject@1100485000 : Code[20];
+      CostObject@1100485002 : Code[20];
+    BEGIN
+      PurchLineCounter := 0;
+      PurchHeaderRec.GET(IPurchLineRec."Document Type",IPurchLineRec."Document No.");
+
+      PurchLineRec.LOCKTABLE;
+      PurchLineRec.SETRANGE("Document Type",IPurchLineRec."Document Type");
+      PurchLineRec.SETRANGE("Document No.",IPurchLineRec."Document No.");
+      IF PurchLineRec.FINDLAST THEN
+        NextLineNo := PurchLineRec."Line No."
+      ELSE
+        NextLineNo := 0;
+
+      EstRec.GET(IEstimateNo);
+      IF EstRec."RAW Estimate" THEN BEGIN
+        EstimateLineRAW.SETRANGE("Estimate No.",IEstimateNo);
+        EstimateLineRAW.SETRANGE("Purchase Action",IPurchAction);
+        EstimateLineRAW.SETRANGE(Advised, FALSE);
+        IF EstimateLineRAW.FINDSET(ICloseLine, FALSE) THEN BEGIN
+          REPEAT
+            CostObject := EstimateLineRAW."Cost Object";
+            IF CostObject = '' THEN BEGIN
+              IF NOT lvAdmiCodeRec.GET(EstimateLineRAW.Admicode) THEN lvAdmiCodeRec.INIT;
+              CASE EstimateLineRAW."Cost Type" OF
+                EstimateLineRAW."Cost Type"::Material:
+                  CostObject := lvAdmiCodeRec."Cost Object Material";
+                EstimateLineRAW."Cost Type"::Subcontracting:
+                  CostObject := lvAdmiCodeRec."Cost Object Subcontracting";
+                EstimateLineRAW."Cost Type"::Plant:
+                  CostObject := lvAdmiCodeRec."Cost Object Plant";
+              END;
+            END;
+            IF CostObject <> '' THEN BEGIN
+              DimMgt.GetDimValueRec(2, CostObject, DimValRec, TRUE, '');
+              TmpEstimateLineRAW := EstimateLineRAW;
+              IF NOT TmpEstimateLineRAW.FIND('=') THEN BEGIN
+                //CompressedTotal := CheckSameProperty;
+                CompressedTotal := EstimateLineRAW."Part Quantity" * EstimateLineRAW.Quantity * EstimateLineRAW."Time Quantity";
+                //db, 19-03-19: tmp-solution (upgrade CheckSameProperty)
+                IF CompressedTotal > 0 THEN BEGIN
+                  PurchLineRec.INIT;
+                  NextLineNo := NextLineNo + 10000;
+                  PurchLineRec."Document Type"  := IPurchLineRec."Document Type";
+                  PurchLineRec."Document No." := IPurchLineRec."Document No.";
+                  PurchLineRec."Line No." := NextLineNo;
+                  PurchLineRec."Input by" := USERID;
+                  PurchLineRec."Input Date" := TODAY;
+                  PurchLineRec.INSERT;
+                  PurchLineCounter := PurchLineCounter + 1;
+                  PurchLineRec.Type := PurchLineRec.Type::"G/L Account";
+                  PurchLineRec.VALIDATE("Currency Code", IPurchLineRec."Currency Code");
+                  PurchLineRec.VALIDATE("Job No.", EstRec."Project No.");
+                  PurchLineRec.VALIDATE("Estimate No.", EstRec."No.");
+                  PurchLineRec.VALIDATE("Purchase Action", EstimateLineRAW."Purchase Action");
+                  PurchLineRec."Purchase Phase" := EstimateLineRAW."Purchase Phase";
+                  PurchLineRec."Cost Type" := DimValRec."Cost Type"+1;  //db, 15-03-19
+                  PurchLineRec."Shortcut Dimension 2 Code" := CostObject;
+                  SavedCostObject := PurchLineRec."Shortcut Dimension 2 Code";
+                  PurchLineRec.VALIDATE("Unit of Measure Code", EstimateLineRAW."Unit of Measure");
+                  IF ItemRec.GET(EstimateLineRAW."Item No.") THEN
+                    PurchLineRec."Qty. per Unit of Measure" :=
+                      UOMMgt.GetQtyPerUnitOfMeasure(ItemRec, PurchLineRec."Unit of Measure Code");
+                  IF PurchHeaderRec."Amounts only" THEN BEGIN
+                    PurchLineRec.VALIDATE("Direct Unit Cost", CompressedTotal);
+                  END ELSE BEGIN
+                    PurchLineRec.VALIDATE(Quantity, CompressedTotal);
+                  END;
+                  IF PurchLineRec."Cost Type" = PurchLineRec."Cost Type"::Material THEN BEGIN
+                    PurchLineRec."Item No." := EstimateLineRAW."Item No.";
+                    PurchLineRec.Manufacturer := EstimateLineRAW.Manufacturer;
+                    PurchLineRec."Basic Item" := EstimateLineRAW."Basic Item";
+                    PurchLineRec."Vendor (Trade Item)" := EstimateLineRAW."Vendor (Trade Item)";
+                    PurchLineRec."Trade Item" := EstimateLineRAW."Trade Item";
+                    IF EstimateLineRAW."Trade Item" <> '' THEN BEGIN
+                      PurchLineRec."Trade Item" := '';
+                      PurchLineRec.VALIDATE("Trade Item", EstimateLineRAW."Trade Item");
+                    END ELSE BEGIN
+                      IF EstimateLineRAW."Basic Item" <> '' THEN BEGIN
+                        PurchLineRec."Basic Item" := '';
+                        PurchLineRec.VALIDATE("Basic Item", EstimateLineRAW."Basic Item");
+                      END ELSE BEGIN
+                        IF EstimateLineRAW."Item No." <> '' THEN BEGIN
+                          PurchLineRec."Item No." := '';
+                          PurchLineRec.VALIDATE("Item No.", EstimateLineRAW."Item No.");
+                        END;
+                      END;
+                    END;
+                  END;
+                  IF PurchHeaderRec."Amounts only" THEN
+                    PurchLineRec.VALIDATE("Direct Unit Cost", CompressedTotal);
+                  //
+                  PurchLineRec.VALIDATE("Shortcut Dimension 2 Code", SavedCostObject);
+                  PurchLineRec."Posting Date" := PurchHeaderRec."Posting Date";
+                  PurchLineRec.VALIDATE("Expected Receipt Date", EstRec."Reference Date (Rate)");
+                  PurchLineRec."Cost Component" := EstimateLineRAW."Cost Component";
+                  PurchLineRec.Description := COPYSTR(EstimateLineRAW.Description, 1, 50);
+                  PurchLineRec."Description 2" := COPYSTR(EstimateLineRAW.Description, 51, 50);
+                  PurchLineRec.VALIDATE(Text, EstimateLineRAW."External Text");
+                  IF PurchHeaderRec."Amounts only" THEN
+                    PurchLineRec.InitAmntToReceive;
+                  PurchLineRec."Modified by" := USERID;
+                  PurchLineRec."Last Date Modified" := TODAY;
+                  PurchLineRec.MODIFY;
+                  PurchLineRec.CreatePurchOrderControl(FALSE);
+                END;
+              END;
+              IF ICloseLine THEN BEGIN
+                EstimateLineRAW.Advised := TRUE;
+                EstimateLineRAW.MODIFY;
+              END;
+            END;
+          UNTIL EstimateLineRAW.NEXT = 0;
+        END;
+      END ELSE BEGIN
+        TmpEstLineRec.RESET;
+        TmpEstLineRec.DELETEALL;
+        //
+        EstLineRec.SETRANGE("Estimate No.",IEstimateNo);
+        EstLineRec.SETRANGE("Purchase Action",IPurchAction);
+        EstLineRec.SETRANGE(Advised, FALSE);
+        IF EstLineRec.FINDSET(ICloseLine, FALSE) THEN BEGIN
+          REPEAT
+            CostObject := EstLineRec."Cost Object Price";
+            IF CostObject = '' THEN BEGIN
+              IF NOT lvAdmiCodeRec.GET(EstLineRec.Admicode) THEN lvAdmiCodeRec.INIT;
+              CASE EstLineRec."Cost Type (Price)" OF
+                EstLineRec."Cost Type (Price)"::Material:
+                  CostObject := lvAdmiCodeRec."Cost Object Material";
+                EstLineRec."Cost Type (Price)"::Subcontracting:
+                  CostObject := lvAdmiCodeRec."Cost Object Subcontracting";
+                EstLineRec."Cost Type (Price)"::Plant:
+                  CostObject := lvAdmiCodeRec."Cost Object Plant";
+              END;
+            END;
+            IF CostObject <> '' THEN BEGIN
+              DimMgt.GetDimValueRec(2, CostObject, DimValRec, TRUE, '');
+              TmpEstLineRec := EstLineRec;
+              IF NOT TmpEstLineRec.FIND('=') THEN BEGIN
+                CompressedTotal := CheckSameProperty;
+                IF CompressedTotal > 0 THEN BEGIN
+                  PurchLineRec.INIT;
+                  NextLineNo := NextLineNo + 10000;
+                  PurchLineRec."Document Type"  := IPurchLineRec."Document Type";
+                  PurchLineRec."Document No." := IPurchLineRec."Document No.";
+                  PurchLineRec."Line No." := NextLineNo;
+                  PurchLineRec."Input by" := USERID;
+                  PurchLineRec."Input Date" := TODAY;
+                  PurchLineRec.INSERT;
+                  PurchLineCounter := PurchLineCounter + 1;
+                  PurchLineRec.Type := PurchLineRec.Type::"G/L Account";
+                  PurchLineRec.VALIDATE("Currency Code", IPurchLineRec."Currency Code");
+                  PurchLineRec.VALIDATE("Job No.", EstRec."Project No.");
+                  PurchLineRec.VALIDATE("Estimate No.", EstRec."No.");
+                  PurchLineRec.VALIDATE("Purchase Action", EstLineRec."Purchase Action");
+                  PurchLineRec."Purchase Phase" := EstLineRec."Purchase Phase";
+                  PurchLineRec."Cost Type" := DimValRec."Cost Type"+1;  //db, 15-03-19
+                  PurchLineRec."Shortcut Dimension 2 Code" := CostObject;
+                  SavedCostObject := PurchLineRec."Shortcut Dimension 2 Code";
+                  PurchLineRec.VALIDATE("Unit of Measure Code", EstLineRec."Unit of Measure");
+                  IF ItemRec.GET(EstLineRec."Item No.") THEN
+                    PurchLineRec."Qty. per Unit of Measure" :=
+                      UOMMgt.GetQtyPerUnitOfMeasure(ItemRec, PurchLineRec."Unit of Measure Code");
+                  IF PurchHeaderRec."Amounts only" THEN BEGIN
+                    PurchLineRec.VALIDATE("Direct Unit Cost", CompressedTotal);
+                  END ELSE BEGIN
+                    PurchLineRec.VALIDATE(Quantity, CompressedTotal);
+                  END;
+                  IF PurchLineRec."Cost Type" = PurchLineRec."Cost Type"::Material THEN BEGIN
+                    PurchLineRec."Item No." := EstLineRec."Item No.";
+                    PurchLineRec.Manufacturer := EstLineRec.Manufacturer;
+                    PurchLineRec."Basic Item" := EstLineRec."Basic Item";
+                    PurchLineRec."Vendor (Trade Item)" := EstLineRec."Vendor (Trade Item)";
+                    PurchLineRec."Trade Item" := EstLineRec."Trade Item";
+                    IF EstLineRec."Trade Item" <> '' THEN BEGIN
+                      PurchLineRec."Trade Item" := '';
+                      PurchLineRec.VALIDATE("Trade Item", EstLineRec."Trade Item");
+                    END ELSE BEGIN
+                      IF EstLineRec."Basic Item" <> '' THEN BEGIN
+                        PurchLineRec."Basic Item" := '';
+                        PurchLineRec.VALIDATE("Basic Item", EstLineRec."Basic Item");
+                      END ELSE BEGIN
+                        IF EstLineRec."Item No." <> '' THEN BEGIN
+                          PurchLineRec."Item No." := '';
+                          PurchLineRec.VALIDATE("Item No.", EstLineRec."Item No.");
+                        END;
+                      END;
+                    END;
+                  END;
+                  IF PurchHeaderRec."Amounts only" THEN
+                    PurchLineRec.VALIDATE("Direct Unit Cost", CompressedTotal);
+                  //
+                  PurchLineRec.VALIDATE("Shortcut Dimension 2 Code", SavedCostObject);
+                  PurchLineRec."Posting Date" := PurchHeaderRec."Posting Date";
+                  PurchLineRec.VALIDATE("Expected Receipt Date", EstRec."Reference Date (Rate)");
+                  PurchLineRec."Cost Component" := EstLineRec."Cost Component";
+                  PurchLineRec.Description := COPYSTR(EstLineRec.Description, 1, 50);
+                  PurchLineRec."Description 2" := COPYSTR(EstLineRec.Description, 51, 50);
+                  PurchLineRec.VALIDATE(Text, EstLineRec."External Text");
+                  IF PurchHeaderRec."Amounts only" THEN
+                    PurchLineRec.InitAmntToReceive;
+                  PurchLineRec."Modified by" := USERID;
+                  PurchLineRec."Last Date Modified" := TODAY;
+                  PurchLineRec.MODIFY;
+                  PurchLineRec.CreatePurchOrderControl(FALSE);
+                END;
+              END;
+              IF ICloseLine THEN BEGIN
+                EstLineRec.Advised := TRUE;
+                EstLineRec.MODIFY;
+              END;
+            END;
+          UNTIL EstLineRec.NEXT = 0;
+        END;
+        //
+        TmpEstimateRecipeLine.RESET;
+        TmpEstimateRecipeLine.DELETEALL;
+        //
+        RcplineRec.SETRANGE("Estimate No.",IEstimateNo);
+        RcplineRec.SETRANGE("Purchase Action",IPurchAction);
+        RcplineRec.SETRANGE(Advised, FALSE);
+        IF RcplineRec.FINDSET(ICloseLine, FALSE) THEN BEGIN
+          REPEAT
+            CostObject := RcplineRec."Cost Object Price";
+            IF CostObject = '' THEN BEGIN
+              IF NOT lvAdmiCodeRec.GET(RcplineRec.Admicode) THEN lvAdmiCodeRec.INIT;
+              CASE RcplineRec."Cost Type (Price)" OF
+                RcplineRec."Cost Type (Price)"::Material:
+                  CostObject := lvAdmiCodeRec."Cost Object Material";
+                RcplineRec."Cost Type (Price)"::Subcontracting:
+                  CostObject := lvAdmiCodeRec."Cost Object Subcontracting";
+                RcplineRec."Cost Type (Price)"::Plant:
+                  CostObject := lvAdmiCodeRec."Cost Object Plant";
+              END;
+            END;
+            IF CostObject <> '' THEN BEGIN
+              DimMgt.GetDimValueRec(2, CostObject, DimValRec, TRUE, '');
+              TmpEstimateRecipeLine := RcplineRec;
+              IF NOT TmpEstimateRecipeLine.FIND('=') THEN BEGIN
+                //CompressedTotal := CheckSameProperty;
+                EstLineRec.GET(RcplineRec."Estimate No.", RcplineRec."Sub-Estimate No.", RcplineRec."Part Group", RcplineRec.Part, RcplineRec."Estimate Line");
+                IF RcplineRec."Ignore Recipe Quantity" THEN
+                  CompressedTotal := RcplineRec.Quantity * EstLineRec."Part Quantity"
+                ELSE
+                  CompressedTotal := RcplineRec.Quantity * EstLineRec.Quantity * EstLineRec."Part Quantity";
+                //db, 19-03-19: tmp-solution (upgrade CheckSameProperty)
+                IF CompressedTotal > 0 THEN BEGIN
+                  PurchLineRec.INIT;
+                  NextLineNo := NextLineNo + 10000;
+                  PurchLineRec."Document Type"  := IPurchLineRec."Document Type";
+                  PurchLineRec."Document No." := IPurchLineRec."Document No.";
+                  PurchLineRec."Line No." := NextLineNo;
+                  PurchLineRec."Input by" := USERID;
+                  PurchLineRec."Input Date" := TODAY;
+                  PurchLineRec.INSERT;
+                  PurchLineCounter := PurchLineCounter + 1;
+                  PurchLineRec.Type := PurchLineRec.Type::"G/L Account";
+                  PurchLineRec.VALIDATE("Currency Code", IPurchLineRec."Currency Code");
+                  PurchLineRec.VALIDATE("Job No.", EstRec."Project No.");
+                  PurchLineRec.VALIDATE("Estimate No.", EstRec."No.");
+                  PurchLineRec.VALIDATE("Purchase Action", RcplineRec."Purchase Action");
+                  PurchLineRec."Purchase Phase" := RcplineRec."Purchase Phase";
+                  PurchLineRec."Cost Type" := DimValRec."Cost Type"+1;  //db, 15-03-19
+                  PurchLineRec."Shortcut Dimension 2 Code" := CostObject;
+                  SavedCostObject := PurchLineRec."Shortcut Dimension 2 Code";
+                  PurchLineRec.VALIDATE("Unit of Measure Code", RcplineRec."Unit of Measure");
+                  IF ItemRec.GET(RcplineRec."Item No.") THEN
+                    PurchLineRec."Qty. per Unit of Measure" :=
+                      UOMMgt.GetQtyPerUnitOfMeasure(ItemRec, PurchLineRec."Unit of Measure Code");
+                  IF PurchHeaderRec."Amounts only" THEN BEGIN
+                    PurchLineRec.VALIDATE("Direct Unit Cost", CompressedTotal);
+                  END ELSE BEGIN
+                    PurchLineRec.VALIDATE(Quantity, CompressedTotal);
+                  END;
+                  IF PurchLineRec."Cost Type" = PurchLineRec."Cost Type"::Material THEN BEGIN
+                    PurchLineRec."Item No." := RcplineRec."Item No.";
+                    PurchLineRec.Manufacturer := RcplineRec.Manufacturer;
+                    PurchLineRec."Basic Item" := RcplineRec."Basic Item";
+                    PurchLineRec."Vendor (Trade Item)" := RcplineRec."Vendor (Trade Item)";
+                    PurchLineRec."Trade Item" := RcplineRec."Trade Item";
+                    IF RcplineRec."Trade Item" <> '' THEN BEGIN
+                      PurchLineRec."Trade Item" := '';
+                      PurchLineRec.VALIDATE("Trade Item", RcplineRec."Trade Item");
+                    END ELSE BEGIN
+                      IF RcplineRec."Basic Item" <> '' THEN BEGIN
+                        PurchLineRec."Basic Item" := '';
+                        PurchLineRec.VALIDATE("Basic Item", RcplineRec."Basic Item");
+                      END ELSE BEGIN
+                        IF RcplineRec."Item No." <> '' THEN BEGIN
+                          PurchLineRec."Item No." := '';
+                          PurchLineRec.VALIDATE("Item No.", RcplineRec."Item No.");
+                        END;
+                      END;
+                    END;
+                  END;
+                  IF PurchHeaderRec."Amounts only" THEN
+                    PurchLineRec.VALIDATE("Direct Unit Cost", CompressedTotal);
+                  //
+                  PurchLineRec.VALIDATE("Shortcut Dimension 2 Code", SavedCostObject);
+                  PurchLineRec."Posting Date" := PurchHeaderRec."Posting Date";
+                  PurchLineRec.VALIDATE("Expected Receipt Date", EstRec."Reference Date (Rate)");
+                  PurchLineRec."Cost Component" := RcplineRec."Cost Component";
+                  PurchLineRec.Description := COPYSTR(RcplineRec.Description, 1, 50);
+                  PurchLineRec."Description 2" := COPYSTR(RcplineRec.Description, 51, 50);
+                  PurchLineRec.VALIDATE(Text, RcplineRec."External Text");
+                  IF PurchHeaderRec."Amounts only" THEN
+                    PurchLineRec.InitAmntToReceive;
+                  PurchLineRec."Modified by" := USERID;
+                  PurchLineRec."Last Date Modified" := TODAY;
+                  PurchLineRec.MODIFY;
+                  PurchLineRec.CreatePurchOrderControl(FALSE);
+                END;
+              END;
+              IF ICloseLine THEN BEGIN
+                RcplineRec.Advised := TRUE;
+                RcplineRec.MODIFY;
+              END;
+            END;
+          UNTIL RcplineRec.NEXT = 0;
+        END;
+      END;
+    END;
+
+    PROCEDURE CheckSameProperty@1100485002() SubTotal : Decimal;
+    VAR
+      lvEstLineRec@1210190000 : Record 11072072;
+    BEGIN
+      IF PurchHeaderRec."Amounts only" THEN BEGIN
+        CASE EstLineRec."Cost Type (Price)" OF
+          EstLineRec."Cost Type (Price)"::Material:
+            SubTotal := EstLineRec."Material Cost Amount";
+          EstLineRec."Cost Type (Price)"::Subcontracting:
+            SubTotal := EstLineRec."Subcontracting Cost Amount";
+          EstLineRec."Cost Type (Price)"::Plant:
+            SubTotal := EstLineRec."Plant Cost Amount";
+        END;
+      END ELSE BEGIN
+        SubTotal := EstLineRec."Part Quantity" * EstLineRec.Quantity * EstLineRec."Time Quantity";
+      END;
+
+      lvEstLineRec.COPY(EstLineRec);
+
+      lvEstLineRec.SETRANGE("Estimate No.", EstLineRec."Estimate No.");
+      lvEstLineRec.SETRANGE(Description, EstLineRec.Description);
+      lvEstLineRec.SETRANGE("Unit of Measure", EstLineRec."Unit of Measure");
+      lvEstLineRec.SETRANGE("Purchase Route Reference", EstLineRec."Purchase Route Reference");
+      lvEstLineRec.SETRANGE("Price Agreement", EstLineRec."Price Agreement");
+      IF EstLineRec.Vendor <> '' THEN
+        lvEstLineRec.SETRANGE(Vendor, EstLineRec.Vendor);
+      lvEstLineRec.SETRANGE("External Text", EstLineRec."External Text");
+
+      IF EstLineRec."Cost Type (Price)" = EstLineRec."Cost Type (Price)"::Material THEN BEGIN
+        lvEstLineRec.SETRANGE("Item No.", EstLineRec."Item No.");
+        lvEstLineRec.SETRANGE("Basic Item", EstLineRec."Basic Item");
+        lvEstLineRec.SETRANGE(Manufacturer, EstLineRec.Manufacturer);
+        lvEstLineRec.SETRANGE("Trade Item", EstLineRec."Trade Item");
+        lvEstLineRec.SETRANGE("Vendor (Trade Item)", EstLineRec."Vendor (Trade Item)");
+      END;
+      lvEstLineRec.SETRANGE("Net Cost Price", EstLineRec."Net Cost Price");
+      lvEstLineRec.SETRANGE("Purchase Action", EstLineRec."Purchase Action");
+      lvEstLineRec.SETRANGE("Cost Object Price", EstLineRec."Cost Object Price");
+
+      IF lvEstLineRec.FINDSET(FALSE, FALSE) THEN BEGIN
+        REPEAT
+          IF (lvEstLineRec."Sub-Estimate No." <> EstLineRec."Sub-Estimate No.") OR
+             (lvEstLineRec."Part Group" <> EstLineRec."Part Group") OR
+             (lvEstLineRec.Part <> EstLineRec.Part) OR
+             (lvEstLineRec."Line No." <> EstLineRec."Line No.")
+          THEN BEGIN
+            TmpEstLineRec := lvEstLineRec;
+            IF TmpEstLineRec.INSERT THEN;
+
+            IF PurchHeaderRec."Amounts only" THEN BEGIN
+              CASE lvEstLineRec."Cost Type (Price)" OF
+                lvEstLineRec."Cost Type (Price)"::Material:
+                  SubTotal := SubTotal + lvEstLineRec."Material Cost Amount";
+                lvEstLineRec."Cost Type (Price)"::Subcontracting:
+                  SubTotal := SubTotal + lvEstLineRec."Subcontracting Cost Amount";
+                lvEstLineRec."Cost Type (Price)"::Plant:
+                  SubTotal := SubTotal + lvEstLineRec."Plant Cost Amount";
+              END;
+            END ELSE BEGIN
+              SubTotal := SubTotal + lvEstLineRec."Part Quantity" * lvEstLineRec.Quantity * lvEstLineRec."Time Quantity";
+            END;
+          END;
+        UNTIL lvEstLineRec.NEXT = 0;
+      END;
+
+      EXIT(SubTotal);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

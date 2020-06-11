@@ -1,0 +1,294 @@
+OBJECT Codeunit 11012154 Create Excel Summary Sheet
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    TableNo=11012172;
+    OnRun=BEGIN
+            ProcessSheet(Rec, FALSE);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@11012002 : TextConst 'DEU=Endblatt Kalkulation;ENU=Estimate Summary;NLD=Staartblad calculatie;NOR=Kalkyle Í sammendrag;SVE=Kalkyl Í sammandrag';
+      EstSetup@1100529601 : Record 11012150;
+      FileMgt@1100525500 : Codeunit 419;
+      Text001@1210190000 : TextConst 'DEU=Vorlage Endblatt unbekannt: %1;ENU=Template not found: %1;NLD=Onderlegger staartblad onbekend: %1;NOR=Finner ikke malen: %1;SVE=Det g†r inte att hitta mallen: %1';
+      ExcelMgt@1100529600 : Codeunit 11012348;
+      DocumentServiceMgt@1100529602 : Codeunit 9510;
+
+    PROCEDURE ProcessSheet@1000000001(VAR SumRec@1000000000 : Record 11012172;SumPrint@1000000001 : Boolean);
+    VAR
+      TemplExt@1100485000 : Text[5];
+      SheetExt@1100485001 : Text[5];
+      CreateFromExcelTemplate@1100529600 : Boolean;
+      SaveOption@1100529606 : ' ,Server,Client,SharePoint';
+      ServerTmpFileName@1100529602 : Text;
+      SumSheetFileName@1100529607 : Text;
+    BEGIN
+      SumRec.GET(SumRec."Estimate No.", SumRec.Summary);
+
+      EstSetup.GET;
+      EstSetup.TESTFIELD("Pathname Excel Templates");
+      EstSetup.TESTFIELD("Pathname Excel Sheets");
+
+      DocumentServiceMgt.SetUseDocumentService4PS(TRUE);
+
+      IF SumRec."Excel Template" <> '' THEN
+        TemplExt := GetFileExtension(SumRec, EstSetup."Pathname Excel Templates" + SumRec."Excel Template", TRUE);
+      SheetExt := GetFileExtension(SumRec, EstSetup."Pathname Excel Sheets" + SumRec."Excel Sheet", FALSE);
+
+      SaveOption := SaveOption::" ";
+      CreateFromExcelTemplate := FALSE;
+
+      IF FileMgt.ServerFileExists(EstSetup."Pathname Excel Sheets" + SumRec."Excel Sheet" + SheetExt) THEN BEGIN
+        SaveOption := SaveOption::Server;
+        SumSheetFileName := EstSetup."Pathname Excel Sheets" + SumRec."Excel Sheet" + SheetExt;
+      END;
+
+      IF (SaveOption = SaveOption::" ") AND FileMgt.ClientAvailable THEN
+        IF FileMgt.ClientFileExists(EstSetup."Pathname Excel Sheets" + SumRec."Excel Sheet" + SheetExt) THEN BEGIN
+          SaveOption := SaveOption::Client;
+          SumSheetFileName := EstSetup."Pathname Excel Sheets" + SumRec."Excel Sheet" + SheetExt;
+        END;
+
+      IF SaveOption = SaveOption::" " THEN
+        IF CheckSharePointPath(EstSetup."Pathname Excel Sheets" + SumRec."Excel Sheet" + SheetExt, ServerTmpFileName) THEN
+          SaveOption := SaveOption::SharePoint;
+
+      IF SaveOption = SaveOption::" " THEN BEGIN
+        CreateFromExcelTemplate := TRUE;
+
+        SumRec.TESTFIELD("Excel Template");
+        IF FileMgt.ServerFileExists(EstSetup."Pathname Excel Templates" + SumRec."Excel Template" + TemplExt) THEN BEGIN
+          SaveOption := SaveOption::Server;
+          SumSheetFileName := EstSetup."Pathname Excel Templates" + SumRec."Excel Template" + TemplExt;
+        END;
+
+        IF (SaveOption = SaveOption::" ") AND FileMgt.ClientAvailable THEN
+          IF FileMgt.ClientFileExists(EstSetup."Pathname Excel Templates" + SumRec."Excel Template" + TemplExt) THEN BEGIN
+            SaveOption := SaveOption::Client;
+            SumSheetFileName := EstSetup."Pathname Excel Templates" + SumRec."Excel Template" + TemplExt;
+          END;
+
+        IF SaveOption = SaveOption::" " THEN
+          IF CheckSharePointPath(EstSetup."Pathname Excel Templates" + SumRec."Excel Template" + TemplExt, ServerTmpFileName) THEN
+            SaveOption := SaveOption::SharePoint;
+
+        IF SaveOption = SaveOption::" " THEN
+          ERROR(Text001, EstSetup."Pathname Excel Templates" + SumRec."Excel Template" + TemplExt);
+      END;
+
+      CASE SaveOption OF
+        SaveOption::Server:
+          BEGIN
+            ServerTmpFileName := FileMgt.ServerTempFileName(SheetExt);
+            FileMgt.CopyServerFile(SumSheetFileName, ServerTmpFileName, TRUE);
+          END;
+        SaveOption::Client:
+          ServerTmpFileName := FileMgt.UploadFileSilentToServerPath(SumSheetFileName, '');
+      END;
+
+      EstSetup.TESTFIELD("Worksheet Excel Estimates");
+      ExcelMgt.OpenWorkbook(ServerTmpFileName, EstSetup."Worksheet Excel Estimates");
+
+      FillFields(SumRec);
+
+      ExcelMgt.ChangeDocType(SheetExt);
+      ExcelMgt.CloseWorkbook;
+
+      IF SumRec."Excel Sheet" = '' THEN BEGIN
+        SumRec."Excel Sheet" :=
+          CONVERTSTR(Text000 + ' ' + SumRec."Estimate No." + ' ' + SumRec.Summary, '.', '_'); //mg.c, 01-02-11: M24908
+        SumRec.MODIFY;
+      END;
+
+      SumSheetFileName := EstSetup."Pathname Excel Sheets" + SumRec."Excel Sheet" + SheetExt;
+
+      CASE SaveOption OF
+        SaveOption::Server:
+          FileMgt.CopyServerFile(ServerTmpFileName, SumSheetFileName, TRUE);
+        SaveOption::Client:
+          FileMgt.DownloadToFile(ServerTmpFileName, SumSheetFileName);
+        SaveOption::SharePoint:
+          DocumentServiceMgt.UploadFileFromServerToCloudSilent(ServerTmpFileName, SumSheetFileName, SumRec."Excel Sheet" + SheetExt);
+      END;
+
+      OpenOrPrintFile(ServerTmpFileName, SumSheetFileName, SumPrint);
+    END;
+
+    PROCEDURE GetFileExtension@1100485000(SummarySheet@1100529602 : Record 11012172;FileName@1100485000 : Text[1024];IsTemplate@1100485001 : Boolean) : Text[5];
+    VAR
+      ExcelAutomation@1100529604 : Codeunit 11012402;
+      SheetExt@1100529600 : ARRAY [5] OF Text[5];
+      VersionText@1100529603 : Text[30];
+      i@1100529601 : Integer;
+    BEGIN
+      //Beter was het geweest de extensie gewoon op te nemen in de naam van de onderlegger en het excelbestand,
+      //dit is gewoon gokken. Opmerking naar aanleiding van melding 16290
+
+      IF IsTemplate THEN BEGIN
+        SheetExt[1] := '.xltm';
+        SheetExt[2] := '.xltx';
+        SheetExt[3] := '.xlt';
+      END ELSE BEGIN
+        SheetExt[1] := '.xlsm';
+        SheetExt[2] := '.xlsx';
+        SheetExt[3] := '.xls';
+      END;
+
+      FOR i := 1 TO 3 DO
+        IF FileMgt.ServerFileExists(FileName + SheetExt[i]) THEN
+          EXIT(SheetExt[i]);
+
+      IF FileMgt.ClientAvailable THEN BEGIN
+        FOR i := 1 TO 3 DO
+          IF FileMgt.ClientFileExists(FileName + SheetExt[i]) THEN
+            EXIT(SheetExt[i]);
+
+        IF SummarySheet."Excel Template contains Macros" THEN
+          EXIT(SheetExt[1]);
+
+        CLEAR(ExcelAutomation);
+        IF ExcelAutomation.CheckInitExcel THEN BEGIN
+          VersionText := ExcelAutomation.ExcelVersion;
+          IF STRPOS(VersionText, '.') <> 0 THEN
+            VersionText := COPYSTR(VersionText, 1, STRPOS(VersionText, '.') - 1);
+          EVALUATE(i, VersionText);
+          IF i < 12 THEN
+            EXIT(SheetExt[3])
+          ELSE
+            EXIT(SheetExt[2]);
+        END;
+      END;
+
+      IF SummarySheet."Excel Template contains Macros" THEN
+        EXIT(SheetExt[1])
+      ELSE
+        EXIT(SheetExt[2]);
+    END;
+
+    PROCEDURE FillFields@1(SummaryRec@11012000 : Record 11012172);
+    VAR
+      SumExcRelRec@11012001 : Record 11012173;
+      SumLineRec@11012002 : Record 11012171;
+    BEGIN
+      SumLineRec.SETRANGE("Estimate No.",SummaryRec."Estimate No.");
+      SumLineRec.SETRANGE(Summary,SummaryRec.Summary);
+      SumExcRelRec.SETRANGE("Estimate No.",SummaryRec."Estimate No.");
+      SumExcRelRec.SETRANGE(Summary,SummaryRec.Summary);
+      REPEAT
+        SumExcRelRec.SETRANGE("Row No.",SumLineRec."Row No.");
+        SumExcRelRec.SETFILTER(Row, '>%1', 0);
+        SumExcRelRec.SETFILTER("Column No.", '>%1', 0);
+        IF SumExcRelRec.FIND('-') THEN BEGIN
+          REPEAT
+            CASE SumExcRelRec.Field OF
+              SumExcRelRec.Field::Description:
+                ExcelMgt.WriteCellData(SumExcRelRec.Row, SumExcRelRec."Column No.", SumLineRec.Description, TRUE);
+              SumExcRelRec.Field::Surcharge:
+                ExcelMgt.WriteCellData(SumExcRelRec.Row, SumExcRelRec."Column No.", FORMAT(SumLineRec."Surcharge Percentage", 0, 2), FALSE);
+              SumExcRelRec.Field::"Subtotal Hours":
+                BEGIN
+                  SumLineRec.CALCFIELDS("Subtotal Hours");
+                  ExcelMgt.WriteCellData(SumExcRelRec.Row, SumExcRelRec."Column No.", FORMAT(SumLineRec."Subtotal Hours", 0, 2), FALSE);
+                END;
+              SumExcRelRec.Field::Subtotal:
+                BEGIN
+                  SumLineRec.CALCFIELDS("Subtotal Amount");
+                  ExcelMgt.WriteCellData(SumExcRelRec.Row, SumExcRelRec."Column No.", FORMAT(SumLineRec."Subtotal Amount", 0, 2), FALSE);
+                END;
+              SumExcRelRec.Field::Hours:
+                ExcelMgt.WriteCellData(SumExcRelRec.Row, SumExcRelRec."Column No.", FORMAT(SumLineRec.Hours, 0, 2), FALSE);
+              SumExcRelRec.Field::Amount:
+                ExcelMgt.WriteCellData(SumExcRelRec.Row, SumExcRelRec."Column No.", FORMAT(SumLineRec.Amount, 0, 2), FALSE);
+              SumExcRelRec.Field::"Adjustment Factor Hours":
+                ExcelMgt.WriteCellData(SumExcRelRec.Row, SumExcRelRec."Column No.", FORMAT(SumLineRec."Adjustment Factor Hours", 0, 2), FALSE);
+              SumExcRelRec.Field::Variable:
+                ExcelMgt.WriteCellData(SumExcRelRec.Row, SumExcRelRec."Column No.", FORMAT(SumLineRec.Variable, 0, 2), FALSE);
+              SumExcRelRec.Field::"Rate Code":
+                ExcelMgt.WriteCellData(SumExcRelRec.Row, SumExcRelRec."Column No.", SumLineRec."Rate Code", TRUE);
+              SumExcRelRec.Field::Rate:
+                BEGIN
+                  IF SummaryRec."Summary Type" = SummaryRec."Summary Type"::Sales THEN BEGIN  //db, 15-11-16 (C033458)
+                    SumLineRec.CALCFIELDS("Sales Rate");
+                    ExcelMgt.WriteCellData(SumExcRelRec.Row, SumExcRelRec."Column No.", FORMAT(SumLineRec."Sales Rate", 0, 2), FALSE);
+                  END ELSE BEGIN
+                    SumLineRec.CALCFIELDS("Cost Rate");
+                    ExcelMgt.WriteCellData(SumExcRelRec.Row, SumExcRelRec."Column No.", FORMAT(SumLineRec."Cost Rate", 0, 2), FALSE);
+                  END;
+                END;
+              SumExcRelRec.Field::Quantity:  //db, 31-10-13: DP00260 (14457)
+                ExcelMgt.WriteCellData(SumExcRelRec.Row, SumExcRelRec."Column No.", FORMAT(SumLineRec.Quantity, 0, 2), FALSE);
+              SumExcRelRec.Field::Unit:  //db, 31-10-13: DP00260 (14457)
+                ExcelMgt.WriteCellData(SumExcRelRec.Row, SumExcRelRec."Column No.", SumLineRec."Unit of Measure", TRUE);
+            END;
+          UNTIL SumExcRelRec.NEXT = 0;
+        END;
+      UNTIL SumLineRec.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CheckSharePointPath@1100529603(SharePointPath@1100529600 : Text;VAR ServTmpFileName@1100529602 : Text) : Boolean;
+    VAR
+      TryDownloadFile@1100529601 : Codeunit 11012348;
+    BEGIN
+      ServTmpFileName := '';
+      IF NOT DocumentServiceMgt.CanConnect THEN
+        EXIT(FALSE);
+      DocumentServiceMgt.SetDoNotShowError(TRUE);
+      IF NOT DocumentServiceMgt.IsServiceUri(SharePointPath) THEN
+        EXIT(FALSE);
+
+      CLEAR(TryDownloadFile);
+      TryDownloadFile.SetTestMode(TRUE);
+      TryDownloadFile.SetTestFilePath(SharePointPath);
+      IF TryDownloadFile.RUN THEN BEGIN
+        ServTmpFileName := TryDownloadFile.GetServTmpFilePath;
+        EXIT(ServTmpFileName <> '');
+      END;
+    END;
+
+    LOCAL PROCEDURE OpenOrPrintFile@1100529600(ServerTmpFileName@1100529602 : Text;SumSheetFileName@1100529601 : Text;DoPrint@1100529604 : Boolean);
+    VAR
+      ExcelAutomation@1100529600 : Codeunit 11012402;
+      ClientFileName@1100529603 : Text;
+    BEGIN
+      IF FileMgt.ClientAvailable THEN BEGIN
+        IF FileMgt.ClientFileExists(SumSheetFileName) THEN
+          ClientFileName := SumSheetFileName
+        ELSE
+          ClientFileName := FileMgt.DownloadTempFile(ServerTmpFileName);
+        IF ClientFileName = '' THEN
+          EXIT;
+
+        CLEAR(ExcelAutomation);
+        IF ExcelAutomation.CheckInitExcel THEN BEGIN
+          ExcelAutomation.OpenWorkbook(ClientFileName);
+          IF DoPrint THEN BEGIN
+            ExcelAutomation.PrintWorkBook;
+            ExcelAutomation.CloseWorkbookWithoutSaving();
+            ExcelAutomation.TermExcel;
+          END ELSE
+            ExcelAutomation.GiveUserControl;
+        END;
+        EXIT;
+      END;
+
+      IF FileMgt.IsWebClient THEN BEGIN
+        ClientFileName := FileMgt.GetFileName(SumSheetFileName);
+        DOWNLOAD(ServerTmpFileName, '', '', '', ClientFileName);
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

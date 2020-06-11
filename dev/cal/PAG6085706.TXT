@@ -1,0 +1,2235 @@
+OBJECT Page 6085706 Purch. Invoice With Image
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=DCNL14.00.00.5.00.08;
+  }
+  PROPERTIES
+  {
+    CaptionML=[DEU=Einkaufsrechnung;
+               ENU=Purchase Invoice;
+               NLD=Inkoopfactuur;
+               SVE=Inkîpsfaktura];
+    SourceTable=Table38;
+    SourceTableView=WHERE(Document Type=FILTER(Invoice));
+    PageType=Document;
+    RefreshOnActivate=Yes;
+    PromotedActionCategoriesML=[DEU=Neu, Prozess, Bericht, Mail-Dokumente, 4, Genehmigungsverwaltung, Genehmigung;
+                                ENU=New,Process,Report,Approve,Invoice,Posting,View,Approval Administration,Incoming Document,Document;
+                                NLD=Nieuw,Verwerken,Rapport,Goedkeuren,Factureren,Boeken,Weergeven,Goedkeuringsadministratie,Inkomend document,Document];
+    OnInit=VAR
+             PurchasesPayablesSetup@1001 : Record 312;
+           BEGIN
+             PurchSetup.GET;
+             JobQueuesUsed := PurchasesPayablesSetup.JobQueueActive;
+             SetExtDocNoMandatoryCondition;
+             ShowShippingOptionsWithLocation := ApplicationAreaMgmtFacade.IsLocationEnabled OR ApplicationAreaMgmtFacade.IsAllDisabled;
+           END;
+
+    OnOpenPage=VAR
+                 OfficeMgt@1000 : Codeunit 1630;
+                 PermissionManager@1001 : Codeunit 9002;
+                 DCSetup@6085573 : Record 6085573;
+               BEGIN
+                 SetDocNoVisible;
+
+                 DCSetup.GET;
+                 ShowAllocations := DCSetup."Enable Purchase Allocation";
+
+                 IsOfficeAddin := OfficeMgt.IsAvailable;
+                 CreateIncomingDocFromEmailAttachment := OfficeMgt.OCRAvailable;
+                 CreateIncomingDocumentVisible := NOT OfficeMgt.IsOutlookMobileApp;
+                 IsSaaS := PermissionManager.SoftwareAsAService;
+
+                 IF UserMgt.GetPurchasesFilter <> '' THEN BEGIN
+                   FILTERGROUP(2);
+                   SETRANGE("Responsibility Center",UserMgt.GetPurchasesFilter);
+                   FILTERGROUP(0);
+                 END;
+                 IF ("No." <> '') AND ("Buy-from Vendor No." = '') THEN
+                   DocumentIsPosted := (NOT GET("Document Type","No."));
+                 EnableControls;
+                 OnActivateForm;
+
+                 ActivateFields;
+                 CurrPage.DocumentFiles.PAGE.SetClientAddInSizeSmall(TRUE);
+
+                 ShowApproval := DCApprovalsBridge.IsPurchApprovalEnabledDocType("Document Type");
+               END;
+
+    OnAfterGetRecord=BEGIN
+                       CalculateCurrentShippingAndPayToOption;
+
+                       ApprovalFlowCode := PurchHeaderDCInfo.GetApprovalFlowCode(Rec);
+                       ApprovalFlowCodeEditable := CurrPage.EDITABLE;
+                       CurrPage.DocumentFiles.PAGE.SetDocument(DATABASE::"Purchase Header","Document Type","No.",0,TRUE);
+                       UpdateAmounts;
+                       EnableFields;
+                     END;
+
+    OnNewRecord=BEGIN
+                  ApprovalFlowCode := '';
+                  ApprovalFlowCodeEditable := CurrPage.EDITABLE;
+                  "Responsibility Center" := UserMgt.GetPurchasesFilter;
+                  UpdateAmounts;
+
+                  IF (NOT DocNoVisible) AND ("No." = '') THEN
+                    SetBuyFromVendorFromFilter;
+
+                  CalculateCurrentShippingAndPayToOption;
+                END;
+
+    OnDeleteRecord=BEGIN
+                     CurrPage.SAVERECORD;
+                     EXIT(ConfirmDeletion);
+                   END;
+
+    OnQueryClosePage=BEGIN
+                       IF NOT DocumentIsPosted THEN
+                         EXIT(ConfirmCloseUnposted);
+                     END;
+
+    OnAfterGetCurrRecord=BEGIN
+                           IF "No." <> '' THEN
+                             CurrPage.DocumentFiles.PAGE.SetDocument(DATABASE::"Purchase Header","Document Type","No.",0,TRUE);
+                           SetControlAppearance;
+                         END;
+
+    ActionList=ACTIONS
+    {
+      { 1900000003;  ;ActionContainer;
+                      Name=RelatedInformation;
+                      CaptionML=;
+                      ActionContainerType=RelatedInformation }
+      { 1900000004;  ;ActionContainer;
+                      Name=ActionItems;
+                      CaptionML=;
+                      ActionContainerType=ActionItems }
+      { 55      ;1   ;ActionGroup;
+                      Name=InvoiceActionGroup;
+                      CaptionML=[DEU=R&echnung;
+                                 ENU=&Invoice;
+                                 NLD=&Factuur;
+                                 SVE=Fa&ktura];
+                      Image=Invoice }
+      { 57      ;2   ;Action    ;
+                      Name=StatisticsAction;
+                      ShortCutKey=F7;
+                      CaptionML=[DEU=Statistik;
+                                 ENU=Statistics;
+                                 NLD=Statistiek;
+                                 SVE=Statistik];
+                      ToolTipML=[DEU=Zeigt statistische Informationen fÅr den Datensatz an, wie etwa den Wert der gebuchten Posten.;
+                                 ENU=View statistical information, such as the value of posted entries, for the record.;
+                                 NLD=Statistische informatie, zoals de waarde van geboekte posten, voor de record weergeven.];
+                      ApplicationArea=#Basic,#Suite;
+                      Promoted=Yes;
+                      Image=Statistics;
+                      PromotedCategory=Category5;
+                      OnAction=BEGIN
+                                 CalcInvDiscForHeader;
+                                 COMMIT;
+                                 PAGE.RUNMODAL(PAGE::"Purchase Statistics",Rec);
+                                 PurchCalcDiscByType.ResetRecalculateInvoiceDisc(Rec);
+                               END;
+                                }
+      { 58      ;2   ;Action    ;
+                      Name=VendorCardAction;
+                      ShortCutKey=Shift+F7;
+                      CaptionML=[DEU=Karte;
+                                 ENU=Vendor;
+                                 NLD=Leverancier;
+                                 SVE=Kort];
+                      ToolTipML=[DEU=Zeigt detaillierte Informationen Åber den Kreditor auf dem Einkaufsbeleg an, oder ermîglicht deren Bearbeitung.;
+                                 ENU=View or edit detailed information about the vendor on the purchase document.;
+                                 NLD=Gedetailleerde informatie weergeven of bewerken over de leverancier in het inkoopdocument.];
+                      ApplicationArea=#Basic,#Suite;
+                      RunObject=Page 26;
+                      RunPageLink=No.=FIELD(Buy-from Vendor No.);
+                      Promoted=Yes;
+                      Enabled="Buy-from Vendor No." <> '';
+                      PromotedIsBig=Yes;
+                      Image=Vendor;
+                      PromotedCategory=Category5;
+                      PromotedOnly=Yes }
+      { 59      ;2   ;Action    ;
+                      Name=PurchCommentSheetAction;
+                      CaptionML=[DEU=Be&merkungen;
+                                 ENU=Co&mments;
+                                 NLD=Op&merkingen];
+                      ToolTipML=[DEU=Zeigen Sie Bemerkungen an, oder fÅgen Sie sie dem Datensatz hinzu.;
+                                 ENU=View or add comments for the record.;
+                                 NLD=Opmerkingen weergeven of toevoegen voor de record.];
+                      ApplicationArea=#Comments;
+                      RunObject=Page 66;
+                      RunPageLink=Document Type=FIELD(Document Type),
+                                  No.=FIELD(No.),
+                                  Document Line No.=CONST(0);
+                      Image=ViewComments }
+      { 113     ;2   ;Action    ;
+                      Name=DimensionsAction;
+                      AccessByPermission=TableData 348=R;
+                      ShortCutKey=Shift+Ctrl+D;
+                      CaptionML=[DEU=Dimensionen;
+                                 ENU=Dimensions;
+                                 NLD=Dimensies];
+                      ToolTipML=[DEU=Anzeigen oder Bearbeiten von Dimensionen, wie etwa eines Bereichs, eines Projekts oder einer Abteilung, die Sie Verkaufs- oder Einkaufsbelegen zuweisen kînnen, um die Kosten zu verteilen und den Transaktionsverlauf zu analysieren.;
+                                 ENU=View or edit dimensions, such as area, project, or department, that you can assign to sales and purchase documents to distribute costs and analyze transaction history.;
+                                 NLD=Dimensies, zoals gebied, project of afdeling, weergeven of bewerken die u kunt toewijzen aan verkoop- en inkoopdocumenten om de kosten te verdelen en de transactiegeschiedenis te analyseren.];
+                      ApplicationArea=#Dimensions;
+                      Promoted=Yes;
+                      Enabled="No." <> '';
+                      PromotedIsBig=Yes;
+                      Image=Dimensions;
+                      PromotedCategory=Category5;
+                      PromotedOnly=Yes;
+                      OnAction=BEGIN
+                                 ShowDocDim;
+                                 CurrPage.SAVERECORD;
+                               END;
+                                }
+      { 1901458458;2 ;Action    ;
+                      Name=DocAttach;
+                      CaptionML=[DEU=AnhÑnge;
+                                 ENU=Attachments;
+                                 NLD=Bijlagen];
+                      ToolTipML=[DEU=FÅgen Sie eine Datei als Anhang an. Sie kînnen Bilder sowie Belege anhÑngen.;
+                                 ENU=Add a file as an attachment. You can attach images as well as documents.;
+                                 NLD=Een bestand als bijlage toevoegen. U kunt afbeeldingen en documenten toevoegen.];
+                      ApplicationArea=#All;
+                      Promoted=Yes;
+                      Visible=FALSE;
+                      PromotedIsBig=Yes;
+                      Image=Attach;
+                      PromotedCategory=Category5;
+                      PromotedOnly=Yes;
+                      OnAction=VAR
+                                 DocumentAttachmentDetails@1000 : Page 1173;
+                                 RecRef@1001 : RecordRef;
+                               BEGIN
+                                 RecRef.GETTABLE(Rec);
+                                 DocumentAttachmentDetails.OpenForRecRef(RecRef);
+                                 DocumentAttachmentDetails.RUNMODAL;
+                               END;
+                                }
+      { 6085598 ;2   ;Action    ;
+                      Name=Archived Versions;
+                      CaptionML=[DEU=&Archivierte Versionen;
+                                 ENU=&Archived Versions;
+                                 NLD=Gearchiveerde versies];
+                      RunObject=Page 6086032;
+                      RunPageLink=Document Type=FIELD(Document Type),
+                                  No.=FIELD(No.);
+                      Image=Approvals }
+      { 6085597 ;2   ;Action    ;
+                      Name=Allocations;
+                      CaptionML=[DEU=Verteilungen;
+                                 ENU=Allocations;
+                                 NLD=Allocaties];
+                      Visible=ShowAllocations;
+                      Image=Approvals;
+                      OnAction=VAR
+                                 PurchDocManagement@6085573 : Codeunit 6085709;
+                               BEGIN
+                                 PurchDocManagement.ShowAllocations(Rec);
+                               END;
+                                }
+      { 6085596 ;2   ;Action    ;
+                      Name=Payment Information;
+                      ShortCutKey=Shift+Ctrl+F9;
+                      CaptionML=[DEU=Zahlungs&informationen;
+                                 ENU=Payment &Information;
+                                 NLD=Betalings&informatie];
+                      RunObject=Codeunit 6085745;
+                      Promoted=Yes;
+                      Visible=ShowPaymentInfo;
+                      Image=ElectronicPayment;
+                      PromotedCategory=Process;
+                      PromotedOnly=Yes }
+      { 41      ;2   ;ActionGroup;
+                      Name=IncomingDocument;
+                      CaptionML=[DEU=Eingehender Beleg;
+                                 ENU=Incoming Document;
+                                 NLD=Inkomend document;
+                                 SVE=Inkommande dokument];
+                      Visible=FALSE }
+      { 39      ;3   ;Action    ;
+                      Name=IncomingDocCard;
+                      CaptionML=[DEU=Eingehenden Beleg anzeigen;
+                                 ENU=View;
+                                 NLD=Weergeven;
+                                 SVE=Visa inkommande dokument];
+                      ToolTipML=[DEU=Zeigen Sie eingehende BelegdatensÑtze und DateianhÑnge an, die fÅr den Posten oder Beleg vorhanden sind.;
+                                 ENU=View any incoming document records and file attachments that exist for the entry or document.;
+                                 NLD=Inkomende documentrecords en bestandsbijlagen weergeven die voor de post of het document bestaan.];
+                      ApplicationArea=#Basic,#Suite;
+                      Enabled=HasIncomingDocument;
+                      Image=ViewOrder;
+                      PromotedCategory=Category9;
+                      OnAction=VAR
+                                 IncomingDocument@1000 : Record 130;
+                               BEGIN
+                                 IncomingDocument.ShowCardFromEntryNo("Incoming Document Entry No.");
+                               END;
+                                }
+      { 37      ;3   ;Action    ;
+                      Name=SelectIncomingDoc;
+                      AccessByPermission=TableData 130=R;
+                      CaptionML=[DEU=Eingehenden Beleg auswÑhlen;
+                                 ENU=Select;
+                                 NLD=Selecteren;
+                                 SVE=VÑlj inkommande dokument];
+                      ToolTipML=[DEU=WÑhlen Sie einen eingehenden Belegdatensatz und einen Dateianhang aus, die mit dem Posten oder Beleg verknÅpft werden sollen.;
+                                 ENU=Select an incoming document record and file attachment that you want to link to the entry or document.;
+                                 NLD=Een inkomende documentrecord en bestandsbijlage selecteren die u wilt koppelen aan de post of het document.];
+                      ApplicationArea=#Basic,#Suite;
+                      Image=SelectLineToApply;
+                      PromotedCategory=Category9;
+                      OnAction=VAR
+                                 IncomingDocument@1000 : Record 130;
+                               BEGIN
+                                 VALIDATE("Incoming Document Entry No.",IncomingDocument.SelectIncomingDocument("Incoming Document Entry No.",RECORDID));
+                               END;
+                                }
+      { 35      ;3   ;Action    ;
+                      Name=IncomingDocAttachFile;
+                      Ellipsis=Yes;
+                      CaptionML=[DEU=Eingehenden Beleg aus Datei erstellen;
+                                 ENU=Create from File;
+                                 NLD=Maken van bestand;
+                                 SVE=Skapa inkommande dokument frÜn fil];
+                      ToolTipML=[DEU=Erstellen Sie einen eingehenden Belegdatensatz durch Auswahl einer anzuhÑngenden Datei, und verknÅpfen Sie den Belegdatensatz mit dem Posten oder Beleg.;
+                                 ENU=Create an incoming document record by selecting a file to attach, and then link the incoming document record to the entry or document.;
+                                 NLD=Een inkomende documentrecord maken door een bestand te selecteren om te koppelen en vervolgens de inkomende documentrecord koppelen aan de post of het document.];
+                      ApplicationArea=#Basic,#Suite;
+                      Visible=CreateIncomingDocumentVisible;
+                      Enabled=CreateIncomingDocumentEnabled;
+                      Image=Attach;
+                      PromotedCategory=Category9;
+                      OnAction=VAR
+                                 IncomingDocumentAttachment@1000 : Record 133;
+                               BEGIN
+                                 IncomingDocumentAttachment.NewAttachmentFromPurchaseDocument(Rec);
+                               END;
+                                }
+      { 16      ;3   ;Action    ;
+                      Name=IncomingDocEmailAttachment;
+                      Ellipsis=Yes;
+                      CaptionML=[DEU=Aus Anhang erstellen;
+                                 ENU=Create from Attachment;
+                                 NLD=Maken van bijlage];
+                      ToolTipML=[DEU=Erstellt einen eingehenden Belegdatensatz durch Auswahl eines Dateianhangs aus Outlook-E-Mails und verknÅpft diesen Belegdatensatz mit dem Posten oder Beleg.;
+                                 ENU=Create an incoming document record by selecting an attachment from outlook email, and then link the incoming document record to the entry or document.;
+                                 NLD=Een inkomende documentrecord maken door een bijlage uit een Outlook-e-mail te selecteren en vervolgens de inkomende documentrecord koppelen aan de post of het document.];
+                      ApplicationArea=#Basic,#Suite;
+                      Visible=CreateIncomingDocFromEmailAttachment;
+                      Enabled=IncomingDocEmailAttachmentEnabled;
+                      Image=SendElectronicDocument;
+                      PromotedCategory=Category9;
+                      OnAction=VAR
+                                 OfficeMgt@1001 : Codeunit 1630;
+                               BEGIN
+                                 IF NOT INSERT(TRUE) THEN
+                                   MODIFY(TRUE);
+                                 OfficeMgt.InitiateSendToIncomingDocumentsWithPurchaseHeaderLink(Rec,"Buy-from Vendor No.");
+                               END;
+                                }
+      { 29      ;3   ;Action    ;
+                      Name=RemoveIncomingDoc;
+                      CaptionML=[DEU=Eingehenden Beleg entfernen;
+                                 ENU=Remove;
+                                 NLD=Verwijderen;
+                                 SVE=Ta bort inkommande dokument];
+                      ToolTipML=[DEU=Entfernen Sie einen externen Beleg, der manuell oder automatisch erfasst und einem Beleg oder Posten als Datei angehÑngt wurde.;
+                                 ENU=Remove an external document that has been recorded, manually or automatically, and attached as a file to a document or ledger entry.;
+                                 NLD=Een extern document verwijderen dat handmatig of automatisch is geregistreerd en als een bestand is gekoppeld aan een document of een post.];
+                      ApplicationArea=#Basic,#Suite;
+                      Enabled=HasIncomingDocument;
+                      Image=RemoveLine;
+                      PromotedCategory=Category9;
+                      OnAction=VAR
+                                 IncomingDocument@1000 : Record 130;
+                               BEGIN
+                                 IF IncomingDocument.GET("Incoming Document Entry No.") THEN
+                                   IncomingDocument.RemoveLinkToRelatedRecord;
+                                 "Incoming Document Entry No." := 0;
+                                 MODIFY(TRUE);
+                               END;
+                                }
+      { 25      ;1   ;ActionGroup;
+                      Name=ApprovalActionGroup;
+                      CaptionML=[DEU=Genehmigung;
+                                 ENU=Approval;
+                                 NLD=Goedkeuring] }
+      { 23      ;2   ;Action    ;
+                      Name=Approve;
+                      CaptionML=[DEU=&Genehmigen;
+                                 ENU=&Approve;
+                                 NLD=Goedkeuren];
+                      ToolTipML=[DEU=Genehmigen Sie die angeforderten énderungen.;
+                                 ENU=Approve the requested changes.;
+                                 NLD=De aangevraagde wijzigingen goedkeuren.];
+                      ApplicationArea=#All;
+                      Promoted=Yes;
+                      Visible=ShowApproval;
+                      Enabled=EnableApprove;
+                      PromotedIsBig=Yes;
+                      Image=Approve;
+                      PromotedCategory=Category4;
+                      PromotedOnly=Yes;
+                      OnAction=BEGIN
+                                 DCApprovalsBridge.Approve(Rec);
+                               END;
+                                }
+      { 21      ;2   ;Action    ;
+                      Name=Reject;
+                      CaptionML=[DEU=Abl&ehnen;
+                                 ENU=&Reject;
+                                 NLD=Weigeren];
+                      ToolTipML=[DEU=Verweigert die Genehmigungsanforderung.;
+                                 ENU=Reject the approval request.;
+                                 NLD=De goedkeuringsaanvraag weigeren.];
+                      ApplicationArea=#All;
+                      Promoted=Yes;
+                      Visible=ShowApproval;
+                      Enabled=EnableReject;
+                      PromotedIsBig=Yes;
+                      Image=Reject;
+                      PromotedCategory=Category4;
+                      PromotedOnly=Yes;
+                      OnAction=BEGIN
+                                 DCApprovalsBridge.Reject(Rec);
+                               END;
+                                }
+      { 19      ;2   ;Action    ;
+                      Name=Forward;
+                      CaptionML=[DEU=Versenden;
+                                 ENU=&Forward;
+                                 NLD=Delegeren];
+                      ToolTipML=[DEU=Delegiert die Genehmigung an einen Ersatzgenehmiger.;
+                                 ENU=Delegate the approval to a substitute approver.;
+                                 NLD=De goedkeuring delegeren naar een vervangende fiatteur.];
+                      ApplicationArea=#All;
+                      Promoted=Yes;
+                      Visible=ShowApproval;
+                      Enabled=EnableForward;
+                      PromotedIsBig=Yes;
+                      Image=Delegate;
+                      PromotedCategory=Category4;
+                      PromotedOnly=Yes;
+                      OnAction=BEGIN
+                                 DCApprovalsBridge.Forward(Rec);
+                               END;
+                                }
+      { 6085573 ;2   ;Action    ;
+                      Name=OnHold;
+                      CaptionML=[DEU=&Gesperrt;
+                                 ENU=&On Hold;
+                                 NLD=Afwachten];
+                      Promoted=Yes;
+                      Visible=ShowApproval;
+                      Enabled=EnableOnHold;
+                      PromotedIsBig=Yes;
+                      Image=Lock;
+                      PromotedCategory=Category4;
+                      PromotedOnly=Yes;
+                      OnAction=BEGIN
+                                 DCApprovalsBridge.OnHold(Rec);
+                               END;
+                                }
+      { 13      ;2   ;Action    ;
+                      Name=Comment;
+                      CaptionML=[DEU=Bemerkungen;
+                                 ENU=Comments;
+                                 NLD=Opmerkingen];
+                      ToolTipML=[DEU=Zeigen Sie Bemerkungen an, oder fÅgen Sie sie dem Datensatz hinzu.;
+                                 ENU=View or add comments for the record.;
+                                 NLD=Opmerkingen weergeven of toevoegen voor de record.];
+                      ApplicationArea=#All;
+                      Promoted=Yes;
+                      Visible=OpenApprovalEntriesExistForCurrUser;
+                      Image=ViewComments;
+                      PromotedCategory=Category4;
+                      OnAction=VAR
+                                 ApprovalsMgmt@1000 : Codeunit 1535;
+                               BEGIN
+                                 ApprovalsMgmt.GetApprovalComment(Rec);
+                               END;
+                                }
+      { 9       ;1   ;ActionGroup;
+                      Name=RealeaseActionGroup;
+                      CaptionML=[DEU=Freigeben;
+                                 ENU=Release;
+                                 NLD=Vrijgeven;
+                                 SVE=SlÑppa];
+                      Image=Release }
+      { 120     ;2   ;Action    ;
+                      Name=ReleaseAction;
+                      ShortCutKey=Ctrl+F9;
+                      CaptionML=[DEU=&Freigeben;
+                                 ENU=Re&lease;
+                                 NLD=&Vrijgeven;
+                                 SVE=&SlÑpp];
+                      ToolTipML=[DEU=Gibt den Beleg fÅr die nÑchste Stufe der Verarbeitung frei. Wenn ein Beleg freigegeben wird, wird er in alle VerfÅgbarkeitsberechnungen ab dem erwarteten Eingangsdatum der Artikel einbezogen. Sie mÅssen den Beleg erneut îffnen, bevor Sie an Ihm énderungen vornehmen kînnen.;
+                                 ENU=Release the document to the next stage of processing. When a document is released, it will be included in all availability calculations from the expected receipt date of the items. You must reopen the document before you can make changes to it.;
+                                 NLD=Het document vrijgeven voor de volgende fase van de verwerking. Wanneer een document wordt vrijgegeven, wordt dit in alle beschikbaarheidsberekeningen opgenomen vanaf de verwachte ontvangstdatum van de artikelen. U moet het document opnieuw openen voordat u hierin wijzigingen kunt aanbrengen.];
+                      ApplicationArea=#Suite;
+                      Promoted=Yes;
+                      PromotedIsBig=Yes;
+                      Image=ReleaseDoc;
+                      PromotedCategory=Process;
+                      PromotedOnly=Yes;
+                      OnAction=VAR
+                                 ReleasePurchDoc@1000 : Codeunit 415;
+                               BEGIN
+                                 ReleasePurchDoc.PerformManualRelease(Rec);
+                               END;
+                                }
+      { 121     ;2   ;Action    ;
+                      Name=Reopen;
+                      CaptionML=[DEU=Stat&us zurÅcksetzen;
+                                 ENU=Re&open;
+                                 NLD=Opnieu&w openen;
+                                 SVE=&ôppna igen];
+                      ToolTipML=[DEU=ôffnet den Beleg erneut, um ihn nach der Genehmigung zu Ñndern. Genehmigte Belege haben den Status "Freigegeben" und mÅssen geîffnet werden, bevor sie geÑndert werden kînnen.;
+                                 ENU=Reopen the document to change it after it has been approved. Approved documents have the Released status and must be opened before they can be changed.;
+                                 NLD=Het document opnieuw openen om het te wijzigen nadat het is goedgekeurd. Goedgekeurde documenten hebben de status Vrijgegeven en moeten worden geopend voordat ze kunnen worden gewijzigd.];
+                      ApplicationArea=#Suite;
+                      Promoted=Yes;
+                      Enabled=Status <> Status::Open;
+                      PromotedIsBig=Yes;
+                      Image=ReOpen;
+                      PromotedCategory=Process;
+                      PromotedOnly=Yes;
+                      OnAction=VAR
+                                 ReleasePurchDoc@1001 : Codeunit 415;
+                               BEGIN
+                                 ReleasePurchDoc.PerformManualReopen(Rec);
+                               END;
+                                }
+      { 60      ;1   ;ActionGroup;
+                      Name=FunctionsActionGroup;
+                      CaptionML=[DEU=F&unktion;
+                                 ENU=F&unctions;
+                                 NLD=F&uncties;
+                                 SVE=F&unktioner];
+                      Image=Action }
+      { 6085574 ;2   ;Action    ;
+                      Name=GetAmtDistrib;
+                      Ellipsis=Yes;
+                      CaptionML=[DEU=Rufe Standardbetragsverteilungscodes af;
+                                 ENU=Get Std. Amount Di&stribution Codes;
+                                 NLD=Haal standaardbedragverdelingscodes];
+                      Image=ApplyTemplate;
+                      OnAction=BEGIN
+                                 PurchDocMgt.GetAmountDistribution(Rec);
+                               END;
+                                }
+      { 6085575 ;2   ;Action    ;
+                      Name=GetOrderLines;
+                      Ellipsis=Yes;
+                      CaptionML=[DEU=Auftragszeilen &abrufen;
+                                 ENU=Ge&t Order Lines;
+                                 NLD=O&rderregels ophalen];
+                      Image=GetLines;
+                      OnAction=BEGIN
+                                 CODEUNIT.RUN(CODEUNIT::"Purch.-Get Order",Rec);
+                               END;
+                                }
+      { 4       ;2   ;Action    ;
+                      Name=GetRecurringPurchaseLines;
+                      Ellipsis=Yes;
+                      CaptionML=[DEU=Wiederkehrende Einkaufszeilen abrufen;
+                                 ENU=Get Recurring Purchase Lines;
+                                 NLD=Periodieke inkoopregels ophalen];
+                      ToolTipML=[DEU=FÅgen Sie Einkaufsbelegzeilen ein, die Sie fÅr den Kreditor als wiederkehrend eingerichtet haben. Wiederkehrende Einkaufszeilen kînnen fÅr monatliche WiederbeschaffungsauftrÑge oder eine feste FrachtgebÅhr stehen.;
+                                 ENU=Insert purchase document lines that you have set up for the vendor as recurring. Recurring purchase lines could be for a monthly replenishment order or a fixed freight expense.;
+                                 NLD=Inkoopdocumentregels invoegen die u voor de leverancier hebt ingesteld als periodiek. Periodieke inkoopregels kunnen bedoeld zijn voor een maandelijkse aanvullingsorder of voor vaste vrachtkosten.];
+                      ApplicationArea=#Suite;
+                      PromotedIsBig=Yes;
+                      Image=VendorCode;
+                      OnAction=VAR
+                                 StdVendPurchCode@1000 : Record 175;
+                               BEGIN
+                                 StdVendPurchCode.InsertPurchLines(Rec);
+                               END;
+                                }
+      { 63      ;2   ;Action    ;
+                      Name=CopyDocument;
+                      Ellipsis=Yes;
+                      CaptionML=[DEU=Beleg kopieren;
+                                 ENU=Copy Document;
+                                 NLD=Document kopiÔøΩren];
+                      ToolTipML=[DEU=Kopiert Belegzeilen und Kopfinformationen aus einem anderen Einkaufsbeleg in diesen Beleg. Sie kînnen eine gebuchte Einkaufsrechnung in eine neue Einkaufsrechnung kopieren, um schnell einen Ñhnlichen Beleg zu erstellen.;
+                                 ENU=Copy document lines and header information from another purchase document to this document. You can copy a posted purchase invoice into a new purchase invoice to quickly create a similar document.;
+                                 NLD=Documentregels en koptekstgegevens uit een ander inkoopdocument naar dit document kopiÔøΩren. U kunt een geboekte inkoopfactuur naar een nieuwe inkoopfactuur kopiÔøΩren om snel een soortgelijk document te maken.];
+                      ApplicationArea=#Suite;
+                      Enabled="No." <> '';
+                      PromotedIsBig=Yes;
+                      Image=CopyDocument;
+                      OnAction=BEGIN
+                                 CopyPurchDoc.SetPurchHeader(Rec);
+                                 CopyPurchDoc.RUNMODAL;
+                                 CLEAR(CopyPurchDoc);
+                                 IF GET("Document Type","No.") THEN;
+                               END;
+                                }
+      { 61      ;2   ;Action    ;
+                      Name=CalculateInvoiceDiscount;
+                      AccessByPermission=TableData 24=R;
+                      CaptionML=[DEU=&Rechnungsrab. berechnen;
+                                 ENU=Calculate &Invoice Discount;
+                                 NLD=Factuurkort&ing berekenen];
+                      ToolTipML=[DEU=Berechnen Sie den Rechnungsrabatt fÅr die gesamte Einkaufsrechnung.;
+                                 ENU=Calculate the invoice discount for the entire purchase invoice.;
+                                 NLD=De factuurkorting berekenen voor de volledige inkoopfactuur.];
+                      ApplicationArea=#Basic,#Suite;
+                      Image=CalculateInvoiceDiscount;
+                      OnAction=BEGIN
+                                 ApproveCalcInvDisc;
+                                 PurchCalcDiscByType.ResetRecalculateInvoiceDisc(Rec);
+                               END;
+                                }
+      { 136     ;2   ;Separator  }
+      { 137     ;2   ;Separator  }
+      { 112     ;2   ;Action    ;
+                      Name=MoveNegativeLines;
+                      Ellipsis=Yes;
+                      CaptionML=[DEU=Negative Zeilen Åbertragen;
+                                 ENU=Move Negative Lines;
+                                 NLD=Negatieve regels verplaatsen;
+                                 SVE=Flytta negativa rader];
+                      ToolTipML=[DEU=Bereitet das Erstellen eines Wiederbeschaffungsauftrags in einem Verkaufsreklamationsvorgang vor.;
+                                 ENU=Prepare to create a replacement sales order in a sales return process.;
+                                 NLD=Voorbereiden om een vervangingsverkooporder te maken in een verkoopretourproces.];
+                      ApplicationArea=#Basic,#Suite;
+                      Image=MoveNegativeLines;
+                      OnAction=BEGIN
+                                 CLEAR(MoveNegPurchLines);
+                                 MoveNegPurchLines.SetPurchHeader(Rec);
+                                 MoveNegPurchLines.RUNMODAL;
+                                 MoveNegPurchLines.ShowDocument;
+                               END;
+                                }
+      { 47      ;1   ;ActionGroup;
+                      Name=RequestApprovalGroup;
+                      CaptionML=[DEU=Genehmigungsanforderung;
+                                 ENU=Request Approval;
+                                 NLD=Goedkeuring aanvragen;
+                                 SVE=BegÑr godkÑnnande] }
+      { 45      ;2   ;Action    ;
+                      Name=ApprovalsAction;
+                      AccessByPermission=TableData 454=R;
+                      CaptionML=[DEU=Genehmigungen;
+                                 ENU=Approvals;
+                                 NLD=Goedkeuringen;
+                                 SVE=GodkÑnnanden];
+                      ToolTipML=[DEU=Zeigt eine Liste der DatensÑtze an, die noch genehmigt werden mÅssen. Beispielsweise wird angezeigt, wer die Genehmigung des Datensatzes angefordert hat, wann er gesendet wurde und bis wann er genehmigt sein muss.;
+                                 ENU=View a list of the records that are waiting to be approved. For example, you can see who requested the record to be approved, when it was sent, and when it is due to be approved.;
+                                 NLD=Een lijst weergeven met de records die wachten op goedkeuring. U kunt bijvoorbeeld zien wie goedkeuring van de record heeft aangevraagd, wanneer de record is verzonden en wanneer deze moet worden goedgekeurd.];
+                      ApplicationArea=#Suite;
+                      Promoted=Yes;
+                      Visible=ShowApproval;
+                      PromotedIsBig=Yes;
+                      Image=Approvals;
+                      PromotedCategory=Category8;
+                      PromotedOnly=Yes;
+                      OnAction=BEGIN
+                                 DCApprovalMgt.DrillDownApprovalEntries(Rec);
+                               END;
+                                }
+      { 142     ;2   ;Action    ;
+                      Name=SendApprovalRequest;
+                      CaptionML=[DEU=&Genehmigungsanforderung senden;
+                                 ENU=Send A&pproval Request;
+                                 NLD=Goedkeuringsaanvraag &verzenden;
+                                 SVE=Skicka godk&ÑnnandebegÑran];
+                      ToolTipML=[DEU=Fordert eine Genehmigung fÅr den Beleg an.;
+                                 ENU=Request approval of the document.;
+                                 NLD=Goedkeuring van het document aanvragen.];
+                      ApplicationArea=#Basic,#Suite;
+                      Promoted=Yes;
+                      Visible=ShowApproval;
+                      Enabled=NOT OpenApprovalEntriesExist AND CanRequestApprovalForFlow AND EnableSendApproval;
+                      PromotedIsBig=Yes;
+                      Image=SendApprovalRequest;
+                      PromotedCategory=Category8;
+                      PromotedOnly=Yes;
+                      OnAction=BEGIN
+                                 DCApprovalsBridge.SendPurchDocApprovalRequest(Rec);
+                               END;
+                                }
+      { 143     ;2   ;Action    ;
+                      Name=CancelApprovalRequest;
+                      CaptionML=[DEU=&Genehmigungsanforderung stornieren;
+                                 ENU=Cancel Approval Re&quest;
+                                 NLD=&Goedkeuringsaanvraag annuleren;
+                                 SVE=Annullera &godkÑnnandebegÑran];
+                      ToolTipML=[DEU=Storniert die Genehmigungsanforderung.;
+                                 ENU=Cancel the approval request.;
+                                 NLD=De goedkeuringsaanvraag annuleren.];
+                      ApplicationArea=#Basic,#Suite;
+                      Promoted=Yes;
+                      Visible=ShowApproval;
+                      Enabled=CanCancelApprovalForRecord OR CanCancelApprovalForFlow;
+                      PromotedIsBig=Yes;
+                      Image=CancelApprovalRequest;
+                      PromotedCategory=Category8;
+                      PromotedOnly=Yes;
+                      OnAction=BEGIN
+                                 DCApprovalsBridge.CancelApprovalRequest(Rec);
+                               END;
+                                }
+      { 6085580 ;2   ;Action    ;
+                      Name=ForceApproval;
+                      CaptionML=[DEU=&Genehmigung erzwingen;
+                                 ENU=&Force Approval;
+                                 NLD=&Forceer goedkeuring;
+                                 SVE=Tvinga godkÑnnande];
+                      Promoted=Yes;
+                      Visible=ShowApproval;
+                      Enabled=EnableForceApproval;
+                      Image=EncryptionKeys;
+                      PromotedCategory=Category8;
+                      PromotedOnly=Yes;
+                      OnAction=BEGIN
+                                 DCApprovalsBridge.ForceApproval(Rec);
+                               END;
+                                }
+      { 6085576 ;2   ;Action    ;
+                      Name=ChangeImportedAmounts;
+                      CaptionML=[DEU=&Importierte BetrÑge Ñndern;
+                                 ENU=&Change Imported Amounts;
+                                 NLD=&Wijzig geimporteerde bedragen];
+                      Promoted=Yes;
+                      Visible=ShowImportedAmounts;
+                      Enabled=EnableChangeImportedAmount;
+                      Image=EditAdjustments;
+                      PromotedCategory=Category10;
+                      PromotedOnly=Yes;
+                      OnAction=BEGIN
+                                 PurchDocMgt.ChangeDocAmounts(Rec);
+                                 UpdateAmounts;
+                               END;
+                                }
+      { 62      ;1   ;ActionGroup;
+                      Name=FlowActionGroup;
+                      CaptionML=[DEU=Beleg kopieren;
+                                 ENU=Flow;
+                                 NLD=Flow;
+                                 SVE=Kopiera dokument];
+                      Image=Flow }
+      { 71      ;2   ;Action    ;
+                      Name=CreateFlow;
+                      CaptionML=[DEU=Workflow erstellen;
+                                 ENU=Create a Flow;
+                                 NLD=Een werkstroom maken];
+                      ToolTipML=[DEU=Erstellen Sie einen neuen Workflow aus einer Liste passender Workflow-Vorlagen.;
+                                 ENU=Create a new Flow from a list of relevant Flow templates.;
+                                 NLD=Een nieuwe werkstroom maken uit een lijst met relevante werkstroomsjablonen.];
+                      ApplicationArea=#Basic,#Suite;
+                      Visible=IsSaaS;
+                      Image=Flow;
+                      PromotedCategory=Category8;
+                      OnAction=VAR
+                                 FlowServiceManagement@1000 : Codeunit 6400;
+                                 FlowTemplateSelector@1001 : Page 6400;
+                               BEGIN
+                                 // Opens page 6400 where the user can use filtered templates to create new flows.
+                                 FlowTemplateSelector.SetSearchText(FlowServiceManagement.GetPurchasingTemplateFilter);
+                                 FlowTemplateSelector.RUN;
+                               END;
+                                }
+      { 73      ;2   ;Action    ;
+                      Name=SeeFlows;
+                      CaptionML=[DEU=Meine Workflows anzeigen;
+                                 ENU=See my Flows;
+                                 NLD=Mijn werkstromen weergeven];
+                      ToolTipML=[DEU=Erstellte Workflows anzeigen und konfigurieren.;
+                                 ENU=View and configure Flows that you created.;
+                                 NLD=Werkstromen weergeven en configureren die u hebt gemaakt.];
+                      ApplicationArea=#Basic,#Suite;
+                      RunObject=Page 6401;
+                      Image=Flow;
+                      PromotedCategory=Category8 }
+      { 66      ;1   ;ActionGroup;
+                      Name=PostingActionGroup;
+                      CaptionML=[DEU=Bu&chung;
+                                 ENU=P&osting;
+                                 NLD=B&oeken;
+                                 SVE=B&okfîring];
+                      Image=Post }
+      { 68      ;2   ;Action    ;
+                      Name=PostAction;
+                      ShortCutKey=F9;
+                      CaptionML=[DEU=Bu&chen;
+                                 ENU=P&ost;
+                                 NLD=&Boeken;
+                                 SVE=&Bokfîr];
+                      ToolTipML=[DEU=Schlie·t den Beleg oder das Buch.-Blatt durch Buchen der BetrÑge und Mengen auf die entsprechenden Konten in den FirmenbÅchern ab.;
+                                 ENU=Finalize the document or journal by posting the amounts and quantities to the related accounts in your company books.;
+                                 NLD=Het document of dagboek afronden door de bedragen en aantallen te boeken naar de gerelateerde rekeningen in de boeken van uw bedrijf.];
+                      ApplicationArea=#Basic,#Suite;
+                      Promoted=Yes;
+                      PromotedIsBig=Yes;
+                      Image=PostOrder;
+                      PromotedCategory=Process;
+                      PromotedOnly=Yes;
+                      OnAction=BEGIN
+                                 VerifyTotal;
+                                 SIStorage.SetAllowPostRelPurchDocC90(TRUE);
+                                 Post(CODEUNIT::"Purch.-Post (Yes/No)");
+                                 SIStorage.SetAllowPostRelPurchDocC90(FALSE);
+                               END;
+                                }
+      { 33      ;2   ;Action    ;
+                      Name=Preview;
+                      CaptionML=[DEU=Buchungsvorschau;
+                                 ENU=Preview Posting;
+                                 NLD=Voorbeeld van boeking weergeven;
+                                 SVE=Fîrhandsgranska bokfîring];
+                      ToolTipML=[DEU=PrÅft die verschiedenen Postenarten, die beim Buchen des Belegs oder Buch.-Blatts erstellt werden.;
+                                 ENU=Review the different types of entries that will be created when you post the document or journal.;
+                                 NLD=De verschillende soorten posten controleren die worden gemaakt wanneer u het document of dagboek boekt.];
+                      ApplicationArea=#Basic,#Suite;
+                      Enabled=PreviewPostingEnabled;
+                      Image=ViewPostedOrder;
+                      OnAction=VAR
+                                 PurchPostYesNo@1000 : Codeunit 91;
+                                 PurchDocLineRelMgt@6085573 : Codeunit 6085761;
+                               BEGIN
+                                 PurchDocLineRelMgt.PurchDocMatchedToPreviewError(Rec);
+                                 PurchPostYesNo.Preview(Rec);
+                               END;
+                                }
+      { 67      ;2   ;Action    ;
+                      Name=TestReport;
+                      Ellipsis=Yes;
+                      CaptionML=[DEU=Testbericht;
+                                 ENU=Test Report;
+                                 NLD=Testrapport;
+                                 SVE=Testrapport];
+                      ToolTipML=[DEU=Zeigt einen Testbericht an, damit Sie mîgliche Fehler vor dem Buchen des Buch.-Blatts oder Belegs finden und korrigieren kînnen.;
+                                 ENU=View a test report so that you can find and correct any errors before you perform the actual posting of the journal or document.;
+                                 NLD=Een testrapport weergeven zodat u eventuele fouten kunt vinden en corrigeren voordat u de feitelijke boeking van het dagboek of document uitvoert.];
+                      ApplicationArea=#Basic,#Suite;
+                      Image=TestReport;
+                      OnAction=BEGIN
+                                 ReportPrint.PrintPurchHeader(Rec);
+                               END;
+                                }
+      { 69      ;2   ;Action    ;
+                      Name=PostAndPrint;
+                      ShortCutKey=Shift+F9;
+                      CaptionML=[DEU=Buchen und d&rucken;
+                                 ENU=Post and &Print;
+                                 NLD=Boeken en af&drukken;
+                                 SVE=Bokfîr och skriv &ut];
+                      ToolTipML=[DEU=Schlie·t den Beleg oder das Buch.-Blatt ab und bereitet das Drucken vor. Die Werte und Mengen werden auf die entsprechenden Konten gebucht. Ein Berichtanforderungsfenster wird geîffnet, in dem Sie angeben kînnen, was auf dem Ausdruck enthalten sein soll.;
+                                 ENU=Finalize and prepare to print the document or journal. The values and quantities are posted to the related accounts. A report request window where you can specify what to include on the print-out.;
+                                 NLD=Afronden en afdrukken van het document of dagboek voorbereiden. De waarden en aantallen worden geboekt naar de gerelateerde rekeningen. Een rapportaanvraagvenster waarin u kunt opgeven wat in de afdruk moet worden opgenomen.];
+                      ApplicationArea=#Basic,#Suite;
+                      Promoted=Yes;
+                      Visible=NOT IsOfficeAddin;
+                      PromotedIsBig=Yes;
+                      Image=PostPrint;
+                      PromotedCategory=Process;
+                      OnAction=BEGIN
+                                 VerifyTotal;
+                                 SIStorage.SetAllowPostRelPurchDocC90(TRUE);
+                                 Post(CODEUNIT::"Purch.-Post + Print");
+                                 SIStorage.SetAllowPostRelPurchDocC90(FALSE);
+                               END;
+                                }
+      { 70      ;2   ;Action    ;
+                      Name=PostBatch;
+                      Ellipsis=Yes;
+                      CaptionML=[DEU=&Stapelbuchen;
+                                 ENU=Post &Batch;
+                                 NLD=B&atchboeken;
+                                 SVE=Bokfîr b&atch-jobb];
+                      ToolTipML=[DEU=Bucht mehrere Belege gleichzeitig. Ein Berichtanforderungsfenster wird geîffnet, in dem Sie angeben kînnen, welche Belege gebucht werden sollen.;
+                                 ENU=Post several documents at once. A report request window opens where you can specify which documents to post.;
+                                 NLD=Meerdere documenten tegelijk boeken. Er wordt een rapportaanvraagvenster geopend waarin u kunt opgeven welke documenten worden geboekt.];
+                      ApplicationArea=#Basic,#Suite;
+                      Image=PostBatch;
+                      OnAction=BEGIN
+                                 VerifyTotal;
+                                 REPORT.RUNMODAL(REPORT::"Batch Post Purchase Invoices",TRUE,TRUE,Rec);
+                                 CurrPage.UPDATE(FALSE);
+                               END;
+                                }
+      { 7       ;2   ;Action    ;
+                      Name=RemoveFromJobQueue;
+                      CaptionML=[DEU=Aus Aufgabenwarteschlange entfernen;
+                                 ENU=Remove From Job Queue;
+                                 NLD=Verwijderen uit taakwachtrij;
+                                 SVE=Ta bort frÜn jobbkî];
+                      ToolTipML=[DEU=Entfernt die geplante Verarbeitung dieses Datensatzes aus der Aufgabenwarteschlange.;
+                                 ENU=Remove the scheduled processing of this record from the job queue.;
+                                 NLD=De geplande verwerking van deze record verwijderen uit de taakwachtrij.];
+                      ApplicationArea=#All;
+                      Visible="Job Queue Status" = "Job Queue Status"::"Scheduled For Posting";
+                      Image=RemoveLine;
+                      OnAction=BEGIN
+                                 CancelBackgroundPosting;
+                               END;
+                                }
+      { 6085584 ;1   ;ActionGroup;
+                      Name=DocumentActionGroup;
+                      CaptionML=[DEU=Abl&ehnen;
+                                 ENU=Document;
+                                 NLD=Document;
+                                 SVE=A&vvisa];
+                      ActionContainerType=NewDocumentItems }
+      { 6085583 ;2   ;Action    ;
+                      Name=Document Card;
+                      CaptionML=[DEU=Versenden;
+                                 ENU=Document Card;
+                                 NLD=Documentkaart;
+                                 SVE=&Vidarebefordra];
+                      Promoted=Yes;
+                      PromotedIsBig=Yes;
+                      Image=Document;
+                      PromotedCategory=Category10;
+                      PromotedOnly=Yes;
+                      OnAction=BEGIN
+                                 PurchDocMgt.ShowDocumentFromPurchDoc(Rec);
+                               END;
+                                }
+      { 6085582 ;2   ;Action    ;
+                      Name=Show File;
+                      ShortCutKey=Shift+Ctrl+P;
+                      CaptionML=[DEU=&Gesperrt;
+                                 ENU=&Show File;
+                                 NLD=&Toon bestand;
+                                 SVE=S&toppad];
+                      Promoted=Yes;
+                      PromotedIsBig=Yes;
+                      Image=SendAsPDF;
+                      PromotedCategory=Category10;
+                      PromotedOnly=Yes;
+                      OnAction=BEGIN
+                                 PurchDocMgt.ShowDocPDFFromPurchDoc(Rec);
+                               END;
+                                }
+      { 6085581 ;2   ;Action    ;
+                      Name=Incoming E-Mail;
+                      CaptionML=[DEU=&PDF-Datei anzeigen;
+                                 ENU=Incoming E-Mail;
+                                 NLD=Inkomende e-mail];
+                      Promoted=Yes;
+                      Visible=ShowIncomingEmail;
+                      PromotedIsBig=Yes;
+                      Image=Email;
+                      PromotedCategory=Category10;
+                      PromotedOnly=Yes;
+                      OnAction=BEGIN
+                                 PurchDocMgt.ShowEmailFromPurchDoc(Rec);
+                               END;
+                                }
+    }
+  }
+  CONTROLS
+  {
+    { 1900000001;;Container;
+                Name=Content;
+                ContainerType=ContentArea }
+
+    { 1   ;1   ;Group     ;
+                Name=GeneralGroup;
+                CaptionML=[DEU=Allgemein;
+                           ENU=General;
+                           NLD=Algemeen;
+                           SVE=AllmÑnt];
+                GroupType=Group }
+
+    { 2   ;2   ;Field     ;
+                ToolTipML=[DEU=Gibt die Nummer des beteiligten Postens oder Datensatz entsprechend der festgelegten Nummernserie an.;
+                           ENU=Specifies the number of the involved entry or record, according to the specified number series.;
+                           NLD=Hiermee wordt het nummer opgegeven van de betrokken post of record, volgens de opgegeven nummerreeks.];
+                ApplicationArea=#All;
+                SourceExpr="No.";
+                Importance=Additional;
+                Visible=DocNoVisible;
+                OnAssistEdit=BEGIN
+                               IF AssistEdit(xRec) THEN
+                                 CurrPage.UPDATE;
+                             END;
+                              }
+
+    { 64  ;2   ;Field     ;
+                Name=Buy-from Vendor No.;
+                CaptionML=[DEU=Kreditorennr.;
+                           ENU=Vendor No.;
+                           NLD=Leveranciersnr.];
+                ToolTipML=[DEU=Gibt die Nummer des Kreditors an, der die Produkte liefert.;
+                           ENU=Specifies the number of the vendor who delivers the products.;
+                           NLD=Hiermee wordt het nummer opgegeven van de leverancier die de producten levert.];
+                ApplicationArea=#All;
+                NotBlank=Yes;
+                SourceExpr="Buy-from Vendor No.";
+                Importance=Additional;
+                OnValidate=BEGIN
+                             OnAfterValidateBuyFromVendorNo(Rec,xRec);
+                             CurrPage.UPDATE;
+                           END;
+                            }
+
+    { 6   ;2   ;Field     ;
+                Name=Buy-from Vendor Name;
+                CaptionML=[DEU=Kreditorenname;
+                           ENU=Vendor Name;
+                           NLD=Leverancier];
+                ToolTipML=[DEU=Gibt den Namen des Kreditors an, der die Produkte liefert.;
+                           ENU=Specifies the name of the vendor who delivers the products.;
+                           NLD=Hiermee wordt de naam opgegeven van de leverancier die de producten levert.];
+                ApplicationArea=#All;
+                NotBlank=Yes;
+                SourceExpr="Buy-from Vendor Name";
+                Importance=Promoted;
+                OnValidate=VAR
+                             ApplicationAreaMgmtFacade@1000 : Codeunit 9179;
+                           BEGIN
+                             OnAfterValidateBuyFromVendorNo(Rec,xRec);
+
+                             IF ApplicationAreaMgmtFacade.IsFoundationEnabled THEN
+                               PurchCalcDiscByType.ApplyDefaultInvoiceDiscount(0,Rec);
+
+                             CurrPage.UPDATE;
+                           END;
+
+                ShowMandatory=TRUE }
+
+    { 90  ;2   ;Field     ;
+                ToolTipML=[DEU=Gibt zusÑtzliche Buchungsinformationen fÅr den Beleg an. Wenn Sie den Beleg buchen, kann die Beschreibung als Detail zu den Kreditoren- und Debitorenposten hinzugefÅgt werden.;
+                           ENU=Specifies additional posting information for the document. After you post the document, the description can add detail to vendor and customer ledger entries.;
+                           NLD=Hiermee worden aanvullende boekingsgegevens voor het document opgegeven. Nadat u het document hebt geboekt, geeft de beschrijving nadere toelichting op de leveranciers- en klantposten.];
+                ApplicationArea=#Suite;
+                SourceExpr="Posting Description";
+                Visible=FALSE }
+
+    { 51  ;2   ;Group     ;
+                Name=BuyFromGroup;
+                CaptionML=[DEU=Eink. von;
+                           ENU=Buy-from;
+                           NLD=Inkoopadres];
+                GroupType=Group }
+
+    { 72  ;3   ;Field     ;
+                Name=Buy-from Address;
+                CaptionML=[DEU=Adresse;
+                           ENU=Address;
+                           NLD=Adres];
+                ToolTipML=[DEU=Gibt die Adresse des Kreditors an, der die Artikel liefert.;
+                           ENU=Specifies the address of the vendor who ships the items.;
+                           NLD=Hiermee wordt het adres opgegeven van de leverancier die de artikelen verzendt.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Buy-from Address";
+                Importance=Additional }
+
+    { 74  ;3   ;Field     ;
+                Name=Buy-from Address 2;
+                CaptionML=[DEU=Adresse 2;
+                           ENU=Address 2;
+                           NLD=Adres 2];
+                ToolTipML=[DEU=Gibt zusÑtzliche Adressinformationen an.;
+                           ENU=Specifies additional address information.;
+                           NLD=Hiermee wordt aanvullende adresinformatie opgegeven.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Buy-from Address 2";
+                Importance=Additional }
+
+    { 76  ;3   ;Field     ;
+                CaptionML=[DEU=Ort;
+                           ENU=City;
+                           NLD=Plaats];
+                ToolTipML=[DEU=Gibt den Ort des Kreditors auf dem Einkaufsbeleg an.;
+                           ENU=Specifies the city of the vendor on the purchase document.;
+                           NLD=Hiermee wordt de plaats van de leverancier in het inkoopdocument opgegeven.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Buy-from City";
+                Importance=Additional }
+
+    { 93  ;3   ;Group     ;
+                Visible=IsBuyFromCountyVisible;
+                GroupType=Group }
+
+    { 92  ;4   ;Field     ;
+                CaptionML=[DEU=Bundesregion;
+                           ENU=County;
+                           NLD=Provincie];
+                ToolTipML=[DEU=Gibt Bundesland, Provinz oder Bundesregion der Adresse an.;
+                           ENU=Specifies the state, province or county of the address.;
+                           NLD=Hiermee wordt de staat of provincie van het adres opgegeven.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Buy-from County";
+                Importance=Additional }
+
+    { 77  ;3   ;Field     ;
+                Name=Buy-from Post Code;
+                CaptionML=[DEU=Eink. von PLZ-Code;
+                           ENU=Post Code;
+                           NLD=Postcode;
+                           SVE=Leverantîrspostnr];
+                ToolTipML=[DEU=Gibt die Postleitzahl an.;
+                           ENU=Specifies the postal code.;
+                           NLD=Hiermee wordt de postcode opgegeven.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Buy-from Post Code";
+                Importance=Additional }
+
+    { 95  ;3   ;Field     ;
+                CaptionML=[DEU=Land/Region;
+                           ENU=Country/Region;
+                           NLD=Land/regio];
+                ToolTipML=[DEU=Gibt das Land oder die Region der Adresse an.;
+                           ENU=Specifies the country or region of the address.;
+                           NLD=Hiermee wordt het land of de regio van het adres opgegeven.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Buy-from Country/Region Code";
+                Importance=Additional;
+                OnValidate=BEGIN
+                             IsBuyFromCountyVisible := FormatAddress.UseCounty("Buy-from Country/Region Code");
+                           END;
+                            }
+
+    { 128 ;3   ;Field     ;
+                Name=Buy-from Contact No.;
+                CaptionML=[DEU=Kontaktnr.;
+                           ENU=Contact No.;
+                           NLD=Contactpersoonnr.];
+                ToolTipML=[DEU=Gibt die Nummer Ihres Kontakts beim Kreditor an.;
+                           ENU=Specifies the number of your contact at the vendor.;
+                           NLD=Hiermee wordt het nummer opgegeven van uw contactpersoon bij de leverancier.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Buy-from Contact No.";
+                Importance=Additional }
+
+    { 8   ;2   ;Field     ;
+                Name=Buy-from Contact;
+                CaptionML=[DEU=Kontakt;
+                           ENU=Contact;
+                           NLD=Contactpersoon];
+                ToolTipML=[DEU=Gibt den Namen der Person an, an die Sie sich bezÅglich der Lieferung des Artikels von diesem Kreditor wenden.;
+                           ENU=Specifies the name of the person to contact about shipment of the item from this vendor.;
+                           NLD=Hiermee wordt de naam opgegeven van de persoon met wie contact kan worden opgenomen over verzending van het artikel vanaf deze leverancier.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Buy-from Contact";
+                Editable="Buy-from Vendor No." <> '' }
+
+    { 43  ;2   ;Field     ;
+                ToolTipML=[DEU=Gibt das Datum an, an dem der zugehîrige Beleg erstellt wurde.;
+                           ENU=Specifies the date when the related document was created.;
+                           NLD=Hiermee wordt de datum opgegeven waarop het gerelateerde document is gemaakt.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Document Date";
+                Importance=Additional }
+
+    { 12  ;2   ;Field     ;
+                Name=Posting Date;
+                ToolTipML=[DEU=Gibt das Datum an, an dem die Buchung des Einkaufsbelegs erfasst wird.;
+                           ENU=Specifies the date when the posting of the purchase document will be recorded.;
+                           NLD=Hiermee wordt de datum opgegeven waarop de boeking van het inkoopdocument wordt geregistreerd.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Posting Date";
+                Importance=Promoted }
+
+    { 30  ;2   ;Field     ;
+                Name=Due Date;
+                ToolTipML=[DEU=Gibt das FÑlligkeitsdatum der Rechnung an. Die Anwendung berechnet das Datum unter Verwendung der Felder "Zlg.-Bedingungscode" und "Belegdatum".;
+                           ENU=Specifies when the invoice is due. The program calculates the date using the Payment Terms Code and Document Date fields.;
+                           NLD=Hiermee wordt opgegeven wanneer de factuur moet zijn betaald. De datum wordt berekend met behulp van de velden Betalingscondities en Documentdatum.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Due Date";
+                Importance=Promoted;
+                ShowMandatory=TRUE }
+
+    { 11  ;2   ;Field     ;
+                Name=Incoming Document Entry No.;
+                ToolTipML=[DEU=Gibt die Nummer des eingehenden Belegs an, fÅr den dieser Einkaufsbeleg erstellt wird.;
+                           ENU=Specifies the number of the incoming document that this purchase document is created for.;
+                           NLD=Hiermee wordt het nummer opgegeven van het inkomende document waarvoor dit inkoopdocument is gemaakt.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Incoming Document Entry No.";
+                Importance=Additional;
+                Visible=FALSE }
+
+    { 14  ;2   ;Field     ;
+                Name=Vendor Invoice No.;
+                ToolTipML=[DEU=Gibt die Belegnummer des vom Kreditor erhaltenen Originalbelegs an. Sie kînnen entscheiden, ob die Belegnummer fÅr die Buchung erforderlich oder optional ist. StandardmÑ·ig ist sie erforderlich, damit dieser Beleg auf das Original verweist. Optionale Belegnummern verkÅrzen den Buchungsvorgang um einen Schritt. Wenn Sie die ursprÅngliche Rechnung beispielsweise als PDF-Datei anhÑngen, mÅssen Sie die Belegnummer nicht unbedingt eingeben. Wenn Sie angeben mîchten, ob Belegnummern erforderlich sind, aktivieren Sie im Fenster "Kreditoren && Einkauf Einr." die Option "Ext. Belegnr. erforderlich" oder deaktivieren Sie sie.;
+                           ENU=Specifies the document number of the original document you received from the vendor. You can require the document number for posting, or let it be optional. By default, it's required, so that this document references the original. Making document numbers optional removes a step from the posting process. For example, if you attach the original invoice as a PDF, you might not need to enter the document number. To specify whether document numbers are required, in the Purchases & Payables Setup window, select or clear the Ext. Doc. No. Mandatory field.;
+                           NLD=Hiermee wordt het documentnummer opgegeven van het oorspronkelijke document dat u van de leverancier hebt ontvangen. U kunt het documentnummer voor boeking vereisen of het optioneel laten. Standaard is het vereist, zodat dit document verwijst naar het oorspronkelijke document. Documentnummers optioneel maken verwijdert een stap uit het boekingsproces. Als u bijvoorbeeld de oorspronkelijke factuur als een PDF-bestand koppelt, hoeft u het documentnummer mogelijk niet in te voeren. Als u wilt opgeven of documentnummers vereist zijn, schakelt u in het venster Inkoopinstellingen het veld Extern documentnr. verplicht in of uit.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Vendor Invoice No.";
+                ShowMandatory=VendorInvoiceNoMandatory }
+
+    { 6085578;2;Group     ;
+                Name=AppCodes;
+                CaptionML=[ENU="";
+                           NLD="";
+                           SVE=GodkÑnnandekommentarer];
+                GroupType=Group }
+
+    { 10  ;3   ;Field     ;
+                Name=Purchaser Code;
+                ToolTipML=[DEU=Gibt an, welcher EinkÑufer dem Kreditor zugewiesen ist.;
+                           ENU=Specifies which purchaser is assigned to the vendor.;
+                           NLD=Hiermee wordt opgegeven welke inkoper aan de leverancier is toegewezen.];
+                ApplicationArea=#Suite;
+                SourceExpr="Purchaser Code";
+                OnValidate=BEGIN
+                             PurchaserCodeOnAfterValidate;
+                           END;
+                            }
+
+    { 6085579;3;Group     ;
+                Name=AppFlowCode;
+                CaptionML=[ENU="";
+                           NLD=""];
+                Visible=ShowApproval;
+                GroupType=Group }
+
+    { 6085586;4;Field     ;
+                Name=ApprovalFlowCode;
+                CaptionML=[DEU=Genehmigungsablaufcode;
+                           ENU=Approval Flow Code;
+                           NLD=Goedkeuringsflowcode];
+                SourceExpr=ApprovalFlowCode;
+                Editable=ApprovalFlowCodeEditable;
+                OnValidate=BEGIN
+                             PurchHeaderDCInfo.UpdateApprovalFlowCode(Rec,ApprovalFlowCode);
+                           END;
+
+                OnLookup=BEGIN
+                           EXIT(PurchHeaderDCInfo.LookupApprovalFlowCode(Text));
+                         END;
+                          }
+
+    { 6085585;2;Field     ;
+                Name=Reason Code;
+                SourceExpr="Reason Code" }
+
+    { 1102601000;2;Field  ;
+                Name=Campaign No.;
+                ToolTipML=[DEU=Gibt die Kampagnennummer an, mit der der Beleg verknÅpft ist.;
+                           ENU=Specifies the campaign number the document is linked to.;
+                           NLD=Hiermee wordt het campagnenummer opgegeven waaraan het document is gekoppeld.];
+                ApplicationArea=#RelationshipMgmt;
+                SourceExpr="Campaign No.";
+                Importance=Additional }
+
+    { 84  ;2   ;Field     ;
+                Name=Order Address Code;
+                CaptionML=[DEU=Alternativer Kreditorenadresscode;
+                           ENU=Alternate Vendor Address Code;
+                           NLD=Adrescode van alternatieve leverancier];
+                ToolTipML=[DEU=Gibt die Bestelladresse des verknÅpften Kreditors an.;
+                           ENU=Specifies the order address of the related vendor.;
+                           NLD=Hiermee wordt het orderadres van de gerelateerde leverancier opgegeven.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Order Address Code";
+                Importance=Additional }
+
+    { 115 ;2   ;Field     ;
+                ToolTipML=[DEU=Gibt den Code der ZustÑndigkeitseinheit (z.ˇB. ein Logistikhub) an, die dem beteiligten Benutzer, Mandanten, Kreditor oder Debitor zugeordnet ist.;
+                           ENU=Specifies the code of the responsibility center, such as a distribution hub, that is associated with the involved user, company, customer, or vendor.;
+                           NLD=Hiermee wordt de code opgegeven van de divisie, zoals een distributiecentrum, die is toegewezen aan de betrokken gebruiker, bedrijf, klant of leverancier.];
+                ApplicationArea=#Suite;
+                SourceExpr="Responsibility Center";
+                Importance=Additional }
+
+    { 65  ;2   ;Field     ;
+                Name=Assigned User ID;
+                ToolTipML=[DEU=Gibt die ID des Benutzers an, der fÅr den Beleg verantwortlich ist.;
+                           ENU=Specifies the ID of the user who is responsible for the document.;
+                           NLD=Hiermee wordt de id opgegeven van de gebruiker die verantwoordelijk is voor het document.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Assigned User ID";
+                Importance=Additional }
+
+    { 5   ;2   ;Field     ;
+                Name=Job Queue Status;
+                ToolTipML=[DEU=Gibt den Status von Aufgabenwarteschlangenposten an, die die Buchung von Rechnungen verarbeiten.;
+                           ENU=Specifies the status of a job queue entry that handles the posting of purchase invoices.;
+                           NLD=Hiermee wordt de status opgegeven van een taakwachtrijpost die de boeking van inkoopfacturen afhandelt.];
+                ApplicationArea=#All;
+                SourceExpr="Job Queue Status";
+                Importance=Additional;
+                Visible=JobQueuesUsed }
+
+    { 6085592;2;Field     ;
+                Name=AmountExclVAT;
+                CaptionML=[DEU=Betrag ausschl. USt. (Importiert);
+                           ENU=Amount Excl. VAT (Imported);
+                           NLD=Bedrag excl. BTW (Geimporteerd)];
+                SourceExpr=AmountExclVAT;
+                Editable=FALSE }
+
+    { 6085591;2;Field     ;
+                Name=AmountInclVAT;
+                CaptionML=[DEU=Betrag einschl. USt. (Importiert);
+                           ENU=Amount Incl. VAT (Imported);
+                           NLD=Bedrag incl. BTW (Geimporteerd)];
+                SourceExpr=AmountInclVAT;
+                Editable=FALSE }
+
+    { 118 ;2   ;Field     ;
+                Name=Status;
+                ToolTipML=[DEU=Gibt an, ob der Datensatz geîffnet ist, noch genehmigt werden muss, fÅr die Vorauszahlung fakturiert oder zur Weiterbearbeitung freigegeben wurde.;
+                           ENU=Specifies whether the record is open, waiting to be approved, invoiced for prepayment, or released to the next stage of processing.;
+                           NLD=Hiermee wordt opgegeven of de record open is, nog moet worden goedgekeurd, is gefactureerd voor vooruitbetaling of is vrijgegeven naar de volgende verwerkingsfase.];
+                ApplicationArea=#Suite;
+                SourceExpr=Status;
+                Importance=Promoted }
+
+    { 6085577;2;Group     ;
+                Name=Approvals;
+                CaptionML=[ENU="";
+                           NLD=""];
+                Visible=ShowApproval;
+                GroupType=Group }
+
+    { 6085587;3;Field     ;
+                Name=ApprovBy;
+                CaptionML=[DEU=Genehmigungskommentare;
+                           ENU=Approval by;
+                           NLD=Goed te keuren door;
+                           SVE=GodkÑnnandekommentarer];
+                SourceExpr=DCApprovalsBridge.GetApproversList(Rec,TRUE);
+                CaptionClass='1,5,,' + GetApprovalCaption;
+                OnDrillDown=BEGIN
+                              DCApprovalsBridge.ShowApproversList(Rec);
+                            END;
+                             }
+
+    { 6085589;3;Field     ;
+                Name=ApprovComments;
+                CaptionML=[DEU=Genehmigung durch;
+                           ENU=Approval Comments;
+                           NLD=Goedkeuring-opmerkingen;
+                           SVE=GodkÑnnande av];
+                SourceExpr=DCApprovalsBridge.GetLastApprovalComment(Rec);
+                OnDrillDown=BEGIN
+                              DCApprovalMgt.DrillDownApprovalComments(Rec);
+                            END;
+                             }
+
+    { 6085594;1;Part      ;
+                Name=DocumentFiles;
+                CaptionML=[DEU=AngehÑngte Dateien;
+                           ENU=Attached Files;
+                           NLD=Gekoppelde bestanden];
+                PagePartID=Page6085759;
+                Visible=TRUE;
+                PartType=Page;
+                ShowFilter=No }
+
+    { 54  ;1   ;Part      ;
+                Name=PurchLines;
+                ApplicationArea=#Basic,#Suite;
+                SubPageLink=Document No.=FIELD(No.);
+                PagePartID=Page55;
+                Enabled="Buy-from Vendor No." <> '';
+                Editable="Buy-from Vendor No." <> '';
+                UpdatePropagation=Both }
+
+    { 6085593;1;Part      ;
+                Name=ApprovalComments;
+                CaptionML=[DEU=Genehmigung durch;
+                           ENU=Approval Comments;
+                           NLD=Goedkeuring-opmerkingen];
+                SubPageView=SORTING(Table ID,Document Type,Document No.)
+                            WHERE(Table ID=CONST(38));
+                SubPageLink=Document Type=FIELD(Document Type),
+                            Document No.=FIELD(No.);
+                PagePartID=Page6085715;
+                PartType=Page;
+                ShowFilter=No }
+
+    { 1905885101;1;Group  ;
+                Name=InvoiceDetailsGroup;
+                CaptionML=[DEU=Fakturierung;
+                           ENU=Invoice Details;
+                           NLD=Factuurdetails;
+                           SVE=Fakturering];
+                GroupType=Group }
+
+    { 104 ;2   ;Field     ;
+                Name=Currency Code;
+                ToolTipML=[DEU=Gibt den WÑhrungscode fÅr BetrÑge in den Einkaufszeilen an.;
+                           ENU=Specifies the currency code for amounts on the purchase lines.;
+                           NLD=Hiermee wordt de valutacode opgegeven voor bedragen op de inkoopregels.];
+                ApplicationArea=#Suite;
+                SourceExpr="Currency Code";
+                Importance=Promoted;
+                OnValidate=BEGIN
+                             CurrPage.SAVERECORD;
+                             PurchCalcDiscByType.ApplyDefaultInvoiceDiscount(0,Rec);
+                           END;
+
+                OnAssistEdit=BEGIN
+                               CLEAR(ChangeExchangeRate);
+                               IF "Posting Date" <> 0D THEN
+                                 ChangeExchangeRate.SetParameter("Currency Code","Currency Factor","Posting Date")
+                               ELSE
+                                 ChangeExchangeRate.SetParameter("Currency Code","Currency Factor",WORKDATE);
+                               IF ChangeExchangeRate.RUNMODAL = ACTION::OK THEN BEGIN
+                                 VALIDATE("Currency Factor",ChangeExchangeRate.GetParameter);
+                                 CurrPage.UPDATE;
+                               END;
+                               CLEAR(ChangeExchangeRate);
+                             END;
+                              }
+
+    { 48  ;2   ;Field     ;
+                Name=Expected Receipt Date;
+                ToolTipML=[DEU=Gibt das erwartete Lieferdatum der Artikel auf dem Einkaufsbeleg an.;
+                           ENU=Specifies the date you expect to receive the items on the purchase document.;
+                           NLD=Hiermee wordt de datum opgegeven waarop u verwacht de artikelen in het inkoopdocument te ontvangen.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Expected Receipt Date";
+                Importance=Promoted }
+
+    { 108 ;2   ;Field     ;
+                Name=Prices Including VAT;
+                ToolTipML=[DEU=Gibt an, ob die Felder "VK-Preis" und "Zeilenbetrag" in Belegzeilen mit oder ohne MwSt. angezeigt werden.;
+                           ENU=Specifies if the Unit Price and Line Amount fields on document lines should be shown with or without VAT.;
+                           NLD=Hiermee wordt opgegeven of de velden Eenheidsprijs en Regelbedrag op documentregels met of zonder btw moeten worden weergegeven.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Prices Including VAT";
+                OnValidate=BEGIN
+                             PricesIncludingVATOnAfterValid;
+                           END;
+                            }
+
+    { 138 ;2   ;Field     ;
+                ToolTipML=[DEU=Gibt die MwSt.-ErklÑrung des beteiligten Debitors oder Kreditors an, um Transaktionen fÅr diesen Datensatz mit dem entsprechenden Sachkonto entsprechend der MwSt.-Buchungsmatrix Einrichtung zu verknÅpfen.;
+                           ENU=Specifies the VAT specification of the involved customer or vendor to link transactions made for this record with the appropriate general ledger account according to the VAT posting setup.;
+                           NLD=Hiermee wordt de btw-specificatie van de betrokken klant of leverancier opgegeven om transacties die voor deze record zijn gemaakt, aan de juiste grootboekrekening te koppelen volgens de btw-boekingsinstellingen.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="VAT Bus. Posting Group";
+                OnValidate=VAR
+                             ApplicationAreaMgmtFacade@1000 : Codeunit 9179;
+                           BEGIN
+                             CurrPage.SAVERECORD;
+
+                             IF ApplicationAreaMgmtFacade.IsFoundationEnabled THEN
+                               PurchCalcDiscByType.ApplyDefaultInvoiceDiscount(0,Rec);
+                           END;
+                            }
+
+    { 28  ;2   ;Field     ;
+                ToolTipML=[DEU=Gibt eine Formel an, die das FÑlligkeitsdatum, das Skontodatum und den Skontobetrag berechnet.;
+                           ENU=Specifies a formula that calculates the payment due date, payment discount date, and payment discount amount.;
+                           NLD=Hiermee wordt een formule opgegeven waarmee de vervaldatum van de betaling, de datum van de contantkorting en het bedrag van de contantkorting worden berekend.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Payment Terms Code";
+                Importance=Promoted }
+
+    { 102 ;2   ;Field     ;
+                ToolTipML=[DEU=Gibt an, wie die Zahlung erfolgen soll, z.ˇB. per öberweisung, Bargeld oder Scheck.;
+                           ENU=Specifies how to make payment, such as with bank transfer, cash, or check.;
+                           NLD=Hiermee wordt opgegeven hoe een betaling wordt uitgevoerd, zoals via bankoverboeking, contant of per cheque.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Payment Method Code";
+                Importance=Additional }
+
+    { 50  ;2   ;Field     ;
+                ToolTipML=[DEU=Gibt den Transaktionstyp, den der Beleg darstellt, fÅr INTRASTAT-Berichte an.;
+                           ENU=Specifies the type of transaction that the document represents, for the purpose of reporting to INTRASTAT.;
+                           NLD=Hiermee wordt het soort transactie opgegeven dat het verkoopdocument vertegenwoordigt, ten behoeve van INTRASTAT-rapportage.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Transaction Type" }
+
+    { 85  ;2   ;Field     ;
+                ToolTipML=[DEU=Gibt den Code fÅr Shortcutdimension 1 an (einer der zwei globalen Dimensionscodes, die Sie im Fenster "Finanzbuchhaltung Einrichtung" eingerichtet haben).;
+                           ENU=Specifies the code for Shortcut Dimension 1, which is one of two global dimension codes that you set up in the General Ledger Setup window.;
+                           NLD=Hiermee wordt de code opgegeven van Shortcutdimensie 1. Dat is een van de twee globale dimensiecodes die u instelt in het venster Boekhoudinstellingen.];
+                ApplicationArea=#Dimensions;
+                SourceExpr="Shortcut Dimension 1 Code";
+                OnValidate=BEGIN
+                             ShortcutDimension1CodeOnAfterV;
+                           END;
+                            }
+
+    { 87  ;2   ;Field     ;
+                Name=Shortcut Dimension 2 Code;
+                ToolTipML=[DEU=Gibt den Dimensionswertcode an, der mit dem Einkaufskopf verknÅpft ist.;
+                           ENU=Specifies the dimension value code associated with the purchase header.;
+                           NLD=Hiermee wordt de code opgegeven van de dimensiewaarde die aan de inkoopkop is gekoppeld.];
+                ApplicationArea=#Dimensions;
+                SourceExpr="Shortcut Dimension 2 Code";
+                OnValidate=BEGIN
+                             ShortcutDimension2CodeOnAfterV;
+                           END;
+                            }
+
+    { 32  ;2   ;Field     ;
+                Name=Payment Discount %;
+                ToolTipML=[DEU=Gibt den Skontosatz an, der gewÑhrt wird, wenn die Zahlung am oder vor dem Datum im Feld "Skontodatum" erfolgt.;
+                           ENU=Specifies the payment discount percent granted if payment is made on or before the date in the Pmt. Discount Date field.;
+                           NLD=Hiermee wordt het percentage contantkorting opgegeven dat wordt verleend als de betaling uiterlijk wordt voldaan op of vÔøΩÔøΩr de datum die is ingevoerd in het veld Vervaldatum contantkort.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Payment Discount %" }
+
+    { 34  ;2   ;Field     ;
+                Name=Pmt. Discount Date;
+                ToolTipML=[DEU=Gibt das Datum an, an dem der Betrag in dem Posten gezahlt werden muss, damit ein Skonto gewÑhrt wird.;
+                           ENU=Specifies the date on which the amount in the entry must be paid for a payment discount to be granted.;
+                           NLD=Hiermee wordt de datum opgegeven waarop het bedrag in de post moet worden betaald voordat een contantkorting wordt verleend.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Pmt. Discount Date";
+                Importance=Additional }
+
+    { 46  ;2   ;Field     ;
+                Name=Shipment Method Code;
+                ToolTipML=[DEU=Gibt die Lieferbedingungen der zugehîrigen Lieferung an, z. B. "Frei an Bord" (FOB).;
+                           ENU=Specifies the delivery conditions of the related shipment, such as free on board (FOB).;
+                           NLD=Hiermee worden de leveringsvoorwaarden van de gerelateerde verzending opgegeven, zoals Franco aan boord (FOB).];
+                ApplicationArea=#Suite;
+                SourceExpr="Shipment Method Code";
+                Importance=Additional }
+
+    { 17  ;2   ;Field     ;
+                Name=Payment Reference;
+                ToolTipML=[DEU=Gibt die Zahlung der Einkaufsrechnung an.;
+                           ENU=Specifies the payment of the purchase invoice.;
+                           NLD=Hiermee wordt de betaling van de inkoopfactuur opgegeven.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Payment Reference";
+                Importance=Additional }
+
+    { 15  ;2   ;Field     ;
+                Name=Creditor No.;
+                ToolTipML=[DEU=Gibt den Kreditor an, der die Einkaufsrechnung gesendet hat.;
+                           ENU=Specifies the vendor who sent the purchase invoice.;
+                           NLD=Hiermee wordt de leverancier opgegeven die de inkoopfactuur heeft verzonden.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Creditor No.";
+                Importance=Additional }
+
+    { 91  ;2   ;Field     ;
+                ToolTipML=[DEU=Gibt an, dass der zugehîrige Posten eine unbezahlte Rechnung darstellt, fÅr die entweder ein Zahlungsvorschlag, eine Mahnung oder eine Zinsrechnung vorhanden ist.;
+                           ENU=Specifies that the related entry represents an unpaid invoice for which either a payment suggestion, a reminder, or a finance charge memo exists.;
+                           NLD=Hiermee wordt opgegeven dat de gerelateerde post een niet-betaalde factuur vertegenwoordigt waarvoor een betalingsvoorstel, een aanmaning of een rentefactuur bestaat.];
+                ApplicationArea=#Suite;
+                SourceExpr="On Hold";
+                Importance=Additional }
+
+    { 1906801201;1;Group  ;
+                Name=ShippingAndPaymentGroup;
+                CaptionML=[DEU=Lieferung;
+                           ENU=Shipping and Payment;
+                           NLD=Verzending en betaling;
+                           SVE=Leverans];
+                GroupType=Group }
+
+    { 53  ;2   ;Group     ;
+                Name=ShippingAndPaymentGroup1;
+                CaptionML=[ENU="";
+                           NLD=""];
+                GroupType=Group }
+
+    { 78  ;3   ;Group     ;
+                Name=ShippingAndPaymentGroup2;
+                CaptionML=[ENU="";
+                           NLD=""];
+                GroupType=Group }
+
+    { 75  ;4   ;Field     ;
+                Name=ShippingOptionWithLocation;
+                CaptionML=[DEU=Lief. an;
+                           ENU=Ship-to;
+                           NLD=Verzenden-naar];
+                ToolTipML=[DEU=Gibt die Adresse an, an die die Produkte im Einkaufsbeleg geliefert werden. Standard (Mandantenadresse): Identisch mit der Mandantenadresse, die im Fenster "Firmendaten" angegeben ist. Lagerort: Ein alternativer Lagerort des Unternehmens. Benutzerdefinierte Adresse: In den Feldern unten festgelegte Lieferadresse.;
+                           ENU=Specifies the address that the products on the purchase document are shipped to. Default (Company Address): The same as the company address specified in the Company Information window. Location: One of the company's location addresses. Custom Address: Any ship-to address that you specify in the fields below.;
+                           NLD=Hiermee wordt het adres opgegeven waarnaar de producten in het inkoopdocument worden verzonden. Standaard (bedrijfsadres): hetzelfde als het bedrijfsadres dat is opgegeven in het venster Bedrijfsgegevens. Vestiging: een van de vestigingsadressen van het bedrijf. Aangepast adres: een verzendadres dat u in de onderstaande velden opgeeft.];
+                OptionCaptionML=[DEU=Standard (Mandantenadresse),Lagerort,Benutzerdefinierte Adresse;
+                                 ENU=Default (Company Address),Location,Custom Address;
+                                 NLD=Standaard (bedrijfsadres),Vestiging,Aangepast adres];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr=ShipToOptions;
+                Visible=ShowShippingOptionsWithLocation;
+                OnValidate=BEGIN
+                             ValidateShippingOption;
+                           END;
+                            }
+
+    { 80  ;4   ;Field     ;
+                Name=ShippingOptionWithoutLocation;
+                CaptionML=[DEU=Lief. an;
+                           ENU=Ship-to;
+                           NLD=Verzenden-naar];
+                ToolTipML=[DEU=Gibt die Adresse an, an die die Produkte im Einkaufsbeleg geliefert werden. Standard (Mandantenadresse): Identisch mit der Mandantenadresse, die im Fenster "Firmendaten" angegeben ist. Benutzerdefinierte Adresse: In den Feldern unten festgelegte Lieferadresse.;
+                           ENU=Specifies the address that the products on the purchase document are shipped to. Default (Company Address): The same as the company address specified in the Company Information window. Custom Address: Any ship-to address that you specify in the fields below.;
+                           NLD=Hiermee wordt het adres opgegeven waarnaar de producten in het inkoopdocument worden verzonden. Standaard (bedrijfsadres): hetzelfde als het bedrijfsadres dat is opgegeven in het venster Bedrijfsgegevens. Aangepast adres: een verzendadres dat u in de onderstaande velden opgeeft.];
+                OptionCaptionML=[DEU=Standard (Mandantenadresse),,Benutzerdefinierte Adresse;
+                                 ENU=Default (Company Address),,Custom Address;
+                                 NLD=Standaard (bedrijfsadres),,Aangepast adres];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr=ShipToOptions;
+                Visible=NOT ShowShippingOptionsWithLocation;
+                HideValue=ShowShippingOptionsWithLocation AND (ShipToOptions = ShipToOptions::Location);
+                OnValidate=BEGIN
+                             ValidateShippingOption
+                           END;
+                            }
+
+    { 79  ;4   ;Group     ;
+                Name=LocationGroup1;
+                CaptionML=[ENU="";
+                           NLD=""];
+                GroupType=Group }
+
+    { 81  ;5   ;Group     ;
+                Name=LocationGroup2;
+                CaptionML=[ENU="";
+                           NLD=""];
+                Visible=ShipToOptions = ShipToOptions::Location;
+                GroupType=Group }
+
+    { 89  ;6   ;Field     ;
+                Name=Location Code;
+                ToolTipML=[DEU=Gibt einen Code fÅr den Lagerort an, an dem die Artikel nach dem Wareneingang gelagert werden sollen.;
+                           ENU=Specifies a code for the location where you want the items to be placed when they are received.;
+                           NLD=Hiermee wordt een code opgegeven voor de vestiging waar de artikelen na ontvangst moeten worden geplaatst.];
+                ApplicationArea=#Location;
+                SourceExpr="Location Code" }
+
+    { 36  ;5   ;Field     ;
+                Name=Ship-to Name;
+                CaptionML=[DEU=Name;
+                           ENU=Name;
+                           NLD=Naam];
+                ToolTipML=[DEU=Gibt den Namen des Mandanten unter der Adresse an, an die die Artikel auf dem Einkaufsbeleg geliefert werden sollen.;
+                           ENU=Specifies the name of the company at the address that you want the items on the purchase document to be shipped to.;
+                           NLD=Hiermee wordt de naam opgegeven van het bedrijf op het adres waarnaar u de artikelen in het inkoopdocument wilt verzenden.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Ship-to Name";
+                Importance=Additional;
+                Editable=ShipToOptions = ShipToOptions::"Custom Address" }
+
+    { 38  ;5   ;Field     ;
+                Name=Ship-to Address;
+                CaptionML=[DEU=Adresse;
+                           ENU=Address;
+                           NLD=Adres];
+                ToolTipML=[DEU=Gibt die Adresse an, an die die Artikel auf dem Einkaufsbeleg geliefert werden sollen.;
+                           ENU=Specifies the address that you want the items on the purchase document to be shipped to.;
+                           NLD=Hiermee wordt het adres opgegeven waarnaar u de artikelen in het inkoopdocument wilt verzenden.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Ship-to Address";
+                Importance=Additional;
+                Editable=ShipToOptions = ShipToOptions::"Custom Address" }
+
+    { 40  ;5   ;Field     ;
+                Name=Ship-to Address 2;
+                CaptionML=[DEU=Adresse 2;
+                           ENU=Address 2;
+                           NLD=Adres 2];
+                ToolTipML=[DEU=Gibt zusÑtzliche Adressinformationen an.;
+                           ENU=Specifies additional address information.;
+                           NLD=Hiermee wordt aanvullende adresinformatie opgegeven.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Ship-to Address 2";
+                Importance=Additional;
+                Editable=ShipToOptions = ShipToOptions::"Custom Address" }
+
+    { 42  ;5   ;Field     ;
+                Name=Ship-to City;
+                CaptionML=[DEU=Ort;
+                           ENU=City;
+                           NLD=Plaats];
+                ToolTipML=[DEU=Gibt den Ort der Adresse an, an die die Artikel auf dem Einkaufsbeleg geliefert werden sollen.;
+                           ENU=Specifies the city of the address that you want the items on the purchase document to be shipped to.;
+                           NLD=Hiermee wordt de plaats opgegeven van het adres waarnaar u de artikelen in het inkoopdocument wilt verzenden.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Ship-to City";
+                Importance=Additional;
+                Editable=ShipToOptions = ShipToOptions::"Custom Address" }
+
+    { 199 ;5   ;Group     ;
+                Visible=IsShipToCountyVisible;
+                GroupType=Group }
+
+    { 97  ;6   ;Field     ;
+                CaptionML=[DEU=Bundesregion;
+                           ENU=County;
+                           NLD=Provincie];
+                ToolTipML=[DEU=Gibt Bundesland, Provinz oder Bundesregion der Adresse an.;
+                           ENU=Specifies the state, province or county of the address.;
+                           NLD=Hiermee wordt de staat of provincie van het adres opgegeven.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Ship-to County";
+                Importance=Additional;
+                Editable=ShipToOptions = ShipToOptions::"Custom Address" }
+
+    { 94  ;5   ;Field     ;
+                CaptionML=[DEU=Lief. an PLZ-Code;
+                           ENU=Post Code;
+                           NLD=Postcode;
+                           SVE=Leveranspostnrkod];
+                ToolTipML=[DEU=Gibt die Postleitzahl der Adresse an, an die die Artikel auf dem Einkaufsbeleg geliefert werden sollen.;
+                           ENU=Specifies the postal code of the address that you want the items on the purchase document to be shipped to.;
+                           NLD=Hiermee wordt de postcode opgegeven van het adres waarnaar u de artikelen in het inkoopdocument wilt verzenden.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Ship-to Post Code";
+                Importance=Additional;
+                Editable=ShipToOptions = ShipToOptions::"Custom Address" }
+
+    { 83  ;5   ;Field     ;
+                Name=Ship-to Country/Region Code;
+                CaptionML=[DEU=Land/Region;
+                           ENU=Country/Region;
+                           NLD=Land/regio];
+                ToolTipML=[DEU=Gibt den LÑnder-/Regionscode der Adresse an, an die die Artikel auf dem Einkaufsbeleg geliefert werden sollen.;
+                           ENU=Specifies the country/region code of the address that you want the items on the purchase document to be shipped to.;
+                           NLD=Hiermee wordt het land/de regio opgegeven van het adres waarnaar u de artikelen in het inkoopdocument wilt verzenden.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Ship-to Country/Region Code";
+                Importance=Additional;
+                Editable=ShipToOptions = ShipToOptions::"Custom Address" }
+
+    { 44  ;5   ;Field     ;
+                Name=Ship-to Contact;
+                CaptionML=[DEU=Kontakt;
+                           ENU=Contact;
+                           NLD=Contactpersoon];
+                ToolTipML=[DEU=Gibt den Namen einer Kontaktperson fÅr die Adresse an, an die die Artikel auf dem Einkaufsbeleg geliefert werden sollen.;
+                           ENU=Specifies the name of a contact person for the address of the address that you want the items on the purchase document to be shipped to.;
+                           NLD=Hiermee wordt de naam opgegeven van een contactpersoon op het adres waarnaar u de artikelen in het inkoopdocument wilt verzenden.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Ship-to Contact";
+                Importance=Additional;
+                Editable=ShipToOptions = ShipToOptions::"Custom Address" }
+
+    { 56  ;2   ;Group     ;
+                Name=PayToOptionsGroup;
+                CaptionML=[ENU="";
+                           NLD=""];
+                GroupType=Group }
+
+    { 86  ;3   ;Field     ;
+                Name=PayToOptions;
+                CaptionML=[DEU=Zahlung an;
+                           ENU=Pay-to;
+                           NLD=Betaaladres];
+                ToolTipML=[DEU=Gibt den Kreditor an, an den der Einkaufsbeleg gezahlt wird. Standard (Kreditor): Identisch mit den Kreditor auf dem Einkaufsbeleg. Anderer Kreditor: Kreditoren, die Sie in den Feldern unten angeben.;
+                           ENU=Specifies the vendor that the purchase document will be paid to. Default (Vendor): The same as the vendor on the purchase document. Another Vendor: Any vendor that you specify in the fields below.;
+                           NLD=Hiermee wordt de leverancier opgegeven aan wie het inkoopdocument wordt betaald. Standaard (leverancier): hetzelfde als de leverancier in het inkoopdocument. Een andere leverancier: een leverancier die u in de onderstaande velden opgeeft.];
+                OptionCaptionML=[DEU=Standard (Kreditor),Anderer Kreditor;
+                                 ENU=Default (Vendor),Another Vendor;
+                                 NLD=Standaard (leverancier),Een andere leverancier];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr=PayToOptions;
+                OnValidate=BEGIN
+                             IF PayToOptions = PayToOptions::"Default (Vendor)" THEN
+                               VALIDATE("Pay-to Vendor No.","Buy-from Vendor No.");
+                           END;
+                            }
+
+    { 88  ;3   ;Group     ;
+                Name=PayToOptionsNameGroup;
+                CaptionML=[ENU="";
+                           NLD=""];
+                Visible=PayToOptions = PayToOptions::"Another Vendor";
+                GroupType=Group }
+
+    { 18  ;4   ;Field     ;
+                Name=Pay-to Name;
+                CaptionML=[DEU=Name;
+                           ENU=Name;
+                           NLD=Naam];
+                ToolTipML=[DEU=Gibt den Namen des Kreditors an, der die Rechnung schickt.;
+                           ENU=Specifies the name of the vendor sending the invoice.;
+                           NLD=Hiermee wordt de naam opgegeven van de leverancier die de factuur verzendt.];
+                ApplicationArea=#Basic,#Suite;
+                NotBlank=Yes;
+                SourceExpr="Pay-to Name";
+                TableRelation=Vendor.Name;
+                Importance=Promoted;
+                OnValidate=VAR
+                             ApplicationAreaMgmtFacade@1000 : Codeunit 9179;
+                           BEGIN
+                             IF GETFILTER("Pay-to Vendor No.") = xRec."Pay-to Vendor No." THEN
+                               IF "Pay-to Vendor No." <> xRec."Pay-to Vendor No." THEN
+                                 SETRANGE("Pay-to Vendor No.");
+
+                             IF ApplicationAreaMgmtFacade.IsFoundationEnabled THEN
+                               PurchCalcDiscByType.ApplyDefaultInvoiceDiscount(0,Rec);
+
+                             CurrPage.UPDATE;
+                           END;
+                            }
+
+    { 20  ;4   ;Field     ;
+                Name=Pay-to Address;
+                CaptionML=[DEU=Adresse;
+                           ENU=Address;
+                           NLD=Adres];
+                ToolTipML=[DEU=Gibt die Adresse des Kreditors an, der die Rechnung schickt.;
+                           ENU=Specifies the address of the vendor sending the invoice.;
+                           NLD=Hiermee wordt het adres opgegeven van de leverancier die de factuur verzendt.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Pay-to Address";
+                Importance=Additional;
+                Enabled="Buy-from Vendor No." <> "Pay-to Vendor No.";
+                Editable="Buy-from Vendor No." <> "Pay-to Vendor No." }
+
+    { 22  ;4   ;Field     ;
+                Name=Pay-to Address 2;
+                CaptionML=[DEU=Adresse 2;
+                           ENU=Address 2;
+                           NLD=Adres 2];
+                ToolTipML=[DEU=Gibt zusÑtzliche Adressinformationen an.;
+                           ENU=Specifies additional address information.;
+                           NLD=Hiermee wordt aanvullende adresinformatie opgegeven.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Pay-to Address 2";
+                Importance=Additional;
+                Enabled="Buy-from Vendor No." <> "Pay-to Vendor No.";
+                Editable="Buy-from Vendor No." <> "Pay-to Vendor No." }
+
+    { 24  ;4   ;Field     ;
+                CaptionML=[DEU=Ort;
+                           ENU=City;
+                           NLD=Plaats];
+                ToolTipML=[DEU=Gibt den Ort des Kreditors auf dem Einkaufsbeleg an.;
+                           ENU=Specifies the city of the vendor on the purchase document.;
+                           NLD=Hiermee wordt de plaats van de leverancier in het inkoopdocument opgegeven.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Pay-to City";
+                Importance=Additional;
+                Enabled="Buy-from Vendor No." <> "Pay-to Vendor No.";
+                Editable="Buy-from Vendor No." <> "Pay-to Vendor No." }
+
+    { 103 ;4   ;Group     ;
+                Visible=IsPayToCountyVisible;
+                GroupType=Group }
+
+    { 101 ;5   ;Field     ;
+                CaptionML=[DEU=Bundesregion;
+                           ENU=County;
+                           NLD=Provincie];
+                ToolTipML=[DEU=Gibt Bundesland, Provinz oder Bundesregion der Adresse an.;
+                           ENU=Specifies the state, province or county of the address.;
+                           NLD=Hiermee wordt de staat of provincie van het adres opgegeven.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Pay-to County";
+                Importance=Additional;
+                Enabled="Buy-from Vendor No." <> "Pay-to Vendor No.";
+                Editable="Buy-from Vendor No." <> "Pay-to Vendor No." }
+
+    { 82  ;4   ;Field     ;
+                Name=Pay-to Post Code;
+                CaptionML=[DEU=Zahlung an PLZ-Code;
+                           ENU=Post Code;
+                           NLD=Postcode;
+                           SVE=Betalas postnr];
+                ToolTipML=[DEU=Gibt die Postleitzahl an.;
+                           ENU=Specifies the postal code.;
+                           NLD=Hiermee wordt de postcode opgegeven.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Pay-to Post Code";
+                Importance=Additional;
+                Enabled="Buy-from Vendor No." <> "Pay-to Vendor No.";
+                Editable="Buy-from Vendor No." <> "Pay-to Vendor No." }
+
+    { 99  ;4   ;Field     ;
+                CaptionML=[DEU=Land/Region;
+                           ENU=Country/Region;
+                           NLD=Land/regio];
+                ToolTipML=[DEU=Gibt das Land oder die Region der Adresse an.;
+                           ENU=Specifies the country or region of the address.;
+                           NLD=Hiermee wordt het land of de regio van het adres opgegeven.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Pay-to Country/Region Code";
+                Importance=Additional;
+                Enabled="Buy-from Vendor No." <> "Pay-to Vendor No.";
+                Editable="Buy-from Vendor No." <> "Pay-to Vendor No.";
+                OnValidate=BEGIN
+                             IsPayToCountyVisible := FormatAddress.UseCounty("Pay-to Country/Region Code");
+                           END;
+                            }
+
+    { 130 ;4   ;Field     ;
+                Name=Pay-to Contact No.;
+                CaptionML=[DEU=Kontaktnr.;
+                           ENU=Contact No.;
+                           NLD=Contactpersoonnr.];
+                ToolTipML=[DEU=Gibt die Nummer des Kontakts an, der die Rechnung schickt.;
+                           ENU=Specifies the number of the contact who sends the invoice.;
+                           NLD=Hiermee wordt het nummer opgegeven van de contactpersoon die de factuur verzendt.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Pay-to Contact No.";
+                Importance=Additional;
+                Enabled="Buy-from Vendor No." <> "Pay-to Vendor No.";
+                Editable="Buy-from Vendor No." <> "Pay-to Vendor No." }
+
+    { 26  ;4   ;Field     ;
+                Name=Pay-to Contact;
+                CaptionML=[DEU=Kontakt;
+                           ENU=Contact;
+                           NLD=Contactpersoon];
+                ToolTipML=[DEU=Gibt den Namen der Person an, an die Sie sich bezÅglich einer Rechnung von diesem Kreditor wenden.;
+                           ENU=Specifies the name of the person to contact about an invoice from this vendor.;
+                           NLD=Hiermee wordt de naam opgegeven van de persoon met wie contact moet worden opgenomen over een factuur van deze leverancier.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Pay-to Contact";
+                Enabled="Buy-from Vendor No." <> "Pay-to Vendor No.";
+                Editable="Buy-from Vendor No." <> "Pay-to Vendor No." }
+
+    { 1907468901;1;Group  ;
+                Name=ForeignTradeGroup;
+                CaptionML=[DEU=Au·enhandel;
+                           ENU=Foreign Trade;
+                           NLD=Buitenlandse handel;
+                           SVE=Utlandshandel] }
+
+    { 100 ;2   ;Field     ;
+                ToolTipML=[DEU=Gibt eine Spezifikation fÅr die Transaktion des Belegs fÅr INTRASTAT-Berichte an.;
+                           ENU=Specifies a specification of the document's transaction, for the purpose of reporting to INTRASTAT.;
+                           NLD=Hiermee wordt een specificatie van de transactie van het document opgegeven, ten behoeve van INTRASTAT-rapportage.];
+                ApplicationArea=#Suite;
+                SourceExpr="Transaction Specification" }
+
+    { 52  ;2   ;Field     ;
+                ToolTipML=[DEU=Gibt den Verkehrszweig fÅr INTRASTAT-Berichte an.;
+                           ENU=Specifies the transport method, for the purpose of reporting to INTRASTAT.;
+                           NLD=Hiermee wordt de transportmethode opgegeven, ten behoeve van INTRASTAT-rapportage.];
+                ApplicationArea=#Suite;
+                SourceExpr="Transport Method" }
+
+    { 96  ;2   ;Field     ;
+                Name=Entry Point;
+                ToolTipML=[DEU=Gibt den Code des Entladehafens zur Meldung an Intrastat an, an dem die Artikel in Ihr Land/Ihre Region kommen.;
+                           ENU=Specifies the code of the port of entry where the items pass into your country/region, for reporting to Intrastat.;
+                           NLD=Hiermee wordt de code opgegeven van de haven waar de artikelen uw land/regio binnenkomen, voor Intrastat-rapportage.];
+                ApplicationArea=#Basic,#Suite;
+                SourceExpr="Entry Point" }
+
+    { 98  ;2   ;Field     ;
+                ToolTipML=[DEU=Gibt das Gebiet der Debitor- oder Kreditoradresse fÅr INTRASTAT-Berichte an.;
+                           ENU=Specifies the area of the customer or vendor, for the purpose of reporting to INTRASTAT.;
+                           NLD=Hiermee wordt het gebied van de klant of leverancier opgegeven, ten behoeve van INTRASTAT-rapportage.];
+                ApplicationArea=#Suite;
+                SourceExpr=Area }
+
+    { 1900000007;;Container;
+                Name=FactboxArea;
+                ContainerType=FactBoxArea }
+
+    { 1901275107;1;Part   ;
+                Name=Attached Documents;
+                CaptionML=[DEU=AnhÑnge;
+                           ENU=Attachments;
+                           NLD=Bijlagen];
+                ApplicationArea=#All;
+                SubPageLink=Table ID=CONST(38),
+                            Document Type=FIELD(Document Type),
+                            No.=FIELD(No.);
+                PagePartID=Page1174;
+                Visible=FALSE;
+                PartType=Page }
+
+    { 6085595;1;Part      ;
+                Name=CaptureUI;
+                CaptionML=[DEU=Beleg;
+                           ENU=Document;
+                           NLD=Document];
+                SubPageView=SORTING(Document Type,No.)
+                            WHERE(Document Type=CONST(Invoice));
+                SubPageLink=No.=FIELD(No.);
+                PagePartID=Page6085596 }
+
+  }
+  CODE
+  {
+    VAR
+      PurchSetup@150000 : Record 312;
+      CopyPurchDoc@1002 : Report 492;
+      MoveNegPurchLines@1005 : Report 6698;
+      ApplicationAreaMgmtFacade@1027 : Codeunit 9179;
+      ReportPrint@1003 : Codeunit 228;
+      UserMgt@1004 : Codeunit 5700;
+      PurchCalcDiscByType@1007 : Codeunit 66;
+      OfficeMgt@1022 : Codeunit 1630;
+      FormatAddress@1033 : Codeunit 365;
+      ChangeExchangeRate@1001 : Page 511;
+      DocAmountEnable@19024812 : Boolean INDATASET;
+      DocAmountVATEnable@19071676 : Boolean INDATASET;
+      ShipToOptions@1025 : 'Default (Company Address),Location,Custom Address';
+      PayToOptions@1028 : 'Default (Vendor),Another Vendor';
+      HasIncomingDocument@1010 : Boolean;
+      DocNoVisible@1006 : Boolean;
+      VendorInvoiceNoMandatory@1008 : Boolean;
+      OpenApprovalEntriesExist@1009 : Boolean;
+      OpenApprovalEntriesExistForCurrUser@1000 : Boolean;
+      ShowWorkflowStatus@1011 : Boolean;
+      JobQueuesUsed@1014 : Boolean;
+      OpenPostedPurchaseInvQst@1015 : TextConst '@@@="%1 = posted document number";DEU=Die Rechnung wurde unter der Nummer %1 gebucht und in das Fenster "Gebuchte Einkaufsrechnungen" verschoben.\\Mîchten Sie die gebuchte Rechnung îffnen?;ENU=The invoice is posted as number %1 and moved to the Posted Purchase Invoices window.\\Do you want to open the posted invoice?;NLD=De factuur is geboekt als nummer %1 en verplaatst naar het venster Geboekte inkoopfacturen.\\Wilt u de geboekte factuur openen?';
+      IsOfficeAddin@1017 : Boolean;
+      CanCancelApprovalForRecord@1013 : Boolean;
+      DocumentIsPosted@1012 : Boolean;
+      CreateIncomingDocumentEnabled@1016 : Boolean;
+      CreateIncomingDocumentVisible@1021 : Boolean;
+      CreateIncomingDocFromEmailAttachment@1018 : Boolean;
+      TotalsMismatchErr@1019 : TextConst 'DEU=Die Rechnung kann nicht gebucht werden, da die Summe von der Summe auf dem zugehîrigen eingehenden Beleg abweicht.;ENU=The invoice cannot be posted because the total is different from the total on the related incoming document.;NLD=De factuur kan niet worden geboekt omdat het totaal afwijkt van het totaal in het gerelateerde inkomende document.';
+      IncomingDocEmailAttachmentEnabled@1020 : Boolean;
+      CanRequestApprovalForFlow@1023 : Boolean;
+      CanCancelApprovalForFlow@1024 : Boolean;
+      ShowShippingOptionsWithLocation@1026 : Boolean;
+      IsSaaS@1029 : Boolean;
+      IsBuyFromCountyVisible@1032 : Boolean;
+      IsPayToCountyVisible@1031 : Boolean;
+      IsShipToCountyVisible@1030 : Boolean;
+      PurchHeaderDCInfo@6085595 : Record 6085767;
+      PurchDocMgt@6085594 : Codeunit 6085709;
+      DCApprovalsBridge@6085593 : Codeunit 6085790;
+      DCApprovalMgt@6085592 : Codeunit 6085722;
+      SIStorage@6085591 : Codeunit 6085789;
+      ApprovalFlowCode@6085590 : Code[10];
+      AmountExclVAT@6085589 : Decimal;
+      AmountInclVAT@6085588 : Decimal;
+      LineAmountExclVAT@6085587 : Decimal;
+      LineAmountInclVAT@6085586 : Decimal;
+      ImageCleared@6085585 : Boolean;
+      ApprovalFlowCodeEditable@6085584 : Boolean INDATASET;
+      PreviewPostingEnabled@6085583 : Boolean INDATASET;
+      ShowIncomingEmail@6085582 : Boolean INDATASET;
+      EnableForceApproval@6085581 : Boolean INDATASET;
+      EnableChangeImportedAmount@6085580 : Boolean INDATASET;
+      EnableSendApproval@6085579 : Boolean INDATASET;
+      EnableCancelApproval@6085578 : Boolean INDATASET;
+      EnableApprove@6085577 : Boolean INDATASET;
+      EnableReject@6085576 : Boolean INDATASET;
+      EnableForward@6085575 : Boolean INDATASET;
+      EnableOnHold@6085574 : Boolean INDATASET;
+      ShowAllocations@6085573 : Boolean INDATASET;
+      ShowPaymentInfo@6085596 : Boolean INDATASET;
+      ShowApproval@6085597 : Boolean INDATASET;
+      ApprovedByTxt@6085598 : TextConst 'DEU=Genehmigt vom;ENU=Approved by;NLD=Goedgekeurd door';
+      ApprovalByTxt@6085599 : TextConst 'DEU=Genehmigungskommentare;ENU=Approval by;NLD=Goed te keuren door';
+      ShowImportedAmounts@6085600 : Boolean INDATASET;
+
+    LOCAL PROCEDURE ActivateFields@6();
+    BEGIN
+      IsBuyFromCountyVisible := FormatAddress.UseCounty("Buy-from Country/Region Code");
+      IsPayToCountyVisible := FormatAddress.UseCounty("Pay-to Country/Region Code");
+      IsShipToCountyVisible := FormatAddress.UseCounty("Ship-to Country/Region Code");
+    END;
+
+    [External]
+    PROCEDURE LineModified@7();
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE Post@4(PostingCodeunitID@1000 : Integer);
+    VAR
+      PurchaseHeader@1002 : Record 38;
+      PurchInvHeader@1003 : Record 122;
+      LinesInstructionMgt@1001 : Codeunit 1320;
+      InstructionMgt@1004 : Codeunit 1330;
+      IsScheduledPosting@1005 : Boolean;
+    BEGIN
+      IF ApplicationAreaMgmtFacade.IsFoundationEnabled THEN
+        LinesInstructionMgt.PurchaseCheckAllLinesHaveQuantityAssigned(Rec);
+
+      SendToPosting(PostingCodeunitID);
+
+      IsScheduledPosting := "Job Queue Status" = "Job Queue Status"::"Scheduled for Posting";
+      DocumentIsPosted := (NOT PurchaseHeader.GET("Document Type","No.")) OR IsScheduledPosting;
+
+      IF IsScheduledPosting THEN
+        CurrPage.CLOSE;
+      CurrPage.UPDATE(FALSE);
+
+      IF PostingCodeunitID <> CODEUNIT::"Purch.-Post (Yes/No)" THEN
+        EXIT;
+
+      IF IsOfficeAddin THEN BEGIN
+        PurchInvHeader.SETRANGE("Pre-Assigned No.","No.");
+        PurchInvHeader.SETRANGE("Order No.",'');
+        IF PurchInvHeader.FINDFIRST THEN
+          PAGE.RUN(PAGE::"Posted Purchase Invoice",PurchInvHeader);
+      END ELSE
+        IF InstructionMgt.IsEnabled(InstructionMgt.ShowPostedConfirmationMessageCode) THEN
+          ShowPostedConfirmationMessage;
+    END;
+
+    LOCAL PROCEDURE VerifyTotal@22();
+    BEGIN
+      IF NOT IsTotalValid THEN
+        ERROR(TotalsMismatchErr);
+    END;
+
+    LOCAL PROCEDURE ApproveCalcInvDisc@1();
+    BEGIN
+      CurrPage.PurchLines.PAGE.ApproveCalcInvDisc;
+    END;
+
+    PROCEDURE EnableControls@1101100000();
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE PurchaserCodeOnAfterValidate@19046120();
+    BEGIN
+      CurrPage.PurchLines.PAGE.UpdateForm(TRUE);
+    END;
+
+    LOCAL PROCEDURE ShortcutDimension1CodeOnAfterV@19029405();
+    BEGIN
+      CurrPage.UPDATE;
+    END;
+
+    LOCAL PROCEDURE ShortcutDimension2CodeOnAfterV@19008725();
+    BEGIN
+      CurrPage.UPDATE;
+    END;
+
+    LOCAL PROCEDURE PricesIncludingVATOnAfterValid@19009096();
+    BEGIN
+      CurrPage.UPDATE;
+      CALCFIELDS("Invoice Discount Amount");
+    END;
+
+    LOCAL PROCEDURE OnActivateForm@19002417();
+    BEGIN
+      EnableControls;
+    END;
+
+    LOCAL PROCEDURE SetDocNoVisible@2();
+    VAR
+      DocumentNoVisibility@1000 : Codeunit 1400;
+      DocType@1003 : 'Quote,Order,Invoice,Credit Memo,Blanket Order,Return Order,Reminder,FinChMemo';
+    BEGIN
+      DocNoVisible := DocumentNoVisibility.PurchaseDocumentNoIsVisible(DocType::Invoice,"No.");
+    END;
+
+    LOCAL PROCEDURE SetExtDocNoMandatoryCondition@3();
+    VAR
+      PurchasesPayablesSetup@1000 : Record 312;
+    BEGIN
+      PurchasesPayablesSetup.GET;
+      VendorInvoiceNoMandatory := PurchasesPayablesSetup."Ext. Doc. No. Mandatory"
+    END;
+
+    LOCAL PROCEDURE SetControlAppearance@5();
+    VAR
+      ApprovalsMgmt@1002 : Codeunit 1535;
+      WorkflowWebhookMgt@1000 : Codeunit 1543;
+      PurchLineRel@6085573 : Record 6085702;
+    BEGIN
+      HasIncomingDocument := "Incoming Document Entry No." <> 0;
+      CreateIncomingDocumentEnabled := (NOT HasIncomingDocument) AND ("No." <> '');
+      SetExtDocNoMandatoryCondition;
+
+      IncomingDocEmailAttachmentEnabled := OfficeMgt.EmailHasAttachments;
+      OpenApprovalEntriesExistForCurrUser := ApprovalsMgmt.HasOpenApprovalEntriesForCurrentUser(RECORDID);
+      OpenApprovalEntriesExist := ApprovalsMgmt.HasOpenApprovalEntries(RECORDID);
+
+      CanCancelApprovalForRecord := ApprovalsMgmt.CanCancelApprovalForRecord(RECORDID);
+
+      WorkflowWebhookMgt.GetCanRequestAndCanCancel(RECORDID,CanRequestApprovalForFlow,CanCancelApprovalForFlow);
+
+      PurchLineRel.SETRANGE("Document Type","Document Type");
+      PurchLineRel.SETRANGE("Document No.","No.");
+      PreviewPostingEnabled := PurchLineRel.ISEMPTY;
+    END;
+
+    LOCAL PROCEDURE ShowPostedConfirmationMessage@13();
+    VAR
+      PurchInvHeader@1000 : Record 122;
+      InstructionMgt@1001 : Codeunit 1330;
+    BEGIN
+      PurchInvHeader.SETRANGE("Pre-Assigned No.","No.");
+      PurchInvHeader.SETRANGE("Order No.",'');
+      IF PurchInvHeader.FINDFIRST THEN
+        IF InstructionMgt.ShowConfirm(STRSUBSTNO(OpenPostedPurchaseInvQst,PurchInvHeader."No."),
+             InstructionMgt.ShowPostedConfirmationMessageCode)
+        THEN
+          PAGE.RUN(PAGE::"Posted Purchase Invoice",PurchInvHeader);
+    END;
+
+    LOCAL PROCEDURE ValidateShippingOption@8();
+    BEGIN
+      CASE ShipToOptions OF
+        ShipToOptions::"Default (Company Address)",
+        ShipToOptions::"Custom Address":
+          VALIDATE("Location Code",'');
+        ShipToOptions::Location:
+          VALIDATE("Location Code");
+      END;
+    END;
+
+    LOCAL PROCEDURE CalculateCurrentShippingAndPayToOption@36();
+    BEGIN
+      IF "Location Code" <> '' THEN
+        ShipToOptions := ShipToOptions::Location
+      ELSE
+        IF ShipToAddressEqualsCompanyShipToAddress THEN
+          ShipToOptions := ShipToOptions::"Default (Company Address)"
+        ELSE
+          ShipToOptions := ShipToOptions::"Custom Address";
+
+      IF "Pay-to Vendor No." = "Buy-from Vendor No." THEN
+        PayToOptions := PayToOptions::"Default (Vendor)"
+      ELSE
+        PayToOptions := PayToOptions::"Another Vendor";
+    END;
+
+    LOCAL PROCEDURE UpdateAmounts@6085575();
+    BEGIN
+      PurchDocMgt.GetPurchStatusAmounts(Rec,AmountExclVAT,AmountInclVAT,LineAmountExclVAT,LineAmountInclVAT);
+    END;
+
+    LOCAL PROCEDURE EnableFields@6085573();
+    VAR
+      PurchDocMgt@6085575 : Codeunit 6085709;
+      Document@6085574 : Record 6085590;
+      EmptyGuid@6085573 : GUID;
+      DCApprovalsBridge@6085576 : Codeunit 6085790;
+      ShowApprovalFactBox@6085577 : Boolean;
+      ContiniaLicenseMgt@6085578 : Codeunit 6192771;
+    BEGIN
+      ShowIncomingEmail := FALSE;
+      EnableChangeImportedAmount := DCApprovalsBridge.AllowChangingImportedAmounts(Rec);
+      IF PurchDocMgt.GetDocument(Document,DATABASE::"Purchase Header","Document Type","No.") THEN
+        ShowIncomingEmail := Document."E-Mail GUID" <> EmptyGuid;
+
+      ShowPaymentInfo := ContiniaLicenseMgt.HasLicenseAccessToPM;
+      ShowApproval := DCApprovalsBridge.IsPurchApprovalEnabledDocType("Document Type");
+
+      // Possition of Change Imported Amounts are rendered wrong (standard NAV issue observed in 2018 RTM) when other actions in same group have variable set on Visible property.
+      // Below workaround solved the issue
+      ShowImportedAmounts := TRUE;
+
+      IF ShowApproval THEN
+        DCApprovalsBridge.SetApprovalButtons(
+          Rec,
+          EnableForceApproval,
+          EnableSendApproval,
+          EnableCancelApproval,
+          EnableApprove,
+          EnableReject,
+          EnableForward,
+          EnableOnHold,
+          ShowApprovalFactBox);
+    END;
+
+    LOCAL PROCEDURE GetApprovalCaption@6085574() : Text[80];
+    BEGIN
+      IF Status = Status::Released THEN
+        EXIT(ApprovedByTxt)
+      ELSE
+        EXIT(ApprovalByTxt);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -1,0 +1,510 @@
+OBJECT Codeunit 11126681 Empoly Warehouse Mgt
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      InventorySetup@1100528301 : Record 313;
+      EmpolySetup@1100525005 : Record 11126692;
+      ItemJnlTemplate@1100525004 : Record 82;
+      ItemJnlBatch@1100525003 : Record 233;
+      ReqWkshTemplate@1100525000 : Record 244;
+      ReqWkshBatch@1100525001 : Record 245;
+      RelatedRecId@1100528300 : RecordID;
+
+    PROCEDURE CreateItemJnlLineDelivery@1100525000(OrderHeader@1100525001 : Record 11126687;OrderLine@1100525000 : Record 11126688);
+    VAR
+      ItemJnlLine@1100525002 : Record 83;
+      LastLineNo@1100525007 : Integer;
+    BEGIN
+      //copy from codeunit 11012041
+      FillTemplateAndBatchDelivery;
+      ItemJnlLine.SETRANGE("Journal Template Name", ItemJnlBatch."Journal Template Name");
+      ItemJnlLine.SETRANGE("Journal Batch Name", ItemJnlBatch.Name);
+      IF ItemJnlLine.FINDLAST THEN
+        LastLineNo := ItemJnlLine."Line No."
+      ELSE
+        LastLineNo := 0;
+
+      ItemJnlLine.INIT;
+      ItemJnlLine."Journal Template Name" := ItemJnlBatch."Journal Template Name";
+      ItemJnlLine."Journal Batch Name" := ItemJnlBatch.Name;
+      ItemJnlLine."Line No." := LastLineNo + 1;
+      ItemJnlLine.INSERT(TRUE);
+
+      GetDefaultsFromTemplateBatch(ItemJnlLine);
+
+      ItemJnlLine."Receiving Company" := OrderHeader."Receiving Company";  //db, 18-12-15
+      ItemJnlLine."Entry Type" := ItemJnlLine."Entry Type"::Sale;
+      IF OrderHeader."Project No." <> '' THEN
+        ItemJnlLine.VALIDATE("Job No.", OrderHeader."Project No.");
+      IF OrderHeader."Service Order No." <> '' THEN
+        ItemJnlLine.VALIDATE("Service Order No.", OrderHeader."Service Order No.");
+      ItemJnlLine.VALIDATE(Element, OrderLine.Element);
+      CheckItemCostObject(OrderLine."Item No.");
+      ItemJnlLine.VALIDATE("Item No.", OrderLine."Item No.");
+      IF OrderHeader."Location Code" <> '' THEN
+        ItemJnlLine.VALIDATE("Location Code", OrderHeader."Location Code");
+      CASE TRUE OF
+        OrderHeader.Process = OrderHeader.Process::"Project Retour",
+        OrderHeader.Process = OrderHeader.Process::"Service Retour":
+          ItemJnlLine.VALIDATE(Quantity, OrderLine.Quantity * -1);
+        ELSE
+          ItemJnlLine.VALIDATE(Quantity, OrderLine.Quantity);
+      END;
+      ItemJnlLine."Posting Date" := TODAY;
+      ItemJnlLine."Document Date" := TODAY;
+      ItemJnlLine."Document No." := OrderHeader."No.";
+      ItemJnlLine.Blocked := InventorySetup."Default Blocked";
+      ItemJnlLine."Reason Code" := OrderLine."Reason Code";
+      ItemJnlLine."Posting No. Series" := ItemJnlBatch."Posting No. Series";
+      ItemJnlLine.MODIFY(TRUE);
+      RelatedRecId := ItemJnlLine.RECORDID;
+    END;
+
+    PROCEDURE CreateItemJnlLinePhysInventory@1100525001(OrderHeader@1100525003 : Record 11126687;OrderLine@1100525002 : Record 11126688);
+    VAR
+      ItemJnlLine@1100525001 : Record 83;
+      ItemLedgEntry@1100525006 : Record 32;
+      LastLineNo@1100525004 : Integer;
+      ItemRec@1100525000 : Record 27;
+    BEGIN
+      //copy from report 790
+      FillTemplateAndBatchPhysInventory;
+      ItemJnlLine.SETRANGE("Journal Template Name", ItemJnlBatch."Journal Template Name");
+      ItemJnlLine.SETRANGE("Journal Batch Name", ItemJnlBatch.Name);
+      IF ItemJnlLine.FINDLAST THEN
+        LastLineNo := ItemJnlLine."Line No."
+      ELSE
+        LastLineNo := 0;
+
+      ItemJnlLine.INIT;
+      ItemJnlLine."Journal Template Name" := ItemJnlBatch."Journal Template Name";
+      ItemJnlLine."Journal Batch Name" := ItemJnlBatch.Name;
+      ItemJnlLine."Line No." := LastLineNo + 1;
+      ItemJnlLine.INSERT(TRUE);
+
+      GetDefaultsFromTemplateBatch(ItemJnlLine);
+
+      ItemRec.GET(OrderLine."Item No.");
+      ItemRec.SETRANGE("Date Filter", 0D, OrderHeader."Order Date");
+      ItemRec.SETRANGE("Location Filter", OrderHeader."Location Code");
+      ItemRec.CALCFIELDS("Net Change");
+
+      ItemJnlLine."Receiving Company" := OrderHeader."Receiving Company";  //db, 18-12-15
+      ItemJnlLine."Entry Type" := ItemJnlLine."Entry Type"::"Positive Adjmt.";
+      ItemJnlLine.VALIDATE("Item No.", OrderLine."Item No.");
+      IF OrderHeader."Location Code" <> '' THEN
+        ItemJnlLine.VALIDATE("Location Code", OrderHeader."Location Code");
+      ItemJnlLine."Phys. Inventory" := TRUE;
+      ItemJnlLine."Qty. (Calculated)" := ItemRec."Net Change";
+      ItemJnlLine.VALIDATE("Qty. (Phys. Inventory)", OrderLine.Quantity);
+      // Calculate 'Quantity' and fill 'Entry Type' (Pos/Neg Adjmt)
+
+      ItemLedgEntry.SETCURRENTKEY("Item No.");
+      ItemLedgEntry.SETRANGE("Item No.", OrderLine."Item No.");
+      IF ItemLedgEntry.FINDLAST THEN
+        ItemJnlLine."Last Item Ledger Entry No." := ItemLedgEntry."Entry No.";
+      //C034268.sn
+      ItemJnlLine."Posting Date" := TODAY;
+      ItemJnlLine."Document Date" := TODAY;
+      //C034268.en
+      ItemJnlLine."Document No." := OrderHeader."No.";
+      ItemJnlLine."Posting No. Series" := ItemJnlBatch."Posting No. Series";
+      ItemJnlLine.MODIFY(TRUE);
+      RelatedRecId := ItemJnlLine.RECORDID;
+    END;
+
+    PROCEDURE CreateItemJnlLineStockTransfer@1100525005(OrderHeader@1100525003 : Record 11126687;OrderLine@1100525002 : Record 11126688);
+    VAR
+      ItemJnlLine@1100525001 : Record 83;
+      LastLineNo@1100525004 : Integer;
+    BEGIN
+      FillTemplateAndBatchStockTransfer;
+      ItemJnlLine.SETRANGE("Journal Template Name", ItemJnlBatch."Journal Template Name");
+      ItemJnlLine.SETRANGE("Journal Batch Name", ItemJnlBatch.Name);
+      IF ItemJnlLine.FINDLAST THEN
+        LastLineNo := ItemJnlLine."Line No."
+      ELSE
+        LastLineNo := 0;
+
+      ItemJnlLine.INIT;
+      ItemJnlLine."Journal Template Name" := ItemJnlBatch."Journal Template Name";
+      ItemJnlLine."Journal Batch Name" := ItemJnlBatch.Name;
+      ItemJnlLine."Line No." := LastLineNo + 1;
+      ItemJnlLine.INSERT(TRUE);
+
+      GetDefaultsFromTemplateBatch(ItemJnlLine);
+
+      ItemJnlLine."Receiving Company" := OrderHeader."Receiving Company";  //db, 18-12-15
+      ItemJnlLine.VALIDATE("Entry Type", ItemJnlLine."Entry Type"::Transfer);
+      ItemJnlLine.VALIDATE("Item No.", OrderLine."Item No.");
+      ItemJnlLine."Entry Type" := ItemJnlLine."Entry Type"::Transfer;
+
+      ItemJnlLine.VALIDATE("Location Code", OrderHeader."Location Code");
+      ItemJnlLine.VALIDATE("New Location Code", OrderHeader."To Location Code");
+      ItemJnlLine.VALIDATE(Quantity, OrderLine.Quantity);
+      //C034268.sn
+      ItemJnlLine."Posting Date" := TODAY;
+      ItemJnlLine."Document Date" := TODAY;
+      //C034268.en
+      ItemJnlLine."Document No." := OrderHeader."No.";
+      ItemJnlLine."Posting No. Series" := ItemJnlBatch."Posting No. Series";
+      ItemJnlLine.MODIFY(TRUE);
+      RelatedRecId := ItemJnlLine.RECORDID;
+    END;
+
+    PROCEDURE CreateReqLine@1100525003(OrderHeader@1100525001 : Record 11126687;OrderLine@1100525000 : Record 11126688);
+    VAR
+      ReqLine@1100525002 : Record 246;
+      LastLineNo@1100525007 : Integer;
+    BEGIN
+      //copy from codeunit 11012041
+      FillTemplateAndBatchReqLine;  //db, 21-12-15
+      ReqLine.SETRANGE("Worksheet Template Name", ReqWkshBatch."Worksheet Template Name");
+      ReqLine.SETRANGE("Journal Batch Name", ReqWkshBatch.Name);
+      IF ReqLine.FINDLAST THEN
+        LastLineNo := ReqLine."Line No."
+      ELSE
+        LastLineNo := 0;
+
+      ReqLine.INIT;
+      ReqLine."Worksheet Template Name" := ReqWkshBatch."Worksheet Template Name";
+      ReqLine."Journal Batch Name" := ReqWkshBatch.Name;
+      ReqLine."Line No." := LastLineNo + 1;
+      ReqLine.INSERT;
+
+      ReqLine.Type := ReqLine.Type::Item;
+      CheckItemCostObject(OrderLine."Item No.");
+      ReqLine.VALIDATE("No.", OrderLine."Item No.");
+      ReqLine.VALIDATE(Quantity, OrderLine.Quantity);  //db, 21-12-15
+      OrderLine.CALCFIELDS("Base Unit of Measure");
+      ReqLine.VALIDATE("Unit of Measure Code", OrderLine."Base Unit of Measure");  //db, 28-12-15
+      ReqLine."Order Date" := TODAY;
+      ReqLine."Created by" := USERID;
+      ReqLine."Date Created" := TODAY;
+      ReqLine."Accept Action Message" := TRUE;
+      IF OrderHeader."Location Code" <> '' THEN BEGIN
+        ReqLine.VALIDATE(Deliver, ReqLine.Deliver::Location);
+        ReqLine.VALIDATE("Ship To Location", OrderHeader."Location Code");
+      END;
+      ReqLine."Modified by" := USERID;
+      ReqLine."Last Date Modified" := TODAY;
+      ReqLine.MODIFY;
+      RelatedRecId := ReqLine.RECORDID;
+    END;
+
+    PROCEDURE FillTemplateAndBatchDelivery@1210190000();
+    BEGIN
+      InventorySetup.GET;
+      EmpolySetup.GET;
+      EmpolySetup.TESTFIELD("Scanned Item Journal Template");
+      EmpolySetup.TESTFIELD("Scanned Item Journal Batch");
+      ItemJnlTemplate.GET(EmpolySetup."Scanned Item Journal Template");
+      ItemJnlBatch.GET(EmpolySetup."Scanned Item Journal Template", EmpolySetup."Scanned Item Journal Batch");
+    END;
+
+    PROCEDURE FillTemplateAndBatchPhysInventory@1210190002();
+    BEGIN
+      InventorySetup.GET;
+      EmpolySetup.GET;
+      EmpolySetup.TESTFIELD("Scanned Phys. Inv Jnl Template");
+      EmpolySetup.TESTFIELD("Scanned Phys. Inv Jnl Batch");
+
+      ItemJnlTemplate.GET(EmpolySetup."Scanned Phys. Inv Jnl Template");
+      ItemJnlBatch.GET(EmpolySetup."Scanned Phys. Inv Jnl Template", EmpolySetup."Scanned Phys. Inv Jnl Batch");
+    END;
+
+    PROCEDURE FillTemplateAndBatchStockTransfer@1100525002();
+    BEGIN
+      InventorySetup.GET;
+      EmpolySetup.GET;
+      EmpolySetup.TESTFIELD("Scanned Stock Tr. Jnl Template");
+      EmpolySetup.TESTFIELD("Scanned Stock Tr. Jnl Batch");
+
+      ItemJnlTemplate.GET(EmpolySetup."Scanned Stock Tr. Jnl Template");
+      ItemJnlBatch.GET(EmpolySetup."Scanned Stock Tr. Jnl Template", EmpolySetup."Scanned Stock Tr. Jnl Batch");
+    END;
+
+    PROCEDURE FillTemplateAndBatchReqLine@1100525006();
+    BEGIN
+      //db, 21-12-15
+      InventorySetup.GET;
+      EmpolySetup.GET;
+      EmpolySetup.TESTFIELD("Scanned Purchase Jnl Template");
+      EmpolySetup.TESTFIELD("Scanned Purchase Journal Batch");
+
+      ReqWkshTemplate.GET(EmpolySetup."Scanned Purchase Jnl Template");
+      ReqWkshBatch.GET(EmpolySetup."Scanned Purchase Jnl Template", EmpolySetup."Scanned Purchase Journal Batch");
+    END;
+
+    PROCEDURE GetRelatedRecId@1100528311(VAR RecId@1100528300 : RecordID);
+    BEGIN
+      RecId := RelatedRecId;
+    END;
+
+    PROCEDURE CheckItemCostObject@1100525004(ItemNo@1100525000 : Code[20]);
+    VAR
+      ItemRec@1100525003 : Record 27;
+      DimValRec@1100525002 : Record 349;
+      DimMgt@1100525001 : Codeunit 408;
+    BEGIN
+      ItemRec.GET(ItemNo);
+      ItemRec.TESTFIELD("Global Dimension 2 Code");
+      DimMgt.GetDimValueRec(2,ItemRec."Global Dimension 2 Code",DimValRec,TRUE,'');
+    END;
+
+    PROCEDURE GetDefaultsFromTemplateBatch@1100525007(VAR ItemJnlLine@1100525000 : Record 83);
+    VAR
+      NoSeriesMgt@1100525001 : Codeunit 396;
+    BEGIN
+      IF ItemJnlBatch."No. Series" <> '' THEN BEGIN
+        CLEAR(NoSeriesMgt);
+        ItemJnlLine."Document No." := NoSeriesMgt.GetNextNo(ItemJnlBatch."No. Series",0D,FALSE);
+      END;
+      ItemJnlLine."Source Code" := ItemJnlTemplate."Source Code";
+      ItemJnlLine."Reason Code" := ItemJnlBatch."Reason Code";
+    END;
+
+    PROCEDURE ProcessWarehouseSalesOrder@1100528300(EmpolyWarehouseOrder@1100528301 : Record 11126687);
+    VAR
+      InventorySetup@1100528302 : Record 313;
+      EmpolyWarehouseOrderLine@1100528300 : Record 11126688;
+      SalesHeader@1100528303 : Record 36;
+      SalesLine@1100529600 : Record 37;
+      ReleaseSalesDocument@1100528305 : Codeunit 414;
+      FirstFreeLineNo@1100528304 : Integer;
+    BEGIN
+      EmpolyWarehouseOrderLine.SETRANGE("Order No.", EmpolyWarehouseOrder."No.");
+      EmpolyWarehouseOrderLine.SETRANGE("Processed On", 0DT);  //#C038493.n
+      IF (NOT EmpolyWarehouseOrderLine.FINDSET) THEN
+        EXIT;
+
+      InventorySetup.GET;
+      EmpolySetup.GET;
+      CreateSalesHeader(EmpolySetup, EmpolyWarehouseOrder, SalesHeader);
+      SalesLine.SETRANGE("Document Type", SalesHeader."Document Type");
+      SalesLine.SETRANGE("Document No.", SalesHeader."No.");
+      IF SalesLine.FINDLAST THEN
+        FirstFreeLineNo := SalesLine."Line No." + 10000
+      ELSE
+        FirstFreeLineNo := 10000;
+
+      REPEAT
+        CreateSalesLine(EmpolyWarehouseOrder, EmpolyWarehouseOrderLine, SalesHeader, FirstFreeLineNo);
+        FirstFreeLineNo += 10000;
+
+        EmpolyWarehouseOrderLine."Processed On" := CURRENTDATETIME; //#C038493.n
+        EmpolyWarehouseOrderLine.MODIFY;  //#C038493.n
+      UNTIL (EmpolyWarehouseOrderLine.NEXT = 0);
+      CopyComments(EmpolyWarehouseOrder, SalesHeader);
+
+      IF ((EmpolySetup."Release Sales") AND (EmpolyWarehouseOrder.Process = EmpolyWarehouseOrder.Process::Sales)) OR
+         ((EmpolySetup."Release Sales Return") AND (EmpolyWarehouseOrder.Process = EmpolyWarehouseOrder.Process::"Sales Return"))
+      THEN BEGIN
+        COMMIT;
+        CASE TRUE OF
+          (EmpolySetup."Sales Type" = EmpolySetup."Sales Type"::Order) AND
+            (EmpolyWarehouseOrder.Process = EmpolyWarehouseOrder.Process::Sales),
+          (EmpolySetup."Sales Return Type" = EmpolySetup."Sales Return Type"::ReturnOrder) AND
+            (EmpolyWarehouseOrder.Process = EmpolyWarehouseOrder.Process::"Sales Return"):
+          BEGIN
+            SalesHeader.VALIDATE(Status, SalesHeader.Status::Released);
+            SalesHeader.MODIFY(TRUE);
+          END;
+          (EmpolySetup."Sales Type" = EmpolySetup."Sales Type"::Invoice) AND
+            (EmpolyWarehouseOrder.Process = EmpolyWarehouseOrder.Process::Sales),
+          (EmpolySetup."Sales Return Type" = EmpolySetup."Sales Return Type"::CreditMemo) AND
+            (EmpolyWarehouseOrder.Process = EmpolyWarehouseOrder.Process::"Sales Return"):
+          BEGIN
+            ReleaseSalesDocument.PerformManualRelease(SalesHeader);
+          END;
+        END;
+      END;
+      RelatedRecId := SalesHeader.RECORDID;
+    END;
+
+    PROCEDURE SetProjectFilter@1100528304() : Text;
+    VAR
+      Job@1100528301 : Record 11072003;
+      FilterString@1100528300 : Text;
+    BEGIN
+      FilterString := '';
+      EmpolySetup.GET;
+
+      IF (EmpolySetup."Proj Estimating") THEN  BEGIN
+        FilterString += FORMAT(Job."Project Status"::Estimation);
+      END;
+      IF (EmpolySetup."Proj Preparation") THEN BEGIN
+        IF (FilterString <> '') THEN
+          FilterString += '|';
+        FilterString += FORMAT(Job."Project Status"::Preparation)
+      END;
+      IF (EmpolySetup."Proj Production") THEN BEGIN
+        IF (FilterString <> '') THEN
+          FilterString += '|';
+        FilterString += FORMAT(Job."Project Status"::Production)
+      END;
+      IF (EmpolySetup."Proj Technical Finished") THEN BEGIN
+        IF (FilterString <> '') THEN
+          FilterString += '|';
+        FilterString += FORMAT(Job."Project Status"::"Technical Finished")
+      END;
+
+      EXIT(FilterString);
+    END;
+
+    PROCEDURE SetSOFilter@1100528307() : Text;
+    VAR
+      FilterString@1100528300 : Text;
+    BEGIN
+      EmpolySetup.GET;
+
+      IF (EmpolySetup."SO Status Check" = EmpolySetup."SO Status Check"::RefPoint) THEN
+        FilterString := SetRefPointFilter
+      ELSE
+        FilterString := SetStatusFilter;
+
+      EXIT(FilterString);
+    END;
+
+    LOCAL PROCEDURE "---Locals---"@1100528303();
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE CreateSalesHeader@1100528301(EmpolySetup@1100528303 : Record 11126692;EmpolyWarehouseOrder@1100528300 : Record 11126687;VAR SalesHeader@1100528301 : Record 36);
+    BEGIN
+      SalesHeader.INIT;
+      CASE TRUE OF
+        (EmpolySetup."Sales Type" = EmpolySetup."Sales Type"::Order) AND
+        (EmpolyWarehouseOrder.Process = EmpolyWarehouseOrder.Process::Sales):
+          SalesHeader.VALIDATE("Document Type", SalesHeader."Document Type"::Order);
+        (EmpolySetup."Sales Type" = EmpolySetup."Sales Type"::Invoice) AND
+        (EmpolyWarehouseOrder.Process = EmpolyWarehouseOrder.Process::Sales):
+          SalesHeader.VALIDATE("Document Type", SalesHeader."Document Type"::Invoice);
+        (EmpolySetup."Sales Return Type" = EmpolySetup."Sales Return Type"::ReturnOrder) AND
+        (EmpolyWarehouseOrder.Process = EmpolyWarehouseOrder.Process::"Sales Return"):
+          SalesHeader.VALIDATE("Document Type", SalesHeader."Document Type"::"Return Order");
+        (EmpolySetup."Sales Return Type" = EmpolySetup."Sales Return Type"::CreditMemo) AND
+        (EmpolyWarehouseOrder.Process = EmpolyWarehouseOrder.Process::"Sales Return"):
+          SalesHeader.VALIDATE("Document Type", SalesHeader."Document Type"::"Credit Memo");
+      END;
+      SalesHeader.INSERT(TRUE);
+      COMMIT;
+      SalesHeader.VALIDATE("Sell-to Customer No.", EmpolyWarehouseOrder."Customer No.");
+      SalesHeader.VALIDATE("Order Date", EmpolyWarehouseOrder."Order Date");
+      SalesHeader."Your Reference" := EmpolyWarehouseOrder."No.";
+      SalesHeader.VALIDATE("Location Code", EmpolyWarehouseOrder."Location Code");
+      SalesHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesLine@1100528302(EmpolyWarehouseOrder@1100528300 : Record 11126687;EmpolyWarehouseOrderLine@1100528301 : Record 11126688;SalesHeader@1100528303 : Record 36;FirstFreeLineNo@1100528305 : Integer);
+    VAR
+      SalesLine@1100528302 : Record 37;
+    BEGIN
+      SalesLine.INIT;
+      SalesLine."Document Type" := SalesHeader."Document Type";
+      SalesLine."Document No." := SalesHeader."No.";
+      SalesLine."Line No." := FirstFreeLineNo;
+      SalesLine.INSERT(TRUE);
+      SalesLine.VALIDATE("Item No.", EmpolyWarehouseOrderLine."Item No.");
+      SalesLine.VALIDATE(Quantity, EmpolyWarehouseOrderLine.Quantity);
+      IF (EmpolyWarehouseOrder.Process = EmpolyWarehouseOrder.Process::"Sales Return") THEN BEGIN
+        SalesLine.VALIDATE("Return Qty. to Receive", EmpolyWarehouseOrderLine.Quantity);
+        SalesLine.VALIDATE("Qty. to Invoice", EmpolyWarehouseOrderLine.Quantity);
+        SalesLine.VALIDATE("Return Reason Code", EmpolyWarehouseOrderLine."Reason Code");
+      END ELSE BEGIN
+        SalesLine.VALIDATE("Qty. to Ship", EmpolyWarehouseOrderLine.Quantity);
+        SalesLine.VALIDATE("Qty. to Invoice", EmpolyWarehouseOrderLine.Quantity);
+      END;
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CopyComments@1100529400(EmpolyWarehouseOrder@1100529400 : Record 11126687;SalesHeader@1100529401 : Record 36);
+    VAR
+      CommentLine@1100529402 : Record 97;
+      SalesCommentLine@1100529403 : Record 44;
+      LastLineNo@1100529404 : Integer;
+    BEGIN
+      CommentLine.SETRANGE("Table Name", CommentLine."Table Name"::EmpolyOrder);
+      CommentLine.SETRANGE("No.", EmpolyWarehouseOrder."No.");
+      IF (NOT CommentLine.FINDSET) THEN
+        EXIT;
+      SalesCommentLine.SETRANGE("Document Type", SalesHeader."Document Type");
+      SalesCommentLine.SETRANGE("No.", SalesHeader."No.");
+      IF (SalesCommentLine.FINDLAST) THEN
+        LastLineNo := SalesCommentLine."Line No.";
+
+      REPEAT
+        LastLineNo += 10000;
+        SalesCommentLine.INIT;
+        SalesCommentLine."Document Type" := SalesHeader."Document Type";
+        SalesCommentLine."No." := SalesHeader."No.";
+        SalesCommentLine."Line No." := LastLineNo;
+        SalesCommentLine.Date := CommentLine.Date;
+        SalesCommentLine.Comment := CommentLine.Comment;
+        SalesCommentLine."Line Break" := CommentLine."Line Break";
+        SalesCommentLine.INSERT(TRUE);
+      UNTIL (CommentLine.NEXT = 0);
+    END;
+
+    LOCAL PROCEDURE SetStatusFilter@1100528306() : Text;
+    VAR
+      ServiceOrder@1100528301 : Record 11012823;
+      FilterString@1100528300 : Text;
+    BEGIN
+      FilterString := '';
+
+      IF (EmpolySetup."SO In Process") THEN  BEGIN
+        FilterString += FORMAT(ServiceOrder.Status::"In Process");
+      END;
+      IF (EmpolySetup."SO Open") THEN BEGIN
+        IF (FilterString <> '') THEN
+          FilterString += '|';
+        FilterString += FORMAT(ServiceOrder.Status::Open)
+      END;
+      IF (EmpolySetup."SO Technical Finished") THEN  BEGIN
+        IF (FilterString <> '') THEN
+          FilterString += '|';
+        FilterString += FORMAT(ServiceOrder.Status::"Technical Finished")
+      END;
+
+      EXIT(FilterString);
+    END;
+
+    LOCAL PROCEDURE SetRefPointFilter@1100528305() : Text;
+    VAR
+      ReferencePoint@1100528301 : Record 11020271;
+      FilterString@1100528300 : Text;
+    BEGIN
+      FilterString := '';
+      ReferencePoint.SETRANGE(Apply, ReferencePoint.Apply::ServOrder);
+      ReferencePoint.SETRANGE("Show in Warehouse App", TRUE);
+      IF (NOT ReferencePoint.FINDSET) THEN
+        EXIT;
+
+      REPEAT
+        IF (FilterString <> '') THEN
+          FilterString += '|';
+        FilterString += FORMAT(ReferencePoint."No.");
+      UNTIL (ReferencePoint.NEXT = 0);
+
+      EXIT(FilterString);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

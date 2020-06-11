@@ -1,0 +1,217 @@
+OBJECT Table 11012639 Project CF Projects Setup
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    CaptionML=ENU=Project CF Projects Setup;
+  }
+  FIELDS
+  {
+    { 10  ;   ;Primary Key         ;Code10        ;DataClassification=ToBeClassified;
+                                                   CaptionML=[ENU=Primary Key;
+                                                              SVE=Prim„rnyckel] }
+    { 20  ;   ;Reference Date      ;Date          ;CaptionML=[ENU=Reference Date;
+                                                              SVE=Referensdatum] }
+    { 30  ;   ;Expected Outcome    ;Option        ;CaptionML=ENU=Expected Outcome;
+                                                   OptionCaptionML=ENU=Normal,Best Case (if not present: Normal),Worst Case ((if not present: Normal);
+                                                   OptionString=Normal,Best Case,Worst Case }
+    { 40  ;   ;Last Updated        ;DateTime      ;CaptionML=[ENU=Last Updated;
+                                                              SVE=Senast uppdaterad];
+                                                   Editable=No }
+  }
+  KEYS
+  {
+    {    ;Primary Key                             ;Clustered=Yes }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+
+    PROCEDURE BuildMatrix@1100527701(CalledFromCompany@1100527702 : Text[30];ReferenceDate@1100527714 : Date);
+    VAR
+      ProjectCFProjectsDetail@1100527717 : Record 11012643;
+      ProjectCFDetail@1100527716 : Record 11012638;
+      ProjectCF@1100527713 : Record 11012635;
+      ProjectCFNormal@1100527706 : Record 11012635;
+      ProjectCFProjects@1100527712 : Record 11012642;
+      ProjectCFProjectsMain@1100527703 : Record 11012642;
+      ProjectCFProjectsNormalTotal@1100527711 : Record 11012642;
+      ProjectCFProjectsBestTotal@1100527708 : Record 11012642;
+      ProjectCFProjectsWorstTotal@1100527710 : Record 11012642;
+      ProjectCFRubric@1100527709 : Record 11012637;
+      ProjectCFProjectsSetup@1100527704 : Record 11012639;
+      Job@1100527700 : Record 11072003;
+      NormalExpectedOutcomeFound@1100527701 : Boolean;
+      BestOrWorstExpectedOutcomeFound@1100527707 : Boolean;
+      ExpectedOutcomeLoop@1100527705 : Integer;
+    BEGIN
+      IF (CalledFromCompany <> '') AND (CalledFromCompany <> COMPANYNAME) THEN
+        EXIT;
+
+      ProjectCFProjectsDetail.DELETEALL;
+      ProjectCFProjects.DELETEALL;
+
+      Job.SETFILTER("Project Status",'..%1',Job."Project Status"::"Technical Finished");
+      IF Job.FINDSET THEN
+        REPEAT
+          NormalExpectedOutcomeFound := FALSE;
+          CLEAR(ProjectCFNormal);
+
+          FOR ExpectedOutcomeLoop := "Expected Outcome"::Normal TO "Expected Outcome"::"Worst Case" DO BEGIN
+
+            BestOrWorstExpectedOutcomeFound := FALSE;
+
+            ProjectCF.SETRANGE("Project No.",Job."No.");
+            ProjectCF.SETRANGE(Fixed,TRUE);
+            IF ReferenceDate <> 0D THEN
+              ProjectCF.SETFILTER("Reference Date",'..%1',ReferenceDate);
+            ProjectCF.SETRANGE("Expected Outcome",ExpectedOutcomeLoop);
+            ProjectCF.SETCURRENTKEY("Project No.","Reference Date","Expected Outcome");
+
+            CASE ExpectedOutcomeLoop OF
+              "Expected Outcome"::Normal:
+                BEGIN
+                  NormalExpectedOutcomeFound := ProjectCF.FINDLAST;
+                  IF NormalExpectedOutcomeFound THEN
+                    ProjectCFNormal := ProjectCF;
+                END;
+              "Expected Outcome"::"Best Case",
+              "Expected Outcome"::"Worst Case":
+                BEGIN
+                  IF ProjectCF.FINDLAST THEN
+                    BestOrWorstExpectedOutcomeFound := (ProjectCF."Reference Date" >= ProjectCFNormal."Reference Date");
+                  IF NOT BestOrWorstExpectedOutcomeFound THEN
+                    ProjectCF := ProjectCFNormal;
+                END;
+            END;
+
+            IF NOT NormalExpectedOutcomeFound AND NOT BestOrWorstExpectedOutcomeFound THEN
+              CLEAR(ProjectCF);
+
+            ProjectCFProjects.INIT;
+            ProjectCFProjects."Selected Expected Outcome" := ExpectedOutcomeLoop;
+            ProjectCFProjects.Type := ProjectCFProjects.Type::Project;
+            ProjectCFProjects."Project No." := Job."No.";
+            ProjectCFProjects."Cash Flow" := ProjectCF."Cash Flow";
+            ProjectCFProjects."Reference Date" := ProjectCF."Reference Date";
+            ProjectCFProjects."Prognosis Date" := ProjectCF."Prognosis Date";
+            ProjectCFProjects."Single/Main/Sub Project/Total" := Job."Single/Main/Sub Project";
+            ProjectCFProjects."Main Project" := Job."Main Project";
+
+
+            IF NOT NormalExpectedOutcomeFound AND NOT BestOrWorstExpectedOutcomeFound THEN BEGIN
+              ProjectCFProjects."Expected Outcome" := ProjectCFProjects."Expected Outcome"::None;
+              ProjectCFProjects.INSERT;
+            END ELSE BEGIN
+              ProjectCFRubric.RESET;
+              ProjectCFRubric.SETRANGE("Record Type",ProjectCFRubric."Record Type"::"Cash Flow");
+              ProjectCFRubric.SETRANGE("Project No.",Job."No.");
+              ProjectCFRubric.SETRANGE("Cash Flow",ProjectCF."Cash Flow");
+              ProjectCFRubric.CALCSUMS("Actual Amount","Prognosis Amount",Remaining,"Open (Purchase)","Received/Not Invoiced","Total Prognosis","Total Cost");
+
+              ProjectCFProjects."Expected Outcome" := ProjectCF."Expected Outcome";
+              ProjectCFProjects."Actual Amount" := ProjectCFRubric."Actual Amount";
+              ProjectCFProjects."Prognosis Amount" := ProjectCFRubric."Prognosis Amount";
+              ProjectCFProjects.Remaining := ProjectCFRubric.Remaining;
+              ProjectCFProjects."Open(Purchase)" := ProjectCFRubric."Open (Purchase)";
+              ProjectCFProjects."Received/Not Invoiced" := ProjectCFRubric."Received/Not Invoiced";
+              ProjectCFProjects."Prognosis Total Cost" := ProjectCFRubric."Total Prognosis";
+              ProjectCFProjects."Total Cost" := ProjectCFRubric."Total Cost";
+
+              ProjectCFProjects.INSERT;
+
+              CASE ExpectedOutcomeLoop OF
+                "Expected Outcome"::Normal:
+                  AddAmountsToTotalLine(ProjectCFRubric,ProjectCFProjectsNormalTotal);
+                "Expected Outcome"::"Best Case":
+                  AddAmountsToTotalLine(ProjectCFRubric,ProjectCFProjectsBestTotal);
+                "Expected Outcome"::"Worst Case":
+                  AddAmountsToTotalLine(ProjectCFRubric,ProjectCFProjectsWorstTotal);
+              END;
+
+              ProjectCFDetail.RESET;
+              ProjectCFDetail.SETRANGE("Project No.",Job."No.");
+              ProjectCFDetail.SETRANGE("Cash Flow",ProjectCF."Cash Flow");
+              IF ProjectCFDetail.FINDSET THEN
+                REPEAT
+                  ProjectCFProjectsDetail.INIT;
+                  ProjectCFProjectsDetail."Selected Expected Outcome" := ExpectedOutcomeLoop;
+                  ProjectCFProjectsDetail."Project No." := ProjectCFDetail."Project No.";
+                  ProjectCFProjectsDetail."Cash Flow" := ProjectCFDetail."Cash Flow";
+                  ProjectCFProjectsDetail.Rubric := ProjectCFDetail.Rubric;
+                  ProjectCFProjectsDetail."Line No." := ProjectCFDetail."Line No.";
+                  ProjectCFProjectsDetail.Date := ProjectCFDetail.Date;
+                  ProjectCFProjectsDetail.Amount := ProjectCFDetail.Amount;
+                  ProjectCFProjectsDetail."Main Project" := Job."Main Project";
+                  ProjectCFProjectsDetail."Template Code" := ProjectCFDetail."Template Code";
+                  ProjectCFProjectsDetail.INSERT;
+                UNTIL ProjectCFDetail.NEXT = 0;
+            END;
+          END;
+        UNTIL Job.NEXT = 0;
+
+      //Update Main Projects
+      ProjectCFProjectsMain.SETRANGE("Single/Main/Sub Project/Total",ProjectCFProjectsMain."Single/Main/Sub Project/Total"::"Main Project");
+      IF ProjectCFProjectsMain.FINDSET(TRUE) THEN
+        REPEAT
+          ProjectCFProjects.SETRANGE("Selected Expected Outcome",ProjectCFProjectsMain."Selected Expected Outcome");
+          ProjectCFProjects.SETRANGE("Main Project",ProjectCFProjectsMain."Project No.");
+          ProjectCFProjects.SETRANGE("Single/Main/Sub Project/Total",ProjectCFProjects."Single/Main/Sub Project/Total"::"Sub Project");
+          IF ProjectCFProjects.FINDSET THEN BEGIN
+            ProjectCFProjectsMain."Expected Outcome" := ProjectCFProjects."Expected Outcome";
+            REPEAT
+              IF ProjectCFProjectsMain."Expected Outcome" <> ProjectCFProjects."Expected Outcome" THEN
+                ProjectCFProjectsMain."Expected Outcome" := ProjectCFProjectsMain."Expected Outcome"::Multiple;
+              ProjectCFProjectsMain."Actual Amount" += ProjectCFProjects."Actual Amount";
+              ProjectCFProjectsMain."Prognosis Amount" += ProjectCFProjects."Prognosis Amount";
+              ProjectCFProjectsMain.Remaining += ProjectCFProjects.Remaining;
+              ProjectCFProjectsMain."Open(Purchase)" += ProjectCFProjects."Open(Purchase)";
+              ProjectCFProjectsMain."Received/Not Invoiced" += ProjectCFProjects."Received/Not Invoiced";
+              ProjectCFProjectsMain."Prognosis Total Cost" += ProjectCFProjects."Prognosis Total Cost";
+              ProjectCFProjectsMain."Total Cost" += ProjectCFProjects."Total Cost";
+            UNTIL ProjectCFProjects.NEXT = 0;
+            ProjectCFProjectsMain.MODIFY;
+          END;
+        UNTIL ProjectCFProjectsMain.NEXT = 0;
+
+      //Totals
+      InsertTotalLine(ProjectCFProjectsNormalTotal,"Expected Outcome"::Normal);
+      InsertTotalLine(ProjectCFProjectsBestTotal,"Expected Outcome"::"Best Case");
+      InsertTotalLine(ProjectCFProjectsWorstTotal,"Expected Outcome"::"Worst Case");
+
+      ProjectCFProjectsSetup.GET;
+      ProjectCFProjectsSetup."Last Updated" := CURRENTDATETIME;
+      ProjectCFProjectsSetup.MODIFY;
+    END;
+
+    LOCAL PROCEDURE AddAmountsToTotalLine@1100527704(ProjectCFRubric@1100527700 : Record 11012637;VAR ProjectCFProjectsTotal@1100527702 : Record 11012642);
+    BEGIN
+      ProjectCFProjectsTotal."Actual Amount" += ProjectCFRubric."Actual Amount";
+      ProjectCFProjectsTotal."Prognosis Amount" += ProjectCFRubric."Prognosis Amount";
+      ProjectCFProjectsTotal.Remaining += ProjectCFRubric.Remaining;
+      ProjectCFProjectsTotal."Open(Purchase)" += ProjectCFRubric."Open (Purchase)";
+      ProjectCFProjectsTotal."Received/Not Invoiced" += ProjectCFRubric."Received/Not Invoiced";
+      ProjectCFProjectsTotal."Prognosis Total Cost" += ProjectCFRubric."Total Prognosis";
+      ProjectCFProjectsTotal."Total Cost" += ProjectCFRubric."Total Cost";
+    END;
+
+    LOCAL PROCEDURE InsertTotalLine@1100527706(VAR ProjectCFProjectsTotal@1100527700 : Record 11012642;ExpectedOutcome@1100527701 : Integer);
+    BEGIN
+      ProjectCFProjectsTotal."Selected Expected Outcome" := ExpectedOutcome;
+      ProjectCFProjectsTotal.Type := ProjectCFProjectsTotal.Type::Total;
+      ProjectCFProjectsTotal."Single/Main/Sub Project/Total" := ProjectCFProjectsTotal."Single/Main/Sub Project/Total"::Total;
+      ProjectCFProjectsTotal.INSERT;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

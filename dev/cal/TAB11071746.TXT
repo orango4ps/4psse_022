@@ -1,0 +1,298 @@
+OBJECT Table 11071746 Service-Contract Ctrl. Period
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnInsert=BEGIN
+               TestOverlappingPeriods;
+               IF Code = '' THEN
+                 DetermineCode;
+             END;
+
+    OnModify=BEGIN
+               TESTFIELD("Date Finished", 0D);
+               TestOverlappingPeriods;
+               TestInUse;
+             END;
+
+    OnDelete=VAR
+               ServiceContract@1100528600 : Record 11012812;
+               ServiceContractControl@1100528601 : Record 11071762;
+               ServiceContrPreclDetail@1100528602 : Record 11071767;
+               AssignCatBudgettoPeriod@1100528603 : Record 11072314;
+             BEGIN
+               ServiceContract.GET("Service Contract No.");
+               IF ServiceContract.Status = ServiceContract.Status::Closed THEN
+                 ServiceContract.FIELDERROR(Status);
+               IF ServiceContract.Status <> ServiceContract.Status::Expired THEN BEGIN
+                 TESTFIELD("Date Finished", 0D);
+                 TestInUse;
+               END;
+               ServiceContractControl.SETCURRENTKEY("Service Contract No.");
+               ServiceContractControl.SETRANGE("Service Contract No.", "Service Contract No.");
+               ServiceContractControl.SETRANGE("Save Contract Control", FALSE);
+               IF ServiceContractControl.FINDSET THEN
+                 REPEAT
+                   IF NOT ServiceContractControl.IsControlUnusedInPreclosure(ServiceContrPreclDetail) THEN
+                     ServiceContractControl.DELETE(TRUE);
+                 UNTIL ServiceContractControl.NEXT = 0;
+               AssignCatBudgettoPeriod.SETRANGE("Service Contract No.", "Service Contract No.");
+               AssignCatBudgettoPeriod.SETRANGE("Control Period Code", Code);
+               AssignCatBudgettoPeriod.DELETEALL(TRUE);
+             END;
+
+    CaptionML=[ENU=Service-Contract Control Period;
+               NOR=Kontrollperiode for servicekontrakt;
+               SVE=Servicekontraktskontrollperiod];
+    LookupPageID=Page11125253;
+    DrillDownPageID=Page11125253;
+  }
+  FIELDS
+  {
+    { 10  ;   ;Service Contract No.;Code20        ;TableRelation=Service-Contract;
+                                                   CaptionML=[ENU=Service Contract No.;
+                                                              NOR=Servicekontraktnr;
+                                                              SVE=Servicekontraktnr] }
+    { 20  ;   ;Code                ;Code10        ;CaptionML=[ENU=Code;
+                                                              NOR=Kode;
+                                                              SVE=Kod] }
+    { 30  ;   ;Starting Date       ;Date          ;CaptionML=[ENU=Starting Date;
+                                                              NOR=Startdato;
+                                                              SVE=Startdatum] }
+    { 40  ;   ;Ending Date         ;Date          ;CaptionML=[ENU=Ending Date;
+                                                              NOR=Sluttdato;
+                                                              SVE=Slutdatum] }
+    { 50  ;   ;Date Finished       ;Date          ;CaptionML=[ENU=Date Finished;
+                                                              NOR=Dato Ferdig;
+                                                              SVE=Datum f„rdigt];
+                                                   Editable=No }
+    { 60  ;   ;Control Period Filter OLD;Text250  ;CaptionML=ENU=Control Period Filter OLD;
+                                                   Description=OLD;
+                                                   Editable=No }
+  }
+  KEYS
+  {
+    {    ;Service Contract No.,Code               ;Clustered=Yes }
+    {    ;Service Contract No.,Ending Date         }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+    VAR
+      Text000@1100528600 : TextConst 'ENU=%1 must exceed %2;NOR=%1 m† overstige %2;SVE=%1 m†ste ”verskrida %2';
+      Text001@1100528601 : TextConst 'ENU=No overlapping allowed;NOR=Overlapping er ikke tillatt;SVE=Ingen ”verlappning „r till†ten';
+      Text002@1210190000 : TextConst 'ENU=Period is used in Perclose Result, modify or delete not allowed;NOR=Periode er brukt i prelimin‘rt resultat, endre eller fjerning er ikke tillatt;SVE=Period anv„nds i Perclose-resultat, att „ndra eller ta bort „r inte till†tet';
+      IgnoreActualPeriods@1100529600 : Boolean;
+
+    PROCEDURE TestOverlappingPeriods@1100528600();
+    VAR
+      ContractControlPeriod@1100528600 : Record 11071746;
+    BEGIN
+      IF ("Starting Date" = 0D) OR ("Ending Date" = 0D) THEN EXIT;
+      IF "Ending Date" <= "Starting Date" THEN
+        ERROR(Text000, FIELDCAPTION("Ending Date"), FIELDCAPTION("Starting Date"));
+      ContractControlPeriod.SETRANGE("Service Contract No.", "Service Contract No.");
+      ContractControlPeriod.SETFILTER(Code, '<>%1', Code);
+      IF ContractControlPeriod.FINDSET THEN
+        REPEAT
+          IF NOT ((("Starting Date" < ContractControlPeriod."Starting Date") AND
+                   ("Ending Date" < ContractControlPeriod."Starting Date")) OR
+                  (("Starting Date" > ContractControlPeriod."Ending Date") AND
+                   ("Ending Date" > ContractControlPeriod."Ending Date"))) THEN
+            ERROR(Text001);
+        UNTIL ContractControlPeriod.NEXT = 0;
+    END;
+
+    PROCEDURE DetermineCode@1100528601();
+    BEGIN
+      Code := GetNextControlPeriodCode("Service Contract No.");
+    END;
+
+    PROCEDURE UpdateControlPeriodsUntil@1100528602(IServiceContractNo@1100528600 : Code[20];IUntil@1100528601 : Date;CheckNoOfPeriods@1100529600 : Boolean);
+    VAR
+      ContractControlPeriod@1100528602 : Record 11071746;
+      NewContractControlPeriod@1100528604 : Record 11071746;
+      ServiceContract@1100528603 : Record 11012812;
+      StartingDate@1100528605 : Date;
+    BEGIN
+      ServiceContract.GET(IServiceContractNo);
+      ServiceContract.TESTFIELD("Starting Date Control Period");
+      ServiceContract.TESTFIELD("Control Period Interval");
+
+      IF CheckNoOfPeriods AND (ServiceContract."Number of Control Ref. Periods" <> 0) THEN BEGIN
+        UpdateControlPeriodsNumber(IServiceContractNo, WORKDATE, IUntil);
+        EXIT;
+      END;
+
+      GetDateUntil(IServiceContractNo, ServiceContract.GetServiceContractEndingDate, IUntil, FALSE);
+
+      ContractControlPeriod.SETCURRENTKEY("Service Contract No.", "Ending Date");
+      ContractControlPeriod.SETRANGE("Service Contract No.", IServiceContractNo);
+      ContractControlPeriod.SETFILTER("Ending Date", '<>%1', 0D);
+      IF NOT ContractControlPeriod.FINDLAST THEN
+        ContractControlPeriod.INIT;
+
+      IF ContractControlPeriod."Ending Date" < IUntil THEN BEGIN
+        IF ContractControlPeriod."Ending Date" <> 0D THEN
+          StartingDate := ContractControlPeriod."Ending Date" + 1
+        ELSE
+          StartingDate := ServiceContract."Starting Date Control Period";
+        REPEAT
+          NewContractControlPeriod.INIT;
+          NewContractControlPeriod.VALIDATE("Service Contract No.", IServiceContractNo);
+          NewContractControlPeriod.Code := GetNextControlPeriodCode(IServiceContractNo);
+          NewContractControlPeriod."Starting Date" := StartingDate;
+          NewContractControlPeriod.VALIDATE("Ending Date", CALCDATE(ServiceContract."Control Period Interval", StartingDate) -1);
+          NewContractControlPeriod.INSERT(TRUE);
+          StartingDate := NewContractControlPeriod."Ending Date" + 1;
+        UNTIL NewContractControlPeriod."Ending Date" >= IUntil;
+      END;
+    END;
+
+    PROCEDURE UpdateControlPeriodsNumber@1100529600(ServiceContractNo@1100528600 : Code[20];DateFrom@1100529602 : Date;VAR DateUntil@1100529601 : Date);
+    VAR
+      ContractControlPeriod@1100528602 : Record 11071746;
+      NewContractControlPeriod@1100528604 : Record 11071746;
+      ServiceContract@1100528603 : Record 11012812;
+      StartingDate@1100528605 : Date;
+      PeriodCount@1100529600 : Integer;
+      TotalPeriodCount@1100529603 : Integer;
+      LatestServiceControlPeriodDate@1100529604 : Date;
+    BEGIN
+      ServiceContract.GET(ServiceContractNo);
+      ServiceContract.TESTFIELD("Starting Date Control Period");
+      ServiceContract.TESTFIELD("Control Period Interval");
+
+      LatestServiceControlPeriodDate := GetLatestServiceControlPeriodDate(ServiceContractNo);
+      IF LatestServiceControlPeriodDate <> 0D THEN
+        UpdateControlPeriodsUntil(ServiceContractNo, LatestServiceControlPeriodDate, FALSE);
+
+      IF ServiceContract."Number of Control Ref. Periods" = 0 THEN BEGIN
+        UpdateControlPeriodsUntil(ServiceContractNo, DateUntil, FALSE);
+        EXIT;
+      END;
+
+      GetDateUntil(ServiceContractNo, ServiceContract.GetServiceContractEndingDate, DateUntil, TRUE);
+      TotalPeriodCount := ServiceContract."Number of Control Ref. Periods";
+
+      ContractControlPeriod.SETCURRENTKEY("Service Contract No.", "Ending Date");
+      ContractControlPeriod.SETRANGE("Service Contract No.", ServiceContractNo);
+
+      IF DateFrom = 0D THEN
+        DateFrom := WORKDATE;
+      ContractControlPeriod.SETFILTER("Ending Date", '>=%1', DateFrom);
+      PeriodCount := ContractControlPeriod.COUNT;
+      ContractControlPeriod.SETFILTER("Ending Date", '<>%1', 0D);
+
+      IF IgnoreActualPeriods THEN
+        IF TotalPeriodCount = PeriodCount THEN
+          EXIT;
+
+      IF TotalPeriodCount > PeriodCount THEN BEGIN
+        IF NOT ContractControlPeriod.FINDLAST THEN
+          ContractControlPeriod.INIT
+        ELSE
+          IF (DateUntil <> 0D) AND (ContractControlPeriod."Ending Date" >= DateUntil) THEN
+            EXIT;
+        IF ContractControlPeriod."Ending Date" <> 0D THEN
+          StartingDate := ContractControlPeriod."Ending Date" + 1
+        ELSE
+          StartingDate := ServiceContract."Starting Date Control Period";
+
+        REPEAT
+          NewContractControlPeriod.INIT;
+          NewContractControlPeriod.VALIDATE("Service Contract No.", ServiceContractNo);
+          NewContractControlPeriod.Code := GetNextControlPeriodCode(ServiceContractNo);
+          NewContractControlPeriod."Starting Date" := StartingDate;
+          NewContractControlPeriod.VALIDATE("Ending Date", CALCDATE(ServiceContract."Control Period Interval", StartingDate) - 1);
+          NewContractControlPeriod.INSERT(TRUE);
+          StartingDate := NewContractControlPeriod."Ending Date" + 1;
+          IF NewContractControlPeriod."Ending Date" >= DateFrom THEN
+            PeriodCount += 1;
+        UNTIL (TotalPeriodCount = PeriodCount) OR ((DateUntil <> 0D) AND (NewContractControlPeriod."Ending Date" >= DateUntil));
+      END;
+
+      IF (TotalPeriodCount <= PeriodCount) OR (DateUntil = 0D) THEN BEGIN
+        IF TotalPeriodCount > PeriodCount THEN
+          TotalPeriodCount := PeriodCount;
+        IF IgnoreActualPeriods THEN BEGIN
+          ContractControlPeriod.FINDFIRST;
+          IF ContractControlPeriod.NEXT(TotalPeriodCount - 1) <> 0 THEN
+            DateUntil := ContractControlPeriod."Ending Date";
+        END ELSE BEGIN
+          ContractControlPeriod.FINDLAST;
+          DateUntil := ContractControlPeriod."Ending Date";
+        END;
+      END;
+    END;
+
+    PROCEDURE GetNextControlPeriodCode@1100528603(IServiceContractNo@1100528601 : Code[20]) : Code[10];
+    VAR
+      ContractControlPeriod@1100528600 : Record 11071746;
+    BEGIN
+      ContractControlPeriod.SETRANGE("Service Contract No.", IServiceContractNo);
+      IF NOT ContractControlPeriod.FINDLAST THEN
+        EXIT('001');
+      EXIT(INCSTR(ContractControlPeriod.Code));
+    END;
+
+    PROCEDURE TestInUse@1210190000();
+    VAR
+      ServiceContrPreclDetail@1210190000 : Record 11071767;
+    BEGIN
+      ServiceContrPreclDetail.SETCURRENTKEY("Service Contract No.", "Contract Control Period Code");
+      ServiceContrPreclDetail.SETRANGE("Service Contract No.", "Service Contract No.");
+      ServiceContrPreclDetail.SETRANGE("Contract Control Period Code", Code);
+      IF NOT ServiceContrPreclDetail.ISEMPTY THEN
+        ERROR(Text002);
+    END;
+
+    PROCEDURE GetPeriodFilterText@1100528604() : Text;
+    BEGIN
+      EXIT(STRSUBSTNO('%1..%2', "Starting Date", "Ending Date"));
+    END;
+
+    LOCAL PROCEDURE GetLatestServiceControlPeriodDate@1100529601(ServiceContractNo@1100529600 : Code[20]) : Date;
+    VAR
+      ServiceLedgerEntry@1100529601 : Record 11012819;
+    BEGIN
+      IF IgnoreActualPeriods THEN
+        EXIT(0D);
+      ServiceLedgerEntry.SETRANGE("Service Contract No.", ServiceContractNo);
+      IF ServiceLedgerEntry.ISEMPTY THEN
+        EXIT(0D);
+      ServiceLedgerEntry.SETCURRENTKEY("Service Control Period Date");
+      ServiceLedgerEntry.FINDLAST;
+      EXIT(ServiceLedgerEntry."Service Control Period Date");
+    END;
+
+    LOCAL PROCEDURE GetDateUntil@1100529602(ServiceContractNo@1100529602 : Code[20];ServiceContractEndingDate@1100529600 : Date;VAR DateUntil@1100529601 : Date;SkipServiceLedgerEntryCheck@1100529604 : Boolean);
+    VAR
+      LatestServiceControlPeriodDate@1100529603 : Date;
+    BEGIN
+      LatestServiceControlPeriodDate := GetLatestServiceControlPeriodDate(ServiceContractNo);
+      IF (LatestServiceControlPeriodDate <> 0D) AND (DateUntil < LatestServiceControlPeriodDate) AND
+         ((DateUntil <> 0D) OR NOT SkipServiceLedgerEntryCheck)
+      THEN
+        DateUntil := LatestServiceControlPeriodDate;
+      IF (ServiceContractEndingDate <> 0D) AND ((DateUntil = 0D) OR (DateUntil > ServiceContractEndingDate)) THEN
+        DateUntil := ServiceContractEndingDate;
+    END;
+
+    PROCEDURE SetIgnoreActualPeriods@1100529603(NewIgnoreActualPeriods@1100529600 : Boolean);
+    BEGIN
+      IgnoreActualPeriods := NewIgnoreActualPeriods;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

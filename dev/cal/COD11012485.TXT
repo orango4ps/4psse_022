@@ -1,0 +1,407 @@
+OBJECT Codeunit 11012485 Bing Maps Handler
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      BingMapsSetup@1100525000 : Record 11072390;
+      BingMapsInfoboxOptions@1100525001 : Record 11072391;
+      Text001@1100525002 : TextConst 'ENU=%1 is empty';
+      BingMapsUserSetup@1100525003 : Record 11072392;
+      Text002@1100525004 : TextConst 'ENU=There is a problem finding location data for %1 %2.';
+
+    PROCEDURE UpdateLocation@1100525000("No."@1100525002 : Text;TableID@1100525003 : Integer;Lat@1100525004 : Text;Lng@1100525005 : Text);
+    VAR
+      ServiceObject@1100525000 : Record 11071691;
+      ServiceLocation@1100525001 : Record 11012801;
+      EmployeeExtension@1100528100 : Record 11229470;
+      Employee@1100528101 : Record 5200;
+      ResourceWOP@1100528102 : Record 11229278;
+    BEGIN
+      Lat := CONVERTSTR(Lat, ',', '.');
+      Lng := CONVERTSTR(Lng, ',', '.');
+
+      CASE TableID OF
+        DATABASE::"Service-Object":
+          BEGIN
+            ServiceObject.GET("No.");
+            ServiceObject.Latitude := Lat;
+            ServiceObject.Longitude := Lng;
+            ServiceObject.MODIFY;
+          END;
+        DATABASE::"Service Location":
+          BEGIN
+            ServiceLocation.GET("No.");
+            ServiceLocation.Latitude := Lat;
+            ServiceLocation.Longitude := Lng;
+            ServiceLocation.MODIFY;
+          END;
+        DATABASE::Employee:
+          BEGIN
+            EmployeeExtension.GetEmployeeExtension("No.");
+            EmployeeExtension.VALIDATE(Latitude, Lat);
+            EmployeeExtension.VALIDATE(Longitude, Lng);
+            EmployeeExtension.UpdateEmployeeExtension("No.");
+          END;
+        DATABASE::"Resource (WOP)":
+          BEGIN
+            IF ResourceWOP.GET("No.") THEN
+              IF ResourceWOP.Type = ResourceWOP.Type::Employee THEN BEGIN
+                EmployeeExtension.GetEmployeeExtension(ResourceWOP."Source No.");
+                EmployeeExtension.VALIDATE(Latitude, Lat);
+                EmployeeExtension.VALIDATE(Longitude, Lng);
+                EmployeeExtension.UpdateEmployeeExtension("No.");
+              END;
+          END;
+      END;
+    END;
+
+    PROCEDURE OpenCard@1100525001(No@1100525000 : Code[20];TableID@1100525001 : Integer);
+    VAR
+      ServiceObject@1100525002 : Record 11071691;
+      ServiceLocation@1100525003 : Record 11012801;
+      ServiceObjectCard@1100525004 : Page 11125144;
+      ServiceLocationCard@1100525005 : Page 11125143;
+      ResourceCard@1100525007 : Page 11229280;
+      ResourceWOP@1100525006 : Record 11229278;
+      ServiceOrder@1100525008 : Record 11012823;
+      ServiceOrderCard@1100525009 : Page 11125209;
+    BEGIN
+      CASE TableID OF
+        DATABASE::"Service-Object":
+          BEGIN
+            ServiceObject.GET(No);
+            ServiceObjectCard.SETRECORD(ServiceObject);
+            ServiceObjectCard.RUNMODAL;
+          END;
+        DATABASE::"Service Location":
+          BEGIN
+            ServiceLocation.GET(No);
+            ServiceLocationCard.SETRECORD(ServiceLocation);
+            ServiceLocationCard.RUNMODAL;
+          END;
+        DATABASE::"Service Order":
+          BEGIN
+            ServiceOrder.GET(No);
+            ServiceOrderCard.SETRECORD(ServiceOrder);
+            ServiceOrderCard.RUNMODAL;
+          END;
+        DATABASE::"Resource (WOP)":
+          BEGIN
+            ResourceWOP.GET(No);
+            ResourceCard.SETRECORD(ResourceWOP);
+            ResourceCard.RUNMODAL;
+          END;
+      END;
+    END;
+
+    PROCEDURE GetColour@1100525004(ServiceOrder@1100525001 : Record 11012823) : Text;
+    VAR
+      returnValue@1100525000 : Text;
+      ReferencePoint@1100525002 : Record 11020271;
+      OperatingSystemMgt@1100525003 : Codeunit 11012364;
+    BEGIN
+      ServiceOrder.CALCFIELDS("Actual Reference Point");
+      ReferencePoint.GET(ServiceOrder."Actual Reference Point");
+      returnValue := OperatingSystemMgt.GetHexColor(ReferencePoint.Colour);
+      IF returnValue = '' THEN
+        returnValue := '000000';
+      EXIT('#' + returnValue);
+    END;
+
+    PROCEDURE GetApiKey@1100525006(ObjectIDForLogging@1100528100 : Text[250]) : Text;
+    BEGIN
+      IF SetupIsDoneAndEnabled THEN BEGIN
+        WriteToBingMapsLog(ObjectIDForLogging, 'GetApiKey');
+        EXIT(BingMapsSetup.ApiKey);
+      END;
+    END;
+
+    PROCEDURE SetupIsDoneAndEnabled@1100525007() : Boolean;
+    BEGIN
+      IF BingMapsSetup.GET THEN
+        IF BingMapsSetup.Enabled THEN
+          EXIT(TRUE);
+    END;
+
+    PROCEDURE GetFieldIDForTitle@1100525009(TableID@1100525000 : Integer;TypeRequest@1100525001 : 'NAV,FSA') : Integer;
+    BEGIN
+      IF SetupIsDoneAndEnabled THEN BEGIN
+        SetBingMapsInfoboxFilter(TableID);
+        CASE TypeRequest OF
+          TypeRequest::NAV:
+            BingMapsInfoboxOptions.SETRANGE("Head of infobox NAV", TRUE);
+          TypeRequest::FSA:
+            BingMapsInfoboxOptions.SETRANGE("Head of infobox FSA", TRUE);
+          END;
+        IF BingMapsInfoboxOptions.FINDFIRST THEN
+          EXIT(BingMapsInfoboxOptions.Field);
+      END;
+    END;
+
+    PROCEDURE GetValueFromField@1100525012(recordID@1100525000 : RecordID;tableID@1100525001 : Integer;fieldID@1100525002 : Integer) : Text;
+    VAR
+      recRef@1100525004 : RecordRef;
+      fldRef@1100525003 : FieldRef;
+    BEGIN
+      IF SetupIsDoneAndEnabled THEN BEGIN
+        IF (fieldID <> 0) AND (tableID <> 0) THEN BEGIN
+          recRef.OPEN(tableID);
+          recRef.GET(recordID);
+          fldRef := recRef.FIELD(fieldID);
+          IF FORMAT(fldRef.CLASS) = 'FlowField' THEN
+            fldRef.CALCFIELD;
+          IF FORMAT(fldRef.VALUE) <> '' THEN
+            EXIT(FORMAT(fldRef.VALUE))
+          ELSE
+            EXIT(STRSUBSTNO(Text001, fldRef.CAPTION));
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE SetBingMapsInfoboxFilter@1100525008(TableID@1100525000 : Integer);
+    BEGIN
+      BingMapsInfoboxOptions.RESET;
+      BingMapsInfoboxOptions.SETRANGE(Table, TableID);
+    END;
+
+    PROCEDURE BuildDescription@1100525016(recordID@1100525001 : RecordID;tableID@1100525002 : Integer;Type@1100525004 : 'NAV,FSA') : Text;
+    VAR
+      returnValue@1100525003 : Text;
+      part@1100525005 : Text;
+    BEGIN
+      IF SetupIsDoneAndEnabled THEN BEGIN
+        returnValue := '';
+        SetBingMapsInfoboxFilter(tableID);
+        CASE Type OF
+          Type::NAV:
+            BingMapsInfoboxOptions.SETRANGE("Display in NAV", TRUE);
+          Type::FSA:
+            BingMapsInfoboxOptions.SETRANGE("Display in FSA", TRUE);
+        END;
+        IF BingMapsInfoboxOptions.FINDSET THEN
+          REPEAT
+            part := GetValueFromField(recordID, tableID, BingMapsInfoboxOptions.Field) + '<br/>';
+            returnValue := COPYSTR(returnValue + part, 1, MAXSTRLEN(returnValue));
+          UNTIL BingMapsInfoboxOptions.NEXT = 0;
+        EXIT(returnValue);
+      END;
+    END;
+
+    PROCEDURE DisplayAsPin@1100525002(TableID@1100525000 : Integer) : Boolean;
+    BEGIN
+      IF SetupIsDoneAndEnabled THEN BEGIN
+        CASE TableID OF
+          DATABASE::"Service-Object":
+            BEGIN
+              IF BingMapsSetup."Service Object Display" = BingMapsSetup."Service Object Display"::Pin THEN
+                EXIT(TRUE);
+            END;
+          DATABASE::"Service Location":
+            BEGIN
+              IF BingMapsSetup."Service Location Display" = BingMapsSetup."Service Location Display"::Pin THEN
+                EXIT(TRUE);
+            END;
+          DATABASE::"Service Order":
+            BEGIN
+              IF BingMapsSetup."Service Order Display" = BingMapsSetup."Service Object Display"::Pin THEN
+                EXIT(TRUE);
+            END;
+          DATABASE::"Resource (WOP)":
+            BEGIN
+
+            END;
+        END;
+      END;
+    END;
+
+    PROCEDURE GetLatLngFromAddress@1100525013(VAR Latitude@1100525000 : Text;VAR Longitude@1100525004 : Text;Address@1100525014 : Text;City@1100525015 : Text;PostCode@1100525016 : Text) : Boolean;
+    VAR
+      HttpResponseMessage@1100525002 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.HttpResponseMessage";
+      HttpClient@1100525003 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.HttpClient";
+      Uri@1100525005 : Text[255];
+      BaseObject@1100525006 : DotNet "'Newtonsoft.Json, Version=6.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed'.Newtonsoft.Json.Linq.JObject";
+      ResourceSets@1100525007 : DotNet "'Newtonsoft.Json, Version=6.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed'.Newtonsoft.Json.Linq.JArray";
+      Resources@1100525008 : DotNet "'Newtonsoft.Json, Version=6.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed'.Newtonsoft.Json.Linq.JArray";
+      SetData@1100525009 : DotNet "'Newtonsoft.Json, Version=6.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed'.Newtonsoft.Json.Linq.JObject";
+      LocationData@1100525010 : DotNet "'Newtonsoft.Json, Version=6.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed'.Newtonsoft.Json.Linq.JObject";
+      Point@1100525011 : DotNet "'Newtonsoft.Json, Version=6.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed'.Newtonsoft.Json.Linq.JObject";
+      Coordinates@1100525012 : DotNet "'Newtonsoft.Json, Version=6.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed'.Newtonsoft.Json.Linq.JArray";
+      Confidence@1100525013 : DotNet "'Newtonsoft.Json, Version=6.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed'.Newtonsoft.Json.Linq.JObject";
+      HttpResponseMessageContent@1100525001 : Text;
+    BEGIN
+      IF (SetupIsDoneAndEnabled) AND (Address <> '') AND (City <> '') AND (PostCode <> '') THEN BEGIN
+        Uri := STRSUBSTNO('http://dev.virtualearth.net/REST/v1/Locations?postalCode=%1&addressLine=%2&locality=%3&maxResults=1&key=%4',
+                         PostCode, Address, City, GetApiKey('Codeunit 11012485 (GetLatLngFromAddress)'));
+        HttpClient := HttpClient.HttpClient;
+        HttpResponseMessage := HttpClient.GetAsync(Uri).Result;
+        IF NOT ISNULL(HttpResponseMessage) THEN BEGIN
+          HttpResponseMessageContent := HttpResponseMessage.Content.ReadAsStringAsync.Result; //BC13
+          BaseObject := BaseObject.Parse(HttpResponseMessageContent);
+        END;
+        IF NOT ISNULL(BaseObject) THEN
+          ResourceSets := BaseObject.GetValue('resourceSets');
+        IF NOT ISNULL(ResourceSets) THEN
+          SetData := ResourceSets.First;
+        IF NOT ISNULL(SetData) THEN
+          Resources := SetData.GetValue('resources');
+        IF NOT ISNULL(Resources) THEN
+          LocationData := Resources.First;
+        IF NOT ISNULL(LocationData) THEN
+          Point := LocationData.GetValue('point');
+        IF NOT ISNULL(Point) THEN
+          Coordinates := Point.GetValue('coordinates');
+        IF NOT ISNULL(Coordinates) THEN
+          Confidence := LocationData.GetValue('confidence');
+        IF NOT ISNULL(Confidence) THEN
+          IF FORMAT(Confidence) = 'High' THEN BEGIN
+            Latitude := FORMAT(Coordinates.First);
+            Longitude := FORMAT(Coordinates.Last);
+            EXIT(TRUE);
+          END ELSE
+            EXIT(TRUE);
+        END ELSE
+          IF NOT ((Address <> '') AND (City <> '') AND (PostCode <> '')) THEN BEGIN
+            Latitude := '';
+            Longitude := '';
+            EXIT(TRUE);
+          END;
+    END;
+
+    LOCAL PROCEDURE getRadians@1100525014(Degrees@1100525000 : Decimal) : Decimal;
+    BEGIN
+      EXIT(3.14159 * Degrees / 180.0);
+    END;
+
+    PROCEDURE GetDistanceBetweenPoints@1100525017(latitude1@1100525000 : Code[255];longitude1@1100525001 : Code[255];latitude2@1100525002 : Code[255];longitude2@1100525003 : Code[255]) : Decimal;
+    VAR
+      Math@1100525017 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Math";
+      lat1@1100525016 : Decimal;
+      lat2@1100525015 : Decimal;
+      lng1@1100525014 : Decimal;
+      lng2@1100525013 : Decimal;
+      radians1@1100525012 : Decimal;
+      radians2@1100525011 : Decimal;
+      distanceRadians1@1100525010 : Decimal;
+      distanceRadians2@1100525009 : Decimal;
+      a@1100525008 : Decimal;
+      c@1100525007 : Decimal;
+      r@1100525006 : Decimal;
+      distance@1100525005 : Decimal;
+      strDistance@1100525004 : Text;
+    BEGIN
+      EVALUATE(lat1, CONVERTSTR(latitude1, '.', ','));
+      EVALUATE(lat2, CONVERTSTR(latitude2, '.', ','));
+      EVALUATE(lng1, CONVERTSTR(longitude1, '.', ','));
+      EVALUATE(lng2, CONVERTSTR(longitude2, '.', ','));
+
+      //earths radius in KM
+      r := 6371000.0;
+
+      radians1 := getRadians(lat1);
+      radians2 := getRadians(lat2);
+      distanceRadians1 := getRadians(lat2-lat1);
+      distanceRadians2 := getRadians(lng2-lng1);
+
+      a := Math.Sin(distanceRadians1 / 2) * Math.Sin(distanceRadians1 / 2) +
+            Math.Cos(radians1) * Math.Cos(radians2) * Math.Sin(distanceRadians2 / 2) * Math.Sin(distanceRadians2 / 2);
+      c := 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
+
+      strDistance := CONVERTSTR(FORMAT(Math.Round(r * c)), ',', '.');
+      EVALUATE(distance, strDistance);
+      EXIT(distance);
+    END;
+
+    PROCEDURE GetZoomLevel@1100525018() : Integer;
+    BEGIN
+      IF SetupIsDoneAndEnabled THEN BEGIN
+        IF GetDefaultUserSettingsRecord THEN BEGIN
+          IF BingMapsUserSetup."Zoom Level" = 0 THEN BEGIN
+            BingMapsUserSetup."Zoom Level" := BingMapsSetup."Default Zoom Level";
+            BingMapsUserSetup.MODIFY;
+          END;
+          EXIT(BingMapsUserSetup."Zoom Level");
+        END;
+      END;
+    END;
+
+    PROCEDURE SetZoomLevel@1100525021(Level@1100525000 : Integer);
+    BEGIN
+      IF SetupIsDoneAndEnabled THEN BEGIN
+        IF GetDefaultUserSettingsRecord THEN BEGIN
+          BingMapsUserSetup."Zoom Level" := Level;
+          BingMapsUserSetup.MODIFY;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateDefaultUserSettingsRecord@1100525022() : Boolean;
+    BEGIN
+      BingMapsUserSetup."User ID" := USERID;
+      BingMapsUserSetup."Zoom Level" := BingMapsSetup."Default Zoom Level";
+      BingMapsUserSetup.INSERT;
+    END;
+
+    LOCAL PROCEDURE GetDefaultUserSettingsRecord@1100525023() : Boolean;
+    BEGIN
+      IF BingMapsUserSetup.GET(USERID) THEN
+        EXIT(TRUE)
+      ELSE
+        IF CreateDefaultUserSettingsRecord THEN
+          EXIT(TRUE);
+    END;
+
+    PROCEDURE LocationError@1100525003(TableName@1100525000 : Text;RecordName@1100525001 : Text);
+    BEGIN
+      IF GUIALLOWED THEN
+        MESSAGE(Text002, TableName, RecordName);
+    END;
+
+    LOCAL PROCEDURE WriteToBingMapsLog@1100528102(ObjectIDForLogging@1100528101 : Text[250];EventName@1100528102 : Text[250]);
+    VAR
+      BingMapsLog@1100528100 : Record 11072393;
+    BEGIN
+      InitBingMapsLogEntry(BingMapsLog, ObjectIDForLogging, EventName);
+      BingMapsLog.INSERT(TRUE);
+      COMMIT;
+    END;
+
+    PROCEDURE WriteToBingMapsLogUsingQuery@1100528105(RecordPrimaryKey@1100528101 : Text[250];ObjectIDForLogging@1100528102 : Text[250];EventName@1100528103 : Text[250];RecordType@1100528104 : Text[250]);
+    VAR
+      BingMapsLog@1100528100 : Record 11072393;
+    BEGIN
+      InitBingMapsLogEntry(BingMapsLog, ObjectIDForLogging, EventName);
+      BingMapsLog."Event Name" := EventName;
+      BingMapsLog."Record Primary Key" := RecordPrimaryKey;
+      BingMapsLog."Record Type" := RecordType;
+      BingMapsLog.INSERT(TRUE);
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE InitBingMapsLogEntry@1100528100(VAR BingMapsLog@1100528100 : Record 11072393;ObjectIDForLogging@1100528102 : Text[250];EventName@1100528101 : Text[250]);
+    BEGIN
+      BingMapsLog.LOCKTABLE;
+      IF BingMapsLog.FINDLAST THEN
+        BingMapsLog."Entry No." += 1;
+
+      BingMapsLog.INIT;
+      BingMapsLog."Object ID" := ObjectIDForLogging;
+      BingMapsLog."Event Name" := EventName;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

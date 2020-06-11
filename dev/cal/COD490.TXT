@@ -1,0 +1,207 @@
+OBJECT Codeunit 490 Parallel Session Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      TempJobQueueEntry@1000 : TEMPORARY Record 472;
+      TempIntegerFreeMemMapFile@1012 : TEMPORARY Record 2000000026;
+      TempInteger@1001 : TEMPORARY Record 2000000026;
+      ActiveSession@1002 : Record 2000000110;
+      MemoryMappedFile@1007 : ARRAY [1000] OF Codeunit 491;
+      NoOfJQEntries@1003 : Integer;
+      NoOfActiveSessions@1004 : Integer;
+      RemainingTasksMsg@1005 : TextConst '@@@=#1## shows a number.;ENU=Waiting for background tasks to finish.\Remaining tasks: #1####;NOR=Venter p† at bakgrunnsoppgavene skal fullf›res.\Resterende oppgaver: #1####';
+      MaxNoOfSessions@1006 : Integer;
+      NoOfMemMappedFiles@1009 : Integer;
+
+    PROCEDURE NewSessionRunCodeunitWithRecord@2(CodeunitId@1000 : Integer;Parameter@1002 : Text;Priority@1001 : Integer;RecordIDToRun@1003 : RecordID) : Boolean;
+    BEGIN
+      IF NOT CreateNewJQEntry(CodeunitId,Parameter,Priority) THEN
+        EXIT(FALSE);
+      TempJobQueueEntry."Record ID to Process" := RecordIDToRun;
+      TempJobQueueEntry.MODIFY;
+      StartNewSessions;
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE NewSessionRunCodeunitWithBlob@8(CodeunitId@1000 : Integer;Parameter@1002 : Text;Priority@1001 : Integer;VAR TempBlob@1003 : Record 99008535) : Boolean;
+    BEGIN
+      IF NoOfMemMappedFiles > ARRAYLEN(MemoryMappedFile) THEN
+        EXIT(FALSE);
+      IF NOT CreateNewJQEntry(CodeunitId,Parameter,Priority) THEN
+        EXIT(FALSE);
+
+      IF (NoOfMemMappedFiles = 0) AND (TempIntegerFreeMemMapFile.COUNT = 0) THEN // init
+        FOR TempIntegerFreeMemMapFile.Number := 1 TO ARRAYLEN(MemoryMappedFile) DO
+          TempIntegerFreeMemMapFile.INSERT;
+
+      IF NOT TempIntegerFreeMemMapFile.FINDFIRST THEN
+        EXIT(FALSE);
+
+      TempJobQueueEntry."Run in User Session" := TRUE; // used for flagging the existence of a memory mapped file
+      TempJobQueueEntry.MODIFY;
+
+      MemoryMappedFile[TempIntegerFreeMemMapFile.Number].CreateMemoryMappedFileFromTempBlob(TempBlob,FORMAT(TempJobQueueEntry.ID));
+      TempIntegerFreeMemMapFile.DELETE;
+      NoOfMemMappedFiles += 1;
+
+      StartNewSessions;
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE NewSessionRunCodeunit@3(CodeunitId@1000 : Integer;Parameter@1002 : Text;Priority@1001 : Integer) : Boolean;
+    BEGIN
+      IF NOT CreateNewJQEntry(CodeunitId,Parameter,Priority) THEN
+        EXIT(FALSE);
+      StartNewSessions;
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateNewJQEntry@11(CodeunitId@1000 : Integer;Parameter@1002 : Text;Priority@1001 : Integer) : Boolean;
+    BEGIN
+      NoOfJQEntries += 1;
+      TempJobQueueEntry.INIT;
+      TempJobQueueEntry.ID := CREATEGUID;
+      TempJobQueueEntry."Object Type to Run" :=
+        TempJobQueueEntry."Object Type to Run"::Codeunit;
+      TempJobQueueEntry."Object ID to Run" := CodeunitId;
+      TempJobQueueEntry.Priority := Priority;
+      TempJobQueueEntry."Parameter String" :=
+        COPYSTR(Parameter,1,MAXSTRLEN(TempJobQueueEntry."Parameter String"));
+      TempJobQueueEntry.INSERT;
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE NoOfActiveJobs@4() : Integer;
+    BEGIN
+      EXIT(NoOfJQEntries + NoOfActiveSessions);
+    END;
+
+    PROCEDURE WaitForAllToFinish@10(TimeOutInSeconds@1000 : Integer) : Boolean;
+    VAR
+      Window@1002 : Dialog;
+      T0@1001 : DateTime;
+    BEGIN
+      IF TimeOutInSeconds = 0 THEN
+        TimeOutInSeconds := 3600;
+      T0 := CURRENTDATETIME + 1000 * TimeOutInSeconds;
+      IF GUIALLOWED THEN
+        Window.OPEN(RemainingTasksMsg);
+      WHILE (NoOfJQEntries > 0) AND (CURRENTDATETIME < T0) DO BEGIN
+        IF GUIALLOWED THEN
+          Window.UPDATE(1,NoOfActiveJobs);
+        WaitForFreeSessions(TimeOutInSeconds,GetMaxNoOfSessions - 1);
+        StartNewSessions;
+      END;
+      IF GUIALLOWED THEN
+        Window.CLOSE;
+      EXIT(WaitForFreeSessions(TimeOutInSeconds,0));
+    END;
+
+    LOCAL PROCEDURE WaitForFreeSessions@13(TimeOutInSeconds@1001 : Integer;NoOfRemainingSessions@1000 : Integer) : Boolean;
+    BEGIN
+      IF TempInteger.ISEMPTY THEN
+        EXIT(TRUE);
+      IF TimeOutInSeconds = 0 THEN
+        TimeOutInSeconds := 3600;
+      RefreshActiveSessions;
+      WHILE (NoOfActiveSessions > NoOfRemainingSessions) AND (TimeOutInSeconds > 0) DO BEGIN
+        SLEEP(2000);
+        TimeOutInSeconds -= 2;
+        RefreshActiveSessions;
+      END;
+      EXIT(NoOfActiveSessions <= NoOfRemainingSessions);
+    END;
+
+    LOCAL PROCEDURE StartNewSessions@7();
+    BEGIN
+      RefreshActiveSessions;
+      IF NoOfActiveSessions >= GetMaxNoOfSessions THEN
+        EXIT;
+
+      TempJobQueueEntry.RESET;
+      TempJobQueueEntry.SETFILTER(Status,'<>%1',TempJobQueueEntry.Status::"In Process");
+      TempJobQueueEntry.SETCURRENTKEY(Priority);
+      IF TempJobQueueEntry.FINDSET THEN
+        REPEAT
+          TempInteger.INIT;
+          STARTSESSION(TempInteger.Number,TempJobQueueEntry."Object ID to Run",COMPANYNAME,TempJobQueueEntry);
+          TempInteger.INSERT;
+          TempJobQueueEntry.Status := TempJobQueueEntry.Status::"In Process";
+          TempJobQueueEntry."Timeout (sec.)" := TempInteger.Number; // Use the timeout field for storing session id.
+          TempJobQueueEntry.MODIFY;
+          NoOfActiveSessions += 1;
+          NoOfJQEntries -= 1;
+        UNTIL (TempJobQueueEntry.NEXT = 0) OR (NoOfActiveSessions >= GetMaxNoOfSessions);
+    END;
+
+    PROCEDURE RunHeartbeat@6();
+    BEGIN
+      StartNewSessions;
+    END;
+
+    LOCAL PROCEDURE RefreshActiveSessions@14();
+    VAR
+      i@1000 : Integer;
+      MemMappedFileFound@1001 : Boolean;
+    BEGIN
+      TempJobQueueEntry.RESET;
+      IF TempInteger.FINDSET THEN
+        REPEAT
+          IF NOT ActiveSession.GET(SERVICEINSTANCEID,TempInteger.Number) THEN BEGIN
+            TempInteger.DELETE;
+            NoOfActiveSessions -= 1;
+            TempJobQueueEntry.SETRANGE("Timeout (sec.)",TempInteger.Number);
+            IF TempJobQueueEntry.FINDFIRST THEN BEGIN
+              IF TempJobQueueEntry."Run in User Session" THEN BEGIN
+                i := 1;
+                MemMappedFileFound := FALSE;
+                WHILE (i < ARRAYLEN(MemoryMappedFile)) AND (NOT MemMappedFileFound) DO BEGIN
+                  IF NOT TempIntegerFreeMemMapFile.GET(i) THEN
+                    IF MemoryMappedFile[i].GetName = FORMAT(TempJobQueueEntry.ID) THEN BEGIN
+                      MemoryMappedFile[i].Dispose;
+                      TempIntegerFreeMemMapFile.Number := i;
+                      TempIntegerFreeMemMapFile.INSERT;
+                      NoOfMemMappedFiles -= 1;
+                    END;
+                  i += 1;
+                END;
+              END;
+              TempJobQueueEntry.DELETE;
+            END;
+          END;
+        UNTIL TempInteger.NEXT = 0;
+      TempJobQueueEntry.RESET;
+    END;
+
+    PROCEDURE GetMaxNoOfSessions@1() : Integer;
+    BEGIN
+      IF MaxNoOfSessions <= 0 THEN
+        SetMaxNoOfSessions(10);
+      EXIT(MaxNoOfSessions);
+    END;
+
+    PROCEDURE SetMaxNoOfSessions@5(NewMaxNoOfSessions@1000 : Integer);
+    BEGIN
+      MaxNoOfSessions := NewMaxNoOfSessions;
+      IF MaxNoOfSessions > ARRAYLEN(MemoryMappedFile) THEN
+        MaxNoOfSessions := ARRAYLEN(MemoryMappedFile);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

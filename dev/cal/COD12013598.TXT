@@ -1,0 +1,502 @@
+OBJECT Codeunit 12013598 ExFlow SE Mgt
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=EXF510000,SWEBASE,4PS,4PSSE;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text002@1100285001 : TextConst 'ENU=%1 %2 %3 does not exist.;SVE=%1 %2 %3 finns inte.';
+      Text003@1100285000 : TextConst 'ENU=%1 does not exist.;SVE=%1 finns inte.';
+
+    PROCEDURE InwardNav@1000000001(VAR PurchHead@1000000000 : Record 38);
+    VAR
+      ExFlowSetup@1100285000 : Record 12013601;
+    BEGIN
+      ExFlowSetup.GET;
+      IF (PurchHead."Document Type" <> PurchHead."Document Type"::Invoice) AND
+        (PurchHead."Document Type" <> PurchHead."Document Type"::"Credit Memo") THEN
+        EXIT;
+
+      IF (PurchHead."Document Type" = PurchHead."Document Type"::"Credit Memo") AND
+        (ExFlowSetup."Inward Applies to" <> ExFlowSetup."Inward Applies to"::"Invoices & Cre. Memos") THEN
+          EXIT;
+
+      IF ExFlowSetup."Automatic Reg. of Inwards" = ExFlowSetup."Automatic Reg. of Inwards"::"Values from Lines" THEN
+        InwardNavBasedOnLines(PurchHead);
+      IF ExFlowSetup."Automatic Reg. of Inwards" = ExFlowSetup."Automatic Reg. of Inwards"::"Values from Header" THEN
+        InwardNavBasedOnHeader(PurchHead,ExFlowSetup);
+    END;
+
+    PROCEDURE InwardNavBasedOnLines@1100285002(VAR PurchHead@1000000000 : Record 38);
+    VAR
+      PurchSetup@1100285009 : Record 312;
+      InwRegHeader@1100285000 : Record 11128010;
+      InwRegLines@1100285001 : Record 11128011;
+      PurchLine@1100285006 : Record 39;
+      Currency@1100285008 : Record 4;
+      GLSetup@1100285010 : Record 98;
+      cuInward@1100285002 : Codeunit 11128010;
+      PurchLineAmount@1100285003 : Decimal;
+      NewLineNo@1100285007 : Integer;
+      PostingNo@1100285005 : Code[20];
+      NoSeriesMgt@1100285004 : Codeunit 396;
+      VATPostingSetup@1100285011 : Record 325;
+    BEGIN
+      PurchLine.RESET;
+      PurchLine.SETRANGE("Document Type",PurchHead."Document Type");
+      PurchLine.SETRANGE("Document No.",PurchHead."No.");
+      PurchLine.SETFILTER(Type,'<>0');
+      PurchLine.SETFILTER("No.",'<>%1','');
+      IF PurchLine.FIND('-') THEN
+        BEGIN
+          PurchHead.TESTFIELD("Buy-from Vendor No.");
+          PurchHead.TESTFIELD("Pay-to Vendor No.");
+          PurchHead.TESTFIELD("VAT Bus. Posting Group");
+          PurchHead.TESTFIELD("Gen. Bus. Posting Group");
+
+          PurchSetup.GET;
+
+          //>> SWEBASE
+          IF (PurchHead."Posting No." = '') AND
+             (PurchHead."No. Series" <> PurchHead."Posting No. Series") THEN BEGIN
+            PurchHead."Posting No." := NoSeriesMgt.GetNextNo(PurchHead."Posting No. Series",PurchHead."Posting Date",TRUE);
+            PurchHead.MODIFY;
+          END;
+          IF PurchHead."Posting No." <> '' THEN
+            PostingNo := PurchHead."Posting No."
+          ELSE
+            PostingNo := PurchHead."No.";
+          //<< SWEBASE
+
+          InwRegHeader.INIT;
+          InwRegHeader."Document Type"           := PurchHead."Document Type";
+          InwRegHeader."Document No."            := PurchHead."No.";
+          InwRegHeader."No."                     := PurchHead."No.";
+          InwRegHeader.Responsible               := PurchHead."Purchaser Code";
+          InwRegHeader."VAT Bus. Posting Group"  := PurchHead."VAT Bus. Posting Group";
+          InwRegHeader."Vendor Posting Group"    := PurchHead."Vendor Posting Group";
+          InwRegHeader."Gen. Bus. Posting Group" := PurchHead."Gen. Bus. Posting Group";
+          InwRegHeader."Posting Date"            := PurchHead."Posting Date";
+          IF FORMAT(PurchSetup."Latest Return Date Calc.") <> '' THEN
+            InwRegHeader."Latest Return"           := CALCDATE(PurchSetup."Latest Return Date Calc.",TODAY)
+          ELSE
+            InwRegHeader."Latest Return"           := CALCDATE('<-1D>', PurchHead."Due Date");
+
+          InwRegHeader."Currency Code"           := PurchHead."Currency Code";
+          InwRegHeader."Currency Factor"         := PurchHead."Currency Factor";
+          InwRegHeader."Dimension Set ID"        := PurchHead."Dimension Set ID";
+          IF PurchHead."Document Type" = PurchHead."Document Type"::Invoice THEN
+            InwRegHeader.VALIDATE("Vendor Invoice No.", PurchHead."Vendor Invoice No.")
+          ELSE
+            InwRegHeader.VALIDATE("Vendor Invoice No.", PurchHead."Vendor Cr. Memo No.");
+
+          OnBeforeInsertInwardHead(InwRegHeader,PurchHead); //191128
+
+          InwRegHeader.INSERT;
+
+
+          //>> SWEBASE
+          //InwRegHeader."Posting No." := PostingNo;
+          //InwRegHeader."Due Date" := PurchHead."Due Date";
+          //InwRegHeader."Document Date" := PurchHead."Document Date";
+          //InwRegHeader."Amount to Pay" := PurchHead."Gross Invoice Amount ExFlow";
+          //InwRegHeader."Of which VAT" := PurchHead."Import VAT Amount";
+
+          //IF (InwRegHeader."Amount to Pay" - InwRegHeader."Of which VAT") <> 0 THEN
+          //  InwRegHeader."VAT %" := ROUND(InwRegHeader."Of which VAT" /
+          //    (InwRegHeader."Amount to Pay" - InwRegHeader."Of which VAT") * 100,0.00001)
+          //ELSE
+          //  InwRegHeader."VAT %" := 100;
+
+          IF PurchHead."Document Type" = PurchHead."Document Type"::Invoice THEN
+            InwRegHeader."Vendor Invoice No." := PurchHead."Vendor Invoice No.";
+          IF PurchHead."Document Type" = PurchHead."Document Type"::"Credit Memo" THEN
+            InwRegHeader."Vendor Invoice No." := PurchHead."Vendor Cr. Memo No.";
+
+          InwRegHeader.MODIFY;
+          //<< SWEBASE
+
+          InwRegHeader.CALCFIELDS("Vendor No.");
+          InwRegHeader.CALCFIELDS("Vendor Name");
+
+          IF PurchHead."Currency Code" = '' THEN
+            Currency.InitRoundingPrecision
+          ELSE
+            Currency.GET(PurchHead."Currency Code");
+
+          NewLineNo := 0;
+
+          GLSetup.GET;
+
+          REPEAT
+            InwRegLines.SETCURRENTKEY("Document No.","VAT Prod. Posting Group","Gen. Prod. Posting Group");
+            InwRegLines.SETRANGE("Document No.", PurchHead."No.");
+            InwRegLines.SETRANGE("VAT Prod. Posting Group", PurchLine."VAT Prod. Posting Group");
+            InwRegLines.SETRANGE("Gen. Prod. Posting Group", PurchLine."Gen. Prod. Posting Group");
+
+            IF (NOT PurchSetup."Accumulated Inward Reg. Lines") OR (NOT InwRegLines.FIND('-')) THEN BEGIN
+              NewLineNo                 := NewLineNo + 10000;
+              InwRegLines.INIT;
+              InwRegLines."Document No.":= InwRegHeader."No.";
+              InwRegLines."Line No."    := NewLineNo;
+              IF PurchSetup."Accumulated Inward Reg. Lines" THEN
+                InwRegLines.INSERT(TRUE) // InwHead dimensions to the new line
+              ELSE
+                IF PurchSetup."Copy Dimensions to Inward Reg."  THEN
+                   InwRegLines.INSERT  // Dimensions is copied later from purchaseline
+                ELSE
+                   InwRegLines.INSERT(TRUE); // InwHead dimensions to the new line
+              InwRegLines.GET(InwRegLines."Document No.", InwRegLines."Line No.");
+            END;
+
+           IF VATPostingSetup.GET(InwRegHeader."VAT Bus. Posting Group",PurchLine."VAT Prod. Posting Group") THEN;
+
+           IF (PurchHead."Prices Including VAT") AND (VATPostingSetup."VAT Calculation Type" <> VATPostingSetup."VAT Calculation Type"::"Full VAT") THEN BEGIN
+               PurchLineAmount := PurchLine."Line Amount" / (1 + (PurchLine."VAT %" / 100));
+               PurchLineAmount := ROUND(PurchLineAmount,Currency."Amount Rounding Precision" );
+             END ELSE
+               PurchLineAmount := PurchLine."Line Amount";
+
+            InwRegLines."Gen. Prod. Posting Group" := PurchLine."Gen. Prod. Posting Group";
+            InwRegLines.VALIDATE("VAT Prod. Posting Group", PurchLine."VAT Prod. Posting Group");
+            InwRegLines.VALIDATE(Amount,InwRegLines.Amount+PurchLineAmount);
+            InwRegLines."Dimension Set ID" := PurchLine."Dimension Set ID";
+            InwRegLines."Shortcut Dimension 1 Code" := PurchLine."Shortcut Dimension 1 Code";
+            InwRegLines."Shortcut Dimension 2 Code" := PurchLine."Shortcut Dimension 2 Code";
+            InwRegLines.MODIFY;
+          UNTIL PurchLine.NEXT=0;
+
+          // Post
+          CLEAR(cuInward);
+          cuInward.RUN(InwRegHeader);
+          CLEAR(cuInward);
+        END;
+    END;
+
+    PROCEDURE InwardNavBasedOnHeader@1100285004(VAR PurchHead@1000000000 : Record 38;ExFlowSetup@1100285011 : Record 12013601);
+    VAR
+      PurchSetup@1100285009 : Record 312;
+      InwRegHeader@1100285000 : Record 11128010;
+      InwRegLines@1100285001 : Record 11128011;
+      PurchLine@1100285006 : Record 39;
+      Currency@1100285008 : Record 4;
+      GLSetup@1100285010 : Record 98;
+      cuInward@1100285002 : Codeunit 11128010;
+      PurchLineAmount@1100285003 : Decimal;
+      NewLineNo@1100285007 : Integer;
+      PostingNo@1100285005 : Code[20];
+      NoSeriesMgt@1100285004 : Codeunit 396;
+    BEGIN
+      IF (PurchHead."Gross Invoice Amount ExFlow" = 0) AND
+         (PurchHead."Import VAT Amount" = 0) THEN
+        EXIT;
+
+      PurchHead.TESTFIELD("Buy-from Vendor No.");
+      PurchHead.TESTFIELD("Pay-to Vendor No.");
+      PurchHead.TESTFIELD("VAT Bus. Posting Group");
+      PurchHead.TESTFIELD("Gen. Bus. Posting Group");
+
+      PurchSetup.GET;
+
+      //>> SWEBASE
+      IF (PurchHead."Posting No." = '') AND
+          (PurchHead."No. Series" <> PurchHead."Posting No. Series") THEN BEGIN
+        PurchHead."Posting No." := NoSeriesMgt.GetNextNo(PurchHead."Posting No. Series",PurchHead."Posting Date",TRUE);
+        PurchHead.MODIFY;
+      END;
+      IF PurchHead."Posting No." <> '' THEN
+        PostingNo := PurchHead."Posting No."
+      ELSE
+        PostingNo := PurchHead."No.";
+      //<< SWEBASE
+
+      InwRegHeader.INIT;
+      InwRegHeader."Document Type"           := PurchHead."Document Type";
+      InwRegHeader."Document No."            := PurchHead."No.";
+      InwRegHeader."No."                     := PurchHead."No.";
+      InwRegHeader.Responsible               := PurchHead."Purchaser Code";
+      InwRegHeader."VAT Bus. Posting Group"  := PurchHead."VAT Bus. Posting Group";
+      InwRegHeader."Vendor Posting Group"    := PurchHead."Vendor Posting Group";
+      InwRegHeader."Gen. Bus. Posting Group" := PurchHead."Gen. Bus. Posting Group";
+      InwRegHeader."Posting Date"            := PurchHead."Posting Date";
+      IF FORMAT(PurchSetup."Latest Return Date Calc.") <> '' THEN
+        InwRegHeader."Latest Return"           := CALCDATE(PurchSetup."Latest Return Date Calc.",TODAY)
+      ELSE
+        InwRegHeader."Latest Return"           := CALCDATE('<-1D>', PurchHead."Due Date");
+
+      InwRegHeader."Currency Code"           := PurchHead."Currency Code";
+      InwRegHeader."Currency Factor"         := PurchHead."Currency Factor";
+      InwRegHeader."Dimension Set ID"        := PurchHead."Dimension Set ID";
+      IF PurchHead."Document Type" = PurchHead."Document Type"::Invoice THEN
+        InwRegHeader.VALIDATE("Vendor Invoice No.", PurchHead."Vendor Invoice No.")
+      ELSE
+        InwRegHeader.VALIDATE("Vendor Invoice No.", PurchHead."Vendor Cr. Memo No.");
+
+          OnBeforeInsertInwardHead(InwRegHeader,PurchHead); //191128
+
+      InwRegHeader.INSERT;
+
+      //>> SWEBASE
+      //InwRegHeader."Posting No." := PostingNo;
+      //InwRegHeader."Due Date" := PurchHead."Due Date";
+      //InwRegHeader."Document Date" := PurchHead."Document Date";
+      //InwRegHeader."Amount to Pay" := PurchHead."Gross Invoice Amount ExFlow";
+      //InwRegHeader."Of which VAT" := PurchHead."Import VAT Amount";
+
+      //IF (InwRegHeader."Amount to Pay" - InwRegHeader."Of which VAT") <> 0 THEN
+      //  InwRegHeader."VAT %" := ROUND(InwRegHeader."Of which VAT" /
+      //    (InwRegHeader."Amount to Pay" - InwRegHeader."Of which VAT") * 100,0.00001)
+      //ELSE
+      //  InwRegHeader."VAT %" := 100;
+
+      //IF PurchHead."Document Type" = PurchHead."Document Type"::Invoice THEN
+      //  InwRegHeader."Vendor Invoice No." := PurchHead."Vendor Invoice No.";
+      //IF PurchHead."Document Type" = PurchHead."Document Type"::"Credit Memo" THEN
+      //  InwRegHeader."Vendor Invoice No." := PurchHead."Vendor Cr. Memo No.";
+
+      //InwRegHeader.MODIFY;
+      //<< SWEBASE
+
+      InwRegHeader.CALCFIELDS("Vendor No.");
+      InwRegHeader.CALCFIELDS("Vendor Name");
+
+      IF PurchHead."Currency Code" = '' THEN
+        Currency.InitRoundingPrecision
+      ELSE
+        Currency.GET(PurchHead."Currency Code");
+
+      NewLineNo := 0;
+
+      GLSetup.GET;
+
+      // Net Value
+      PurchLineAmount := PurchHead."Gross Invoice Amount ExFlow" - PurchHead."Import VAT Amount";
+      IF PurchLineAmount <> 0 THEN BEGIN
+        NewLineNo                 := NewLineNo + 10000;
+        InwRegLines.INIT;
+        InwRegLines."Document No.":= InwRegHeader."No.";
+        InwRegLines."Line No."    := NewLineNo;
+        IF PurchSetup."Accumulated Inward Reg. Lines" THEN
+          InwRegLines.INSERT(TRUE) // InwHead dimensions to the new line
+        ELSE
+          IF PurchSetup."Copy Dimensions to Inward Reg."  THEN
+              InwRegLines.INSERT  // Dimensions is copied later from purchaseline
+          ELSE
+              InwRegLines.INSERT(TRUE); // InwHead dimensions to the new line
+        InwRegLines.GET(InwRegLines."Document No.", InwRegLines."Line No.");
+
+        InwRegLines.VALIDATE("Gen. Prod. Posting Group", ExFlowSetup."Inward Reg. Prod. Post Gr 0%");
+        InwRegLines.VALIDATE("VAT Prod. Posting Group", ExFlowSetup."VAT Prod. Posting Group 0%");
+        InwRegLines.VALIDATE(Amount,PurchLineAmount);
+        InwRegLines."Dimension Set ID" := PurchHead."Dimension Set ID";
+        InwRegLines."Shortcut Dimension 1 Code" := PurchHead."Shortcut Dimension 1 Code";
+        InwRegLines."Shortcut Dimension 2 Code" := PurchHead."Shortcut Dimension 2 Code";
+        InwRegLines.MODIFY;
+      END;
+
+      // VAT Value
+      PurchLineAmount := PurchHead."Import VAT Amount";
+      IF PurchLineAmount <> 0 THEN BEGIN
+        NewLineNo                 := NewLineNo + 10000;
+        InwRegLines.INIT;
+        InwRegLines."Document No.":= InwRegHeader."No.";
+        InwRegLines."Line No."    := NewLineNo;
+        IF PurchSetup."Accumulated Inward Reg. Lines" THEN
+          InwRegLines.INSERT(TRUE) // InwHead dimensions to the new line
+        ELSE
+          IF PurchSetup."Copy Dimensions to Inward Reg."  THEN
+              InwRegLines.INSERT  // Dimensions is copied later from purchaseline
+          ELSE
+              InwRegLines.INSERT(TRUE); // InwHead dimensions to the new line
+        InwRegLines.GET(InwRegLines."Document No.", InwRegLines."Line No.");
+
+        InwRegLines.VALIDATE("Gen. Prod. Posting Group", ExFlowSetup."Inward Reg. Prod. Post Gr 100%");
+        InwRegLines.VALIDATE("VAT Prod. Posting Group", ExFlowSetup."VAT Prod. Posting Group 100%");
+        InwRegLines.VALIDATE(Amount,PurchLineAmount);
+        InwRegLines."Dimension Set ID" := PurchHead."Dimension Set ID";
+        InwRegLines."Shortcut Dimension 1 Code" := PurchHead."Shortcut Dimension 1 Code";
+        InwRegLines."Shortcut Dimension 2 Code" := PurchHead."Shortcut Dimension 2 Code";
+        InwRegLines.MODIFY;
+      END;
+
+      // Post
+      CLEAR(cuInward);
+      cuInward.RUN(InwRegHeader);
+      CLEAR(cuInward);
+    END;
+
+    PROCEDURE TestInwSetup@1100285001(ExFPurchLine@1100285000 : Record 12013588);
+    VAR
+      GenPostingSetup@1100285001 : Record 252;
+    BEGIN
+      IF ExFPurchLine.Type = 0 THEN
+        EXIT;
+      IF ExFPurchLine."No." = '' THEN
+        EXIT;
+
+      GenPostingSetup.RESET;
+      GenPostingSetup.SETRANGE("Gen. Bus. Posting Group",ExFPurchLine."Gen. Bus. Posting Group");
+      GenPostingSetup.SETRANGE("Gen. Prod. Posting Group",ExFPurchLine."Gen. Prod. Posting Group");
+      IF NOT GenPostingSetup.FINDFIRST THEN
+        ERROR(Text002,GenPostingSetup.TABLECAPTION,ExFPurchLine.FIELDCAPTION("Gen. Bus. Posting Group"),
+              ExFPurchLine.FIELDCAPTION("Gen. Prod. Posting Group"));
+
+      IF GenPostingSetup."Inward Reg. Bridging Account" = '' THEN
+        ERROR(Text003,GenPostingSetup.FIELDCAPTION("Inward Reg. Bridging Account"));
+    END;
+
+    PROCEDURE PurchHeaderUpdateInw@1100285006(VAR PurchHeader@1100285000 : Record 38);
+    BEGIN
+      PurchHeader.UpdateInwardHeader;
+    END;
+
+    PROCEDURE PurchHeaderDeleteInw@1100285007(VAR PurchHeader@1100285000 : Record 38);
+    BEGIN
+      PurchHeader.DeleteInwardHeader;
+    END;
+
+    PROCEDURE AddAddAccGroup@1100285003(VAR ExPurchaseDocLine@1100285000 : Record 12013588;GLAcc@1100285001 : Record 15);
+    BEGIN
+      ExPurchaseDocLine."Auto. Acc. Group" := GLAcc."Auto. Acc. Group";
+    END;
+
+    PROCEDURE UpdateAccGroup@1100285008(VAR NewPurchLine@1100285000 : Record 39;OldPurchLine@1100285001 : Record 39);
+    VAR
+      GlAcc@1100285002 : Record 15;
+    BEGIN
+      IF GlAcc.GET(OldPurchLine."No.") THEN
+        IF OldPurchLine."Auto. Acc. Group" <> GlAcc."Auto. Acc. Group" THEN
+          IF NewPurchLine."Auto. Acc. Group" <> OldPurchLine."Auto. Acc. Group" THEN
+            NewPurchLine.VALIDATE("Auto. Acc. Group", OldPurchLine."Auto. Acc. Group");
+    END;
+
+    PROCEDURE UpdateSWEBASE@1100285009(VAR PurchHeader@1100285000 : Record 38);
+    BEGIN
+      // Code required for SWEBASE integration
+
+      //PurchHeader."Gross Invoice Amount" := PurchHeader."Gross Invoice Amount ExFlow";
+      //PurchHeader.MODIFY;
+    END;
+
+    PROCEDURE UpdateSWEBASEOrExF@1100285010(VAR PurchHeader@1100285003 : Record 38);
+    VAR
+      PurchHeader2@1100285000 : Record 38;
+    BEGIN
+      // Code required for SWEBASE integration
+
+      //PurchHeader2.GET(PurchHeader."Document Type",PurchHeader."No.");
+      //IF PurchHeader2."Gross Invoice Amount ExFlow" <> PurchHeader."Gross Invoice Amount ExFlow" THEN
+      //  UpdateSWEBASE(PurchHeader)
+      //ELSE
+      //  IF PurchHeader2."Gross Invoice Amount" <> PurchHeader."Gross Invoice Amount" THEN
+      //    UpdateExFlowGross(PurchHeader);
+    END;
+
+    PROCEDURE UpdateExFlowGross@1100285014(VAR PurchHeader@1100285000 : Record 38);
+    BEGIN
+      // Code required for SWEBASE integration
+
+      //PurchHeader."Gross Invoice Amount ExFlow" := PurchHeader."Gross Invoice Amount";
+      //PurchHeader.MODIFY;
+    END;
+
+    PROCEDURE UpdateCustomizedFields@1100285012(VAR PurchHeader@1100285000 : Record 38;PurchImportHeader@1100285001 : Record 12013587);
+    VAR
+      Object@1100285002 : Record 2000000001;
+      FldRef@1100285003 : FieldRef;
+      RecRef@1100285004 : RecordRef;
+    BEGIN
+      // Norwegian localisation, KIDnr
+      Object.RESET;
+      Object.SETRANGE(Type, Object.Type::Table);
+      Object.SETRANGE(ID, 15000000);
+      IF Object.FINDFIRST THEN BEGIN
+        RecRef.GETTABLE(PurchHeader);
+        FldRef := RecRef.FIELD(15000000);
+        FldRef.VALIDATE(PurchImportHeader."Vendor Document No. 2");
+        RecRef.SETTABLE(PurchHeader);
+      END;
+
+      // SWEBASE, "OCR No."
+      Object.RESET;
+      Object.SETRANGE(Type, Object.Type::Table);
+      Object.SETRANGE(ID, 12047973);
+      IF Object.FINDFIRST THEN BEGIN
+        RecRef.GETTABLE(PurchHeader);
+        FldRef := RecRef.FIELD(12047961);
+        FldRef.VALIDATE(PurchImportHeader."Vendor Document No. 2");
+        RecRef.SETTABLE(PurchHeader);
+      END;
+    END;
+
+    PROCEDURE CheckNoDuplicateControl@1100285011(Vendor@1100285000 : Record 23) : Boolean;
+    BEGIN
+      IF Vendor."No control of Ext. Doc. No." THEN
+        EXIT(TRUE);
+
+      IF Vendor."Do not check Duplicate Invoice" THEN
+        EXIT(TRUE);
+
+      EXIT(FALSE);
+    END;
+
+    PROCEDURE GetInwardImageName@1100285040(DocType@1100285002 : Integer;DocNo@1100285000 : Code[20];VAR ExDoc2@1100285001 : Record 12013612) : Text[250];
+    VAR
+      ExFlowSeFunc@1100285004 : Codeunit 12013598;
+      InwardRegEntry@1100285005 : Record 11128012;
+    BEGIN
+      InwardRegEntry.RESET;
+      InwardRegEntry.SETRANGE("Source Type",DocType);
+      InwardRegEntry.SETRANGE("Document No.",DocNo);
+      IF InwardRegEntry.FINDFIRST THEN BEGIN
+        ExDoc2.RESET;
+        ExDoc2.SETCURRENTKEY("Document No.");
+
+        CASE DocType OF
+          2: ExDoc2.SETRANGE("Document Type", ExDoc2."Document Type"::Invoice);
+          3: ExDoc2.SETRANGE("Document Type", ExDoc2."Document Type"::"Credit Memo");
+        END;
+        ExDoc2.SETRANGE("Document No.", InwardRegEntry."Source No.");
+        IF ExDoc2.FINDFIRST THEN
+          EXIT(ExDoc2."Image Name")
+        ELSE BEGIN
+          EXIT('');
+        END;
+      END;
+      EXIT('');
+    END;
+
+    PROCEDURE FilterPurchInvLineOnChargeType@1100285027(VAR PurchInvLine@1100285000 : Record 123);
+    BEGIN
+      PurchInvLine.SETRANGE("Charge Type",0);  //SWEBASE
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeInsertInwardHead@1000000000(VAR Rec@1000000000 : Record 11128010;PurchHead@1000000001 : Record 38);
+    BEGIN
+    END;
+
+    BEGIN
+    {
+      This codeunit exist in 3 versions
+      SWEBASE - Swedish with SWEBASE Addon
+      SE      - SE Swedish NAV
+      BLANK   - Other NAV. (all functions should be empty)
+      This is the SWEBASE version
+      4PS - SWEBASE CU used with mod for missing swebas fields
+      191128 #26301 ORANGO.PR Event - OnBeforeInsertInwardHead
+    }
+    END.
+  }
+}
+

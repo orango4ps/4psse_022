@@ -1,0 +1,560 @@
+OBJECT Report 72140 MenuSuite Node Import
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=MenuSuiteAnalyser_1.02;
+  }
+  PROPERTIES
+  {
+    CaptionML=ENU=MenuSuite Import;
+    ProcessingOnly=Yes;
+    OnPreReport=VAR
+                  lMenuSuiteNode@1000 : Record 72140;
+                  lMenuSuiteNodeChanging@1001 : Record 72142;
+                BEGIN
+                  CR := 13;
+                  LF := 10;
+                  TAB := 9;
+                  IF ImportOptions <> ImportOptions::"Clear before Import" THEN
+                    IF lMenuSuiteNodeChanging.FINDSET THEN
+                      REPEAT
+                        TempMenuSuiteNodeChanging := lMenuSuiteNodeChanging;
+                        TempMenuSuiteNodeChanging.INSERT;
+                      UNTIL lMenuSuiteNodeChanging.NEXT = 0;
+
+                  lMenuSuiteNode.DELETEALL;
+                  lMenuSuiteNodeChanging.DELETEALL;
+                END;
+
+    OnPostReport=VAR
+                   FileManagement@1101285000 : Codeunit 419;
+                 BEGIN
+                   FileName := FileManagement.UploadFileSilent(FileName);
+
+
+                   CurrFile.TEXTMODE(FALSE);
+                   CurrFile.WRITEMODE(FALSE);
+                   CurrFile.OPEN(FileName);
+
+                   Progress.OPEN(tProgress);
+
+                   SyntaxAnalyser;
+
+                   Progress.CLOSE();
+                   CurrFile.CLOSE;
+
+                   MergeMenuSuiteNodeChanging;
+                 END;
+
+  }
+  DATASET
+  {
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      SaveValues=Yes;
+    }
+    CONTROLS
+    {
+      { 1101285000;;Container;
+                  ContainerType=ContentArea }
+
+      { 1101285001;1;Group  ;
+                  GroupType=Group }
+
+      { 1   ;2   ;Field     ;
+                  SourceExpr=FileName;
+                  OnAssistEdit=VAR
+                                 CommonDialogMgt@1101285000 : Codeunit 419;
+                                 DirectoryNameWithBackSlash@1101285001 : Text;
+                                 ShortFileName@1101285002 : Text;
+                               BEGIN
+                                 //FileName := CommonDialogMgt.OpenFile('',FileName,1,'',0);
+                                 FileName := CommonDialogMgt.OpenFileDialog('',FileName,'');
+                               END;
+                                }
+
+      { 1101285003;2;Field  ;
+                  SourceExpr=ImportOptions }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      FileName@1000 : Text[250];
+      ImportOptions@1001 : 'Clear before Import,Replace Exist,Import only New';
+      tUnexpectedEOF@1002 : TextConst 'ENU=Unexpected End Of File';
+      tUnexpected@1003 : TextConst 'ENU=%1 unexpected line %2 position %3.';
+      CurrFile@1004 : File;
+      CR@1005 : Char;
+      LF@1006 : Char;
+      TAB@1007 : Char;
+      LineNo@1008 : Integer;
+      LinePos@1009 : Integer;
+      c@1010 : Char;
+      tExpected@1011 : TextConst 'ENU=%1 was expected line %2 position %3.';
+      Token@1012 : Text[250];
+      gLineNo@1013 : Integer;
+      Progress@1014 : Dialog;
+      tProgress@1015 : TextConst 'ENU=#1############################\@2@@@@@@@@@@@@@@@@@@@@@@@@@@@@';
+      MenuSuiteLineNo@1016 : Integer;
+      TempMenuSuiteNodeChanging@1017 : TEMPORARY Record 72142;
+      TempNewMenuSuiteNodeChanging@1018 : TEMPORARY Record 72142;
+
+    LOCAL PROCEDURE SyntaxAnalyser@1();
+    VAR
+      lObject@1000 : Record 2000000001;
+    BEGIN
+      LineNo := 1;
+      GetChar(c);
+      WHILE GetToken(' ') = 'OBJECT' DO BEGIN
+        IF NOT EVALUATE(lObject.Type,GetToken(' ')) THEN
+          Unexpected(Token);
+        EVALUATE(lObject.ID,GetToken(' '));
+        lObject.Name := GetToken('');
+        Progress.UPDATE(1,FORMAT(lObject.Type) + ' ' + lObject.Name);
+
+        CASE lObject.Type OF
+          lObject.Type::Table,
+          lObject.Type::Page,
+          lObject.Type::Report,
+          lObject.Type::XMLport :
+            SkipObject;
+          lObject.Type::MenuSuite :
+            MenuSuiteObject(lObject);
+          END;
+      END;
+    END;
+
+    LOCAL PROCEDURE SkipObject@2();
+    VAR
+      lLevel@1000 : Integer;
+    BEGIN
+      GetToken('{');
+      REPEAT
+        GetChar(c);
+        IF c = '{' THEN
+          lLevel += 1;
+        IF c = '}' THEN
+          lLevel -= 1;
+      UNTIL (CurrFile.POS = CurrFile.LEN) OR (c = '}') AND (lLevel = 0);
+      Expected('}');
+    END;
+
+    LOCAL PROCEDURE MenuSuiteObject@3(pObject@1000 : Record 2000000001);
+    VAR
+      lDummy@1001 : Text[250];
+    BEGIN
+      IF NOT CheckImportOptions(pObject) THEN BEGIN
+        SkipObject();
+        EXIT;
+      END;
+      MenuSuiteLineNo := 1;
+      GetToken('{');
+      GetToken('OBJECT-PROPERTIES');
+      GetToken('{');
+      WHILE GetToken('') <> '}' DO BEGIN
+        CASE Token OF
+          pObject.FIELDNAME(Date):
+            lDummy := GetProperty('');
+          pObject.FIELDNAME(Time):
+            lDummy := GetProperty('');
+          pObject.FIELDNAME(Modified):
+            lDummy := GetProperty('');
+          pObject.FIELDNAME("Version List"):
+            lDummy := GetProperty('');
+          ELSE
+            Unexpected(Token);
+        END;
+        IF lDummy <> ';' THEN
+          GetToken(';');
+      END;
+
+      GetToken('PROPERTIES');
+      GetToken('{');
+      WHILE GetToken('') <> '}' DO;
+
+      GetToken('MENUNODES');
+      GetToken('{');
+      WHILE GetToken('') <> '}' DO
+        GetMenuSuiteNode(pObject);
+
+      GetToken('}');
+    END;
+
+    LOCAL PROCEDURE GetMenuSuiteNode@4(VAR pObject@1000 : Record 2000000001);
+    VAR
+      lObject@1001 : Record 2000000001;
+      lDummy@1002 : Text;
+      lNodeTypeIsNull@1003 : Boolean;
+    BEGIN
+      Expected('{');
+      WITH TempNewMenuSuiteNodeChanging DO BEGIN
+        INIT;
+        "MenuSuite ID" := pObject.ID;
+        IF GetToken('') <> ';' THEN
+          IF NOT EVALUATE("Node Type",Token) THEN
+            Unexpected(Token);
+        IF Token <> ';' THEN
+          GetToken(';');
+        GetNodeID("Node ID");
+        WHILE GetToken('') <> '}' DO BEGIN
+          Expected(';');
+          CASE GetToken('') OF
+            'Name' :
+              Name := GetProperty('');
+            'CaptionML' :
+              GetCaptionML;
+            'MemberOfMenu' :
+              GetNodeProperty("Member of Menu");
+            'RunObjectType' :
+              IF NOT EVALUATE(lObject.Type,GetProperty('')) THEN
+                Unexpected(Token)
+              ELSE
+                xObjectType := FORMAT(lObject.Type,0,'<Number>');
+            'RunObjectID' :
+              "xObject ID" := GetProperty('');
+            'ParentNodeID' :
+              GetNodeProperty("Parent Node ID");
+            'Visible' :
+              xVisible := GetProperty('');
+            'Enabled' :
+              xEnabled := GetProperty('');
+            'NextNodeID' :
+              GetNodeProperty("Next Node ID");
+            'FirstChild' :
+              GetNodeProperty("First Child");
+            'Image' :
+              Image := GetProperty('');
+            'IsShortcut' :
+              "xIs Shortcut" := GetProperty('');
+            'Deleted' :
+              xDeleted := GetProperty('');
+            'VisibleInDesign' :
+              lDummy := GetProperty('');
+
+            'DepartmentCategory':
+              DepartmentCategory := GetProperty('');
+            'IsDepartmentPage':
+              IsDepartmentPage := GetProperty('');
+            'ApplicationArea':
+              lDummy := GetProperty('');
+            'AccessByPermission':
+              lDummy := GetProperty('=');
+            ELSE
+              Unexpected(Token);
+          END;
+        END;
+        TempNewMenuSuiteNodeChanging."MenuSuite Line No." := MenuSuiteLineNo;
+        InsertMenuSuiteNodeChanging(TempNewMenuSuiteNodeChanging);
+      END;
+    END;
+
+    LOCAL PROCEDURE GetNodeID@5(VAR pNodeID@1000 : Code[40]);
+    BEGIN
+      GetToken('[');
+      GetToken('{');
+      pNodeID := GetToken('');
+      GetToken('}');
+      GetToken(']');
+    END;
+
+    LOCAL PROCEDURE GetProperty@6(skipToken@1101285000 : Text[2]) : Text[250];
+    VAR
+      lToken@1000 : Text[250];
+    BEGIN
+      GetToken('=');
+      lToken := GetToken('!!!'+skipToken+'!!!');
+      IF lToken = '[' THEN BEGIN
+        lToken := GetToken('');
+        GetToken(']');
+      END ELSE IF lToken = '"' THEN BEGIN
+        lToken := GetToken('');
+        GetToken('"');
+      END;
+      EXIT(lToken);
+    END;
+
+    LOCAL PROCEDURE GetNodeProperty@7(VAR pNodeID@1000 : Code[40]);
+    BEGIN
+      GetToken('=');
+      GetNodeID(pNodeID);
+    END;
+
+    LOCAL PROCEDURE GetCaptionML@8();
+    BEGIN
+      GetToken('=');
+      IF GetToken('') = '[' THEN BEGIN
+        REPEAT
+          GetCaptionLanguage(GetToken(''));
+        UNTIL GetToken('') <> ';';
+        Expected(']');
+      END ELSE
+        GetCaptionLanguage(Token);
+    END;
+
+    LOCAL PROCEDURE GetCaptionLanguage@9(pLanguageCode@1000 : Code[10]);
+    VAR
+      lWindowsLanguage@1001 : Record 2000000045;
+      lMenuSuiteNodeChanging@1002 : TEMPORARY Record 72142;
+    BEGIN
+      lMenuSuiteNodeChanging := TempNewMenuSuiteNodeChanging;
+      WITH TempNewMenuSuiteNodeChanging DO BEGIN
+        lWindowsLanguage.SETRANGE("Abbreviated Name",pLanguageCode);
+        lWindowsLanguage.FIND('-');
+        INIT;
+        "Node ID" := lMenuSuiteNodeChanging."Node ID";
+        "MenuSuite ID" := lMenuSuiteNodeChanging."MenuSuite ID";
+        "MenuSuite Line No." := MenuSuiteLineNo;
+        "Language ID" := lWindowsLanguage."Language ID";
+        CaptionML := GetProperty('');
+        InsertMenuSuiteNodeChanging(TempNewMenuSuiteNodeChanging);
+      END;
+      TempNewMenuSuiteNodeChanging := lMenuSuiteNodeChanging;
+    END;
+
+    LOCAL PROCEDURE GetToken@10(pExpected@1000 : Text[30]) Return : Text[250];
+    VAR
+      i@1001 : Integer;
+      lSpaceStop@1002 : Boolean;
+      "skip="@1101285000 : Boolean;
+      foundSkip@1101285001 : Boolean;
+    BEGIN
+      IF pExpected = '!!!!!!' THEN
+        pExpected := '';
+
+      "skip=" := FALSE;
+      IF pExpected = '!!!=!!!' THEN BEGIN
+        pExpected := '';
+        "skip=" := TRUE;
+      END;
+
+      IF pExpected <> '' THEN BEGIN
+        lSpaceStop := pExpected[STRLEN(pExpected)] = ' ';
+        pExpected := DELCHR(pExpected,'>');
+      END;
+
+      WHILE (c IN  [' ',CR,LF]) AND (CurrFile.POS < CurrFile.LEN) DO
+        GetChar(c);
+
+      IF CurrFile.POS = CurrFile.LEN THEN
+        BEGIN END
+      ELSE IF c IN ['{','}','[',']','=',';'] THEN BEGIN
+        Return[1] := c;
+        GetChar(c);
+      END ELSE BEGIN
+        REPEAT
+          i += 1;
+          Return[i] := c;
+          GetChar(c);
+          IF NOT "skip=" THEN foundSkip := (c = '=') ELSE foundSkip := FALSE;
+        //UNTIL (CurrFile.POS > CurrFile.LEN) OR (c IN [CR,LF,TAB,'{','}','[',']','=',';']) OR (c = ' ') AND lSpaceStop;
+        UNTIL (CurrFile.POS > CurrFile.LEN) OR (c IN [CR,LF,TAB,'{','}','[',']',';']) OR foundSkip OR (c = ' ') AND lSpaceStop;
+        IF NOT lSpaceStop THEN
+          Return := DELCHR(Return,'>');
+      END;
+
+      Token := Return;
+
+      IF pExpected <> '' THEN
+        Expected(pExpected);
+    END;
+
+    LOCAL PROCEDURE GetChar@11(VAR c@1000 : Char) : Char;
+    VAR
+      lProgress@1001 : Decimal;
+    BEGIN
+      IF CurrFile.POS = CurrFile.LEN THEN
+        ERROR(tUnexpectedEOF);
+      CurrFile.READ(c);
+      IF c = LF THEN BEGIN
+        LineNo += 1;
+        LinePos := 0;
+        lProgress := ROUND(CurrFile.POS / CurrFile.LEN * 10000,1);
+        Progress.UPDATE(2,lProgress);
+        MenuSuiteLineNo += 1;
+      END;
+      LinePos +=1;
+      EXIT(c);
+    END;
+
+    LOCAL PROCEDURE GetUntil@12(pChar@1000 : Char) Return : Text[1000];
+    VAR
+      i@1001 : Integer;
+    BEGIN
+      IF pChar = 0 THEN
+        pChar := CR;
+      REPEAT
+        GetChar(c);
+        i += 1;
+        Return[i] := c;
+      UNTIL c IN [pChar,CR,LF,TAB,'{','}','[',']','=',';'];
+    END;
+
+    LOCAL PROCEDURE Expected@13(pToken@1000 : Text[30]);
+    BEGIN
+      IF Token <> pToken THEN
+        ERROR(tExpected,pToken,LineNo,LinePos - STRLEN(Token));
+    END;
+
+    LOCAL PROCEDURE Unexpected@14(pToken@1000 : Text[30]);
+    BEGIN
+      ERROR(tUnexpected,pToken,LineNo,LinePos - STRLEN(pToken));
+    END;
+
+    LOCAL PROCEDURE InsertMenuSuiteNodeChanging@15(VAR pMenuSuiteNodeChanging@1000 : Record 72142);
+    VAR
+      lMenuSuiteNodeChanging@1001 : Record 72142;
+    BEGIN
+      lMenuSuiteNodeChanging.COPY(pMenuSuiteNodeChanging);
+      WITH pMenuSuiteNodeChanging DO BEGIN
+        RESET;
+        IF NOT FINDLAST THEN
+          "Entry No." := 0;
+        "Entry No." := "Entry No." + 1;
+        TRANSFERFIELDS(lMenuSuiteNodeChanging,FALSE);
+        INSERT;
+        COPY(lMenuSuiteNodeChanging);
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckImportOptions@16(pObject@1000 : Record 2000000001) : Boolean;
+    BEGIN
+      IF pObject.Type <> pObject.Type::MenuSuite THEN
+        EXIT;
+      WITH TempMenuSuiteNodeChanging DO BEGIN
+        RESET;
+        SETCURRENTKEY("MenuSuite ID","MenuSuite Line No.");
+        SETRANGE("MenuSuite ID",pObject.ID);
+        IF ISEMPTY THEN
+          EXIT(TRUE);
+        IF ImportOptions = ImportOptions::"Import only New" THEN
+          EXIT;
+        DELETEALL;
+           EXIT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE MergeMenuSuiteNodeChanging@17();
+    VAR
+      lOldRecordExist@1000 : Boolean;
+      lNewRecordExist@1001 : Boolean;
+    BEGIN
+      TempMenuSuiteNodeChanging.RESET;
+      TempMenuSuiteNodeChanging.SETCURRENTKEY("MenuSuite ID","MenuSuite Line No.");
+      TempNewMenuSuiteNodeChanging.RESET;
+      TempNewMenuSuiteNodeChanging.SETCURRENTKEY("MenuSuite ID","MenuSuite Line No.");
+      lOldRecordExist := TempMenuSuiteNodeChanging.FIND('-');
+      lNewRecordExist := TempNewMenuSuiteNodeChanging.FIND('-');
+      WHILE lNewRecordExist OR lOldRecordExist DO
+        CASE TRUE OF
+          lOldRecordExist AND lNewRecordExist:
+            IF lOldRecordExist AND (TempMenuSuiteNodeChanging."MenuSuite ID" < TempNewMenuSuiteNodeChanging."MenuSuite ID") THEN BEGIN
+              MoveMenuSuiteNodeChanging(TempMenuSuiteNodeChanging);
+              lOldRecordExist := TempMenuSuiteNodeChanging.NEXT <> 0;
+            END ELSE BEGIN
+              MoveMenuSuiteNodeChanging(TempNewMenuSuiteNodeChanging);
+              lNewRecordExist := TempNewMenuSuiteNodeChanging.NEXT <> 0;
+            END;
+          lOldRecordExist:
+            BEGIN
+              MoveMenuSuiteNodeChanging(TempMenuSuiteNodeChanging);
+              lOldRecordExist := TempMenuSuiteNodeChanging.NEXT <> 0;
+            END;
+          ELSE BEGIN
+            MoveMenuSuiteNodeChanging(TempNewMenuSuiteNodeChanging);
+            lNewRecordExist := TempNewMenuSuiteNodeChanging.NEXT <> 0;
+          END;
+        END;
+      TempMenuSuiteNodeChanging.DELETEALL;
+      TempNewMenuSuiteNodeChanging.DELETEALL;
+      CODEUNIT.RUN(CODEUNIT::"MenuSuite Node Mgt.");
+    END;
+
+    LOCAL PROCEDURE MoveMenuSuiteNodeChanging@18(VAR pTmpMenuSuiteNodeChanging@1000 : TEMPORARY Record 72142);
+    VAR
+      lMenuSuiteNodeChanging@1001 : Record 72142;
+      lMenuSuiteNodeCaption@1002 : Record 72141;
+      lMenuSuiteNode@1003 : Record 72140;
+      lExists@1004 : Boolean;
+    BEGIN
+      pTmpMenuSuiteNodeChanging.SETRANGE("MenuSuite ID",pTmpMenuSuiteNodeChanging."MenuSuite ID");
+      WITH lMenuSuiteNode DO BEGIN
+        REPEAT
+          IF pTmpMenuSuiteNodeChanging."Language ID" <> 0 THEN BEGIN
+            lMenuSuiteNodeCaption."Node ID" := pTmpMenuSuiteNodeChanging."Node ID";
+            lMenuSuiteNodeCaption."Language ID" := pTmpMenuSuiteNodeChanging."Language ID";
+            lExists := lMenuSuiteNodeCaption.FIND;
+            lMenuSuiteNodeCaption.Caption := pTmpMenuSuiteNodeChanging.CaptionML;
+            IF lExists THEN
+              lMenuSuiteNodeCaption.MODIFY
+            ELSE
+              lMenuSuiteNodeCaption.INSERT();
+          END ELSE BEGIN
+            lMenuSuiteNode.TRANSFERFIELDS(pTmpMenuSuiteNodeChanging);
+            lExists := GET("Node ID");
+            IF pTmpMenuSuiteNodeChanging.Name <> '' THEN
+              Name := Name;
+            IF pTmpMenuSuiteNodeChanging."Member of Menu" <> '' THEN
+              "Member of Menu" := "Member of Menu";
+            IF pTmpMenuSuiteNodeChanging.xObjectType <> '' THEN BEGIN
+              EVALUATE("Object Type",pTmpMenuSuiteNodeChanging.xObjectType);
+              pTmpMenuSuiteNodeChanging."Object Type" := "Object Type";
+            END;
+            IF pTmpMenuSuiteNodeChanging."Parent Node ID" <> '' THEN
+              "Parent Node ID" := pTmpMenuSuiteNodeChanging."Parent Node ID";
+            IF pTmpMenuSuiteNodeChanging."xObject ID" <> '' THEN BEGIN
+              EVALUATE("Object ID",pTmpMenuSuiteNodeChanging."xObject ID");
+              pTmpMenuSuiteNodeChanging."Object ID" := "Object ID";
+            END;
+            IF pTmpMenuSuiteNodeChanging."Next Node ID" <> '' THEN
+              "Next Node ID" := pTmpMenuSuiteNodeChanging."Next Node ID";
+            IF pTmpMenuSuiteNodeChanging."First Child" <> '' THEN
+              "First Child ID" := pTmpMenuSuiteNodeChanging."First Child";
+            IF pTmpMenuSuiteNodeChanging.Image <> '' THEN
+              EVALUATE(Image,pTmpMenuSuiteNodeChanging.Image);
+            IF pTmpMenuSuiteNodeChanging.xVisible <> '' THEN BEGIN
+              Visible := pTmpMenuSuiteNodeChanging.xVisible = 'Yes';
+              pTmpMenuSuiteNodeChanging.Visible := Visible;
+            END;
+            IF pTmpMenuSuiteNodeChanging.xDeleted <> '' THEN BEGIN
+              Deleted := pTmpMenuSuiteNodeChanging.xDeleted = 'Yes';
+              pTmpMenuSuiteNodeChanging.Deleted := Deleted;
+            END;
+            IF pTmpMenuSuiteNodeChanging."xIs Shortcut" <> '' THEN BEGIN
+              "Is Shortcut" := pTmpMenuSuiteNodeChanging."xIs Shortcut" = 'Yes';
+              pTmpMenuSuiteNodeChanging."Is Shortcut" := "Is Shortcut";
+            END;
+            IF pTmpMenuSuiteNodeChanging.xEnabled <> '' THEN BEGIN
+              Enabled := pTmpMenuSuiteNodeChanging.xEnabled = 'Yes';
+              pTmpMenuSuiteNodeChanging.Enabled := Enabled;
+            END;
+            "Last MenuSuite ID" := pTmpMenuSuiteNodeChanging."MenuSuite ID";
+            IF lExists THEN
+              MODIFY
+            ELSE
+              INSERT();
+          END;
+          lMenuSuiteNodeChanging := pTmpMenuSuiteNodeChanging;
+          InsertMenuSuiteNodeChanging(lMenuSuiteNodeChanging);
+        UNTIL pTmpMenuSuiteNodeChanging.NEXT = 0;
+      END;
+      pTmpMenuSuiteNodeChanging.SETRANGE("MenuSuite ID");
+    END;
+
+    BEGIN
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

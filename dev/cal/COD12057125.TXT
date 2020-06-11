@@ -1,0 +1,360 @@
+OBJECT Codeunit 12057125 Matching Worksheet Mgt.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=EXF501000;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      SELECTORDER@1100285000 : TextConst 'ENU=Select Order No.;SVE=V„lj ordernummer.';
+      NOORDERSFOUND@1100285001 : TextConst 'ENU=No open orders found;SVE=Inga ”ppna ordrar hittades';
+      SELECTORDERLINENO@1100285002 : TextConst 'ENU=Select order line no.;SVE=V„lj orderradsnnummer';
+      NOORDERLINES@1100285003 : TextConst 'ENU=No Orderlines found;SVE=Inga orderrader hittades';
+      OPENQUANT@1100285004 : TextConst 'ENU="Lines recived not invoiced = %1";SVE="Rader inleverade ej fakturerade = %1"';
+      ITEMEXISTS@1100285005 : TextConst 'ENU="Item Exists on order = %1";SVE="Artikeln finns p† ordern = %1"';
+      PRICEDIFF@1100285006 : TextConst 'ENU=Confirm price difference;SVE=Godk„nn prisdifferens';
+      MATCHED@1100285007 : TextConst 'ENU=Line matched;SVE=Raden „r matchad';
+      NORECEIPT@1100285008 : TextConst 'ENU=No open receipt lines exists for item;SVE=Inga ”ppna inleveransrader finns f”r denna artikel';
+      RECIEPTEXIST@1100285009 : TextConst 'ENU=Receipt missing, listing lines with potential availble quantities:;SVE=Inleverans saknas, visar rader med potentiellt tillg„nglig kvantitet:';
+      EXF006@1100285011 : TextConst 'ENU=Insufficent availability, Proceed anyway?;SVE=Ej tillr„ckligt antal att match. Forts„tt „nd†?';
+      EXF007@1100285010 : TextConst 'ENU=There are other open documents matching the same oder line no. Do you want to release all others connections to free up availablity for this document?;SVE=Det finns ”ppna ExFlow dokument som matchar samma orderradsnummer. Vill du ta bort kopplingen fr†n ”vriga f”r att frig”ra tillg„ngligheten f”r detta dokument?';
+      EXF008@1100285012 : TextConst 'ENU=Handled in matching worksheet at %1, by %2;SVE=Hanterad i matchingsvy vid %1, av %2';
+      NOTMATCHINGLINE@1100285013 : TextConst 'ENU=Line is not beeing matched against PO;SVE=Rad matchas ej mot ink”psorder';
+      MATCHEDNORCPT@1100285014 : TextConst 'ENU=Line matched against order line (verify/close to match against receipt);SVE=Raden „r matchad mot orderrad (st„ng f”nstret/verfiera f”r att matcha mot inlev.)';
+
+    PROCEDURE CreatMatchingTempTable@1100285000(ExFPurchLine@1100285001 : Record 12013588;VAR TempPurchLine@1100285000 : TEMPORARY Record 12057115;VAR MatchingState@1100285002 : 'Order,OrderLine,Receipt,Price,Done');
+    BEGIN
+      TempPurchLine.DELETEALL;
+      IF (ExFPurchLine."Order No." = '') AND (ExFPurchLine."Order No. (Import)" = '') THEN BEGIN
+        CreateMiscTempLine(ExFPurchLine,TempPurchLine);
+        MatchingState := MatchingState::Done;
+      END ELSE IF ExFPurchLine."Order No." = '' THEN BEGIN
+        CreateOpenOrderList(ExFPurchLine,TempPurchLine);
+        MatchingState := MatchingState::Order;
+      END ELSE IF ExFPurchLine."Order Line No." = 0 THEN BEGIN
+        CreateOrderLinesList(ExFPurchLine,TempPurchLine);
+        MatchingState := MatchingState::OrderLine;
+      END ELSE IF (ExFPurchLine."Receipt No." = '') AND (NOT ExFPurchLine."Temp Line Matching Handled") THEN BEGIN
+        CreateReceiptLinesList(ExFPurchLine,TempPurchLine);
+        MatchingState := MatchingState::Receipt;
+      END ELSE BEGIN
+        IF CheckPriceAndUpdateMessage(ExFPurchLine,TempPurchLine) THEN
+          MatchingState := MatchingState::Done
+        ELSE
+          MatchingState := MatchingState::Price;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateOrderLinesList@1100285003(ExFPurchLine@1100285001 : Record 12013588;VAR TempPurchLine@1100285000 : TEMPORARY Record 12057115);
+    VAR
+      PurchLine@1100285002 : Record 39;
+    BEGIN
+      PurchLine.RESET;
+      PurchLine.SETRANGE("Document Type", PurchLine."Document Type"::Order);
+      PurchLine.SETRANGE("Document No.",ExFPurchLine."Order No.");
+      PurchLine.SETFILTER(Type, '<>%1',PurchLine.Type::" ");
+      IF PurchLine.FINDSET THEN
+        REPEAT
+          InsertTempPurchLineFromPurchLine(ExFPurchLine,TempPurchLine,PurchLine);
+        UNTIL PurchLine.NEXT = 0;
+
+      IF TempPurchLine.COUNT <> 0 THEN
+        InsertActionMessage(TempPurchLine,SELECTORDERLINENO)
+      ELSE
+        InsertActionMessage(TempPurchLine,NOORDERLINES);
+    END;
+
+    LOCAL PROCEDURE CreateOpenOrderList@1100285001(ExFPurchLine@1100285001 : Record 12013588;VAR TempPurchLine@1100285000 : TEMPORARY Record 12057115);
+    VAR
+      PurchHead@1100285002 : Record 38;
+    BEGIN
+      PurchHead.RESET;
+      PurchHead.SETRANGE("Document Type", PurchHead."Document Type"::Order);
+      PurchHead.SETRANGE("Pay-to Vendor No.",ExFPurchLine."Pay-to Vendor No.");
+      PurchHead.SETRANGE("Currency Code",ExFPurchLine."Currency Code");
+      IF PurchHead.FINDSET THEN
+        REPEAT
+          InsertTempPurchLineFromPurchHead(ExFPurchLine,TempPurchLine,PurchHead);
+        UNTIL PurchHead.NEXT = 0;
+
+      IF TempPurchLine.COUNT <> 0 THEN
+        InsertActionMessage(TempPurchLine,SELECTORDER)
+      ELSE
+        InsertActionMessage(TempPurchLine,NOORDERSFOUND);
+    END;
+
+    LOCAL PROCEDURE CreateReceiptLinesList@1100285006(ExFPurchLine@1100285001 : Record 12013588;VAR TempPurchLine@1100285000 : TEMPORARY Record 12057115);
+    VAR
+      PurchLine@1100285002 : Record 39;
+    BEGIN
+      PurchLine.RESET;
+      PurchLine.SETRANGE("Document Type",PurchLine."Document Type"::Order);
+      PurchLine.SETRANGE("Pay-to Vendor No.",ExFPurchLine."Pay-to Vendor No.");
+      PurchLine.SETRANGE("Buy-from Vendor No.",ExFPurchLine."Buy-from Vendor No.");
+      PurchLine.SETRANGE("Currency Code",ExFPurchLine."Currency Code");
+      PurchLine.SETRANGE(Type,ExFPurchLine.Type);
+      PurchLine.SETRANGE("No.",ExFPurchLine."No.");
+      PurchLine.SETFILTER("Qty. to Invoice",'>%1',0);
+      IF PurchLine.FINDSET THEN
+        REPEAT
+          InsertTempPurchLineFromPurchLine(ExFPurchLine,TempPurchLine,PurchLine);
+        UNTIL PurchLine.NEXT = 0;
+
+      IF TempPurchLine.COUNT <> 0 THEN
+        InsertActionMessage(TempPurchLine,RECIEPTEXIST)
+      ELSE
+        InsertActionMessage(TempPurchLine,NORECEIPT);
+    END;
+
+    LOCAL PROCEDURE InsertTempPurchLineFromPurchLine@1100285004(ExFPurchLine@1100285001 : Record 12013588;VAR TempPurchLine@1100285000 : TEMPORARY Record 12057115;PurchLine@1100285002 : Record 39);
+    BEGIN
+      TempPurchLine.INIT;
+      TempPurchLine.TRANSFERFIELDS(PurchLine);
+      IF TempPurchLine."Qty. Rcd. Not Invoiced (Base)" > 0 THEN BEGIN
+        TempPurchLine.CALCFIELDS("Match Qty. Imp Inv. (Base)");
+        TempPurchLine.CALCFIELDS("Matched Qty. Invoice (Base)");
+        TempPurchLine."Availble Quantity (Base)" := TempPurchLine."Qty. Rcd. Not Invoiced (Base)" - TempPurchLine."Match Qty. Imp Inv. (Base)" -TempPurchLine."Matched Qty. Invoice (Base)";
+      END;
+
+      TempPurchLine."Direct Unit Cost Invoice" := ExFPurchLine."Direct Unit Cost";
+      IF TempPurchLine."Direct Unit Cost Invoice" = 0 THEN
+       TempPurchLine."Direct Unit Cost Invoice" := ExFPurchLine."Direct Unit Cost (Import)";
+
+      TempPurchLine."Outstanding Quantity Invoice" := ExFPurchLine."Outstanding Quantity";
+      TempPurchLine."Quantity Invoice" := ExFPurchLine."Quantity (Import)";
+      IF TempPurchLine."Quantity Invoice" = 0 THEN
+        TempPurchLine."Quantity Invoice" := ExFPurchLine.Quantity;
+
+
+      //Quantity is deducted if same line already matched, increase to cover for the flowfield and mark currrent line
+      IF (TempPurchLine."Document Type" = TempPurchLine."Document Type"::Order) AND
+         (TempPurchLine."Document No." = ExFPurchLine."Order No.") AND
+         (TempPurchLine."Line No." = ExFPurchLine."Order Line No.")
+          THEN BEGIN
+            TempPurchLine."Current Matched Line" := TRUE;
+            IF TempPurchLine."Qty. Rcd. Not Invoiced (Base)" > 0 THEN
+              TempPurchLine."Availble Quantity (Base)" := TempPurchLine."Availble Quantity (Base)" + ExFPurchLine."Quantity (Base)";
+          END;
+
+      IF TempPurchLine."Availble Quantity (Base)" < 0 THEN
+        TempPurchLine."Availble Quantity (Base)" := 0;
+
+      TempPurchLine.INSERT(FALSE);
+    END;
+
+    LOCAL PROCEDURE InsertTempPurchLineFromPurchHead@1100285002(ExFPurchLine@1100285001 : Record 12013588;VAR TempPurchLine@1100285000 : TEMPORARY Record 12057115;PurchHead@1100285002 : Record 38);
+    VAR
+      PurchLine@1100285003 : Record 39;
+      Msg@1100285004 : Text;
+      ExFlowSetup@1100285005 : Record 12013601;
+      ExfPurchHead@1100285006 : Record 12013587;
+    BEGIN
+      TempPurchLine.INIT;
+      TempPurchLine."Document Type" := PurchHead."Document Type";
+      TempPurchLine."Document No." := PurchHead."No.";
+
+      PurchLine.RESET;
+      PurchLine.SETRANGE("Document Type",PurchHead."Document Type");
+      PurchLine.SETRANGE("Document No.",PurchHead."No.");
+      PurchLine.SETFILTER("Qty. Rcd. Not Invoiced",'>0');
+      TempPurchLine.Description := STRSUBSTNO(OPENQUANT,FORMAT(PurchLine.COUNT));
+
+      IF ExFPurchLine."No." <> '' THEN BEGIN
+        ExFlowSetup.GET;
+        IF ExFlowSetup."Dummy Item OCR Line" <> ExFPurchLine."No." THEN BEGIN
+          PurchLine.RESET;
+          PurchLine.SETRANGE("Document Type",PurchHead."Document Type");
+          PurchLine.SETRANGE("Document No.",PurchHead."No.");
+          PurchLine.SETRANGE("No.",ExFPurchLine."No.");
+          TempPurchLine.Description := COPYSTR(TempPurchLine.Description + ' ' + STRSUBSTNO(ITEMEXISTS,FORMAT(NOT PurchLine.ISEMPTY)),1,250);
+        END;
+      END;
+
+      ExfPurchHead.GET(ExFPurchLine."Inbound Document No.");
+      PurchHead.CALCFIELDS(Amount);
+      PurchHead.CALCFIELDS("Amount Including VAT");
+      TempPurchLine."Line No." := 0;
+      TempPurchLine.Amount := PurchHead.Amount;
+      TempPurchLine."Amount Including VAT" := PurchHead."Amount Including VAT";
+      TempPurchLine."Amount (Invoice)" := ExfPurchHead."Document Amount";
+      TempPurchLine."Amount Including VAT (Invoice)" := ExfPurchHead."Document Amount Including VAT";
+      TempPurchLine.INSERT(FALSE);
+    END;
+
+    LOCAL PROCEDURE InsertActionMessage@1100285005(VAR TempPurchLine@1100285000 : TEMPORARY Record 12057115;Msg@1100285001 : Text);
+    BEGIN
+      TempPurchLine.INIT;
+      TempPurchLine."Document Type" := TempPurchLine."Document Type"::Note;
+      TempPurchLine."Document No." := '';
+      TempPurchLine."Line No." := 0;
+      TempPurchLine.Description := Msg;
+      TempPurchLine.INSERT(FALSE);
+    END;
+
+    LOCAL PROCEDURE CheckPriceAndUpdateMessage@1100285007(ExFPurchLine@1100285001 : Record 12013588;VAR TempPurchLine@1100285000 : TEMPORARY Record 12057115) Match : Boolean;
+    VAR
+      ExWorkflowMgt@1100285002 : Codeunit 12013593;
+      PurcLine@1100285003 : Record 39;
+    BEGIN
+      TempPurchLine.INIT;
+      TempPurchLine.TRANSFERFIELDS(ExFPurchLine);
+      TempPurchLine."Document No." := ExFPurchLine."Order No.";
+      TempPurchLine."Direct Unit Cost Invoice" := ExFPurchLine."Direct Unit Cost";
+      IF TempPurchLine."Direct Unit Cost Invoice" = 0 THEN BEGIN
+        TempPurchLine."Direct Unit Cost Invoice" := ExFPurchLine."Direct Unit Cost (Import)";
+        ExFPurchLine."Direct Unit Cost" := ExFPurchLine."Direct Unit Cost (Import)";
+      END;
+
+      IF PurcLine.GET(PurcLine."Document Type"::Order,ExFPurchLine."Order No.",ExFPurchLine."Order Line No.") THEN BEGIN
+        TempPurchLine."Direct Unit Cost" := PurcLine."Direct Unit Cost";
+        ExFPurchLine."Direct Unit Cost (Order)" := PurcLine."Direct Unit Cost";
+        ExFPurchLine."Line Discount % (Order)" := PurcLine."Line Discount %";
+      END;
+
+      TempPurchLine."Quantity Invoice" := ExFPurchLine."Quantity (Import)";
+      IF TempPurchLine."Quantity Invoice" = 0 THEN
+        TempPurchLine."Quantity Invoice" := ExFPurchLine.Quantity;
+
+      IF NOT ExFPurchLine."Test Unit Costs" THEN BEGIN
+        IF ExFPurchLine."Receipt No." <> '' THEN
+          TempPurchLine.Description := MATCHED
+        ELSE
+          TempPurchLine.Description := MATCHEDNORCPT;
+        TempPurchLine.INSERT(FALSE);
+        EXIT(TRUE);
+      END;
+
+      IF ExWorkflowMgt.PurchPriceOK(ExFPurchLine) THEN BEGIN
+        IF ExFPurchLine."Receipt No." <> '' THEN
+          TempPurchLine.Description := MATCHED
+        ELSE
+          TempPurchLine.Description := MATCHEDNORCPT;
+        TempPurchLine.INSERT(FALSE);
+        EXIT(TRUE);
+      END ELSE BEGIN
+        TempPurchLine.Description := PRICEDIFF;
+        TempPurchLine.INSERT(FALSE);
+        EXIT(TRUE);
+      END;
+    END;
+
+    PROCEDURE ConfirmAvailabilty@1100285009(CurrExPurchLine@1100285002 : Record 12013588;VAR TempExPurchLine@1100285001 : TEMPORARY Record 12057115) : Boolean;
+    VAR
+      ExfPurchDocLine@1100285000 : Record 12013588;
+    BEGIN
+      IF CurrExPurchLine."Quantity (Base)" <= TempExPurchLine."Availble Quantity (Base)" THEN
+        EXIT(TRUE);
+
+      IF NOT CONFIRM(EXF006) THEN
+        EXIT(FALSE);
+
+      CheckReleaseOrderLineNo(CurrExPurchLine,TempExPurchLine);
+
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE CheckReleaseOrderLineNo@1100285008(CurrExPurchLine@1100285002 : Record 12013588;VAR TempExPurchLine@1100285000 : TEMPORARY Record 12057115);
+    VAR
+      ExfPurchDocLine@1100285001 : Record 12013588;
+    BEGIN
+      ExfPurchDocLine.RESET;
+      ExfPurchDocLine.SETFILTER("Inbound Document No.",'<>%1',CurrExPurchLine."Inbound Document No.");
+      ExfPurchDocLine.SETRANGE("Order No.",TempExPurchLine."Document No.");
+      ExfPurchDocLine.SETRANGE("Order Line No.",TempExPurchLine."Line No.");
+      IF ExfPurchDocLine.FINDSET(TRUE) THEN BEGIN
+        IF NOT CONFIRM(EXF007,FALSE) THEN
+          EXIT;
+        REPEAT
+          ExfPurchDocLine.VALIDATE("Order Line No.",0);
+          ExfPurchDocLine."Manually Unmatched" := TRUE;
+          ExfPurchDocLine.MODIFY(FALSE);
+        UNTIL ExfPurchDocLine.NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE UpdateDocumentOnClose@1100285011(ExfPurchHead@1100285001 : Record 12013587);
+    VAR
+      ExPurchLine@1100285000 : Record 12013588;
+      ExFlow@1100285002 : Codeunit 12013601;
+      ExUserComp@1100285003 : Record 12013641;
+      ExUserID@1100285004 : Text[100];
+    BEGIN
+      ExUserID := USERID;
+      IF ExFlow.GetUserComp(ExUserComp,ExUserID) THEN
+        ExUserID:= ExUserComp."User ID";
+      ExPurchLine.RESET;
+      ExPurchLine.SETRANGE("Inbound Document No.",ExfPurchHead."Inbound Document No.");
+      IF ExPurchLine.FINDSET THEN
+        REPEAT
+          IF ExPurchLine."Temp Line Matching Handled" THEN BEGIN
+            IF NOT ExPurchLine."Manual Matching Comment" THEN BEGIN
+              ExPurchLine."Matching Comment" := COPYSTR(STRSUBSTNO(EXF008,FORMAT(TODAY),ExUserID),1,100);
+            END;
+            ExPurchLine."Temp Line Matching Handled" := FALSE;
+            ExPurchLine.MODIFY;
+          END;
+
+          IF (ExPurchLine."Order Line No." <> 0) AND (ExPurchLine."Receipt No." = '') THEN BEGIN
+            ExPurchLine.SetForceUpdateOrderLineNo;
+            ExPurchLine.VALIDATE("Order Line No.");
+            ExPurchLine.MODIFY;
+          END;
+        UNTIL ExPurchLine.NEXT = 0;
+    END;
+
+    PROCEDURE DeleteReceiptTextLine@1100285012(ExfPurchDocLineIn@1100285001 : Record 12013588);
+    VAR
+      ExfPurchDocLineFind@1100285000 : Record 12013588;
+    BEGIN
+      IF ExfPurchDocLineIn."Receipt No." = '' THEN
+        EXIT;
+
+      ExfPurchDocLineFind.RESET;
+      ExfPurchDocLineFind.SETRANGE("Inbound Document No.",ExfPurchDocLineIn."Inbound Document No.");
+      ExfPurchDocLineFind.SETRANGE("Line No.",ExfPurchDocLineIn."Line No.");
+      ExfPurchDocLineFind.FINDFIRST;
+      IF ExfPurchDocLineFind.NEXT <> 0 THEN
+        IF ExfPurchDocLineFind."Receipt No." = ExfPurchDocLineIn."Receipt No." THEN
+          EXIT;
+
+      ExfPurchDocLineFind.RESET;
+      ExfPurchDocLineFind.SETRANGE("Inbound Document No.",ExfPurchDocLineIn."Inbound Document No.");
+      ExfPurchDocLineFind.SETFILTER("Line No.",'<=%1',ExfPurchDocLineIn."Line No.");
+      ExfPurchDocLineFind.SETASCENDING("Line No.",FALSE);
+      IF ExfPurchDocLineFind.FINDFIRST THEN
+        IF ExfPurchDocLineFind.NEXT <> 0 THEN
+          IF (ExfPurchDocLineFind.Type = ExfPurchDocLineFind.Type::" ") AND
+             (STRPOS(ExfPurchDocLineFind.Description,ExfPurchDocLineIn."Receipt No.") <> 0) THEN
+               ExfPurchDocLineFind.DELETE(FALSE);
+    END;
+
+    LOCAL PROCEDURE CreateMiscTempLine@1100285010(ExFPurchLine@1100285001 : Record 12013588;VAR TempPurchLine@1100285000 : TEMPORARY Record 12057115);
+    BEGIN
+      IF ExFPurchLine."Exflow-Created Entry" = ExFPurchLine."Exflow-Created Entry"::DiffLine THEN BEGIN
+        TempPurchLine.TRANSFERFIELDS(ExFPurchLine);
+        TempPurchLine."Document No." := '';
+        TempPurchLine."Direct Unit Cost" := 0;
+        TempPurchLine."Direct Unit Cost Invoice" := ExFPurchLine."Direct Unit Cost";
+        IF ExFPurchLine."Error Message" <> '' THEN
+          TempPurchLine.Description := ExFPurchLine."Error Message"
+        ELSE
+          TempPurchLine.Description := MATCHED;
+        TempPurchLine.INSERT;
+      END ELSE
+        InsertActionMessage(TempPurchLine,NOTMATCHINGLINE);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

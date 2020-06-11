@@ -1,0 +1,776 @@
+OBJECT Codeunit 11072003 Job Jnl.-Post Line
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.04,4PS14.00 (1012);
+  }
+  PROPERTIES
+  {
+    TableNo=11072008;
+    Permissions=TableData 11072005=imd,
+                TableData 11072012=imd,
+                TableData 5802=rimd;
+    OnRun=BEGIN
+            GetGLSetup;
+            RunWithCheck(Rec);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Cust@1025 : Record 18;
+      Job@1004 : Record 11072003;
+      JobTask@1015 : Record 11072600;
+      JobJnlLine@1005 : Record 11072008;
+      JobJnlLine2@1006 : Record 11072008;
+      ItemJnlLine@1008 : Record 83;
+      JobReg@1009 : Record 11072012;
+      GLSetup@1011 : Record 98;
+      CurrExchRate@1012 : Record 330;
+      Currency@1013 : Record 4;
+      Location@1035 : Record 14;
+      Item@1001 : Record 27;
+      JobJnlCheckLine@1016 : Codeunit 11072002;
+      ResJnlPostLine@1017 : Codeunit 212;
+      ItemJnlPostLine@1018 : Codeunit 22;
+      JobPostLine@1024 : Codeunit 11072006;
+      WhseJnlRegisterLine@1003 : Codeunit 7301;
+      UOMMgt@1000 : Codeunit 5402;
+      GLSetupRead@1023 : Boolean;
+      NextEntryNo@1020 : Integer;
+      GLEntryNo@1034 : Integer;
+      ProjSetupRec@1210190001 : Record 315;
+      gOriginSalaryApplication@1100485001 : Boolean;
+      Text11012000@1210190000 : TextConst 'DEU=%1 %2 hat %3 %4.;ENU=%1 %2 has %3 %4.;NLD=%1 %2 heeft %3 %4.;NOR=%1 %2 har %3 %4.;SVE=%1 %2 har %3 %4.';
+      ProjectPrincipal@1100528200 : Record 11012005;
+      JobLedgEntryNo@1100528500 : Integer;
+
+    [External]
+    PROCEDURE RunWithCheck@4(VAR JobJnlLine2@1000 : Record 11072008) : Integer;
+    VAR
+      JobLedgEntryNo@1002 : Integer;
+    BEGIN
+      JobJnlLine.COPY(JobJnlLine2);
+      JobLedgEntryNo := Code(TRUE);
+      JobJnlLine2 := JobJnlLine;
+      EXIT(JobLedgEntryNo);
+    END;
+
+    LOCAL PROCEDURE Code@1(CheckLine@1002 : Boolean) : Integer;
+    VAR
+      JobLedgEntry@1011 : Record 11072005;
+      JobLedgEntryNo@1005 : Integer;
+    BEGIN
+      OnBeforeCode(JobJnlLine);
+
+      GetGLSetup;
+
+      WITH JobJnlLine DO BEGIN
+        IF EmptyLine THEN
+          EXIT;
+
+        IF CheckLine THEN
+          JobJnlCheckLine.RunCheck(JobJnlLine);
+
+        IF JobLedgEntry."Entry No." = 0 THEN BEGIN
+          JobLedgEntry.LOCKTABLE;
+          IF JobLedgEntry.FINDLAST THEN
+            NextEntryNo := JobLedgEntry."Entry No.";
+          NextEntryNo := NextEntryNo + 1;
+        END;
+
+        IF "Document Date" = 0D THEN
+          "Document Date" := "Posting Date";
+
+        IF JobReg."No." = 0 THEN BEGIN
+          JobReg.LOCKTABLE;
+          IF (NOT JobReg.FINDLAST) OR (JobReg."To Entry No." <> 0) THEN BEGIN
+            JobReg.INIT;
+            JobReg."No." := JobReg."No." + 1;
+            JobReg."From Entry No." := NextEntryNo;
+            JobReg."To Entry No." := NextEntryNo;
+            JobReg."Creation Date" := TODAY;
+            JobReg."Creation Time" := TIME;
+            JobReg."Source Code" := "Source Code";
+            JobReg."Journal Batch Name" := "Journal Batch Name";
+            JobReg."User ID" := USERID;
+            JobReg.INSERT;
+          END;
+        END;
+
+        //**4PS.so
+        //Job.GET("Job No.");
+        //CheckJob(JobJnlLine,Job);
+        //**4PS.eo
+
+        //**4PS.sn
+        TestJob("Job No.", '', (JobJnlLine."Employee No." <> '') AND (JobJnlLine."Wage Component" <> ''));
+        //**4PS.en
+
+        JobJnlLine2 := JobJnlLine;
+
+        OnAfterCopyJobJnlLine(JobJnlLine,JobJnlLine2);
+
+        JobJnlLine2."Source Currency Total Cost" := 0;
+        JobJnlLine2."Source Currency Total Price" := 0;
+        JobJnlLine2."Source Currency Line Amount" := 0;
+
+        GetGLSetup;
+        //**4PS.sn
+        IF NOT ProjectPrincipal.GET("Job No.", Principal ) THEN
+          ProjectPrincipal.INIT;
+
+        TESTFIELD("Currency Code",''); //Currency code project card not supported yet
+        JobJnlLine2."Total Cost (LCY)" := ROUND(JobJnlLine2."Total Cost (LCY)", GLSetup."Amount Rounding Precision");
+        JobJnlLine2."Total Price (LCY)" := ROUND(JobJnlLine2."Total Price (LCY)", GLSetup."Amount Rounding Precision");
+
+        //Multi Currency
+        IF JobJnlLine2."Entry Type" = JobJnlLine2."Entry Type"::Sale THEN BEGIN
+          //Entry Type = Sale
+          IF NOT JobJnlLine2."Exchange Rate Difference" THEN
+            IF (JobJnlLine2."Source Currency Code" <> '') AND
+               (JobJnlLine2."Total Price" <> 0 ) THEN
+            BEGIN
+              JobJnlLine2."Total Price" := ROUND(JobJnlLine2."Total Price", GLSetup."Amount Rounding Precision");
+              JobJnlLine2."Unit Price" := ROUND(JobJnlLine2."Unit Price", GLSetup."Amount Rounding Precision");
+            END ELSE BEGIN
+              JobJnlLine2."Total Price" := JobJnlLine2."Total Price (LCY)";
+              JobJnlLine2."Unit Price" := JobJnlLine2."Unit Price (LCY)";
+            END;
+        END ELSE BEGIN
+          //Entry Type = Usage (Purchase)
+          IF (JobJnlLine2."Source Currency Code" <> '') THEN BEGIN
+            JobJnlLine2."Unit Cost" := JobJnlLine2."Unit Cost";
+            JobJnlLine2."Total Cost" := JobJnlLine2."Total Cost";
+          END ELSE BEGIN
+            JobJnlLine2."Unit Cost" := JobJnlLine2."Unit Cost (LCY)";
+            JobJnlLine2."Total Cost" := JobJnlLine2."Total Cost (LCY)";
+          END;
+        END;
+
+        JobJnlLine2."Currency Code" := JobJnlLine2."Source Currency Code";
+        JobJnlLine2."Line Amount" := JobJnlLine2."Line Amount (LCY)";
+        JobJnlLine2."Line Discount Amount" := JobJnlLine2."Line Discount Amount (LCY)";
+        //**4PS.en
+
+        IF (GLSetup."Additional Reporting Currency" <> '') AND
+           (JobJnlLine2."Source Currency Code" <> GLSetup."Additional Reporting Currency")
+        THEN
+          UpdateJobJnlLineSourceCurrencyAmounts(JobJnlLine2);
+
+        IF JobJnlLine2."Entry Type" = JobJnlLine2."Entry Type"::Usage THEN BEGIN
+          CASE Type OF
+            Type::Resource:
+              JobLedgEntryNo := PostResource(JobJnlLine2);
+            Type::Item:
+              JobLedgEntryNo := PostItem(JobJnlLine);
+            Type::"G/L Account":
+              JobLedgEntryNo := CreateJobLedgEntry(JobJnlLine2);
+          END;
+        END ELSE
+          JobLedgEntryNo := CreateJobLedgEntry(JobJnlLine2);
+      END;
+
+      OnAfterRunCode(JobJnlLine2,JobLedgEntryNo);
+
+      EXIT(JobLedgEntryNo);
+    END;
+
+    LOCAL PROCEDURE CheckJob@32(VAR JobJnlLine@1002 : Record 11072008;Job@1000 : Record 11072003);
+    VAR
+      IsHandled@1001 : Boolean;
+    BEGIN
+      IsHandled := FALSE;
+      OnBeforeCheckJob(JobJnlLine,Job,IsHandled,JobReg,NextEntryNo);
+      IF IsHandled THEN
+        EXIT;
+      //**4PS Job."Currency Code" AND "Job Task No." ("Task No.") not used by 4PS
+      EXIT; //**4PS.n
+
+      WITH JobJnlLine DO BEGIN
+        Job.TestBlocked;
+        Job.TESTFIELD("Bill-to Customer No.");
+        Cust.GET(Job."Bill-to Customer No.");
+        TESTFIELD("Currency Code",Job."Currency Code");
+        IsHandled := FALSE;
+        OnCheckJobOnBeforeTestJobTaskType(JobJnlLine,IsHandled);
+        IF NOT IsHandled THEN BEGIN
+          JobTask.GET("Job No.","Job Task No.");
+          JobTask.TESTFIELD("Job Task Type",JobTask."Job Task Type"::Posting);
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE GetGLSetup@14();
+    BEGIN
+      IF NOT GLSetupRead THEN
+        GLSetup.GET;
+      GLSetupRead := TRUE;
+    END;
+
+    [External]
+    PROCEDURE CreateJobLedgEntry@2(JobJnlLine2@1003 : Record 11072008) : Integer;
+    VAR
+      ResLedgEntry@1002 : Record 203;
+      JobLedgEntry@1008 : Record 11072005;
+      JobPlanningLine@1000 : Record 11020401;
+      Job@1004 : Record 11072003;
+      JobTransferLine@1005 : Codeunit 11072016;
+      JobLinkUsage@1001 : Codeunit 1026;
+      JobLedgEntryNo@1006 : Integer;
+      IsHandled@1007 : Boolean;
+    BEGIN
+      IsHandled := FALSE;
+      OnBeforeCreateJobLedgEntry(JobJnlLine2,IsHandled,JobLedgEntryNo);
+      IF IsHandled THEN
+        EXIT(JobLedgEntryNo);
+
+      SetCurrency(JobJnlLine2);
+
+      JobLedgEntry.INIT;
+      //JobTransferLine.FromJnlLineToLedgEntry(JobJnlLine2,JobLedgEntry);  //**4PS.o
+      //**4PS.sn
+      Job.GET(JobJnlLine2."Job No.");
+      JobTransferLine.FromJnlLineToLedgEntry(JobJnlLine2,JobLedgEntry,Job);
+      //**4PS.en
+
+      IF JobLedgEntry."Entry Type" = JobLedgEntry."Entry Type"::Sale THEN BEGIN
+        JobLedgEntry.Quantity := -JobJnlLine2.Quantity;
+        JobLedgEntry."Quantity (Base)" := -JobJnlLine2."Quantity (Base)";
+        JobLedgEntry."Total Cost (LCY)" := -JobJnlLine2."Total Cost (LCY)";
+        JobLedgEntry."Total Cost" := -JobJnlLine2."Total Cost";
+        JobLedgEntry."Total Price (LCY)" := -JobJnlLine2."Total Price (LCY)";
+        JobLedgEntry."Total Price" := -JobJnlLine2."Total Price";
+        JobLedgEntry."Line Amount (LCY)" := -JobJnlLine2."Line Amount (LCY)";
+        JobLedgEntry."Line Amount" := -JobJnlLine2."Line Amount";
+        JobLedgEntry."Line Discount Amount (LCY)" := -JobJnlLine2."Line Discount Amount (LCY)";
+        JobLedgEntry."Line Discount Amount" := -JobJnlLine2."Line Discount Amount";
+
+      //CALL C026457 sn
+        JobLedgEntry."Additional-Currency Total Cost" := -JobLedgEntry."Additional-Currency Total Cost";
+        JobLedgEntry."Add.-Currency Total Price" := -JobLedgEntry."Add.-Currency Total Price";
+        JobLedgEntry."Add.-Currency Line Amount" := -JobLedgEntry."Add.-Currency Line Amount";
+      //CALL C026457 en
+      END ELSE BEGIN
+        JobLedgEntry.Quantity := JobJnlLine2.Quantity;
+        JobLedgEntry."Quantity (Base)" := JobJnlLine2."Quantity (Base)";
+        JobLedgEntry."Total Cost (LCY)" := JobJnlLine2."Total Cost (LCY)";
+        JobLedgEntry."Total Cost" := JobJnlLine2."Total Cost";
+        JobLedgEntry."Total Price (LCY)" := JobJnlLine2."Total Price (LCY)";
+        JobLedgEntry."Total Price" := JobJnlLine2."Total Price";
+        JobLedgEntry."Line Amount (LCY)" := JobJnlLine2."Line Amount (LCY)";
+        JobLedgEntry."Line Amount" := JobJnlLine2."Line Amount";
+        JobLedgEntry."Line Discount Amount (LCY)" := JobJnlLine2."Line Discount Amount (LCY)";
+        JobLedgEntry."Line Discount Amount" := JobJnlLine2."Line Discount Amount";
+
+      //CALL C026457 sn
+        JobLedgEntry."Additional-Currency Total Cost" := JobLedgEntry."Additional-Currency Total Cost";
+        JobLedgEntry."Add.-Currency Total Price" := JobLedgEntry."Add.-Currency Total Price";
+        JobLedgEntry."Add.-Currency Line Amount" := JobLedgEntry."Add.-Currency Line Amount";
+      //CALL C026457 en
+      END;
+
+      //CALL C026457 so
+      //JobLedgEntry."Additional-Currency Total Cost" := -JobLedgEntry."Additional-Currency Total Cost";
+      //JobLedgEntry."Add.-Currency Total Price" := -JobLedgEntry."Add.-Currency Total Price";
+      //JobLedgEntry."Add.-Currency Line Amount" := -JobLedgEntry."Add.-Currency Line Amount";
+      //CALL C026457 eo
+      //**4PS.sn
+      IF (JobLedgEntry.Quantity <> 0) THEN BEGIN
+        JobLedgEntry."Unit Cost" :=
+          ROUND(JobLedgEntry."Total Cost" / JobLedgEntry.Quantity, GLSetup."Unit-Amount Rounding Precision");
+        JobLedgEntry."Unit Cost (LCY)" :=
+           ROUND(JobLedgEntry."Total Cost (LCY)" / JobLedgEntry.Quantity, GLSetup."Unit-Amount Rounding Precision");
+        JobLedgEntry."Unit Price" :=
+          ROUND(JobLedgEntry."Total Price" / JobLedgEntry.Quantity, GLSetup."Unit-Amount Rounding Precision");
+        JobLedgEntry."Unit Price (LCY)" :=
+          ROUND(JobLedgEntry."Total Price (LCY)" / JobLedgEntry.Quantity, GLSetup."Unit-Amount Rounding Precision");
+      END;
+      //**4PS.en
+
+      JobLedgEntry."Entry No." := NextEntryNo;
+      JobLedgEntry."No. Series" := JobJnlLine2."Posting No. Series";
+      JobLedgEntry."Original Unit Cost (LCY)" := JobLedgEntry."Unit Cost (LCY)";
+      JobLedgEntry."Original Total Cost (LCY)" := JobLedgEntry."Total Cost (LCY)";
+      JobLedgEntry."Original Unit Cost" := JobLedgEntry."Unit Cost";
+      JobLedgEntry."Original Total Cost" := JobLedgEntry."Total Cost";
+      JobLedgEntry."Original Total Cost (ACY)" := JobLedgEntry."Additional-Currency Total Cost";
+      JobLedgEntry."Dimension Set ID" := JobJnlLine2."Dimension Set ID";
+      //**4PS.sn
+      JobLedgEntry."Entity Type" := JobJnlLine2."Entity Type";
+      JobLedgEntry."Yard No." := JobJnlLine2."Yard No.";
+      JobLedgEntry."System No." := JobJnlLine2."System No.";
+      JobLedgEntry."Entity No." := JobJnlLine2."Entity No.";
+      JobLedgEntry."Cable Transit Pos." := JobJnlLine2."Cable Transit Pos.";
+      JobLedgEntry.Comment := JobJnlLine2.Comment;
+      //**4PS.en
+      JobLedgEntry.Text := JobJnlLine2.Text;
+
+      WITH JobJnlLine2 DO
+        CASE Type OF
+          Type::Resource:
+            IF "Entry Type" = "Entry Type"::Usage THEN
+              IF ResLedgEntry.FINDLAST THEN BEGIN
+                JobLedgEntry."Ledger Entry Type" := JobLedgEntry."Ledger Entry Type"::Resource;
+                JobLedgEntry."Ledger Entry No." := ResLedgEntry."Entry No.";
+              END;
+          Type::Item:
+            BEGIN
+              JobLedgEntry."Ledger Entry Type" := "Ledger Entry Type"::Item;
+              JobLedgEntry."Ledger Entry No." := "Ledger Entry No.";
+              JobLedgEntry."Serial No." := "Serial No.";
+              JobLedgEntry."Lot No." := "Lot No.";
+            END;
+          Type::"G/L Account":
+            BEGIN
+              JobLedgEntry."Ledger Entry Type" := JobLedgEntry."Ledger Entry Type"::" ";
+              IF GLEntryNo > 0 THEN BEGIN
+                JobLedgEntry."Ledger Entry Type" := JobLedgEntry."Ledger Entry Type"::"G/L Account";
+                JobLedgEntry."Ledger Entry No." := GLEntryNo;
+                GLEntryNo := 0;
+              END;
+            END;
+        END;
+      IF JobLedgEntry."Entry Type" = JobLedgEntry."Entry Type"::Sale THEN BEGIN
+        JobLedgEntry."Serial No." := JobJnlLine2."Serial No.";
+        JobLedgEntry."Lot No." := JobJnlLine2."Lot No.";
+      END;
+
+      JobLedgEntry.CheckIfPostingIsAllowed;//**4PS.n 110720, C-016679
+
+      OnBeforeJobLedgEntryInsert(JobLedgEntry,JobJnlLine2);
+      JobLedgEntry.INSERT(TRUE);
+      OnAfterJobLedgEntryInsert(JobLedgEntry,JobJnlLine2);
+
+      JobReg."To Entry No." := NextEntryNo;
+      JobReg.MODIFY;
+      JobLedgEntry.UpdateCostControlStatus; //**4PS.n
+
+
+      JobLedgEntryNo := JobLedgEntry."Entry No.";
+      IsHandled := FALSE;
+      OnBeforeApplyUsageLink(JobLedgEntry,JobJnlLine2,IsHandled);
+      IF NOT IsHandled THEN
+      //**4PS.so C010183
+      //IF JobLedgEntry."Entry Type" = JobLedgEntry."Entry Type"::Usage THEN BEGIN
+      //  // Usage Link should be applied if it is enabled for the job,
+      //  // if a Job Planning Line number is defined or if it is enabled for a Job Planning Line.
+      //  Job.GET(JobLedgEntry."Job No.");
+      //  IF Job."Apply Usage Link" OR
+      //     (JobJnlLine2."Job Planning Line No." <> 0) OR
+      //     JobLinkUsage.FindMatchingJobPlanningLine(JobPlanningLine,JobLedgEntry)
+      //  THEN
+      //    JobLinkUsage.ApplyUsage(JobLedgEntry,JobJnlLine2)
+      //  ELSE
+      //    JobPostLine.InsertPlLineFromLedgEntry(JobLedgEntry)
+      //END;
+      //**4PS.eo C010183
+
+      NextEntryNo := NextEntryNo + 1;
+      OnAfterApplyUsageLink(JobLedgEntry);
+
+      EXIT(JobLedgEntryNo);
+    END;
+
+    LOCAL PROCEDURE SetCurrency@23(JobJnlLine@1000 : Record 11072008);
+    BEGIN
+      IF JobJnlLine."Currency Code" = '' THEN BEGIN
+        CLEAR(Currency);
+        Currency.InitRoundingPrecision
+      END ELSE BEGIN
+        Currency.GET(JobJnlLine."Currency Code");
+        Currency.TESTFIELD("Amount Rounding Precision");
+        Currency.TESTFIELD("Unit-Amount Rounding Precision");
+      END;
+    END;
+
+    LOCAL PROCEDURE PostItem@26(VAR JobJnlLine@1000 : Record 11072008) JobLedgEntryNo : Integer;
+    VAR
+      ItemLedgEntry@1016 : Record 32;
+      ValueEntry@1014 : Record 5802;
+      JobLedgEntry2@1012 : Record 11072005;
+      JobPlanningLine@1011 : Record 11020401;
+      TempTrackingSpecification@1010 : TEMPORARY Record 336;
+      ItemJnlLine2@1009 : Record 83;
+      JobJnlLineReserve@1017 : Codeunit 11072001;
+      SkipJobLedgerEntry@1007 : Boolean;
+      ApplyToJobContractEntryNo@1006 : Boolean;
+      TempRemainingQty@1005 : Decimal;
+      RemainingAmount@1004 : Decimal;
+      RemainingAmountLCY@1003 : Decimal;
+      RemainingQtyToTrack@1002 : Decimal;
+      IsHandled@1001 : Boolean;
+    BEGIN
+      WITH JobJnlLine DO BEGIN
+        IF NOT "Job Posting Only" THEN BEGIN
+          IsHandled := FALSE;
+          OnBeforeItemPosting(JobJnlLine2,NextEntryNo,IsHandled);
+          IF NOT IsHandled THEN BEGIN
+            InitItemJnlLine;
+            JobJnlLineReserve.TransJobJnlLineToItemJnlLine(JobJnlLine2,ItemJnlLine,ItemJnlLine."Quantity (Base)");
+
+            ApplyToJobContractEntryNo := FALSE;
+            IF JobPlanningLine.GET("Job No.","Job Task No.","Job Planning Line No.") THEN
+              ApplyToJobContractEntryNo := TRUE
+            ELSE
+              IF JobPlanningReservationExists(JobJnlLine2."No.",JobJnlLine2."Job No.") THEN
+                IF ApplyToMatchingJobPlanningLine(JobJnlLine2,JobPlanningLine) THEN
+                  ApplyToJobContractEntryNo := TRUE;
+
+            IF ApplyToJobContractEntryNo THEN
+              ItemJnlLine."Job Contract Entry No." := JobPlanningLine."Job Contract Entry No.";
+
+            ItemLedgEntry.LOCKTABLE;
+            ItemJnlLine2 := ItemJnlLine;
+            ItemJnlPostLine.RunWithCheck(ItemJnlLine);
+            ItemJnlPostLine.CollectTrackingSpecification(TempTrackingSpecification);
+            PostWhseJnlLine(ItemJnlLine2,ItemJnlLine2.Quantity,ItemJnlLine2."Quantity (Base)",TempTrackingSpecification);
+          END;
+        END;
+
+        OnPostItemOnBeforeGetJobConsumptionValueEntry(JobJnlLine);
+        IF GetJobConsumptionValueEntry(ValueEntry,JobJnlLine) THEN BEGIN
+          RemainingAmount := JobJnlLine2."Line Amount";
+          RemainingAmountLCY := JobJnlLine2."Line Amount (LCY)";
+          RemainingQtyToTrack := JobJnlLine2.Quantity;
+          REPEAT
+            SkipJobLedgerEntry := FALSE;
+            IF ItemLedgEntry.GET(ValueEntry."Item Ledger Entry No.") THEN BEGIN
+              JobLedgEntry2.SETRANGE("Ledger Entry Type",JobLedgEntry2."Ledger Entry Type"::Item);
+              JobLedgEntry2.SETRANGE("Ledger Entry No.",ItemLedgEntry."Entry No.");
+              // The following code is only to secure that JLEs created at receipt in version 6.0 or earlier,
+              // are not created again at point of invoice (6.0 SP1 and newer).
+              IF JobLedgEntry2.FINDFIRST AND (JobLedgEntry2.Quantity = -ItemLedgEntry.Quantity) THEN
+                SkipJobLedgerEntry := TRUE
+              ELSE BEGIN
+                JobJnlLine2."Serial No." := ItemLedgEntry."Serial No.";
+                JobJnlLine2."Lot No." := ItemLedgEntry."Lot No.";
+                OnPostItemOnAfterApplyItemTracking(JobJnlLine2,ItemLedgEntry,JobLedgEntry2,SkipJobLedgerEntry);
+              END;
+            END;
+            IF NOT SkipJobLedgerEntry THEN BEGIN
+              TempRemainingQty := JobJnlLine2."Remaining Qty.";
+              JobJnlLine2.Quantity := -ValueEntry."Invoiced Quantity" / "Qty. per Unit of Measure";
+              JobJnlLine2."Quantity (Base)" :=
+                ROUND(JobJnlLine2.Quantity * "Qty. per Unit of Measure",UOMMgt.QtyRndPrecision);
+              Currency.Initialize("Currency Code");
+
+              OnPostItemOnBeforeUpdateTotalAmounts(JobJnlLine2,ItemLedgEntry,ValueEntry);
+
+              UpdateJobJnlLineTotalAmounts(JobJnlLine2,Currency."Amount Rounding Precision");
+              UpdateJobJnlLineAmount(
+                JobJnlLine2,RemainingAmount,RemainingAmountLCY,RemainingQtyToTrack,Currency."Amount Rounding Precision");
+
+              JobJnlLine2.VALIDATE("Remaining Qty.",TempRemainingQty);
+              JobJnlLine2."Ledger Entry Type" := "Ledger Entry Type"::Item;
+              JobJnlLine2."Ledger Entry No." := ValueEntry."Item Ledger Entry No.";
+              JobLedgEntryNo := CreateJobLedgEntry(JobJnlLine2);
+              ValueEntry."Job Ledger Entry No." := JobLedgEntryNo;
+              ValueEntry.MODIFY(TRUE);
+            END;
+          UNTIL ValueEntry.NEXT = 0;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE PostResource@22(VAR JobJnlLine2@1002 : Record 11072008) : Integer;
+    VAR
+      ResJnlLine@1000 : Record 207;
+      ResLedgEntry@1001 : Record 203;
+    BEGIN
+      WITH ResJnlLine DO BEGIN
+        INIT;
+        CopyFromJobJnlLine(JobJnlLine2);
+        ResLedgEntry.LOCKTABLE;
+        ResJnlPostLine.RunWithCheck(ResJnlLine);
+        JobJnlLine2."Resource Group No." := "Resource Group No.";
+        EXIT(CreateJobLedgEntry(JobJnlLine2));
+      END;
+    END;
+
+    LOCAL PROCEDURE PostWhseJnlLine@24(ItemJnlLine@1000 : Record 83;OriginalQuantity@1001 : Decimal;OriginalQuantityBase@1002 : Decimal;VAR TempTrackingSpecification@1003 : TEMPORARY Record 336);
+    VAR
+      WarehouseJournalLine@1004 : Record 7311;
+      TempWarehouseJournalLine@1005 : TEMPORARY Record 7311;
+      ItemTrackingManagement@1006 : Codeunit 6500;
+      WMSManagement@1007 : Codeunit 7302;
+    BEGIN
+      WITH ItemJnlLine DO BEGIN
+        IF "Entry Type" IN ["Entry Type"::Consumption,"Entry Type"::Output] THEN
+          EXIT;
+
+        Quantity := OriginalQuantity;
+        "Quantity (Base)" := OriginalQuantityBase;
+        GetLocation("Location Code");
+        IF Location."Bin Mandatory" THEN
+          IF WMSManagement.CreateWhseJnlLine(ItemJnlLine,0,WarehouseJournalLine,FALSE) THEN BEGIN
+            TempTrackingSpecification.MODIFYALL("Source Type",DATABASE::"Job Journal Line");
+            ItemTrackingManagement.SplitWhseJnlLine(WarehouseJournalLine,TempWarehouseJournalLine,TempTrackingSpecification,FALSE);
+            IF TempWarehouseJournalLine.FIND('-') THEN
+              REPEAT
+                WMSManagement.CheckWhseJnlLine(TempWarehouseJournalLine,1,0,FALSE);
+                WhseJnlRegisterLine.RegisterWhseJnlLine(TempWarehouseJournalLine);
+              UNTIL TempWarehouseJournalLine.NEXT = 0;
+          END;
+      END;
+    END;
+
+    LOCAL PROCEDURE GetLocation@25(LocationCode@1000 : Code[10]);
+    BEGIN
+      IF LocationCode = '' THEN
+        CLEAR(Location)
+      ELSE
+        IF Location.Code <> LocationCode THEN
+          Location.GET(LocationCode);
+    END;
+
+    [External]
+    PROCEDURE SetGLEntryNo@15(GLEntryNo2@1000 : Integer);
+    BEGIN
+      GLEntryNo := GLEntryNo2;
+    END;
+
+    LOCAL PROCEDURE InitItemJnlLine@7();
+    BEGIN
+      WITH ItemJnlLine DO BEGIN
+        INIT;
+        CopyFromJobJnlLine(JobJnlLine2);
+
+        "Source Type" := "Source Type"::Customer;
+        "Source No." := Job."Bill-to Customer No.";
+
+        Item.GET(JobJnlLine2."No.");
+        "Inventory Posting Group" := Item."Inventory Posting Group";
+        "Item Category Code" := Item."Item Category Code";
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateJobJnlLineTotalAmounts@12(VAR JobJnlLineToUpdate@1000 : Record 11072008;AmtRoundingPrecision@1001 : Decimal);
+    BEGIN
+      WITH JobJnlLineToUpdate DO BEGIN
+        "Total Cost" := ROUND("Unit Cost" * Quantity,AmtRoundingPrecision);
+        "Total Cost (LCY)" := ROUND("Unit Cost (LCY)" * Quantity,AmtRoundingPrecision);
+        "Total Price" := ROUND("Unit Price" * Quantity,AmtRoundingPrecision);
+        "Total Price (LCY)" := ROUND("Unit Price (LCY)" * Quantity,AmtRoundingPrecision);
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateJobJnlLineAmount@13(VAR JobJnlLineToUpdate@1001 : Record 11072008;VAR RemainingAmount@1002 : Decimal;VAR RemainingAmountLCY@1003 : Decimal;VAR RemainingQtyToTrack@1004 : Decimal;AmtRoundingPrecision@1000 : Decimal);
+    BEGIN
+      WITH JobJnlLineToUpdate DO BEGIN
+        "Line Amount" := ROUND(RemainingAmount * Quantity / RemainingQtyToTrack,AmtRoundingPrecision);
+        "Line Amount (LCY)" := ROUND(RemainingAmountLCY * Quantity / RemainingQtyToTrack,AmtRoundingPrecision);
+
+        RemainingAmount -= "Line Amount";
+        RemainingAmountLCY -= "Line Amount (LCY)";
+        RemainingQtyToTrack -= Quantity;
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateJobJnlLineSourceCurrencyAmounts@18(VAR JobJnlLine@1000 : Record 11072008);
+    BEGIN
+      WITH JobJnlLine DO BEGIN
+        Currency.GET(GLSetup."Additional Reporting Currency");
+        Currency.TESTFIELD("Amount Rounding Precision");
+        "Source Currency Total Cost" :=
+          ROUND(
+            CurrExchRate.ExchangeAmtLCYToFCY(
+              0,'', //**4PS.n
+              "Posting Date",
+              GLSetup."Additional Reporting Currency","Total Cost (LCY)",
+              CurrExchRate.ExchangeRate(
+              //"Posting Date",GLSetup."Additional Reporting Currency")), //**4PS.o
+                0,'',"Posting Date",GLSetup."Additional Reporting Currency",FALSE),FALSE), //**4PS.n
+            Currency."Amount Rounding Precision");
+        "Source Currency Total Price" :=
+          ROUND(
+            CurrExchRate.ExchangeAmtLCYToFCY(
+              0,'', //**4PS.n
+              "Posting Date",
+              GLSetup."Additional Reporting Currency","Total Price (LCY)",
+              CurrExchRate.ExchangeRate(
+              //"Posting Date",GLSetup."Additional Reporting Currency")), //**4PS.o
+                0,'',"Posting Date",GLSetup."Additional Reporting Currency",TRUE),TRUE), //**4PS.n
+            Currency."Amount Rounding Precision");
+        "Source Currency Line Amount" :=
+          ROUND(
+            CurrExchRate.ExchangeAmtLCYToFCY(
+               0,'', //**4PS.n
+              "Posting Date",
+              GLSetup."Additional Reporting Currency","Line Amount (LCY)",
+              CurrExchRate.ExchangeRate(
+              //"Posting Date",GLSetup."Additional Reporting Currency")), //**4PS.o
+                0,'',"Posting Date",GLSetup."Additional Reporting Currency","Entry Type" = "Entry Type"::Sale),"Entry Type" = "Entry Type"::Sale), //**4PS.n
+            Currency."Amount Rounding Precision");
+      END;
+    END;
+
+    LOCAL PROCEDURE JobPlanningReservationExists@6(ItemNo@1001 : Code[20];JobNo@1002 : Code[20]) : Boolean;
+    VAR
+      ReservationEntry@1000 : Record 337;
+    BEGIN
+      WITH ReservationEntry DO BEGIN
+        SETRANGE("Item No.",ItemNo);
+        SETRANGE("Source Type",DATABASE::"Job Planning Line");
+        SETRANGE("Source Subtype",Job.Status::Open);
+        SETRANGE("Source ID",JobNo);
+        EXIT(NOT ISEMPTY);
+      END;
+    END;
+
+    LOCAL PROCEDURE GetJobConsumptionValueEntry@8(VAR ValueEntry@1000 : Record 5802;JobJournalLine@1001 : Record 11072008) : Boolean;
+    BEGIN
+      WITH JobJournalLine DO BEGIN
+        ValueEntry.SETCURRENTKEY("Job No.","Job Task No.","Document No.");
+        ValueEntry.SETRANGE("Item No.","No.");
+        ValueEntry.SETRANGE("Job No.","Job No.");
+        ValueEntry.SETRANGE("Job Task No.","Job Task No.");
+        ValueEntry.SETRANGE("Document No.","Document No.");
+        ValueEntry.SETRANGE("Item Ledger Entry Type",ValueEntry."Item Ledger Entry Type"::"Negative Adjmt.");
+        ValueEntry.SETRANGE("Job Ledger Entry No.",0);
+        OnGetJobConsumptionValueEntryFilter(ValueEntry,JobJnlLine);
+      END;
+      EXIT(ValueEntry.FINDSET);
+    END;
+
+    LOCAL PROCEDURE ApplyToMatchingJobPlanningLine@10(VAR JobJnlLine@1000 : Record 11072008;VAR JobPlanningLine@1005 : Record 11020401) : Boolean;
+    VAR
+      Job@1001 : Record 11072003;
+      JobLedgEntry@1003 : Record 11072005;
+      JobTransferLine@1004 : Codeunit 11072016;
+      JobLinkUsage@1002 : Codeunit 1026;
+    BEGIN
+      IF JobLedgEntry."Entry Type" <> JobLedgEntry."Entry Type"::Usage THEN
+        EXIT(FALSE);
+
+      Job.GET(JobJnlLine."Job No.");
+      JobLedgEntry.INIT;
+      //JobTransferLine.FromJnlLineToLedgEntry(JobJnlLine,JobLedgEntry); //**4PS.o
+      JobTransferLine.FromJnlLineToLedgEntry(JobJnlLine,JobLedgEntry,Job); //**4PS.n
+      JobLedgEntry.Quantity := JobJnlLine.Quantity;
+      JobLedgEntry."Quantity (Base)" := JobJnlLine."Quantity (Base)";
+
+      IF JobLinkUsage.FindMatchingJobPlanningLine(JobPlanningLine,JobLedgEntry) THEN BEGIN
+        JobJnlLine.VALIDATE("Job Planning Line No.",JobPlanningLine."Line No.");
+        JobJnlLine.MODIFY(TRUE);
+        EXIT(TRUE);
+      END;
+      EXIT(FALSE);
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterApplyUsageLink@11(VAR JobLedgerEntry@1000 : Record 11072005);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterCopyJobJnlLine@17(VAR JobJournalLine@1000 : Record 11072008;JobJournalLine2@1001 : Record 11072008);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterJobLedgEntryInsert@29(VAR JobLedgerEntry@1000 : Record 11072005;JobJournalLine@1001 : Record 11072008);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterRunCode@3(VAR JobJournalLine@1000 : Record 11072008;JobLedgEntryNo@1001 : Integer);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeCheckJob@34(VAR JobJournalLine@1000 : Record 11072008;Job@1001 : Record 11072003;VAR IsHandled@1002 : Boolean;VAR JobRegister@1003 : Record 11072012;VAR NextEntryNo@1004 : Integer);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeCode@19(VAR JobJournalLine@1000 : Record 11072008);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeApplyUsageLink@16(VAR JobLedgerEntry@1000 : Record 11072005;VAR JobJournalLine@1001 : Record 11072008;VAR IsHandled@1002 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeCreateJobLedgEntry@9(VAR JobJournalLine@1000 : Record 11072008;VAR IsHandled@1001 : Boolean;VAR JobLedgEntryNo@1002 : Integer);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeJobLedgEntryInsert@20(VAR JobLedgerEntry@1000 : Record 11072005;JobJournalLine@1001 : Record 11072008);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeItemPosting@21(VAR JobJournalLine@1000 : Record 11072008;VAR NextEntryNo@1001 : Integer;VAR IsHandled@1002 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnCheckJobOnBeforeTestJobTaskType@30(VAR JobJournalLine@1000 : Record 11072008;VAR IsHandled@1001 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnGetJobConsumptionValueEntryFilter@5(VAR ValueEntry@1001 : Record 5802;JobJournalLine@1000 : Record 11072008);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnPostItemOnAfterApplyItemTracking@28(VAR JobJournalLine@1000 : Record 11072008;ItemLedgerEntry@1002 : Record 32;VAR JobLedgerEntry@1001 : Record 11072005;VAR SkipJobLedgerEntry@1003 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnPostItemOnBeforeGetJobConsumptionValueEntry@33(VAR JobJournalLine@1000 : Record 11072008);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnPostItemOnBeforeUpdateTotalAmounts@27(VAR JobJournalLine@1000 : Record 11072008;ItemLedgerEntry@1001 : Record 32;ValueEntry@1002 : Record 5802);
+    BEGIN
+    END;
+
+    PROCEDURE TestJob@1100525000(JobNo@1000 : Code[20];lCompanyName@1100485000 : Text[50];lCalculationHours@1100485001 : Boolean);
+    BEGIN
+      //**4PS  (Also called from CU90)
+      Job.CHANGECOMPANY(lCompanyName);
+      Job.GET(JobNo);
+      Job.TestBlocked;
+
+      ProjSetupRec.CHANGECOMPANY(lCompanyName);
+      ProjSetupRec.GET;
+      IF (ProjSetupRec."Provisions at Closure") THEN
+        Job.CheckProjectStatus(-1)
+      ELSE
+        Job.CheckProjectStatus(0);
+
+      IF NOT ProjSetupRec."Post in Estim. Status allowed" THEN //C001038
+        IF (Job."Project Status" < Job."Project Status"::Preparation) AND (NOT gOriginSalaryApplication) AND
+           (NOT lCalculationHours)
+        THEN
+          ERROR(Text11012000,Job.TABLECAPTION,JobNo,Job.FIELDCAPTION("Project Status"),Job."Project Status");
+    END;
+
+    PROCEDURE SetOriginSalaryApplication@1100485000(IOriginSalaryApplication@1100485000 : Boolean);
+    BEGIN
+      //**4PS
+      gOriginSalaryApplication := IOriginSalaryApplication;
+    END;
+
+    PROCEDURE GetJobLedgEntryNo@1100528500() : Integer;
+    BEGIN
+      //**4PS DP00121
+      EXIT(JobLedgEntryNo);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

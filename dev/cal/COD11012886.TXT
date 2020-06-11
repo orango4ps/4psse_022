@@ -1,0 +1,537 @@
+OBJECT Codeunit 11012886 Post Service Preclosure Mgt.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text002@1100528601 : TextConst 'ENU=Service Contract #1#################\\;NOR=Servicekontrakt #1#################\\;SVE=Servicekontrakt #1#################\\';
+      Text003@1100528609 : TextConst 'ENU=Service-Contract %1 has unposted %2 Lines for %3 %4;NOR=Servicekontrakt %1 har ikke-bokf›rte %2 rader for %3 %4;SVE=Servicekontraktet %1 har inte bokf”rt %2 rader f”r %3 %4';
+      Text007@1100528602 : TextConst 'ENU=Busy with        #2#################\;NOR=Opptatt med        #2#################\;SVE=Upptagen med     #2#################\';
+      Text008@1100528603 : TextConst 'ENU=from             #3################# @4@@@@@@@@@@@@@;NOR=fra             #3################# @4@@@@@@@@@@@@@;SVE=fr†n             #3################# @4@@@@@@@@@@@@@';
+      Text040@1100528605 : TextConst 'ENU=Post;NOR=Bokf›r;SVE=Bokf”r';
+      Text049@1100528604 : TextConst 'ENU=Preclosure Results;NOR=Prelimin‘rt regnskapsresultat;SVE=Projektv„rderingar';
+      Text050@1100528606 : TextConst 'ENU=Preclosure Result %1 %2;NOR=Prelimin‘rt regnskapsresultat %1 %2;SVE=Projektv„rdering %1 %2';
+      NoSeriesCde@1100528607 : Code[20];
+      DocNoCde@1100528608 : Code[20];
+      Window@1100528610 : Dialog;
+      SkipOpenProgressWindow@1100529850 : Boolean;
+
+    PROCEDURE TestPreclosureResult@1100528604(IServicePreclosureResultLine@1100528600 : Record 11072313);
+    VAR
+      ServicePreclosureResultLine@1100528601 : Record 11072313;
+      UserSetup@1100528602 : Record 91;
+      ServiceSetup@1100528603 : Record 11012800;
+    BEGIN
+      TestRealTimeControlMethod;
+      IServicePreclosureResultLine.TESTFIELD(Posted, FALSE);
+      IServicePreclosureResultLine.TestLineTypeOnPosting;
+
+      ServicePreclosureResultLine.SETFILTER("Posting Date", '<%1', IServicePreclosureResultLine."Posting Date");
+      ServicePreclosureResultLine.SETRANGE("Service Contract No.", IServicePreclosureResultLine."Service Contract No.");
+      IF IServicePreclosureResultLine."Service Contract No." = '' THEN
+        ServicePreclosureResultLine.SETRANGE("Global Dimension 1 Code", IServicePreclosureResultLine."Global Dimension 1 Code");
+      ServicePreclosureResultLine.SETRANGE("Control Period Code", IServicePreclosureResultLine."Control Period Code");
+      ServicePreclosureResultLine.SETRANGE("Line Type", IServicePreclosureResultLine."Line Type");
+      IF IServicePreclosureResultLine."Line Type" = IServicePreclosureResultLine."Line Type"::"Service Category" THEN
+        ServicePreclosureResultLine.SETRANGE("Service Category", IServicePreclosureResultLine."Service Category");
+      ServicePreclosureResultLine.SETRANGE(Posted, FALSE);
+      IF ServicePreclosureResultLine.FINDLAST THEN
+        ERROR(Text003, IServicePreclosureResultLine."Service Contract No.", IServicePreclosureResultLine.TABLECAPTION,
+          ServicePreclosureResultLine.FIELDCAPTION("Posting Date"), ServicePreclosureResultLine."Posting Date",
+          ServicePreclosureResultLine.FIELDCAPTION("Seq. No."), ServicePreclosureResultLine."Seq. No.");
+
+      UserSetup.GET(USERID);
+      UserSetup.TESTFIELD("Resp.Pers.Closing.Proc.Service", TRUE);
+
+      ServiceSetup.GET;
+      ServiceSetup.TESTFIELD("Journal Template Closing Proc.");
+
+      CheckTypePreclosureResult(IServicePreclosureResultLine."Service Contract No.", IServicePreclosureResultLine."Service Category");
+    END;
+
+    PROCEDURE PostPreclosureResult@1100528600(VAR IServicePreclosureResultLine@1100528600 : Record 11072313);
+    VAR
+      ServiceSetup@1100528605 : Record 11012800;
+      GenJournalTemplate@1100528604 : Record 80;
+      ServiceType@1100528607 : Record 11012814;
+      GenJournalLine@1100528611 : Record 81;
+      GLRegister@1100528612 : Record 45;
+      ServicePreclosureResultLine@1100529670 : Record 11072313;
+      NextLineNo@1100528603 : Integer;
+      CostDec@1100528609 : Decimal;
+      RevenueDec@1100528610 : Decimal;
+      ProvisionLoss@1100529671 : Decimal;
+      PrevCostDec@1100529673 : Decimal;
+      PrevRevenueDec@1100529672 : Decimal;
+      PrevProvisionLoss@1100529674 : Decimal;
+    BEGIN
+      TestRealTimeControlMethod;
+      IF NOT SkipOpenProgressWindow THEN BEGIN
+        Window.OPEN(Text002 + Text007 + Text008);
+        Window.UPDATE(1, IServicePreclosureResultLine."Service Contract No.");
+        Window.UPDATE(2, Text040);
+        Window.UPDATE(3, Text049);
+      END;
+
+      ServiceSetup.GET;
+      IF NextLineNo = 0 THEN BEGIN
+        GenJournalTemplate.GET(ServiceSetup."Journal Template Closing Proc.");
+        GenJournalTemplate.TESTFIELD("No. Series");
+        ClearDocumentNoCode;
+        NextLineNo := 10000;
+      END;
+
+      ServiceType."Method Preclosure Results" := PreclosureMethodServiceContract(IServicePreclosureResultLine."Service Contract No.", IServicePreclosureResultLine."Service Category");
+
+      CASE ServiceType."Method Preclosure Results" OF
+        ServiceType."Method Preclosure Results"::Net:
+          BEGIN
+            RevenueDec := IServicePreclosureResultLine."Corrected Preclosure Result";
+            CostDec := 0;
+
+            IServicePreclosureResultLine.CALCFIELDS("Prev. Actual Preclosure Result");
+            PrevCostDec := 0;
+            PrevRevenueDec := IServicePreclosureResultLine."Prev. Actual Preclosure Result";
+          END;
+
+        ServiceType."Method Preclosure Results"::Gross:
+          BEGIN
+            RevenueDec := IServicePreclosureResultLine."Corrected Preclosure Revenue";
+            CostDec := IServicePreclosureResultLine."Corrected Preclosure Cost";
+
+            IServicePreclosureResultLine.CALCFIELDS("Prev. Actual Preclosure Rev.", "Prev. Actual Preclosure Cost");
+            PrevRevenueDec := IServicePreclosureResultLine."Prev. Actual Preclosure Rev.";
+            PrevCostDec := IServicePreclosureResultLine."Prev. Actual Preclosure Cost";
+          END;
+
+        ServiceType."Method Preclosure Results"::GrossPL:
+          BEGIN
+            RevenueDec := IServicePreclosureResultLine."Corrected Revenue Accrual";
+            CostDec := IServicePreclosureResultLine."Corrected Cost Accrual";
+
+            IServicePreclosureResultLine.CALCFIELDS("Previous Revenue Accrual", "Previous Cost Accrual");
+            PrevRevenueDec := IServicePreclosureResultLine."Previous Revenue Accrual";
+            PrevCostDec := IServicePreclosureResultLine."Previous Cost Accrual";
+          END;
+      END;
+
+      ProvisionLoss := IServicePreclosureResultLine."Corrected Provision Loss";
+      IServicePreclosureResultLine.CALCFIELDS("Previous Actual Provision Loss");
+      PrevProvisionLoss := IServicePreclosureResultLine."Previous Actual Provision Loss";
+
+      IF PrevCostDec <> 0 THEN BEGIN
+        GLRegister."No." := 0;
+        FillGenJnlLinePreclResult(
+          IServicePreclosureResultLine."Service Contract No.", IServicePreclosureResultLine."Service Category",
+          IServicePreclosureResultLine."Posting Date", TRUE, TRUE,
+          PrevCostDec, NextLineNo, GenJournalTemplate, GenJournalLine, GLRegister, FALSE, IServicePreclosureResultLine."Global Dimension 1 Code");
+        FillServJnlLinePreclResult(IServicePreclosureResultLine, TRUE, GenJournalLine, NextLineNo);
+        NextLineNo := NextLineNo + 10000;
+      END;
+
+      IF PrevProvisionLoss <> 0 THEN BEGIN
+        GLRegister."No." := 0;
+        FillGenJnlLinePreclResult(
+          IServicePreclosureResultLine."Service Contract No.", IServicePreclosureResultLine."Service Category",
+          IServicePreclosureResultLine."Posting Date", TRUE, TRUE,
+          ABS(PrevProvisionLoss), NextLineNo, GenJournalTemplate, GenJournalLine, GLRegister, TRUE, IServicePreclosureResultLine."Global Dimension 1 Code");
+        FillServJnlLinePreclResult(IServicePreclosureResultLine, TRUE, GenJournalLine, NextLineNo);
+        NextLineNo := NextLineNo + 10000;
+      END;
+
+      IF PrevRevenueDec <> 0 THEN BEGIN
+        GLRegister."No." := 0;
+        FillGenJnlLinePreclResult(
+          IServicePreclosureResultLine."Service Contract No.", IServicePreclosureResultLine."Service Category",
+          IServicePreclosureResultLine."Posting Date", TRUE, FALSE,
+          PrevRevenueDec, NextLineNo, GenJournalTemplate, GenJournalLine, GLRegister, FALSE, IServicePreclosureResultLine."Global Dimension 1 Code");
+        FillServJnlLinePreclResult(IServicePreclosureResultLine, FALSE, GenJournalLine, NextLineNo);
+        NextLineNo := NextLineNo + 10000;
+      END;
+
+      ServicePreclosureResultLine.SETRANGE("Line Type", IServicePreclosureResultLine."Line Type");
+      ServicePreclosureResultLine.SETRANGE("Service Contract No.", IServicePreclosureResultLine."Service Contract No.");
+      IF IServicePreclosureResultLine."Service Contract No." = '' THEN
+        ServicePreclosureResultLine.SETRANGE("Global Dimension 1 Code", IServicePreclosureResultLine."Global Dimension 1 Code");
+      ServicePreclosureResultLine.SETRANGE("Control Period Code", IServicePreclosureResultLine."Control Period Code");
+      IF IServicePreclosureResultLine."Line Type" = IServicePreclosureResultLine."Line Type"::"Service Category" THEN
+        ServicePreclosureResultLine.SETRANGE("Service Category", IServicePreclosureResultLine."Service Category");
+      ServicePreclosureResultLine.SETRANGE("Totaling Type", IServicePreclosureResultLine."Totaling Type");
+      ServicePreclosureResultLine.SETRANGE("Source Type", IServicePreclosureResultLine."Source Type");
+      ServicePreclosureResultLine.SETRANGE(Posted, TRUE);
+      ServicePreclosureResultLine.SETRANGE("Correction Posted", FALSE);
+      IF ServicePreclosureResultLine.FINDSET THEN
+        REPEAT
+          ServicePreclosureResultLine."Correction Posted by" := USERID;
+          ServicePreclosureResultLine."Correction Posted on" := TODAY;
+          ServicePreclosureResultLine.VALIDATE("Correction Posted", TRUE);
+          ServicePreclosureResultLine.MODIFY;
+        UNTIL ServicePreclosureResultLine.NEXT = 0;
+
+      IF CostDec <> 0 THEN BEGIN
+        GLRegister."No." := 0;
+        FillGenJnlLinePreclResult(
+          IServicePreclosureResultLine."Service Contract No.", IServicePreclosureResultLine."Service Category",
+          IServicePreclosureResultLine."Posting Date", FALSE, TRUE,
+          CostDec, NextLineNo, GenJournalTemplate, GenJournalLine, GLRegister, FALSE, IServicePreclosureResultLine."Global Dimension 1 Code");
+        FillServJnlLinePreclResult(IServicePreclosureResultLine, TRUE, GenJournalLine, NextLineNo);
+        NextLineNo := NextLineNo + 10000;
+        IServicePreclosureResultLine."Account Cost" := GenJournalLine."Account No.";
+        IServicePreclosureResultLine."Balance Account Cost" := GenJournalLine."Bal. Account No.";
+        IServicePreclosureResultLine."G/L Register No. Cost" := GLRegister."No.";
+      END;
+
+      IF ProvisionLoss <> 0 THEN BEGIN
+        GLRegister."No." := 0;
+        FillGenJnlLinePreclResult(
+          IServicePreclosureResultLine."Service Contract No.", IServicePreclosureResultLine."Service Category",
+          IServicePreclosureResultLine."Posting Date", FALSE, TRUE,
+          ABS(ProvisionLoss), NextLineNo, GenJournalTemplate, GenJournalLine, GLRegister, TRUE, IServicePreclosureResultLine."Global Dimension 1 Code");
+        FillServJnlLinePreclResult(IServicePreclosureResultLine, TRUE, GenJournalLine, NextLineNo);
+        NextLineNo := NextLineNo + 10000;
+        IServicePreclosureResultLine."Account Provision Loss" := GenJournalLine."Account No.";
+        IServicePreclosureResultLine."Balance Account Provision Loss" := GenJournalLine."Bal. Account No.";
+        IServicePreclosureResultLine."G/L Reg. No. Provision Loss" := GLRegister."No.";
+      END;
+
+      IF RevenueDec <> 0 THEN BEGIN
+        GLRegister."No." := 0;
+        FillGenJnlLinePreclResult(
+          IServicePreclosureResultLine."Service Contract No.", IServicePreclosureResultLine."Service Category",
+          IServicePreclosureResultLine."Posting Date", FALSE, FALSE,
+          RevenueDec, NextLineNo, GenJournalTemplate, GenJournalLine, GLRegister, FALSE, IServicePreclosureResultLine."Global Dimension 1 Code");
+        FillServJnlLinePreclResult(IServicePreclosureResultLine, FALSE, GenJournalLine, NextLineNo);
+        NextLineNo := NextLineNo + 10000;
+        IServicePreclosureResultLine."Account Sales" := GenJournalLine."Account No.";
+        IServicePreclosureResultLine."Balance Account Sales" := GenJournalLine."Bal. Account No.";
+        IServicePreclosureResultLine."G/L Register No. Sales" := GLRegister."No.";
+      END;
+
+      IServicePreclosureResultLine."Posted by" := USERID;
+      IServicePreclosureResultLine."Posted on" := TODAY;
+      CASE ServiceType."Method Preclosure Results" OF
+        ServiceType."Method Preclosure Results"::Net:
+          IServicePreclosureResultLine."Actual Preclosure Result" := RevenueDec;
+        ServiceType."Method Preclosure Results"::Gross:
+          BEGIN
+            IServicePreclosureResultLine."Actual Preclosure Revenue" := RevenueDec;
+            IServicePreclosureResultLine."Actual Preclosure Cost" := CostDec;
+          END;
+        ServiceType."Method Preclosure Results"::GrossPL:
+          BEGIN
+            IServicePreclosureResultLine."Actual Revenue Accrual" := RevenueDec;
+            IServicePreclosureResultLine."Actual Cost Accrual" := CostDec;
+          END;
+      END;
+      IServicePreclosureResultLine."Actual Provision Loss" := ProvisionLoss;
+      IServicePreclosureResultLine.VALIDATE(Posted, TRUE);
+      IServicePreclosureResultLine.MODIFY;
+
+      IF IServicePreclosureResultLine."Calc. Interim Results by Order" THEN BEGIN
+        ServicePreclosureResultLine.RESET;
+        ServicePreclosureResultLine.SETRANGE("Posting Date", IServicePreclosureResultLine."Posting Date");
+        ServicePreclosureResultLine.SETRANGE("Seq. No.", IServicePreclosureResultLine."Seq. No.");
+        IF IServicePreclosureResultLine."Totaling Type" <> IServicePreclosureResultLine."Totaling Type"::All THEN
+          ServicePreclosureResultLine.SETRANGE("Totaling Type", IServicePreclosureResultLine."Totaling Type");
+        ServicePreclosureResultLine.SETRANGE("Service Contract No.", IServicePreclosureResultLine."Service Contract No.");
+        IF IServicePreclosureResultLine."Service Contract No." = '' THEN
+          ServicePreclosureResultLine.SETRANGE("Global Dimension 1 Code", IServicePreclosureResultLine."Global Dimension 1 Code");
+        ServicePreclosureResultLine.SETRANGE("Control Period Code", IServicePreclosureResultLine."Control Period Code");
+        ServicePreclosureResultLine.SETFILTER("Line Type", '>%1', IServicePreclosureResultLine."Line Type");
+        IF IServicePreclosureResultLine."Line Type" = IServicePreclosureResultLine."Line Type"::"Service Category" THEN
+          ServicePreclosureResultLine.SETRANGE("Service Category", IServicePreclosureResultLine."Service Category");
+        IF ServicePreclosureResultLine.FINDSET THEN
+          REPEAT
+            ServicePreclosureResultLine."Posted by" := USERID;
+            ServicePreclosureResultLine."Posted on" := TODAY;
+            CASE ServiceType."Method Preclosure Results" OF
+              ServiceType."Method Preclosure Results"::Net:
+                ServicePreclosureResultLine."Actual Preclosure Result" := ServicePreclosureResultLine."Corrected Preclosure Result";
+              ServiceType."Method Preclosure Results"::Gross:
+                BEGIN
+                  ServicePreclosureResultLine."Actual Preclosure Revenue" := ServicePreclosureResultLine."Corrected Preclosure Revenue";
+                  ServicePreclosureResultLine."Actual Preclosure Cost" := ServicePreclosureResultLine."Corrected Preclosure Cost";
+                END;
+              ServiceType."Method Preclosure Results"::GrossPL:
+                BEGIN
+                  ServicePreclosureResultLine."Actual Revenue Accrual" := ServicePreclosureResultLine."Corrected Revenue Accrual";
+                  ServicePreclosureResultLine."Actual Cost Accrual" := ServicePreclosureResultLine."Corrected Cost Accrual";
+                END;
+            END;
+            ServicePreclosureResultLine."Actual Provision Loss" := ServicePreclosureResultLine."Corrected Provision Loss";
+            ServicePreclosureResultLine.Posted := TRUE;
+            ServicePreclosureResultLine.MODIFY;
+          UNTIL ServicePreclosureResultLine.NEXT = 0;
+      END;
+
+      IF NOT SkipOpenProgressWindow THEN
+        Window.CLOSE;
+    END;
+
+    LOCAL PROCEDURE "--- Local"@1100528602();
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE CheckTypePreclosureResult@1100485011(IServiceContractNo@1100528601 : Code[20];ServiceCategoryCode@1100529600 : Code[10]);
+    VAR
+      ServiceType@1100528600 : Record 11012814;
+    BEGIN
+      GetServiceType(IServiceContractNo, ServiceCategoryCode, ServiceType);
+      CASE ServiceType."Method Preclosure Results" OF
+        ServiceType."Method Preclosure Results"::Net:
+          BEGIN
+            ServiceType.TESTFIELD("Preclosure Acc. Profit (Debit)");
+            ServiceType.TESTFIELD("Preclosure Acc. Profit (Cred)");
+          END;
+        ServiceType."Method Preclosure Results"::Gross:
+          BEGIN
+            ServiceType.TESTFIELD("Preclosure Acc. Sales (Debit)");
+            ServiceType.TESTFIELD("Preclosure Acc. Sales (Credit)");
+            ServiceType.TESTFIELD("Preclosure Acc. Costs (Debit)");
+            ServiceType.TESTFIELD("Preclosure Acc. Costs (Credit)");
+          END;
+        ServiceType."Method Preclosure Results"::GrossPL:
+          BEGIN
+            ServiceType.TESTFIELD("Precl. Accr. Rev. ahead (Deb)");
+            ServiceType.TESTFIELD("Precl. Accr. Rev. ahead (Cr)");
+            ServiceType.TESTFIELD("Precl. Accr. Rev. behind (Deb)");
+            ServiceType.TESTFIELD("Precl. Accr. Rev. behind (Cr)");
+            ServiceType.TESTFIELD("Precl. Accr. Cst. ahead (Deb)");
+            ServiceType.TESTFIELD("Precl. Accr. Cst. ahead (Cr)");
+            ServiceType.TESTFIELD("Precl. Accr. Cst. behind (Deb)");
+            ServiceType.TESTFIELD("Precl. Accr. Cst. behind (Cr)");
+          END;
+      END;
+      ServiceType.TESTFIELD("Loss Dotation");
+      ServiceType.TESTFIELD("Loss Provision");
+    END;
+
+    LOCAL PROCEDURE FillServJnlLinePreclResult@1100485005(IServicePreclosureResultLine@1100528604 : Record 11072313;IBalance@1100525000 : Boolean;IGenJournalLine@1100528602 : Record 81;INextLineNo@1100528603 : Integer);
+    VAR
+      ServiceJournalLine@1100528601 : Record 11012820;
+      ServiceContract@1100528605 : Record 11012812;
+      ServiceJnlPostLine@1100528600 : Codeunit 11012802;
+    BEGIN
+      IF NOT ServiceContract.GET(IServicePreclosureResultLine."Service Contract No.") THEN
+        ServiceContract.INIT;
+      ServiceJournalLine.INIT;
+      ServiceJournalLine."Posting Date" := IGenJournalLine."Posting Date";
+      ServiceJournalLine."Reason Code" := IGenJournalLine."Reason Code";
+      ServiceJournalLine."Source Code" := IGenJournalLine."Source Code";
+      ServiceJournalLine."Line No." := INextLineNo;
+      ServiceJournalLine."Project No." := '';
+      ServiceJournalLine."Service Contract No." := IServicePreclosureResultLine."Service Contract No.";
+      ServiceJournalLine."Service Order No." := '';
+      ServiceJournalLine."Customer No." := ServiceContract."Bill-to Customer No. (CP)";
+      IF IBalance THEN BEGIN
+        ServiceJournalLine."Actual Preclosure Result" := IGenJournalLine.Amount;
+        ServiceJournalLine."G/L Account" := IGenJournalLine."Account No.";
+        ServiceJournalLine."WIP Account Costs" := IGenJournalLine."Account No.";
+        ServiceJournalLine."WIP Balance Account" := IGenJournalLine."Bal. Account No.";
+      END ELSE BEGIN
+        ServiceJournalLine."Actual Preclosure Result" := -IGenJournalLine.Amount;
+        ServiceJournalLine."G/L Account" := IGenJournalLine."Bal. Account No.";
+        ServiceJournalLine."WIP Account Costs" := IGenJournalLine."Bal. Account No.";
+        ServiceJournalLine."WIP Balance Account" := IGenJournalLine."Account No.";
+      END;
+      ServiceJournalLine.Description := IGenJournalLine.Description;
+      ServiceJournalLine."Description 2" := IGenJournalLine."Description 2";
+      ServiceJournalLine."Document No." := IGenJournalLine."Document No.";
+      ServiceJournalLine."Cost Type Closing Procedure" := ServiceJournalLine."Cost Type Closing Procedure"::Revenues;
+      ServiceJournalLine."Closing Procedure" := TRUE;
+      ServiceJournalLine."Shortcut Dimension 1 Code" := IGenJournalLine."Shortcut Dimension 1 Code";
+      ServiceJournalLine."Source Type Closing Procedure" := ServiceJournalLine."Source Type Closing Procedure"::"Not Used";
+      ServiceJournalLine."Service Control Period Date" := IServicePreclosureResultLine.GetServiceControlPeriodDate(ServiceJournalLine."Posting Date");
+      ServiceJournalLine."Service Category" := IServicePreclosureResultLine."Service Category";
+      ServiceJnlPostLine.RunWithCheck(ServiceJournalLine);
+    END;
+
+    LOCAL PROCEDURE FillGenJnlLinePreclResult@1100485033(IServiceContractNo@1100528600 : Code[20];ServiceCategoryCode@1100529600 : Code[10];IPostingDate@1100528607 : Date;IContra@1100485002 : Boolean;ITypeCost@1100485001 : Boolean;IBalanceDec@1100485000 : Decimal;INextLineNo@1100528605 : Integer;IGenJournalTemplate@1100528604 : Record 80;VAR OGenJournalLine@1100528603 : Record 81;VAR OGLRegister@1100528606 : Record 45;IProvisionLoss@1100529670 : Boolean;IGlobalDim1Code@1100529601 : Code[20]);
+    VAR
+      ServiceType@1100528602 : Record 11012814;
+      Account@1100485004 : Code[20];
+      BalAccount@1100485003 : Code[20];
+    BEGIN
+      GetServiceType(IServiceContractNo, ServiceCategoryCode, ServiceType);
+      IF IProvisionLoss THEN BEGIN
+        Account := ServiceType."Loss Dotation";
+        BalAccount := ServiceType."Loss Provision";
+      END ELSE
+        CASE ServiceType."Method Preclosure Results" OF
+          ServiceType."Method Preclosure Results"::Net:
+            BEGIN
+              Account := ServiceType."Preclosure Acc. Profit (Debit)";
+              BalAccount := ServiceType."Preclosure Acc. Profit (Cred)";
+            END;
+          ServiceType."Method Preclosure Results"::Gross:
+            BEGIN
+              IF ITypeCost  THEN BEGIN
+                Account := ServiceType."Preclosure Acc. Costs (Debit)";
+                BalAccount := ServiceType."Preclosure Acc. Costs (Credit)";
+              END ELSE BEGIN
+                Account := ServiceType."Preclosure Acc. Sales (Debit)";
+                BalAccount := ServiceType."Preclosure Acc. Sales (Credit)";
+              END;
+            END;
+          ServiceType."Method Preclosure Results"::GrossPL:
+            BEGIN
+              IF ITypeCost THEN BEGIN
+                IF IBalanceDec < 0 THEN BEGIN
+                  BalAccount := ServiceType."Precl. Accr. Cst. ahead (Deb)";
+                  Account := ServiceType."Precl. Accr. Cst. ahead (Cr)";
+                END ELSE BEGIN
+                  Account := ServiceType."Precl. Accr. Cst. behind (Deb)";
+                  BalAccount := ServiceType."Precl. Accr. Cst. behind (Cr)";
+                END;
+              END ELSE BEGIN
+                IF IBalanceDec < 0 THEN BEGIN
+                  BalAccount := ServiceType."Precl. Accr. Rev. ahead (Deb)";
+                  Account := ServiceType."Precl. Accr. Rev. ahead (Cr)";
+                END ELSE BEGIN
+                  Account := ServiceType."Precl. Accr. Rev. behind (Deb)";
+                  BalAccount := ServiceType."Precl. Accr. Rev. behind (Cr)";
+                END;
+              END;
+            END;
+        END;
+
+      FillGenJnlLinePreclosureResult(IServiceContractNo, IPostingDate, IContra, IBalanceDec, Account, BalAccount,
+        INextLineNo, IGenJournalTemplate, IGlobalDim1Code, OGenJournalLine, OGLRegister);
+    END;
+
+    LOCAL PROCEDURE FillGenJnlLinePreclosureResult@1210190011(IServiceContractNo@1100528602 : Code[20];IPostingDate@1100528606 : Date;IContra@1210190000 : Boolean;IBalanceDec@1100485001 : Decimal;IAccount@1100485003 : Code[20];IBalAccount@1100485002 : Code[20];INextLineNo@1100528603 : Integer;IGenJournalTemplate@1100528601 : Record 80;IGlobalDim1Code@1100529600 : Code[20];VAR OGenJournalLine@1100528600 : Record 81;VAR OGLRegister@1100528610 : Record 45);
+    VAR
+      ServiceContract@1100528604 : Record 11012812;
+      DimensionManagement@1100528605 : Codeunit 408;
+      GenJnlPostLine@1100528608 : Codeunit 12;
+    BEGIN
+      IF NOT ServiceContract.GET(IServiceContractNo) THEN
+        ServiceContract.INIT;
+      OGenJournalLine.INIT;
+      OGenJournalLine."Document No." := GetDocumentNoCode(IGenJournalTemplate, IPostingDate);
+      OGenJournalLine."Reason Code" := IGenJournalTemplate."Reason Code";
+      OGenJournalLine."Source Code" := IGenJournalTemplate."Source Code";
+      OGenJournalLine."Account Type" := OGenJournalLine."Account Type"::"G/L Account";
+      OGenJournalLine."System-Created Entry" := TRUE;
+      OGenJournalLine."Posting Date" := IPostingDate;
+
+      OGenJournalLine."Line No." := INextLineNo;
+
+      OGenJournalLine."Closed Service Contract No." := IServiceContractNo;
+
+      OGenJournalLine.VALIDATE("Account No.", IAccount);
+      OGenJournalLine."Gen. Prod. Posting Group" := '';
+      OGenJournalLine."Gen. Bus. Posting Group" := '';
+      OGenJournalLine."VAT Prod. Posting Group" :='';
+      OGenJournalLine."VAT Bus. Posting Group" := '';
+      OGenJournalLine."Gen. Posting Type" := 0;
+      OGenJournalLine."Bal. Account Type" := OGenJournalLine."Bal. Account Type"::"G/L Account";
+
+      OGenJournalLine.VALIDATE("Bal. Account No.", IBalAccount);
+      OGenJournalLine."Bal. Gen. Prod. Posting Group" := '';
+      OGenJournalLine."Bal. Gen. Bus. Posting Group" := '';
+      OGenJournalLine."Bal. VAT Prod. Posting Group" := '';
+      OGenJournalLine."Bal. VAT Bus. Posting Group" := '';
+      OGenJournalLine."Bal. Gen. Posting Type" := 0;
+      OGenJournalLine.Description := COPYSTR(STRSUBSTNO(Text050, ServiceContract.TABLECAPTION, ServiceContract."No."), 1, MAXSTRLEN(OGenJournalLine.Description));
+      OGenJournalLine."Closed Service Contract No." := IServiceContractNo;
+
+      OGenJournalLine."Posting No. Series" := NoSeriesCde;
+      OGenJournalLine."Skip WIP Check" := TRUE;
+
+      IF NOT IContra THEN
+        OGenJournalLine.VALIDATE(Amount, IBalanceDec)
+      ELSE
+        OGenJournalLine.VALIDATE(Amount, -IBalanceDec);
+
+      OGenJournalLine.CreateDim(
+        DATABASE::Job, '',
+        DATABASE::"Service-Contract", IServiceContractNo,
+        DATABASE::"Plant Number", DimensionManagement.MakeCombinedPlantNo(OGenJournalLine."Plant Type", OGenJournalLine."Plant No."), //**4PS.n
+        DATABASE::"Plant Type", OGenJournalLine."Plant Type",
+        DimensionManagement.TypeToTableID1(OGenJournalLine."Account Type"), OGenJournalLine."Account No.",
+        DimensionManagement.TypeToTableID1(OGenJournalLine."Bal. Account Type"), OGenJournalLine."Bal. Account No.",
+        DATABASE::"Salesperson/Purchaser", OGenJournalLine."Salespers./Purch. Code",
+        DATABASE::Campaign, OGenJournalLine."Campaign No.");
+      OGenJournalLine.VALIDATE("Shortcut Dimension 1 Code", IGlobalDim1Code);
+      GenJnlPostLine.RunWithCheck(OGenJournalLine);
+
+      IF NOT IContra THEN
+        GenJnlPostLine.GetGLReg(OGLRegister);
+    END;
+
+    LOCAL PROCEDURE ClearDocumentNoCode@1210190015();
+    BEGIN
+      DocNoCde := '';
+    END;
+
+    LOCAL PROCEDURE GetDocumentNoCode@1210190017(IGenJournalTemplate@1100528600 : Record 80;IPostingDate@1100528601 : Date) : Code[20];
+    VAR
+      NoSeriesMgt@1210190000 : Codeunit 396;
+    BEGIN
+      IF DocNoCde = '' THEN
+        NoSeriesMgt.InitSeries(IGenJournalTemplate."No. Series", ' ', IPostingDate, DocNoCde, NoSeriesCde);
+      EXIT(DocNoCde);
+    END;
+
+    LOCAL PROCEDURE TestRealTimeControlMethod@1100528601();
+    VAR
+      ServiceSetup@1100528600 : Record 11012800;
+    BEGIN
+      ServiceSetup.GET;
+      ServiceSetup.TESTFIELD("Service Control Method", ServiceSetup."Service Control Method"::"Real-Time");
+    END;
+
+    LOCAL PROCEDURE GetServiceType@1100528609(IServiceContractNo@1100528600 : Code[20];ServiceCategoryCode@1100529600 : Code[10];VAR OServiceType@1100528601 : Record 11012814);
+    VAR
+      ServiceContract@1100528602 : Record 11012812;
+      ServiceSetup@1100528603 : Record 11012800;
+      ServiceCategory@1100529601 : Record 11071985;
+    BEGIN
+      IF IServiceContractNo <> '' THEN BEGIN
+        ServiceContract.GET(IServiceContractNo);
+        IF ServiceContract."Result Calc. on Total Contract" THEN BEGIN
+          ServiceContract.TESTFIELD("Service Type");
+          OServiceType.GET(ServiceContract."Service Type");
+          EXIT;
+        END;
+        IF NOT ServiceCategory.GetServiceType(IServiceContractNo, ServiceCategoryCode, FALSE, OServiceType) THEN BEGIN
+          ServiceContract.TESTFIELD("Service Type");
+          OServiceType.GET(ServiceContract."Service Type");
+        END;
+      END ELSE BEGIN
+        ServiceSetup.GET;
+        ServiceSetup.TESTFIELD("Preclosure Result Service Type");
+        OServiceType.GET(ServiceSetup."Preclosure Result Service Type");
+      END;
+    END;
+
+    PROCEDURE PreclosureMethodServiceContract@1100528605(IServiceContractNo@1100528600 : Code[20];ServiceCategoryCode@1100529600 : Code[10]) : Integer;
+    VAR
+      ServiceType@1100528601 : Record 11012814;
+    BEGIN
+      GetServiceType(IServiceContractNo, ServiceCategoryCode, ServiceType);
+      EXIT(ServiceType."Method Preclosure Results");
+    END;
+
+    PROCEDURE SetSkipOpenProgressWindow@1100529851(NewSkipOpenProgressWindow@1100529851 : Boolean);
+    BEGIN
+      SkipOpenProgressWindow := NewSkipOpenProgressWindow;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

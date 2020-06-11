@@ -1,0 +1,268 @@
+OBJECT Report 11128082 Rounding remainings to clear
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PSSE;
+  }
+  PROPERTIES
+  {
+    CaptionML=[ENU=Rounding remainings to apply/clear;
+               SVE=Avrundningsrester att boka bort];
+    ProcessingOnly=Yes;
+    OnInitReport=VAR
+                   GenJnlManagement@1100285100 : Codeunit 230;
+                   JnlSelected@1100285101 : Boolean;
+                   CurrentJnlBatchName@1100285102 : Code[10];
+                 BEGIN
+                   GenJnlManagement.TemplateSelection(PAGE::"Cash Receipt Journal",3,FALSE,GenJournalLine,JnlSelected);
+                   GenJnlManagement.OpenJnl(CurrentJnlBatchName,GenJournalLine);
+                   GenJnlManagement.SetName(CurrentJnlBatchName,GenJournalLine);
+                   JournalTemplateName := GenJournalLine."Journal Template Name";
+                   JournalBatchName := CurrentJnlBatchName;
+                   xGenJournalLine.SETRANGE("Journal Batch Name",JournalBatchName);
+                   xGenJournalLine.SETRANGE("Journal Template Name",JournalTemplateName);
+                   IF NOT xGenJournalLine.FINDLAST THEN BEGIN
+                     xGenJournalLine."Journal Batch Name":=JournalBatchName;
+                     xGenJournalLine."Journal Template Name":=JournalTemplateName;
+                     GenJournalLine."Journal Batch Name":=JournalBatchName;
+                     GenJournalLine."Journal Template Name":=JournalTemplateName;
+                   END;
+                   RoundingAccNo := '3740';
+                   RoundingLimit := 1;
+                   AppplyRounding := TRUE;
+                 END;
+
+    OnPreReport=VAR
+                  CustLedgerEntry@1100285100 : Record 21;
+                BEGIN
+                  CustLedgerEntry.SETRANGE("Applies-to ID",USERID);
+                  IF CustLedgerEntry.FINDSET(TRUE) THEN REPEAT
+                    CustLedgerEntry."Applies-to ID" := '';
+                    CODEUNIT.RUN(CODEUNIT::"Cust. Entry-Edit",CustLedgerEntry);
+                  UNTIL CustLedgerEntry.NEXT =0;
+                  TempCustomer.DELETEALL(FALSE);
+                END;
+
+    OnPostReport=VAR
+                   CustLedgerEntry@1100285100 : Record 21;
+                   ApplyingCustLedgEntry@1100285101 : Record 21;
+                   CustEntrySetApplID@1100285102 : Codeunit 101;
+                   CustEntryApplyPostedEntries@1100285103 : Codeunit 226;
+                   ApplicationDate@1100285104 : Date;
+                 BEGIN
+
+                   GenJournalLine.RESET;
+                   GenJournalLine.SETRANGE("Journal Template Name", JournalTemplateName);
+                   GenJournalLine.SETRANGE("Journal Batch Name", JournalBatchName);
+                   GenJournalLine.SETRANGE("Bal. Account Type", GenJournalLine."Bal. Account Type"::"G/L Account");
+                   GenJournalLine.SETRANGE("Bal. Account No.", RoundingAccNo);
+
+                   CustLedgerEntry.SETCURRENTKEY("Customer No.","Posting Date","Currency Code");
+                   IF TempCustomer.FINDSET AND AppplyRounding THEN
+                     REPEAT
+                       GenJournalLine.SETRANGE("Account Type", GenJournalLine."Account Type"::Customer);
+                       GenJournalLine.SETRANGE("Account No.", TempCustomer."No.");
+                       GenJournalLine.SETRANGE(Amount,0);
+                       IF GenJournalLine.FINDLAST THEN BEGIN
+                         CustLedgerEntry.COPYFILTERS("Cust. Ledger Entry");
+                         CustLedgerEntry.SETRANGE("Customer No.",GenJournalLine."Account No.");
+                         CustLedgerEntry.SETRANGE("Applies-to ID",GenJournalLine."Applies-to ID");
+                         IF CustLedgerEntry.FINDLAST AND (CustLedgerEntry.COUNT>1) THEN BEGIN
+                           ApplyingCustLedgEntry.GET(CustLedgerEntry."Entry No.");
+
+                           IF CustLedgerEntry.FINDSET THEN REPEAT
+                             CustLedgerEntry.TESTFIELD(Open,TRUE);
+                   //          CustLedgerEntry."Applies-to ID" := GenJournalLine."Applies-to ID";
+                             CustLedgerEntry."Applies-to ID" := USERID;
+                             // Set Amount to Apply
+                             IF CustLedgerEntry."Amount to Apply" = 0 THEN BEGIN
+                               CustLedgerEntry.CALCFIELDS("Remaining Amount");
+                               CustLedgerEntry."Amount to Apply" := CustLedgerEntry."Remaining Amount"
+                             END;
+                             IF CustLedgerEntry."Entry No." = ApplyingCustLedgEntry."Entry No." THEN
+                               CustLedgerEntry."Applying Entry" := ApplyingCustLedgEntry."Applying Entry";
+                             CODEUNIT.RUN(CODEUNIT::"Cust. Entry-Edit",CustLedgerEntry);
+                           UNTIL CustLedgerEntry.NEXT = 0;
+
+
+                           ApplyingCustLedgEntry."Applies-to ID" := USERID;
+                           ApplicationDate := CustEntryApplyPostedEntries.GetApplicationDate(ApplyingCustLedgEntry);
+                           CustEntryApplyPostedEntries.Apply(ApplyingCustLedgEntry,ApplyingCustLedgEntry."Document No.",ApplicationDate);
+
+                           ApplyingCustLedgEntry.GET(ApplyingCustLedgEntry."Entry No.");
+                           ApplyingCustLedgEntry."Applying Entry" := FALSE;
+                           ApplyingCustLedgEntry."Applies-to ID" := '';
+                           ApplyingCustLedgEntry."Amount to Apply" := 0;
+                           CODEUNIT.RUN(CODEUNIT::"Cust. Entry-Edit",ApplyingCustLedgEntry);
+
+                           GenJournalLine.DELETE;
+                         END;
+                       END;
+                     UNTIL TempCustomer.NEXT=0;
+                 END;
+
+  }
+  DATASET
+  {
+    { 1100285100;;DataItem;                  ;
+               DataItemTable=Table21;
+               DataItemTableView=SORTING(Customer No.,Open,Positive,Due Date,Currency Code)
+                                 WHERE(Open=CONST(Yes));
+               OnPreDataItem=BEGIN
+                               "Cust. Ledger Entry".SETFILTER("Remaining Amount",'<> 0 & < %1 & > %2',RoundingLimit,-RoundingLimit);
+                               "Cust. Ledger Entry".SETRANGE(Open,TRUE);
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  bottomLine@1100285101 : Boolean;
+                                  jnlBalance@1100285102 : Decimal;
+                                  CustLedgerEntry@1100285100 : Record 21;
+                                BEGIN
+                                  CustLedgerEntry.GET("Cust. Ledger Entry"."Entry No.");
+                                  CustLedgerEntry."Applies-to ID" := '';
+                                  bottomLine := FALSE;
+
+                                  GenJournalLine.RESET;
+                                  GenJournalLine.SETRANGE("Journal Template Name", JournalTemplateName);
+                                  GenJournalLine.SETRANGE("Journal Batch Name", JournalBatchName);
+                                  GenJournalLine.SETRANGE("Account Type", GenJournalLine."Account Type"::Customer);
+                                  GenJournalLine.SETRANGE("Account No.", "Cust. Ledger Entry"."Customer No.");
+                                  GenJournalLine.SETRANGE("Bal. Account Type", GenJournalLine."Bal. Account Type"::"G/L Account");
+                                  GenJournalLine.SETRANGE("Bal. Account No.", RoundingAccNo);
+
+                                  IF NOT GenJournalLine.FINDLAST THEN BEGIN
+                                    GenJournalLine.RESET;
+                                    GenJournalLine.INIT;
+                                    GenJournalLine."Journal Template Name" := JournalTemplateName;
+                                    GenJournalLine."Journal Batch Name" := JournalBatchName;
+                                    GenJournalLine."Line No." := xGenJournalLine."Line No." + 10000;
+                                    GenJournalLine.INSERT;
+
+                                    GenJournalLine.SetUpNewLine(xGenJournalLine,jnlBalance,bottomLine);
+
+                                    GenJournalLine."Account Type" := GenJournalLine."Account Type"::Customer;
+                                    GenJournalLine.VALIDATE("Account No.", "Cust. Ledger Entry"."Customer No.");
+                                    GenJournalLine."Bal. Account Type" := GenJournalLine."Bal. Account Type"::"G/L Account";
+                                    GenJournalLine."Bal. Account No." := RoundingAccNo;
+                                    GenJournalLine."Applies-to ID" := 'ROUND'+FORMAT(GenJournalLine."Line No.",0,2);
+                                    GenJournalLine.MODIFY;
+                                  END;
+
+                                  GenJournalLine.VALIDATE(Amount,GenJournalLine.Amount-"Cust. Ledger Entry"."Remaining Amount");
+                                  GenJournalLine.MODIFY;
+
+                                  CustLedgerEntry."Applies-to ID" := GenJournalLine."Applies-to ID";
+                                  IF CustLedgerEntry."Applies-to ID" <> '' THEN
+                                    CODEUNIT.RUN(CODEUNIT::"Cust. Entry-Edit",CustLedgerEntry);
+
+                                  IF (GenJournalLine.Amount = 0) AND AppplyRounding THEN BEGIN
+                                    TempCustomer.INIT;
+                                    TempCustomer."No." := GenJournalLine."Account No.";
+                                    IF TempCustomer.INSERT(FALSE) THEN;
+                                  END;
+
+                                  xGenJournalLine := GenJournalLine;
+                                END;
+
+               ReqFilterFields=Customer No.,Posting Date;
+               CalcFields=Remaining Amount }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      OnOpenPage=VAR
+                   GenJnlManagement@1100285100 : Codeunit 230;
+                   JnlSelected@1100285101 : Boolean;
+                 BEGIN
+                 END;
+
+    }
+    CONTROLS
+    {
+      { 1100285100;;Container;
+                  ContainerType=ContentArea }
+
+      { 1100285101;1;Field  ;
+                  Name=JournalTemplateName;
+                  CaptionML=[ENU=Journal Template Name;
+                             NOR=Kladdemalnavn;
+                             SVE=Mallnamn f”r journal];
+                  SourceExpr=JournalTemplateName;
+                  TableRelation="Gen. Journal Template".Name WHERE (Type=CONST(Cash Receipts));
+                  OnValidate=BEGIN
+                               JournalBatchName := '';
+                             END;
+                              }
+
+      { 1100285102;1;Field  ;
+                  Name=JournalBatchName;
+                  CaptionML=[ENU=Journal Batch Name;
+                             NOR=Kladdenavn;
+                             SVE=Journalnamn];
+                  SourceExpr=JournalBatchName;
+                  OnLookup=VAR
+                             GenJournalBatch@1101285000 : Record 232;
+                           BEGIN
+                             GenJournalBatch.SETRANGE("Journal Template Name",JournalTemplateName);
+                             IF ACTION::LookupOK = PAGE.RUNMODAL(0,GenJournalBatch) THEN
+                               JournalBatchName := GenJournalBatch.Name;
+                           END;
+                            }
+
+      { 1100285103;1;Field  ;
+                  Name=RoundingAccNo;
+                  CaptionML=[ENU=Invoice Rounding Account;
+                             NOR=Fakturaavrundingskonto;
+                             SVE=™resutj„mning];
+                  SourceExpr=RoundingAccNo;
+                  TableRelation="G/L Account" }
+
+      { 1100285104;1;Field  ;
+                  Name=RoundingLimit;
+                  CaptionML=[ENU=Invoice Rounding Amount;
+                             NOR=Fakturaavrundingsbel”p;
+                             SVE=™resutj„mningbelopp];
+                  SourceExpr=RoundingLimit }
+
+      { 1101285000;1;Field  ;
+                  Name=AppplyRounding;
+                  CaptionML=[ENU="Appply Rounding if Amount = 0";
+                             SVE="Koppla bort avrundning om Belopp = 0"];
+                  SourceExpr=AppplyRounding }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      JournalTemplateName@1100285100 : Code[20];
+      JournalBatchName@1100285101 : Code[20];
+      GenJournalLine@1100285102 : Record 81;
+      xGenJournalLine@1100285103 : Record 81;
+      RoundingAccNo@1100285104 : Code[20];
+      TempCustomer@1100285105 : TEMPORARY Record 18;
+      CustEntryApplyPostedEntries@1100285106 : Codeunit 226;
+      RoundingLimit@1100285107 : Decimal;
+      AppplyRounding@1101285000 : Boolean;
+
+    BEGIN
+    {
+      180404 ORANGO.DL pure292161, totalIn leaves some amount (rounding)
+                        run this report twice to close the open entries
+                          1. gather amount by customer and post them manually
+                          2. if genjnlline.amount = 0 then apply all entries
+    }
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

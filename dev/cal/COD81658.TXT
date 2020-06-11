@@ -1,0 +1,352 @@
+OBJECT Codeunit 81658 Update Project Order Intake
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=RFC024;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+            ProjectOrderIntake.DELETEALL;
+            GLSetup.GET;
+
+            // Check for Main and single projects
+            Job.SETCURRENTKEY("Project Status", "Single/Main/Sub Project", "No.");
+            Job.SETFILTER("Single/Main/Sub Project",'%1|%2', Job."Single/Main/Sub Project"::"Main Project",Job."Single/Main/Sub Project"::Single);
+            Job.SETFILTER("Project Status", '<=%1', Job."Project Status"::"Technical Finished");
+            Job.SETFILTER("Project Type", '<>%1&<>%2', '2', '3');
+            //Job.SETFILTER("No.", '2163000083');
+            //Job.SETRANGE("Global Dimension 1 Code", '2246');
+            IF Job.FINDSET THEN
+            REPEAT
+
+              CLEAR(xProjectOrderIntake);
+
+              IF NOT DimensionValue.GET(GLSetup."Global Dimension 1 Code", Job."Global Dimension 1 Code") THEN
+                CLEAR(DimensionValue);
+
+              // Make sure there are entries in the order intake table for the last 12 months
+              LineNo := 1;
+              BaselinePeriodNo := 13;
+              FOR I := BaselinePeriodNo DOWNTO 0 DO BEGIN
+                IF I > 0 THEN BEGIN
+                  PeriodEndDate := CALCDATE('<-' + FORMAT(I) + 'M>', TODAY); //160101D);
+                  PeriodEndDate := CALCDATE('<CM>', PeriodEndDate);
+                  PeriodStartDate := CALCDATE('<-CM>', PeriodEndDate);
+                END ELSE BEGIN
+                  // The last period contains only data until TODAY and to to the end of the month
+                  PeriodEndDate := TODAY;
+                  PeriodStartDate := CALCDATE('<-CM>', PeriodEndDate);
+                END;
+
+                IF NOT ProjectOrderIntake.GET(Job."No.", PeriodEndDate) THEN BEGIN
+                  ProjectOrderIntake.INIT;
+                  ProjectOrderIntake."Project No." := Job."No.";
+                  ProjectOrderIntake."Line No." := LineNo;
+                  ProjectOrderIntake."Period Start Date" := PeriodStartDate;
+                  ProjectOrderIntake."Period End Date" := PeriodEndDate;
+                  ProjectOrderIntake."Settlement Method" := Job."Settlement Method";
+                  ProjectOrderIntake."Global Dimension 1 Code" := Job."Global Dimension 1 Code";
+                  ProjectOrderIntake."Global Dimension 1 Description" := DimensionValue.Name;
+                  ProjectOrderIntake."Project Name" := Job.Description;
+                  ProjectOrderIntake."Project Type" := Job."Single/Main/Sub Project";
+                  ProjectOrderIntake.INSERT;
+                  LineNo += 1;
+                END;
+
+                //IF ProjectOrderIntake."Period End Date" >= Job."Starting Date" THEN
+                CalculatePeriodData();
+
+              END;  // End of FOR loop
+
+            UNTIL Job.NEXT = 0;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      GLSetup@1100409019 : Record 98;
+      Job@1100285101 : Record 11072003;
+      Prognosis@1100285102 : Record 11012034;
+      PrognosisLineCC@1100409015 : Record 11128270;
+      PrognosisLine@1100409016 : Record 11012035;
+      ProjectPrincipal@1100409005 : Record 11012005;
+      ExtensionContract@1100409007 : Record 11012004;
+      BudgetLine@1100409013 : Record 11012001;
+      ProjectOrderIntake@1100409008 : Record 81611;
+      xProjectOrderIntake@1100409006 : Record 81611;
+      JobLedgerEntry@1100409001 : Record 11072005;
+      DimensionValue@1100409018 : Record 349;
+      JobLedgerEntryTotals@1100409012 : Query 81611;
+      TodaysPeriodEndDate@1100409003 : Date;
+      PeriodEndDate@1100409002 : Date;
+      PeriodStartDate@1100409014 : Date;
+      ContractedRevenue@1100409009 : Decimal;
+      ForecastedBackLogTB1@1100409010 : Decimal;
+      xForecastedBackLogTB1@1100409011 : Decimal;
+      ForecastedFinancialResult@1100285000 : Decimal;
+      ContractedFinancialResult@1100285001 : Decimal;
+      I@1100409004 : Integer;
+      LineNo@1100409000 : Integer;
+      BaselinePeriodNo@1100409020 : Integer;
+      DeleteProject@1100409017 : Boolean;
+
+    PROCEDURE CalculatePeriodData@1100409000();
+    BEGIN
+          // Data from Prognosis (Use the latest prognosis found for the current period)
+          Prognosis.SETRANGE("Project No.", Job."No.");
+          Prognosis.SETFILTER("Prognosis Date", '<=%1', ProjectOrderIntake."Period End Date");
+          IF Prognosis.FINDLAST THEN BEGIN
+
+            ProjectOrderIntake."Current Prognosis Date" := Prognosis."Prognosis Date";
+
+            IF Job."Forecast Level" = Job."Forecast Level"::"Cost Component" THEN BEGIN
+              // Cost Component
+              // Revenue
+              Prognosis.CALCFIELDS("Prognosis Total Revenue CC", "Prognosis Total Cost CC");
+              ProjectOrderIntake."Forecasted Total Revenue" := Prognosis."Prognosis Total Revenue CC";
+              // Costs
+              ProjectOrderIntake."Forecasted Total Cost" := Prognosis."Prognosis Total Cost CC";  // Includes Sundry
+
+              // Costs, excl Sundry (can't be calcalated with the flowfield)
+      //        ProjectOrderIntake."Forecasted Total Cost" := 0;
+      //        PrognosisLineCC.SETCURRENTKEY("Main Project No.");
+      //        PrognosisLineCC.SETRANGE("Main Project No.", Job."No.");
+      //        PrognosisLineCC.SETFILTER("Prognosis Date", '<=%1', ProjectOrderIntake."Period End Date");
+      //        PrognosisLineCC.SETFILTER("Cost Type", '<>%1', PrognosisLineCC."Cost Type"::Sundry);
+      //        IF PrognosisLineCC.FINDSET THEN
+      //        REPEAT
+      //          ProjectOrderIntake."Forecasted Total Cost" += PrognosisLineCC."Prognosis Total Cost";
+      //        UNTIL PrognosisLineCC.NEXT = 0;
+
+            END ELSE BEGIN
+              // Cost Object, etc.
+              // Revenue
+              Prognosis.CALCFIELDS("Prognosis Revenue", "Prognosis Total Cost");
+              ProjectOrderIntake."Forecasted Total Revenue" := Prognosis."Prognosis Revenue" + Prognosis."Project Invoiced";
+              // Costs
+              ProjectOrderIntake."Forecasted Total Cost" := Prognosis."Prognosis Total Cost"; // Includes Sundry
+
+              // Costs, excl Sundry (can't be calcalated with the flowfield)
+      //        ProjectOrderIntake."Forecasted Total Cost" := 0;
+      //        PrognosisLine.SETCURRENTKEY("Main Project No.");
+      //        PrognosisLine.SETRANGE("Main Project No.", Job."No.");
+      //        PrognosisLine.SETFILTER("Prognosis Date", '<=%1', ProjectOrderIntake."Period End Date");
+      //        PrognosisLine.SETFILTER("Cost Type", '<>%1', PrognosisLine."Cost Type"::Sundry);
+      //        IF PrognosisLine.FINDSET THEN
+      //        REPEAT
+      //          ProjectOrderIntake."Forecasted Total Cost" += PrognosisLine."Prognosis Total Cost";
+      //        UNTIL PrognosisLine.NEXT = 0;
+            END;
+          END;
+
+          // Data from Job Ledger Entry (Calculated with a query for performance)
+          JobLedgerEntryTotals.SETRANGE(Main_Project_No, Job."No.");
+          JobLedgerEntryTotals.SETFILTER(Posting_Date, '..%1', ProjectOrderIntake."Period End Date");
+      //    JobLedgerEntryTotals.SETFILTER(Cost_Type, '<>%1', JobLedgerEntryTotals.Cost_Type::Sundry);
+          JobLedgerEntryTotals.OPEN;
+          IF JobLedgerEntryTotals.READ THEN
+            ProjectOrderIntake."Real Cost" := JobLedgerEntryTotals.Sum_Total_Cost_LCY;
+
+          JobLedgerEntry.SETCURRENTKEY("Main Project No.", Type, "No.", "Posting Date");
+          JobLedgerEntry.SETRANGE("Main Project No.", Job."No.");
+          JobLedgerEntry.SETRANGE(Type, JobLedgerEntry.Type::"G/L Account");
+
+          // Konto 147601 = Int„kt
+          JobLedgerEntry.SETRANGE("No.", '147601');
+          JobLedgerEntry.SETFILTER("Posting Date", '%1..%2', ProjectOrderIntake."Period Start Date", ProjectOrderIntake."Period End Date");
+
+          IF JobLedgerEntry.FINDLAST THEN
+            ProjectOrderIntake."Actual Preclosure Revenue" := JobLedgerEntry."Actual Preclosure Result";
+
+          // Konto 147701 = Kostnad
+          JobLedgerEntry.SETRANGE("No.", '147701');
+          JobLedgerEntry.SETFILTER("Posting Date", '%1..%2', ProjectOrderIntake."Period Start Date", ProjectOrderIntake."Period End Date");
+
+          IF JobLedgerEntry.FINDLAST THEN
+            ProjectOrderIntake."Actual Preclosure Cost" := -JobLedgerEntry."Actual Preclosure Result";
+
+          ProjectOrderIntake."Actual Preclosure Result" :=
+            ProjectOrderIntake."Actual Preclosure Revenue" - ProjectOrderIntake."Actual Preclosure Cost";
+
+
+          // Data from Project Principal and Exetension Contract
+          ProjectOrderIntake."Contract Amount (LCY)" := 0;
+          IF ProjectPrincipal.GET(Job."No.", Job."Bill-to Customer No.") THEN BEGIN
+            ProjectOrderIntake."Contract Amount (LCY)" := ProjectPrincipal."Contract Amount (LCY)";
+          END;
+
+          ExtensionContract.SETRANGE("Main Project No.", Job."No.");
+          ExtensionContract.SETFILTER("Contract Date", '..%1', ProjectOrderIntake."Period End Date");
+          IF ExtensionContract.FINDSET THEN
+          REPEAT
+            ProjectOrderIntake."Contract Amount (LCY)" += ExtensionContract."Contract Amount (LCY)";
+          UNTIL ExtensionContract.NEXT = 0;
+
+          // Data from Budget Line
+          BudgetLine.SETCURRENTKEY("Main Project No.");
+          BudgetLine.SETRANGE("Main Project No.", Job."No.");
+          BudgetLine.SETFILTER("Extension Contract Status", '%1|%2|%3',
+            BudgetLine."Extension Contract Status"::"Not Applicable",
+            BudgetLine."Extension Contract Status"::Order,
+            BudgetLine."Extension Contract Status"::"Invoicing Allowed");
+      //    BudgetLine.SETFILTER("Cost Type", '<>%1', BudgetLine."Cost Type"::Sundry);
+          BudgetLine.SETFILTER("Version Date", '..%1', ProjectOrderIntake."Period End Date");
+          IF BudgetLine.FINDSET THEN
+          REPEAT
+            ProjectOrderIntake."Calculated Cost" += BudgetLine."Amount (LCY)";
+          UNTIL BudgetLine.NEXT = 0;
+
+
+          ////////////////////////////////////////////////////////////
+          // The fields below are the ones that will be on the report
+
+          // Upparbetningsgrad %
+          ProjectOrderIntake."Incurred Cost Margin %" :=
+            DivideForZero(
+              ProjectOrderIntake."Real Cost",
+              ProjectOrderIntake."Forecasted Total Cost") * 100;
+          // Adjust for higher then 100%
+          IF ProjectOrderIntake."Incurred Cost Margin %" > 100 THEN
+            ProjectOrderIntake."Incurred Cost Margin %" := 100;
+
+          // Prognostiserad orderstock int„kt
+          ProjectOrderIntake."Forecasted Backlog Revenue" :=
+            ProjectOrderIntake."Forecasted Total Revenue" -
+            ProjectOrderIntake."Incurred Cost Margin %"/100 *
+            ProjectOrderIntake."Forecasted Total Revenue";
+
+          // Prognos finansiellt resultat
+          ForecastedFinancialResult := ProjectOrderIntake."Forecasted Total Revenue" - ProjectOrderIntake."Forecasted Total Cost";
+
+          // (TB1%/EBITA) Prognostiserad orderstock TB1%
+          IF ForecastedFinancialResult <= 0 THEN
+            ProjectOrderIntake."Forecasted Backlog Margin 1%" := 0
+          ELSE
+            ProjectOrderIntake."Forecasted Backlog Margin 1%" :=
+              DivideForZero(
+                ForecastedFinancialResult,
+                ProjectOrderIntake."Forecasted Total Revenue") * 100;
+
+          // Tot kontrakterad Orderstock Int„kt
+          ProjectOrderIntake."Total Contr.Backlog Revenue" :=
+            ProjectOrderIntake."Contract Amount (LCY)" -
+            DivideForZero(ProjectOrderIntake."Real Cost", ProjectOrderIntake."Forecasted Total Cost") * ProjectOrderIntake."Contract Amount (LCY)";
+
+          // Varav kontrakterad Orderstock Int„kt
+          IF ProjectOrderIntake."Forecasted Backlog Revenue" = 0 THEN
+            ProjectOrderIntake."Whereof Contr.Backlog Revenue" := 0
+          ELSE IF ProjectOrderIntake."Forecasted Backlog Revenue" > ProjectOrderIntake."Total Contr.Backlog Revenue" THEN
+            ProjectOrderIntake."Whereof Contr.Backlog Revenue" := ProjectOrderIntake."Total Contr.Backlog Revenue"
+          ELSE
+            ProjectOrderIntake."Whereof Contr.Backlog Revenue" := ProjectOrderIntake."Forecasted Backlog Revenue";
+
+          // Tot kontrakterad Orderstock Kostnad
+          ProjectOrderIntake."Total Contr.Backlog Cost" :=
+            ProjectOrderIntake."Calculated Cost" -
+            DivideForZero(ProjectOrderIntake."Real Cost", ProjectOrderIntake."Forecasted Total Cost") * ProjectOrderIntake."Calculated Cost";
+
+          // Tot kontrakterad Orderstock TB1%
+          ContractedFinancialResult := ProjectOrderIntake."Total Contr.Backlog Revenue" - ProjectOrderIntake."Total Contr.Backlog Cost";
+          IF ContractedFinancialResult <= 0 THEN
+            ProjectOrderIntake."Total Contr. Backlog Margin 1%" := 0
+          ELSE
+            ProjectOrderIntake."Total Contr. Backlog Margin 1%" :=
+              DivideForZero(
+                ContractedFinancialResult,
+                ProjectOrderIntake."Total Contr.Backlog Revenue") * 100;
+
+          // Prognostiserad ordering†ng
+          IF ProjectOrderIntake."Line No." = BaselinePeriodNo THEN
+            ProjectOrderIntake."Forcasted Order Intake" := 0
+          ELSE
+            ProjectOrderIntake."Forcasted Order Intake" :=
+              ProjectOrderIntake."Forecasted Backlog Revenue" -
+              xProjectOrderIntake."Forecasted Backlog Revenue" +
+              ProjectOrderIntake."Actual Preclosure Revenue";
+
+          // Prognostiserad Ordering†ng TB1%
+          IF ProjectOrderIntake."Line No." = BaselinePeriodNo THEN BEGIN
+            ProjectOrderIntake."Forecst.Order Intake Margin 1%" := 0;
+          END ELSE BEGIN
+            IF ROUND(ProjectOrderIntake."Forcasted Order Intake",1) = 0 THEN
+              ProjectOrderIntake."Forecst.Order Intake Margin 1%" := 0
+            ELSE BEGIN
+              ProjectOrderIntake."Forecst.Order Intake Margin 1%" :=
+                DivideForZero(
+                (ProjectOrderIntake."Forecasted Backlog Margin 1%"/100 * ProjectOrderIntake."Forecasted Backlog Revenue" -
+                xProjectOrderIntake."Forecasted Backlog Margin 1%"/100 * xProjectOrderIntake."Forecasted Backlog Revenue" +
+                ProjectOrderIntake."Actual Preclosure Result"),
+                ProjectOrderIntake."Forcasted Order Intake");
+              ProjectOrderIntake."Forecst.Order Intake Margin 1%" := ROUND(ProjectOrderIntake."Forecst.Order Intake Margin 1%"*100, 0.01);
+            END;
+            // Adjust for negative
+            IF (ProjectOrderIntake."Forcasted Order Intake" < 0) AND
+              (ProjectOrderIntake."Forecst.Order Intake Margin 1%" > 0) THEN
+              ProjectOrderIntake."Forecst.Order Intake Margin 1%" := -ProjectOrderIntake."Forecst.Order Intake Margin 1%";
+          END;
+          // Total kontrakterad ordering†ng
+          IF ProjectOrderIntake."Line No." = BaselinePeriodNo THEN
+            ProjectOrderIntake."Total Contracted Order Intake" := 0
+          ELSE
+            ProjectOrderIntake."Total Contracted Order Intake" :=
+              ProjectOrderIntake."Contract Amount (LCY)" -
+              xProjectOrderIntake."Contract Amount (LCY)";
+
+          // Varav kontrakterad ordering†ng
+          IF ProjectOrderIntake."Forcasted Order Intake" = 0 THEN
+            ProjectOrderIntake."Whereof Contr.Order Intake" := 0
+          ELSE IF ProjectOrderIntake."Forcasted Order Intake" > ProjectOrderIntake."Total Contracted Order Intake" THEN
+            ProjectOrderIntake."Whereof Contr.Order Intake" := ProjectOrderIntake."Total Contracted Order Intake"
+          ELSE
+            ProjectOrderIntake."Whereof Contr.Order Intake" := ProjectOrderIntake."Forcasted Order Intake";
+
+          // Total kontrakterad ordering†ng kostnad
+          IF ProjectOrderIntake."Line No." = BaselinePeriodNo THEN
+            ProjectOrderIntake."Total Contr.Order Intake Cost" := 0
+          ELSE
+            ProjectOrderIntake."Total Contr.Order Intake Cost" :=
+              ProjectOrderIntake."Calculated Cost" -
+              xProjectOrderIntake."Calculated Cost";
+
+          // Total kontrakterad Ordering†ng TB1%
+          IF ProjectOrderIntake."Total Contracted Order Intake" = 0 THEN
+            ProjectOrderIntake."Total Contr.Ord.Int.Margin 1%" := 0
+          ELSE
+            ProjectOrderIntake."Total Contr.Ord.Int.Margin 1%" :=
+              DivideForZero(
+                (ProjectOrderIntake."Total Contracted Order Intake" - ProjectOrderIntake."Total Contr.Order Intake Cost"),
+                ProjectOrderIntake."Total Contracted Order Intake") * 100;
+          // Adjust for negative revenue
+          IF (ProjectOrderIntake."Total Contracted Order Intake" < 0) AND
+            (ProjectOrderIntake."Total Contr.Ord.Int.Margin 1%" > 0) THEN
+            ProjectOrderIntake."Total Contr.Ord.Int.Margin 1%" := -ProjectOrderIntake."Total Contr.Ord.Int.Margin 1%";
+
+          ProjectOrderIntake.MODIFY;
+
+          // Save for next iteration
+          xProjectOrderIntake := ProjectOrderIntake;
+    END;
+
+    PROCEDURE DivideForZero@1100409001(X@1100409000 : Decimal;Y@1100409001 : Decimal) : Decimal;
+    BEGIN
+      IF Y = 0 THEN
+        EXIT(0);
+
+      EXIT(X/Y);
+    END;
+
+    BEGIN
+    {
+      150922 CLP Updates aggregated table Project Order Intake
+      151117 CLP Include Type Sundry.
+      151202 CLP Adjustments
+      160127 CLP Adjustedments
+    }
+    END.
+  }
+}
+

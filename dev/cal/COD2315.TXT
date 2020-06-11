@@ -1,0 +1,207 @@
+OBJECT Codeunit 2315 O365 Setup Mgmt
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ClientTypeManagement@1000 : Codeunit 4030;
+      IdentityManagement@1001 : Codeunit 9801;
+      O365GettingStartedMgt@1002 : Codeunit 1309;
+      EvaluationCompanyDoesNotExistsMsg@1003 : TextConst 'ENU=Sorry, but the evaluation company isn''t available right now so we can''t start Dynamics 365 Business Central. Please try again later.;NOR=Beklager, men evalueringsselskapet er ikke tilgjengelig akkurat n†, s† Dynamics 365 Business Central kan ikke startes. Pr›v p† nytt senere.';
+      InvToBusinessCentralCategoryLbl@1005 : TextConst '@@@={Locked};ENU=AL Invoicing To Business Central;NOR=AL Invoicing To Business Central';
+      UserPersonalizationUpdatedTelemetryTxt@1004 : TextConst '@@@={Locked};ENU=User Personalization company has been updated to evaluation company.;NOR=User Personalization company has been updated to evaluation company.';
+      SessionSettingUpdatedTelemetryTxt@1006 : TextConst '@@@={Locked};ENU=Session settings has been updated to evaluation company.;NOR=Session settings has been updated to evaluation company.';
+      EvaluationCompanyNotSetTelemetryTxt@1007 : TextConst '@@@={Locked};ENU=Evaluation company is not set up.;NOR=Evaluation company is not set up.';
+      FixedClientEndpointBaseProdUrlTxt@1011 : TextConst '@@@={Locked};ENU=https://businesscentral.dynamics.com/;NOR=https://businesscentral.dynamics.com/';
+      FixedClientEndpointBaseTieUrlTxt@1010 : TextConst '@@@={Locked};ENU=https://businesscentral.dynamics-tie.com/;NOR=https://businesscentral.dynamics-tie.com/';
+      InvToBusinessCentralTrialTelemetryTxt@1008 : TextConst '@@@={Locked};ENU=User clicked the Try Business Central button from Invoicing.;NOR=User clicked the Try Business Central button from Invoicing.';
+      BusinessCentralTrialVisibleInvNameTxt@1009 : TextConst '@@@={Locked};ENU=BusinessCentralTrialVisibleForInv;NOR=BusinessCentralTrialVisibleForInv';
+      TypeHelper@1012 : Codeunit 10;
+      SupportContactEmailTxt@1013 : TextConst '@@@={Locked};ENU=support@Office365.com;NOR=support@Office365.com';
+
+    [External]
+    PROCEDURE InvoicesExist@9() : Boolean;
+    VAR
+      SalesHeader@1001 : Record 36;
+      SalesInvoiceHeader@1000 : Record 112;
+    BEGIN
+      IF SalesInvoiceHeader.FINDFIRST THEN
+        EXIT(TRUE);
+
+      SalesHeader.SETRANGE("Document Type",SalesHeader."Document Type"::Invoice);
+      IF SalesHeader.FINDFIRST THEN
+        EXIT(TRUE);
+    END;
+
+    [External]
+    PROCEDURE EstimatesExist@10() : Boolean;
+    VAR
+      SalesHeader@1001 : Record 36;
+    BEGIN
+      SalesHeader.SETRANGE("Document Type",SalesHeader."Document Type"::Quote);
+      IF SalesHeader.FINDFIRST THEN
+        EXIT(TRUE);
+    END;
+
+    [External]
+    PROCEDURE DocumentsExist@11() : Boolean;
+    VAR
+      SalesHeader@1001 : Record 36;
+      SalesInvoiceHeader@1000 : Record 112;
+    BEGIN
+      IF SalesInvoiceHeader.FINDFIRST THEN
+        EXIT(TRUE);
+
+      SalesHeader.SETFILTER("Document Type",'%1|%2',SalesHeader."Document Type"::Invoice,SalesHeader."Document Type"::Quote);
+      IF SalesHeader.FINDFIRST THEN
+        EXIT(TRUE);
+    END;
+
+    [External]
+    PROCEDURE ShowCreateTestInvoice@14() : Boolean;
+    BEGIN
+      EXIT(NOT DocumentsExist);
+    END;
+
+    [External]
+    PROCEDURE WizardShouldBeOpenedForInvoicing@23() : Boolean;
+    VAR
+      O365GettingStarted@1002 : Record 1309;
+    BEGIN
+      IF NOT GettingStartedSupportedForInvoicing THEN
+        EXIT(FALSE);
+
+      IF O365GettingStarted.GET(USERID,ClientTypeManagement.GetCurrentClientType) THEN
+        EXIT(FALSE);
+
+      EXIT(TRUE);
+    END;
+
+    [External]
+    PROCEDURE GettingStartedSupportedForInvoicing@12() : Boolean;
+    BEGIN
+      IF NOT IdentityManagement.IsInvAppId THEN
+        EXIT(FALSE);
+
+      IF NOT (ClientTypeManagement.GetCurrentClientType = CLIENTTYPE::Web) THEN
+        EXIT(FALSE);
+
+      EXIT(O365GettingStartedMgt.UserHasPermissionsToRunGettingStarted);
+    END;
+
+    PROCEDURE ChangeToEvaluationCompany@7();
+    VAR
+      UserPersonalization@1001 : Record 2000000073;
+      Company@1000 : Record 2000000006;
+      SessionSetting@1002 : SessionSettings;
+    BEGIN
+      Company.SETRANGE("Evaluation Company",TRUE);
+      IF Company.FINDFIRST THEN BEGIN
+        UserPersonalization.GET(USERSECURITYID);
+        UserPersonalization.VALIDATE(Company,Company.Name);
+        UserPersonalization.MODIFY(TRUE);
+        SENDTRACETAG('00007L4',InvToBusinessCentralCategoryLbl,VERBOSITY::Normal,
+          UserPersonalizationUpdatedTelemetryTxt,DATACLASSIFICATION::SystemMetadata);
+        // Update session settings
+        SessionSetting.INIT;
+        SessionSetting.COMPANY := Company.Name;
+        SessionSetting.REQUESTSESSIONUPDATE(TRUE);
+        SENDTRACETAG('00007L5',InvToBusinessCentralCategoryLbl,VERBOSITY::Normal,
+          SessionSettingUpdatedTelemetryTxt,DATACLASSIFICATION::SystemMetadata);
+      END ELSE BEGIN
+        MESSAGE(EvaluationCompanyDoesNotExistsMsg);
+        SENDTRACETAG('00007L6',InvToBusinessCentralCategoryLbl,VERBOSITY::Warning,
+          EvaluationCompanyNotSetTelemetryTxt,DATACLASSIFICATION::SystemMetadata);
+      END;
+    END;
+
+    PROCEDURE GotoBusinessCentralWithEvaluationCompany@1();
+    VAR
+      Company@1001 : Record 2000000006;
+      ClientUrl@1000 : Text;
+      CompanyPart@1002 : Text;
+    BEGIN
+      IF IsPPE THEN
+        ClientUrl := FixedClientEndpointBaseTieUrlTxt
+      ELSE
+        ClientUrl := FixedClientEndpointBaseProdUrlTxt;
+
+      Company.SETRANGE("Evaluation Company",TRUE);
+      IF Company.FINDFIRST THEN BEGIN
+        SENDTRACETAG('00007L3',InvToBusinessCentralCategoryLbl,VERBOSITY::Normal,
+          InvToBusinessCentralTrialTelemetryTxt,DATACLASSIFICATION::SystemMetadata);
+        CompanyPart := STRSUBSTNO('?company=%1',TypeHelper.UriEscapeDataString(Company.Name));
+        HYPERLINK(ClientUrl + CompanyPart);
+      END ELSE BEGIN
+        SENDTRACETAG('00007NJ',InvToBusinessCentralCategoryLbl,VERBOSITY::Warning,
+          EvaluationCompanyNotSetTelemetryTxt,DATACLASSIFICATION::SystemMetadata);
+        HYPERLINK(ClientUrl);
+      END;
+    END;
+
+    LOCAL PROCEDURE IsPPE@2() : Boolean;
+    VAR
+      EnvironmentMgt@1000 : Codeunit 9005;
+    BEGIN
+      EXIT(EnvironmentMgt.IsPPE);
+    END;
+
+    PROCEDURE GetBusinessCentralTrialVisibility@5() : Boolean;
+    BEGIN
+      EXIT(GetBusinessCentralTrialVisibilityFromKeyVault AND UserHasPermissionsForEvaluationCompany);
+    END;
+
+    PROCEDURE GetBusinessCentralTrialVisibilityFromKeyVault@157() : Boolean;
+    VAR
+      AzureKeyVaultManagement@1005 : Codeunit 2200;
+      BusinessCentralTrialVisibleInvSecret@1001 : Text;
+      BusinessCentralTrialVisible@1000 : Boolean;
+    BEGIN
+      IF AzureKeyVaultManagement.GetAzureKeyVaultSecret(BusinessCentralTrialVisibleInvSecret,BusinessCentralTrialVisibleInvNameTxt) THEN
+        IF (BusinessCentralTrialVisibleInvSecret <> '') AND EVALUATE(BusinessCentralTrialVisible,BusinessCentralTrialVisibleInvSecret) THEN
+          EXIT(BusinessCentralTrialVisible);
+
+      EXIT(TRUE); // Default is visible true
+    END;
+
+    PROCEDURE UserHasPermissionsForEvaluationCompany@4() : Boolean;
+    VAR
+      DummySalesHeader@1001 : Record 36;
+      Company@1002 : Record 2000000006;
+    BEGIN
+      Company.SETRANGE("Evaluation Company",TRUE);
+      IF Company.FINDFIRST THEN BEGIN
+        IF DummySalesHeader.CHANGECOMPANY(Company.Name) THEN
+          EXIT(DummySalesHeader.WRITEPERMISSION);
+      END;
+
+      EXIT(FALSE);
+    END;
+
+    [EventSubscriber(Codeunit,9165,OnBeforeGetSupportInformation)]
+    LOCAL PROCEDURE PopulateSupportInformation@3(VAR SupportName@1000 : Text;VAR SupportEmail@1001 : Text;VAR SupportUrl@1002 : Text);
+    VAR
+      IdentityManagement@1003 : Codeunit 9801;
+    BEGIN
+      IF NOT IdentityManagement.IsInvAppId THEN
+        EXIT;
+
+      SupportEmail := SupportContactEmailTxt;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

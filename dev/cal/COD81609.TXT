@@ -1,0 +1,3060 @@
+OBJECT Codeunit 81609 Handyman Mgmt
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PSSE.HM;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+            // ***** PREPARE JOB ********************************************
+            LOCKTIMEOUT(GUIALLOWED);
+            HandymanSetupThisComp.LOCKTABLE;
+            // HandymanSetup.GET;
+            IF NOT GetHandymanSetupThis THEN
+              EXIT;
+            HandymanSetupThisComp.TESTFIELD("Client Number Handyman");
+            IF HandymanSetupThisComp."Import Active" THEN
+              EXIT; // Stop if Import active on company record
+
+            HandymanSetupThisComp."Job Active" := TRUE; // Lock Company from File Import Job
+            HandymanSetupThisComp.MODIFY;
+            COMMIT;   // 150107 ITERO.AC Avoid record locks if CU 81613 Handyman File Import starts in Imtech Nordic
+
+            // IME-373: Moved Import Before Export
+
+            // ***** IMPORT *************************************************
+            HandleImport;
+
+            // ***** EXPORT *************************************************
+            HandleExport;
+
+            // ***** FINISH *************************************************
+            GetHandymanSetupThis;
+            // HandymanSetup.GET;
+            HandymanSetupThisComp."Job Active" := FALSE; // Unlock Company for File Import
+            HandymanSetupThisComp.MODIFY;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      varFile@1100285103 : File;
+      Filename@1100285104 : Text;
+      HandymanExportWL@1100285008 : Record 81631;
+      TempBlob@1100285504 : Record 99008535;
+      HandymanSalaryCode@1100285531 : Record 81632;
+      HandymanCostCentreWL@1100285006 : Record 81631;
+      txtPRojectsExported@1100285000 : TextConst 'ENU=%1 projects exported.;NOR=%1 prosjekter eksportert;SVE=%1 projekt exporterade.';
+      txtItemNotFound@1100285010 : TextConst 'ENU=Cannot find Trade Item %1 for Vendor %2;NOR=Kan ikke finne katalogartikkel %1 for leverand›r %2;SVE=Kan inte hitta anskaffningsartikel %1 f”r leverant”r %2.';
+      txtHandymanFree@1100285533 : TextConst 'ENU=Handyman Free order;NOR=Handyman fri ordre;SVE=Handyman fri order';
+      txtHandyman@1100285534 : TextConst 'ENU=Handyman;NOR=Handyman;SVE=Handyman';
+      txtHandymanTime@1100285535 : TextConst 'ENU=Handyman Time;NOR=Handyman tid;SVE=Handyman tid';
+      xmldoc@1100285101 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      HandymanImportBufMAIN@1100285100 : Record 81624;
+      HandymanSetupThisComp@1100285102 : Record 81609;
+      HandymanSetupOtherComp@1100285105 : Record 81609;
+      LastExportDateTime@1100285106 : DateTime;
+      GotHandymanSetupThis@1100285107 : Boolean;
+
+    LOCAL PROCEDURE "***IMPORTS***"@1100285138();
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE HandleImport@1100285521();
+    BEGIN
+      IF NOT HandymanSetupThisComp."Leading Company" THEN
+        GetRecordsFromLeadingCompany;
+
+      // IME 373: Seperated ProjectImport from other imports by filter
+
+      HandymanImportBufMAIN.SETRANGE(Type, HandymanImportBufMAIN.Type::Project);
+      CheckImportBuffer(HandymanImportBufMAIN);
+
+      ImportProject; // Import Projects
+
+      HandymanImportBufMAIN.SETFILTER(Type, '<>%1', HandymanImportBufMAIN.Type::Project);
+      CheckImportBuffer(HandymanImportBufMAIN);
+
+      ImportOther; // Material, Timesheet and Descriptions
+    END;
+
+    LOCAL PROCEDURE ImportProject@1100285507();
+    VAR
+      TryImportBuf@111285100 : Boolean;
+    BEGIN
+      CLEAR(HandymanImportBufMAIN);
+      HandymanImportBufMAIN.SETRANGE("Company Name", COMPANYNAME);
+      HandymanImportBufMAIN.SETRANGE(Status, HandymanImportBufMAIN.Status::"In Buffer");
+      HandymanImportBufMAIN.SETRANGE(Type, HandymanImportBufMAIN.Type::Project);
+
+      IF HandymanImportBufMAIN.FINDSET(TRUE) THEN REPEAT
+        COMMIT;
+        //>>RFC1058
+        GetHandymanSetupThis;
+        TryImportBuf := HandymanSetupThisComp."No. of Days To Try" = 0;
+        IF NOT TryImportBuf THEN
+          TryImportBuf := HandymanImportBufMAIN.Tries < HandymanSetupThisComp."No. of Tries per day";
+        IF NOT TryImportBuf THEN
+          TryImportBuf := DT2DATE(HandymanImportBufMAIN."Last try datetime") <> TODAY;
+
+        IF TryImportBuf THEN BEGIN
+        //<<RFC1058
+          IF CODEUNIT.RUN(CODEUNIT::"Handyman WS", HandymanImportBufMAIN) THEN BEGIN
+            HandymanImportBufMAIN.Status := HandymanImportBufMAIN.Status::Imported;
+            HandymanImportBufMAIN."Error Message" := '';
+            HandymanImportBufMAIN.MODIFY(TRUE);
+          END ELSE BEGIN
+            //>>RFC1058
+            WITH HandymanImportBufMAIN DO BEGIN
+              IF (HandymanSetupThisComp."No. of Days To Try" <> 0) AND ("Last try datetime" <> 0DT) THEN BEGIN
+                IF DT2DATE("Last try datetime") <> TODAY THEN
+                  Tries := 0;
+                IF TODAY - DT2DATE("Last try datetime") > HandymanSetupThisComp."No. of Days To Try" THEN
+                  Tries := HandymanSetupThisComp."No. of Tries per day";
+              END;
+              "Last try datetime" := CURRENTDATETIME;
+            END;
+            //<<RFC1058
+
+            IF HandymanImportBufMAIN.Tries >= HandymanSetupThisComp."No. of Tries per day" THEN
+                HandymanImportBufMAIN.Status := HandymanImportBufMAIN.Status::Error;
+            HandymanImportBufMAIN.Tries += 1;
+            HandymanImportBufMAIN."Error Message" := COPYSTR(GETLASTERRORTEXT, 1, 250);
+            HandymanImportBufMAIN.MODIFY(TRUE);
+          END;
+        END; //RFC1058
+      UNTIL HandymanImportBufMAIN.NEXT = 0;
+
+      COMMIT; //ITERO.MH 151022
+    END;
+
+    LOCAL PROCEDURE ImportOther@1100285519();
+    VAR
+      TryImportBuf@111285100 : Boolean;
+    BEGIN
+      CLEAR(HandymanImportBufMAIN);
+      HandymanImportBufMAIN.SETRANGE("Company Name", COMPANYNAME);
+      HandymanImportBufMAIN.SETRANGE(Status, HandymanImportBufMAIN.Status::"In Buffer");
+      HandymanImportBufMAIN.SETFILTER(Type, '<>%1', HandymanImportBufMAIN.Type::Project);
+
+      IF HandymanImportBufMAIN.FINDSET(TRUE) THEN
+      REPEAT
+        COMMIT;
+        //>>RFC1058
+        GetHandymanSetupThis;
+        TryImportBuf := HandymanSetupThisComp."No. of Days To Try" = 0;
+        IF NOT TryImportBuf THEN
+          TryImportBuf := HandymanImportBufMAIN.Tries < HandymanSetupThisComp."No. of Tries per day";
+        IF NOT TryImportBuf THEN
+          TryImportBuf := DT2DATE(HandymanImportBufMAIN."Last try datetime") <> TODAY;
+
+        IF TryImportBuf THEN BEGIN
+        //<<RFC1058
+          IF CODEUNIT.RUN(CODEUNIT::"Handyman WS", HandymanImportBufMAIN) THEN BEGIN
+            HandymanImportBufMAIN.Status := HandymanImportBufMAIN.Status::Imported;
+            HandymanImportBufMAIN."Error Message" := '';
+            HandymanImportBufMAIN.MODIFY(TRUE);
+          END ELSE BEGIN
+            //>>RFC1058
+            WITH HandymanImportBufMAIN DO BEGIN
+              IF (HandymanSetupThisComp."No. of Days To Try" <> 0) AND ("Last try datetime" <> 0DT) THEN BEGIN
+                IF DT2DATE("Last try datetime") <> TODAY THEN
+                  Tries := 0;
+                IF TODAY - DT2DATE("Last try datetime") > HandymanSetupThisComp."No. of Days To Try" THEN
+                  Tries := HandymanSetupThisComp."No. of Tries per day";
+                IF DT2DATE("Last try datetime") - DT2DATE("Imported Date & Time") > HandymanSetupThisComp."No. of Days To Try" THEN
+                  Tries := HandymanSetupThisComp."No. of Tries per day";
+              END;
+              "Last try datetime" := CURRENTDATETIME;
+            END;
+            //<<RFC1058
+
+            IF HandymanImportBufMAIN.Tries >= HandymanSetupThisComp."No. of Tries per day" THEN
+                HandymanImportBufMAIN.Status := HandymanImportBufMAIN.Status::Error;
+            HandymanImportBufMAIN.Tries += 1;
+            HandymanImportBufMAIN."Error Message" := COPYSTR(GETLASTERRORTEXT, 1, 250);
+            HandymanImportBufMAIN.MODIFY(TRUE);
+          END;
+        END; //RFC1058
+      UNTIL HandymanImportBufMAIN.NEXT = 0;
+
+      COMMIT; //ITERO.MH 151022
+    END;
+
+    LOCAL PROCEDURE CheckImportBuffer@1100285510(VAR HandymanImportBuffer@1100285000 : Record 81624);
+    VAR
+      lvTextVar@1100285500 : Text;
+      lvCount@1100285502 : Integer;
+      lvImportBuffer2@1100285001 : Record 81624;
+      Job@1100285100 : Record 11072003;
+    BEGIN
+      WITH HandymanImportBuffer DO BEGIN
+        SETRANGE(Status, Status::"In Buffer");
+        SETRANGE("HM Client ID", HandymanSetupThisComp."Client Number Handyman");
+        SETFILTER("Company Name", '=%1', '');
+        //LOCKTABLE; // To prevent changes from other companies
+        IF FINDSET(TRUE) THEN
+        REPEAT
+          IF "Project No." = '' THEN BEGIN
+              lvImportBuffer2.RESET;
+              lvImportBuffer2.SETCURRENTKEY("HM Client ID", Type, HSID);
+              lvImportBuffer2.SETRANGE("HM Client ID", HandymanSetupThisComp."Client Number Handyman");
+              lvImportBuffer2.SETRANGE(Type, Type::Project);
+              lvImportBuffer2.SETRANGE(HSID, "Handyman OrderID");
+              lvImportBuffer2.SETRANGE(Status, Status::Imported);
+              IF lvImportBuffer2.FINDFIRST THEN BEGIN
+                "Project No." := lvImportBuffer2."Project No.";
+                "Cost Center" := COPYSTR(lvImportBuffer2."Project No.", 1, 4); // IME372
+              END;
+          END;
+          IF ("Project No." = '') THEN BEGIN // Two scenarios: 1. A new job is created, look for CategoryID (Main project)
+                                             //                2. An indirect time without project is here, look for cost center
+
+            IF Type = Type::Timesheet THEN BEGIN // Scenario 2
+              lvTextVar := HandymanSetupThisComp."Company Prefix" + '_I_';
+              lvCount := STRLEN(lvTextVar);
+              IF (COPYSTR("Salary Code", 1, lvCount) = lvTextVar) THEN
+                "Company Name" := COMPANYNAME
+              ELSE
+                Tries += 1;
+            END ELSE IF (Type = Type::Project) THEN BEGIN  // Scenario 1
+              IF (Job.GET("Category ID")) THEN
+                "Company Name" := COMPANYNAME
+              ELSE
+                Tries += 1;
+            END ELSE
+              Tries += 1;
+
+          END ELSE BEGIN
+            IF Job.GET("Project No.") THEN
+              "Company Name" := COMPANYNAME
+            ELSE BEGIN
+              IF (Type = Type::Timesheet) THEN BEGIN // Scenario 2 with proj. no.
+                lvTextVar := HandymanSetupThisComp."Company Prefix" + '_I_';
+                lvCount := STRLEN(lvTextVar);
+                IF (COPYSTR("Salary Code", 1, lvCount) = lvTextVar) THEN
+                  "Company Name" := COMPANYNAME
+                ELSE
+                  Tries += 1;
+              END ELSE BEGIN
+                Tries += 1;
+                IF STRLEN("Project No.") < 7 THEN
+                  "Project No." := ''; // RFC001
+              END;
+            END;
+          END;
+
+          IF (Tries > 30) THEN BEGIN
+            Status := Status::Error;
+            "Error Message" := 'Project ' + "Project No." + ' was not found in any company.';
+          END;
+
+          IF MODIFY(TRUE) THEN
+            COMMIT;
+        UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE "***EXPORTS***"@1100285135();
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE HandleExport@1100285506();
+    BEGIN
+      // Exports basic data, projects and customers
+
+      IF HandymanSetupThisComp."Export All Data Next Time" THEN BEGIN
+         HandymanSetupThisComp."Export All Data Next Time" := FALSE;
+         HandymanSetupThisComp."Last Export Date" := 0D;
+         HandymanSetupThisComp.MODIFY;
+         LastExportDateTime := 0DT;
+
+         ExportBasicData;
+         SLEEP(1000);
+      END;
+
+      ExportBasicDataOnTime;
+      ExportCustomers;
+      ExportMainProjects; // IME-395
+      ExportProject;
+    END;
+
+    PROCEDURE ExportProject@1100285501();
+    VAR
+      lvCount@1100285000 : Integer;
+      lvStartTimeExport@1100285500 : Time;
+      lvEndDateExport@1100409000 : Date;
+      lvEndTimeExport@1100285501 : Time;
+      lvExport@1100285400 : Boolean;
+      JobTEMP@1100285101 : TEMPORARY Record 11072003;
+      xpProjectExport@1100285102 : XMLport 81637;
+      OutStr@1100285100 : OutStream;
+      FileMgmt@1100285103 : Codeunit 419;
+    BEGIN
+      // *** NAS-JOB ***
+      IF NOT GetHandymanSetupThis THEN
+        EXIT;
+
+      lvStartTimeExport := HandymanSetupThisComp."Last Export Time";
+      lvEndDateExport := TODAY;   // 160612 ITERO.AC Pure 092304
+      lvEndTimeExport := TIME;
+      JobTEMP.DELETEALL;
+
+      // Adds all projects that should be exported to the JobTemp temporary table.
+      FillTempJobFromJob(HandymanSetupThisComp."Last Export Date", lvStartTimeExport, lvEndDateExport, lvEndTimeExport, JobTEMP);             // 160612 ITERO.AC Pure 092304 Added Patrameter lvEndDateExport
+
+      // If project principal has changed, these projects should also be inserted.
+      FillTempJobFromProjPrincipal(HandymanSetupThisComp."Last Export Date", lvStartTimeExport, lvEndDateExport, lvEndTimeExport, JobTEMP);   // 160612 ITERO.AC Pure 092304 Added Patrameter lvEndDateExport
+
+      // IF Purchase Line has changed, these projects should also be insterd.
+      FillTempJobFromPurchaseLine(HandymanSetupThisComp."Last Export Date", lvStartTimeExport, lvEndDateExport, lvEndTimeExport, JobTEMP);    // 160612 ITERO.AC Pure 092304 Added Patrameter lvEndDateExport
+
+      // IF Project Element has changed, these projects should also be insterd.
+      FillTempJobFromElement(HandymanSetupThisComp."Last Export Date", lvStartTimeExport, lvEndDateExport, lvEndTimeExport, JobTEMP);         // 160612 ITERO.AC Pure 092304 Added Patrameter lvEndDateExport
+
+      // IF Extension contract has changed, these projects should also be insterd.
+      FillTempJobFromExtensionContract(HandymanSetupThisComp."Last Export Date", lvStartTimeExport, lvEndDateExport, lvEndTimeExport, JobTEMP); // 160612 ITERO.AC Pure 092304 Added Patrameters lvEndDateExport and lvEndTimeExport
+
+      // 150928 IME372 << TRigger Projet Export from Comments:
+      FillTempJobFromComment(HandymanSetupThisComp."Last Export Date", lvStartTimeExport, JobTEMP);
+      // 150928 IME372 >>
+
+      // 160819 RFC-131 << Trigger Project Export from Symbrio Invoice List
+      FillTempJobFromSymbrioInvoiceList(HandymanSetupThisComp."Last Export Date", lvStartTimeExport, lvEndDateExport, lvEndTimeExport, JobTEMP);
+      // 160819 RFC-131 >>
+
+
+      JobTEMP.RESET;
+      JobTEMP.SETFILTER(Description, '<>%1', '');
+      JobTEMP.SETFILTER("Bill-to Customer No.", '<>%1', ''); // Project Principle
+      JobTEMP.SETFILTER("Single/Main/Sub Project", '<>%1', JobTEMP."Single/Main/Sub Project"::"Main Project");
+      //JobTemp.SETRANGE("Project Status", JobTemp."Project Status"::Production);
+      JobTEMP.SETFILTER(Discipline, '<>%1', '');
+      JobTEMP.SETFILTER("Project Manager", '<>%1', '');
+
+      //JobTemp.SETFILTER(Address, '<>%1', '');
+      //JobTemp.SETFILTER(City, '<>%1', '');
+      //JobTemp.SETFILTER("Post Code", '<>%1', '');
+
+      // All projects that should be exported are ready to be exported:
+      lvCount := 0;
+      IF (JobTEMP.FINDSET(FALSE)) THEN REPEAT
+        IF (JobTEMP.Expediter <> '') AND
+            (JobTEMP."Project Status" IN [JobTEMP."Project Status"::Production, JobTEMP."Project Status"::"Technical Finished", JobTEMP."Project Status"::"Administrative Finished"]) AND // Accept Technial Finished
+            HandymanExportWL.GET(HandymanExportWL.Type::"Cost Centre", JobTEMP."Global Dimension 1 Code") AND
+            ((JobTEMP."Single/Main/Sub Project" = JobTEMP."Single/Main/Sub Project"::Single) OR (JobTEMP."Main Project" <> ''))
+        THEN BEGIN
+          Filename := HandymanSetupThisComp."Export Path Handyman" +
+            '\iOrdr' + JobTEMP."No." + DELCHR(FORMAT(TODAY, 0, 9), '=', '-') + '-' + DELCHR(FORMAT(TIME), '=', ':') +
+            'Handymansetup.' + HandymanSetupThisComp."Client Number Handyman";
+
+          lvExport := FALSE; // 150416 ITERO.MH Added Export criteria
+          CLEAR(xpProjectExport);
+          CASE JobTEMP."Project Status" OF
+            JobTEMP."Project Status"::Production:
+              BEGIN
+                xpProjectExport.SetProject(JobTEMP."No.", FALSE);
+                lvExport := TRUE; // 150416 ITERO.MH Added Export criteria
+              END;
+            JobTEMP."Project Status"::"Technical Finished":
+              IF JobTEMP.Expediter = HandymanSetupThisComp."Time User Expediter" THEN
+              BEGIN
+                xpProjectExport.SetProject(JobTEMP."No.", TRUE);
+                lvExport := TRUE; // 150416 ITERO.MH Added Export criteria
+              END;
+            JobTEMP."Project Status"::"Administrative Finished":
+              BEGIN
+                xpProjectExport.SetProject(JobTEMP."No.", TRUE);
+                lvExport := TRUE; // 150416 ITERO.MH Added Export criteria
+              END;
+          END;
+
+          IF lvExport THEN BEGIN // ITERO.MH 150416 Only export if Export = TRUE
+            IF GUIALLOWED THEN BEGIN
+              // Manual run
+              TempBlob.Blob.CREATEOUTSTREAM(OutStr);
+              xpProjectExport.SETDESTINATION(OutStr);
+              xpProjectExport.EXPORT;
+              FileMgmt.BLOBExport4PS(TempBlob, Filename, FALSE, FALSE);
+              CLEAR(TempBlob.Blob);
+            END ELSE BEGIN
+              // NAS-run
+              varFile.CREATE(Filename);
+              varFile.CREATEOUTSTREAM(OutStr);
+              xpProjectExport.SETDESTINATION(OutStr);
+              xpProjectExport.EXPORT;
+              varFile.CLOSE;
+              CLEAR(varFile);
+            END;
+
+            lvCount += 1;
+          END;
+        END;
+      UNTIL JobTEMP.NEXT = 0;
+      IF GUIALLOWED THEN
+        MESSAGE(txtPRojectsExported, FORMAT(lvCount));
+
+      // Resets the setup table fields to correct date & time for last export.
+      HandymanSetupThisComp."Last Export Date" := TODAY;
+      HandymanSetupThisComp."Last Export Time" := lvEndTimeExport;
+      HandymanSetupThisComp.MODIFY;
+      LastExportDateTime := CREATEDATETIME(HandymanSetupThisComp."Last Export Date",HandymanSetupThisComp."Last Export Time");
+    END;
+
+    LOCAL PROCEDURE FillTempJobFromJob@1100285113(ExportDate@1100285100 : Date;StartExportTime@1100285101 : Time;EndExportDate@1100409000 : Date;EndExportTime@1100285104 : Time;VAR pJob@1100285102 : Record 11072003);
+    VAR
+      ProjectElement@1100285105 : Record 11012010;
+      Job@1100285103 : Record 11072003;
+      lvLastModifiedDateTime@1100409003 : DateTime;
+      lvEndExportDateTime@1100409002 : DateTime;
+      lvStartExportDateTime@1100409001 : DateTime;
+    BEGIN
+      IF ExportDate <> 0D THEN
+         Job.SETFILTER(Job."Last Date Modified", '>=%1', ExportDate);
+
+      IF ExportDate <> 0D THEN
+        lvStartExportDateTime := CREATEDATETIME(ExportDate, StartExportTime);
+      IF EndExportDate<> 0D THEN
+        lvEndExportDateTime := CREATEDATETIME(EndExportDate, EndExportTime);
+
+      IF Job.FINDSET(FALSE) THEN REPEAT
+        //>>  160612 ITERO.AC Pure 092304 Use DateTime variables for comparsion in order to avoid miss Extension Contract changed before first run by the day
+        lvLastModifiedDateTime := 0DT;
+        IF Job."Last Date Modified" <> 0D THEN
+          lvLastModifiedDateTime := CREATEDATETIME(Job."Last Date Modified", Job."Time Last Modified");
+
+        IF (ExportDate = 0D) OR
+            ((lvLastModifiedDateTime >= lvStartExportDateTime) AND (lvLastModifiedDateTime < lvEndExportDateTime )) THEN BEGIN
+          pJob.COPY(Job);
+          IF NOT pJob.INSERT THEN;
+        END;
+      UNTIL Job.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE FillTempJobFromProjPrincipal@1100285106(ExportDate@1100285100 : Date;StartExportTime@1100285101 : Time;EndExportDate@1100409000 : Date;EndExportTime@1100285104 : Time;VAR pJob@1100285102 : Record 11072003);
+    VAR
+      ProjectPrincipal@1100285106 : Record 11012005;
+      Job@1100285103 : Record 11072003;
+    BEGIN
+      IF ExportDate <> 0D THEN
+        ProjectPrincipal.SETFILTER("Date/Time Last Modified", '>=%1&<%2',
+          CREATEDATETIME(ExportDate, StartExportTime),
+          CREATEDATETIME(EndExportDate, EndExportTime)     // 160612 ITERO.AC Pure 092304 Replaced HandymanSetup."Last Export Date" with new parameter EndExportDate
+          );
+
+      ProjectPrincipal.SETFILTER("Project No.", '<>%1', '');
+      IF ProjectPrincipal.FINDSET(FALSE) THEN
+      REPEAT
+        IF Job.GET(ProjectPrincipal."Project No.") THEN BEGIN
+          pJob.COPY(Job);
+          IF NOT pJob.INSERT THEN; // Inserts only the non-existing projects. Modify not needed.
+        END;
+      UNTIL ProjectPrincipal.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE FillTempJobFromPurchaseLine@1100285107(ExportDate@1100285100 : Date;StartExportTime@1100285101 : Time;EndExportDate@1100409000 : Date;EndExportTime@1100285104 : Time;VAR pJob@1100285102 : Record 11072003);
+    VAR
+      PurchaseLine@1100285103 : Record 39;
+      Job@1100285105 : Record 11072003;
+    BEGIN
+      PurchaseLine.RESET;
+      IF ExportDate <> 0D THEN
+        PurchaseLine.SETFILTER("Date/Time Last Modified", '>=%1&<%2',
+          CREATEDATETIME(ExportDate , StartExportTime),
+          CREATEDATETIME(EndExportDate, EndExportTime)   // 160612 ITERO.AC Pure 092304 Replaced HandymanSetup."Last Export Date" with new parameter EndExportDate
+          );
+      PurchaseLine.SETFILTER("Job No.", '<>%1', '');
+      IF PurchaseLine.FINDSET(FALSE) THEN REPEAT
+        Job.GET(PurchaseLine."Job No.");
+        pJob.COPY(Job);
+        IF NOT pJob.INSERT THEN; // Inserts only the non-existing projects. Modify not needed.
+      UNTIL PurchaseLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE FillTempJobFromElement@1100285101(ExportDate@1100285100 : Date;StartExportTime@1100285101 : Time;EndExportDate@1100409000 : Date;EndExportTime@1100285104 : Time;VAR pJob@1100285102 : Record 11072003);
+    VAR
+      ProjectElement@1100285105 : Record 11012010;
+      Job@1100285103 : Record 11072003;
+    BEGIN
+      ProjectElement.RESET;
+      IF ExportDate <> 0D THEN
+        ProjectElement.SETFILTER("Date/Time Last Modified", '>=%1&<%2',
+          CREATEDATETIME(ExportDate, StartExportTime),
+          CREATEDATETIME(EndExportDate, EndExportTime)     // 160612 ITERO.AC Pure 092304 Replaced ExportDate with new parameter EndExportDate
+          );
+      ProjectElement.SETFILTER("Project No.", '<>%1', '');
+      IF ProjectElement.FINDSET(FALSE) THEN REPEAT
+        IF Job.GET(ProjectElement."Project No.") THEN BEGIN
+          pJob.COPY(Job);
+          IF NOT pJob.INSERT THEN; // Inserts only the non-existing projects. Modify not needed.
+        END;
+      UNTIL ProjectElement.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE FillTempJobFromExtensionContract@1100285102(ExportDate@1100285100 : Date;StartExportTime@1100285101 : Time;EndExportDate@1100409000 : Date;EndExportTime@1100409001 : Time;VAR pJob@1100285102 : Record 11072003);
+    VAR
+      ExtensionContract@1100285103 : Record 11012004;
+      Job@1100285104 : Record 11072003;
+      lvLastModifiedDateTime@1100409002 : DateTime;
+      lvEndExportDateTime@1100409003 : DateTime;
+      lvStartExportDateTime@1100409004 : DateTime;
+    BEGIN
+      ExtensionContract.RESET;
+      IF ExportDate <> 0D THEN     // 140603 changed from '>' to '>='
+        ExtensionContract.SETFILTER("Last Date Modified", '>=%1', ExportDate);
+      ExtensionContract.SETFILTER("Project No.", '<>%1', '');
+
+      lvStartExportDateTime := 0DT;
+      IF ExportDate <> 0D THEN
+        lvStartExportDateTime := CREATEDATETIME(ExportDate, StartExportTime);
+      lvEndExportDateTime := 0DT;
+      IF EndExportDate<>0D THEN
+        lvEndExportDateTime := CREATEDATETIME(EndExportDate, EndExportTime);
+
+      IF (ExtensionContract.FINDSET(FALSE)) THEN REPEAT
+        //>>  160612 ITERO.AC Pure 092304 Use DateTime variables for comparsion in order to avoid miss Extension Contract changed before first run by the day
+        lvLastModifiedDateTime := 0DT;
+        IF ExtensionContract."Last Date Modified"<>0D THEN
+          lvLastModifiedDateTime := CREATEDATETIME(ExtensionContract."Last Date Modified", ExtensionContract."Time Last Modified");
+
+        IF (ExportDate = 0D) OR
+          ((lvLastModifiedDateTime >= lvStartExportDateTime) AND (lvLastModifiedDateTime < lvEndExportDateTime )) THEN BEGIN
+          IF Job.GET(ExtensionContract."Project No.") THEN BEGIN
+            pJob.COPY(Job);
+            IF NOT pJob.INSERT THEN; // Inserts only the non-existing projects. Modify not needed.
+          END;
+        END;
+      UNTIL ExtensionContract.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE FillTempJobFromComment@1100285100(ExportDate@1100285100 : Date;ExportTime@1100285101 : Time;VAR pJob@1100285102 : Record 11072003);
+    VAR
+      CommentLine@1100285103 : Record 97;
+      Job@1100285104 : Record 11072003;
+      lvLastModifiedDateTime@1100409001 : DateTime;
+      lvStartExportDateTime@1100409000 : DateTime;
+    BEGIN
+      CommentLine.RESET;
+      CommentLine.SETRANGE("Table Name", CommentLine."Table Name"::Job);
+      CommentLine.SETFILTER("No.", '<>%1', '');
+      CommentLine.SETFILTER("Time Created", '<>%1', 0T);
+      CommentLine.SETFILTER(Date, '>=%1', ExportDate);
+
+      lvStartExportDateTime := 0DT;
+      IF ExportDate <> 0D THEN
+        lvStartExportDateTime := CREATEDATETIME(ExportDate, ExportTime);
+
+      IF CommentLine.FINDSET(FALSE) THEN REPEAT
+        lvLastModifiedDateTime := 0DT;
+        IF CommentLine.Date <> 0D THEN
+          lvLastModifiedDateTime := CREATEDATETIME(CommentLine.Date, CommentLine."Time Created");
+        IF lvLastModifiedDateTime >= lvStartExportDateTime THEN BEGIN
+          IF Job.GET(CommentLine."No.") THEN BEGIN
+            pJob.COPY(Job);
+            IF NOT pJob.INSERT THEN;
+          END;
+        END;
+      UNTIL CommentLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE FillTempJobFromSymbrioInvoiceList@1100285143(ExportDate@1100285100 : Date;StartExportTime@1100285101 : Time;EndExportDate@1100409000 : Date;EndExportTime@1100409001 : Time;VAR pJob@1100285102 : Record 11072003);
+    VAR
+      lvLastModifiedDateTime@1100409002 : DateTime;
+      SymbrioPurchaseInvLine@1100285103 : Record 11127981;
+      Job@1100285104 : Record 11072003;
+    BEGIN
+      SymbrioPurchaseInvLine.SETFILTER(OrderHeadID, '=%1', '');
+      IF ExportDate<>0D THEN
+        SymbrioPurchaseInvLine.SETFILTER("DateTime Received", '>=%1&<%2',
+          CREATEDATETIME(ExportDate, StartExportTime), CREATEDATETIME(EndExportDate, EndExportTime));
+
+      IF SymbrioPurchaseInvLine.FINDSET THEN REPEAT
+        IF (Job.GET(SymbrioPurchaseInvLine.AccountRefProject)) THEN BEGIN
+          pJob.COPY(Job);
+          IF NOT pJob.INSERT THEN;
+        END;
+      UNTIL SymbrioPurchaseInvLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ExportBasicDataOnTime@1100285516();
+    VAR
+      lvExport@1100285500 : Boolean;
+    BEGIN
+      // IME-395: Moved Main Project export check to function ExportMainProjects
+      IF HandymanSetupThisComp."Last Exported Basic Data" <> 0DT THEN BEGIN
+        IF (CURRENTDATETIME - HandymanSetupThisComp."Last Exported Basic Data") > (HandymanSetupThisComp."Hours betw. Basic Data Export" * 1000 * 60 * 60) THEN
+          ExportBasicData;
+      END
+      ELSE
+        ExportBasicData;
+    END;
+
+    PROCEDURE ExportBasicData@1100285003();
+    BEGIN
+      // IME-395 Commented and moved after export functions
+      //HandymanSetup."Last Exported Basic Data" := CURRENTDATETIME;
+      //HandymanSetup.MODIFY;
+
+      ExportCostCentr;
+
+      SLEEP(1000);
+      ExportGroups;
+
+      SLEEP(100);
+      ExportCostTypes;
+
+      SLEEP(1000);
+      ExportEmployee;
+
+      SLEEP(1000);
+      ExportDisciplines;
+
+      //SLEEP(1000);        // IME-395: Moved to ExportData
+      //ExportMainProjects;
+
+      //SLEEP(1000);
+      //ExportCustomers;
+
+      SLEEP(1000);
+      ExportItems;
+
+      ExportLocation;
+
+      SLEEP(1000);
+      ClearImportLogs; // 141105 Added clearance of import logs
+
+      SyncEmployeeToSalesperson;
+
+      // IME-395
+      // HandymanSetup.GET;
+      IF GetHandymanSetupThis THEN BEGIN
+        HandymanSetupThisComp."Last Exported Basic Data" := CURRENTDATETIME;
+        HandymanSetupThisComp.MODIFY;
+        HandymanSetupThisComp.GET;
+      END;
+      IF GUIALLOWED THEN
+        MESSAGE('Basdata exporterat');
+    END;
+
+    PROCEDURE ExportEmployee@1100285500();
+    VAR
+      xpEmployeeExport@1100285110 : XMLport 81635;
+      OutStr@1100285100 : OutStream;
+      FileMgmt@1100285101 : Codeunit 419;
+    BEGIN
+      // HandymanSetup.GET;
+      IF NOT GetHandymanSetupThis THEN
+        EXIT;
+
+      Filename := HandymanSetupThisComp."Export Path Handyman" +
+        '\iEmpl' + DELCHR(FORMAT(TODAY, 0, 9), '=', '-') + '-' + DELCHR(FORMAT(TIME), '=', ':') +
+        'Handymansetup.' + HandymanSetupThisComp."Client Number Handyman";
+
+      IF GUIALLOWED THEN BEGIN
+        // Manual run
+        TempBlob.Blob.CREATEOUTSTREAM(OutStr);
+        xpEmployeeExport.SETDESTINATION(OutStr);
+        xpEmployeeExport.EXPORT;
+        FileMgmt.BLOBExport4PS(TempBlob, Filename, FALSE, FALSE);
+        CLEAR(TempBlob.Blob);
+      END ELSE BEGIN
+        // NAS-run
+        varFile.CREATE(Filename);
+        varFile.CREATEOUTSTREAM(OutStr);
+        xpEmployeeExport.SETDESTINATION(OutStr);
+        xpEmployeeExport.EXPORT;
+        varFile.CLOSE;
+        CLEAR(varFile);
+      END;
+      CLEAR(xpEmployeeExport);
+    END;
+
+    PROCEDURE ExportCostCentr@1100285502();
+    VAR
+      xpCostCentreExport@1100285109 : XMLport 81636;
+      HandymanExportWL@1100409000 : Record 81631;
+      OutStr@1100285100 : OutStream;
+      FileMgmt@1100285101 : Codeunit 419;
+    BEGIN
+      // HandymanSetup.GET;
+      IF NOT GetHandymanSetupThis THEN
+        EXIT;
+
+      HandymanExportWL.SETFILTER("Last Updated", '>%1', HandymanSetupThisComp."Last Exported Basic Data");
+      IF HandymanExportWL.ISEMPTY AND (HandymanSetupThisComp."Last Export Date" <> 0D) THEN
+        EXIT;
+
+      Filename := HandymanSetupThisComp."Export Path Handyman" +
+        '\iDepa' + DELCHR(FORMAT(TODAY, 0, 9), '=', '-') + '-' + DELCHR(FORMAT(TIME), '=', ':') +
+        'Handymansetup.' + HandymanSetupThisComp."Client Number Handyman";
+
+      IF GUIALLOWED THEN BEGIN
+        // Manual run
+        TempBlob.Blob.CREATEOUTSTREAM(OutStr);
+        xpCostCentreExport.SETDESTINATION(OutStr);
+        xpCostCentreExport.EXPORT;
+        FileMgmt.BLOBExport4PS(TempBlob, Filename, FALSE, FALSE);
+        CLEAR(TempBlob.Blob);
+      END ELSE BEGIN
+        // NAS-run
+        varFile.CREATE(Filename);
+        varFile.CREATEOUTSTREAM(OutStr);
+        xpCostCentreExport.SETDESTINATION(OutStr);
+        xpCostCentreExport.EXPORT;
+        varFile.CLOSE;
+        CLEAR(varFile);
+      END;
+      CLEAR(xpCostCentreExport);
+    END;
+
+    PROCEDURE ExportCostTypes@1100285503();
+    VAR
+      DimensionValue@1100285506 : Record 349;
+      CostCode@1100285505 : Record 11012083;
+      WageComponent@1100285504 : Record 11012014;
+      CostCodePassed@1100285503 : Boolean;
+      PresentWageComponent@1100285502 : Code[30];
+      SalaryCode@1100285507 : Code[20];
+      HandymanSalarycodes@1100409000 : Record 81632;
+      xpCostTypes@1100285108 : XMLport 81639;
+      OutStr@1100285100 : OutStream;
+      FileMgmt@1100285101 : Codeunit 419;
+    BEGIN
+      // HandymanSetup.GET;
+      IF NOT GetHandymanSetupThis THEN
+        EXIT;
+
+      // IME-395 If no data - do not export
+      HandymanSalarycodes.SETFILTER("Last Modified Date/Time", '>%1', HandymanSetupThisComp."Last Exported Basic Data");
+      IF HandymanSalarycodes.ISEMPTY AND (HandymanSetupThisComp."Last Export Date" <> 0D) THEN
+        EXIT;
+
+
+      Filename := HandymanSetupThisComp."Export Path Handyman" +
+        '\iSalC' + DELCHR(FORMAT(TODAY, 0, 9), '=', '-') + '-' + DELCHR(FORMAT(TIME), '=', ':') +
+        'Handymansetup.' + HandymanSetupThisComp."Client Number Handyman";
+
+      IF GUIALLOWED THEN BEGIN
+        xpCostTypes.ToggleDeleteFromGroup(TRUE);
+        TempBlob.Blob.CREATEOUTSTREAM(OutStr);
+        xpCostTypes.SETDESTINATION(OutStr);
+
+        xpCostTypes.EXPORT;
+        FileMgmt.BLOBExport4PS(TempBlob, Filename, FALSE, FALSE);
+
+        CLEAR(TempBlob.Blob);
+
+        // Export again for bug in Handyman:
+        SLEEP(3000); // IME261 added time
+        Filename := HandymanSetupThisComp."Export Path Handyman" +
+          '\iSalC' + DELCHR(FORMAT(TODAY, 0, 9), '=', '-') + '-' + DELCHR(FORMAT(TIME), '=', ':') +
+          '_2Handymansetup.' + HandymanSetupThisComp."Client Number Handyman";
+        xpCostTypes.ToggleDeleteFromGroup(FALSE);
+        TempBlob.Blob.CREATEOUTSTREAM(OutStr);
+        xpCostTypes.SETDESTINATION(OutStr);
+
+        xpCostTypes.EXPORT;
+        FileMgmt.BLOBExport4PS(TempBlob, Filename, FALSE, FALSE);
+
+        CLEAR(TempBlob.Blob);
+
+      END ELSE BEGIN
+        // NAS-run
+        xpCostTypes.ToggleDeleteFromGroup(TRUE);
+        varFile.CREATE(Filename);
+        varFile.CREATEOUTSTREAM(OutStr);
+        xpCostTypes.SETDESTINATION(OutStr);
+
+        xpCostTypes.EXPORT;
+        varFile.CLOSE;
+        CLEAR(varFile);
+
+        // Export again for bug in Handyman:
+        SLEEP(3000); // IME261 added time
+        xpCostTypes.ToggleDeleteFromGroup(FALSE);
+        Filename := HandymanSetupThisComp."Export Path Handyman" +
+          '\iSalC' + DELCHR(FORMAT(TODAY, 0, 9), '=', '-') + '-' + DELCHR(FORMAT(TIME), '=', ':') +
+          '_2Handymansetup.' + HandymanSetupThisComp."Client Number Handyman";
+        varFile.CREATE(Filename);
+        varFile.CREATEOUTSTREAM(OutStr);
+        xpCostTypes.SETDESTINATION(OutStr);
+
+        xpCostTypes.EXPORT;
+        varFile.CLOSE;
+        CLEAR(varFile);
+
+      END;
+      CLEAR(xpCostTypes);
+    END;
+
+    PROCEDURE ExportMainProjects@1100285504();
+    VAR
+      lvExport@1100409000 : Boolean;
+      Job@1100285100 : Record 11072003;
+      xpMainProjects@1100285108 : XMLport 81638;
+      OutStr@1100285101 : OutStream;
+      FileMgmt@1100285102 : Codeunit 419;
+    BEGIN
+      // HandymanSetup.GET;
+      IF NOT GetHandymanSetupThis THEN
+        EXIT;
+
+      // IME-395 << Added main project triggers:
+      Job.RESET;
+      Job.SETRANGE("Single/Main/Sub Project", Job."Single/Main/Sub Project"::"Main Project");
+      IF HandymanSetupThisComp."Last Export Date" <> 0D THEN
+        Job.SETFILTER("Last Date Modified", '>=%1', HandymanSetupThisComp."Last Export Date");
+
+      lvExport := FALSE;
+      IF (Job.FINDSET(FALSE)) THEN REPEAT
+        IF (HandymanSetupThisComp."Last Export Date" = 0D) OR
+           (CREATEDATETIME(Job."Last Date Modified",Job."Time Last Modified") >= LastExportDateTime)
+        THEN BEGIN
+          IF HandymanCostCentreWL.GET(HandymanCostCentreWL.Type::"Cost Centre", Job."Global Dimension 1 Code") THEN
+            lvExport := TRUE;
+        END;
+      UNTIL (Job.NEXT = 0) OR lvExport; // 150622 Added lvExport as trigger to exit loop
+
+      IF NOT lvExport THEN
+        EXIT;
+      // IME-395 >>
+
+      Filename := HandymanSetupThisComp."Export Path Handyman" +
+        '\iCate' + DELCHR(FORMAT(TODAY, 0, 9), '=', '-') + '-' + DELCHR(FORMAT(TIME), '=', ':') +
+        'Handymansetup.' + HandymanSetupThisComp."Client Number Handyman";
+
+      IF GUIALLOWED THEN BEGIN
+        TempBlob.Blob.CREATEOUTSTREAM(OutStr);
+        xpMainProjects.SETDESTINATION(OutStr);
+        xpMainProjects.EXPORT;
+        FileMgmt.BLOBExport4PS(TempBlob, Filename, FALSE, FALSE);
+
+        CLEAR(TempBlob.Blob);
+      END ELSE BEGIN
+        // NAS-run
+        varFile.CREATE(Filename);
+        varFile.CREATEOUTSTREAM(OutStr);
+        xpMainProjects.SETDESTINATION(OutStr);
+        xpMainProjects.EXPORT;
+        varFile.CLOSE;
+        CLEAR(varFile);
+      END;
+      CLEAR(xpMainProjects);
+    END;
+
+    PROCEDURE ExportDisciplines@1100285000();
+    VAR
+      Discipline@1100409000 : Record 11020204;
+      xpDisciplines@1100285106 : XMLport 81643;
+      xpDisciplineTypes@1100285105 : XMLport 81644;
+      OutStr@1100285100 : OutStream;
+      FileMgmt@1100285101 : Codeunit 419;
+    BEGIN
+      // HandymanSetup.GET;
+      IF NOT GetHandymanSetupThis THEN
+        EXIT;
+
+      // IME-395 If no data - do not export
+      Discipline.SETFILTER("Last Updated Date/Time", '>%1', HandymanSetupThisComp."Last Exported Basic Data");
+      IF Discipline.ISEMPTY AND (HandymanSetupThisComp."Last Export Date" <> 0D) THEN
+        EXIT;
+
+      Filename := HandymanSetupThisComp."Export Path Handyman" +
+        '\iCate' + DELCHR(FORMAT(TODAY, 0, 9), '=', '-') + '-' + DELCHR(FORMAT(TIME), '=', ':') +
+        '_D_Handymansetup.' + HandymanSetupThisComp."Client Number Handyman";
+
+      IF GUIALLOWED THEN BEGIN
+        TempBlob.Blob.CREATEOUTSTREAM(OutStr);
+        xpDisciplines.SETDESTINATION(OutStr);
+        xpDisciplines.EXPORT;
+        FileMgmt.BLOBExport4PS(TempBlob, Filename, FALSE, FALSE);
+
+        CLEAR(TempBlob.Blob);
+      END ELSE BEGIN
+        // NAS-run
+        varFile.CREATE(Filename);
+        varFile.CREATEOUTSTREAM(OutStr);
+        xpDisciplines.SETDESTINATION(OutStr);
+        xpDisciplines.EXPORT;
+        varFile.CLOSE;
+        CLEAR(varFile);
+      END;
+
+      CLEAR(xpDisciplines);
+
+      Filename := HandymanSetupThisComp."Export Path Handyman" +
+        '\iCate' + DELCHR(FORMAT(TODAY, 0, 9), '=', '-') + '-' + DELCHR(FORMAT(TIME), '=', ':') +
+        '_DT_Handymansetup.' + HandymanSetupThisComp."Client Number Handyman";
+
+      IF GUIALLOWED THEN BEGIN
+        TempBlob.Blob.CREATEOUTSTREAM(OutStr);
+        xpDisciplineTypes.SETDESTINATION(OutStr);
+        xpDisciplineTypes.EXPORT;
+        FileMgmt.BLOBExport4PS(TempBlob, Filename, FALSE, FALSE);
+
+        CLEAR(TempBlob.Blob);
+      END ELSE BEGIN
+        // NAS-run
+        varFile.CREATE(Filename);
+        varFile.CREATEOUTSTREAM(OutStr);
+        xpDisciplineTypes.SETDESTINATION(OutStr);
+        xpDisciplineTypes.EXPORT;
+        varFile.CLOSE;
+        CLEAR(varFile);
+      END;
+      CLEAR(xpDisciplines);
+    END;
+
+    PROCEDURE ExportCustomers@1100285505();
+    VAR
+      lvCustomer@1100285500 : Record 18;
+      lvExport@1100285501 : Boolean;
+      xpCustomers@1100285104 : XMLport 81640;
+      OutStr@1100285100 : OutStream;
+      FileMgmt@1100285101 : Codeunit 419;
+    BEGIN
+      // HandymanSetup.GET;
+      IF NOT GetHandymanSetupThis THEN
+        EXIT;
+
+      // ITERO.MH 141016 << Added code to export only if changed on time
+      lvExport := FALSE;
+      lvCustomer.RESET;
+      IF HandymanSetupThisComp."Last Export Date" <> 0D THEN
+        lvCustomer.SETFILTER("Last Date Modified", '>=%1', HandymanSetupThisComp."Last Export Date");
+
+      IF lvCustomer.FINDSET(FALSE) THEN
+      REPEAT
+        IF (HandymanSetupThisComp."Last Export Date" = 0D) OR
+            (CREATEDATETIME(lvCustomer."Last Date Modified",lvCustomer."Time Last Modified") >= LastExportDateTime) THEN
+          lvExport := TRUE;
+      UNTIL (lvCustomer.NEXT = 0) OR lvExport; // 150622 Added lvExport as trigger to exit loop
+
+      IF NOT lvExport THEN
+        EXIT; // Nothing to export
+      // ITERO.MH 141016 >>
+
+      Filename := HandymanSetupThisComp."Export Path Handyman" +
+        '\iCust' + DELCHR(FORMAT(TODAY, 0, 9), '=', '-') + '-' + DELCHR(FORMAT(TIME), '=', ':') +
+        'Handymansetup.' + HandymanSetupThisComp."Client Number Handyman";
+
+      IF GUIALLOWED THEN BEGIN
+        TempBlob.Blob.CREATEOUTSTREAM(OutStr);
+        xpCustomers.SETDESTINATION(OutStr);
+        xpCustomers.EXPORT;
+        FileMgmt.BLOBExport4PS(TempBlob, Filename, FALSE, FALSE);
+
+        CLEAR(TempBlob.Blob);
+      END ELSE BEGIN
+        // NAS-run
+        varFile.CREATE(Filename);
+        varFile.CREATEOUTSTREAM(OutStr);
+        xpCustomers.SETDESTINATION(OutStr);
+        xpCustomers.EXPORT;
+        varFile.CLOSE;
+        CLEAR(varFile);
+      END;
+      CLEAR(xpCustomers);
+    END;
+
+    PROCEDURE ExportGroups@1100285515();
+    VAR
+      LabourRule@1100409000 : Record 11128230;
+      xpGroups@1100285101 : XMLport 81641;
+      OutStr@1100285100 : OutStream;
+      FileMgmt@1100285102 : Codeunit 419;
+    BEGIN
+      // HandymanSetup.GET;
+      IF NOT GetHandymanSetupThis THEN
+        EXIT;
+
+      // IME-395 If no data - do not export
+      LabourRule.SETFILTER("Last Updated Date/Time", '>%1', HandymanSetupThisComp."Last Exported Basic Data");
+      IF LabourRule.ISEMPTY AND (HandymanSetupThisComp."Last Export Date" <> 0D) THEN
+        EXIT;
+
+      Filename := HandymanSetupThisComp."Export Path Handyman" +
+        '\iGrou' + DELCHR(FORMAT(TODAY, 0, 9), '=', '-') + '-' + DELCHR(FORMAT(TIME), '=', ':') +
+        'Handymansetup.' + HandymanSetupThisComp."Client Number Handyman";
+
+      IF GUIALLOWED THEN BEGIN
+        TempBlob.Blob.CREATEOUTSTREAM(OutStr);
+        xpGroups.SETDESTINATION(OutStr);
+        xpGroups.EXPORT;
+        FileMgmt.BLOBExport4PS(TempBlob, Filename, FALSE, FALSE);
+
+        CLEAR(TempBlob.Blob);
+      END ELSE BEGIN
+        // NAS-run
+        varFile.CREATE(Filename);
+        varFile.CREATEOUTSTREAM(OutStr);
+        xpGroups.SETDESTINATION(OutStr);
+        xpGroups.EXPORT;
+        varFile.CLOSE;
+        CLEAR(varFile);
+      END;
+      CLEAR(xpGroups);
+    END;
+
+    PROCEDURE ExportItems@1100285511();
+    VAR
+      TradeItem@1100409001 : Record 11012317;
+      Means@1100409000 : Record 11020245;
+      xpItem@1100285103 : XMLport 81642;
+      xpMeans@1100285102 : XMLport 81645;
+      OutStr@1100285100 : OutStream;
+      FileMgmt@1100285101 : Codeunit 419;
+    BEGIN
+      // HandymanSetup.GET;
+      IF NOT GetHandymanSetupThis THEN
+        EXIT;
+
+      // IME-395 If no data - do not export
+      TradeItem.SETFILTER("Last Updated", '>%1', HandymanSetupThisComp."Last Exported Basic Data");
+      IF (NOT TradeItem.ISEMPTY) OR (HandymanSetupThisComp."Last Export Date" = 0D) THEN BEGIN
+
+        Filename := HandymanSetupThisComp."Export Path Handyman" +
+          '\iWhol' + DELCHR(FORMAT(TODAY, 0, 9), '=', '-') + '-' + DELCHR(FORMAT(TIME), '=', ':') +
+          'Handymansetup.' + HandymanSetupThisComp."Client Number Handyman";
+
+        IF GUIALLOWED THEN BEGIN
+          TempBlob.Blob.CREATEOUTSTREAM(OutStr);
+          xpItem.SETDESTINATION(OutStr);
+          xpItem.EXPORT;
+          FileMgmt.BLOBExport4PS(TempBlob, Filename, FALSE, FALSE);
+
+          CLEAR(TempBlob.Blob);
+        END ELSE BEGIN
+          // NAS-run
+          varFile.CREATE(Filename);
+          varFile.CREATEOUTSTREAM(OutStr);
+          xpItem.SETDESTINATION(OutStr);
+          xpItem.EXPORT;
+          varFile.CLOSE;
+          CLEAR(varFile);
+        END;
+        CLEAR(xpItem);
+      END;
+
+      //*************** Export means **********************************
+
+      // IME-395 If no data - do not export
+      Means.SETFILTER("Last Updated", '>%1', HandymanSetupThisComp."Last Exported Basic Data");
+      IF Means.ISEMPTY AND (HandymanSetupThisComp."Last Export Date" <> 0D) THEN
+        EXIT;
+
+      Filename := HandymanSetupThisComp."Export Path Handyman" +
+        '\iWhol' + DELCHR(FORMAT(TODAY, 0, 9), '=', '-') + '-' + DELCHR(FORMAT(TIME), '=', ':') +
+        'Handymansetup_M.' + HandymanSetupThisComp."Client Number Handyman";
+
+      IF GUIALLOWED THEN BEGIN
+        TempBlob.Blob.CREATEOUTSTREAM(OutStr);
+        xpMeans.SETDESTINATION(OutStr);
+        xpMeans.EXPORT;
+        FileMgmt.BLOBExport4PS(TempBlob, Filename, FALSE, FALSE);
+
+        CLEAR(TempBlob.Blob);
+      END ELSE BEGIN
+        // NAS-run
+        varFile.CREATE(Filename);
+        varFile.CREATEOUTSTREAM(OutStr);
+        xpMeans.SETDESTINATION(OutStr);
+        xpMeans.EXPORT;
+        varFile.CLOSE;
+        CLEAR(varFile);
+      END;
+
+      CLEAR(xpMeans);
+    END;
+
+    PROCEDURE ExportLocation@1100285130();
+    VAR
+      Location@1100409001 : Record 11012317;
+      HandymanExportWL@1100285104 : Record 81631;
+      Item@1100285102 : Record 27;
+      ItemTEMP@1100285106 : TEMPORARY Record 27;
+      ItemLedgerEntry@1100285105 : Record 32;
+      xpInventory@1100285103 : XMLport 81648;
+      OutStr@1100285100 : OutStream;
+      FileMgmt@1100285101 : Codeunit 419;
+    BEGIN
+      // HandymanSetup.GET;
+      IF NOT GetHandymanSetupThis THEN
+        EXIT;
+      IF NOT HandymanSetupThisComp."Use Inventory" THEN
+        EXIT;
+
+      IF HandymanSetupThisComp."Last Export Date" <> 0D THEN
+        Item.SETFILTER("Last Date Modified", '>=%1', DT2DATE(HandymanSetupThisComp."Last Exported Basic Data"));
+
+      HandymanExportWL.SETRANGE(Type, HandymanExportWL.Type::Location);
+      HandymanExportWL.SETFILTER(HandymanExportWL."Last Updated", '>=%1', HandymanSetupThisComp."Last Exported Basic Data");
+      ItemLedgerEntry.SETFILTER("Posting Date", '>=%1', DT2DATE(HandymanSetupThisComp."Last Exported Basic Data"));
+
+      IF (NOT Item.ISEMPTY) OR (HandymanSetupThisComp."Last Export Date" = 0D) OR
+          (NOT HandymanExportWL.ISEMPTY) OR (NOT ItemLedgerEntry.ISEMPTY) THEN BEGIN
+
+        FillTempItem(ItemTEMP, Item, ItemLedgerEntry, DT2DATE(HandymanSetupThisComp."Last Exported Basic Data"));
+        xpInventory.SetItem(ItemTEMP);
+
+        Filename := HandymanSetupThisComp."Export Path Handyman" +
+          '\iStor' + DELCHR(FORMAT(TODAY, 0, 9), '=', '-') + '-' + DELCHR(FORMAT(TIME), '=', ':') +
+          'Handymansetup.' + HandymanSetupThisComp."Client Number Handyman";
+
+        IF GUIALLOWED THEN BEGIN
+          TempBlob.Blob.CREATEOUTSTREAM(OutStr);
+          xpInventory.SETDESTINATION(OutStr);
+          xpInventory.EXPORT;
+          FileMgmt.BLOBExport4PS(TempBlob, Filename, FALSE, FALSE);
+          CLEAR(TempBlob.Blob);
+        END ELSE BEGIN
+          // NAS-run
+          varFile.CREATE(Filename);
+          varFile.CREATEOUTSTREAM(OutStr);
+          xpInventory.SETDESTINATION(OutStr);
+          xpInventory.EXPORT;
+          varFile.CLOSE;
+          CLEAR(varFile);
+        END;
+        CLEAR(xpInventory);
+      END;
+    END;
+
+    PROCEDURE LocationHasEntries@1100285006(pLocationCode@1100285000 : Code[10]) : Boolean;
+    VAR
+      lvItemLedgerEntry@1100285002 : Record 32;
+      lvItemRec@1100285003 : Record 27;
+    BEGIN
+      // 160107 ITERO.AC RFC033
+      // This function checks if there are Item Ledger entries for a certain Location Code after latest export
+      // TODO: Investigate how to check Time... (does not seem to be possible)
+      // 160120 ITERO.AC RFC033-2b Added check if any Item in current location has been changed after latest export
+
+      // HandymanSetup.GET;
+      IF NOT GetHandymanSetupThis THEN
+        EXIT(FALSE);
+
+      lvItemLedgerEntry.SETRANGE("Location Code", pLocationCode);
+      lvItemLedgerEntry.SETFILTER("Posting Date", '>=%1', DT2DATE(HandymanSetupThisComp."Last Exported Basic Data"));
+      IF lvItemLedgerEntry.FINDFIRST THEN
+        EXIT(TRUE);
+
+      //>>160120 ITERO.AC RFC033-2b check if any Items has been altered since last export
+      CLEAR(lvItemRec);
+      lvItemRec.SETFILTER("Last Date Modified", '>=%1', DT2DATE(HandymanSetupThisComp."Last Exported Basic Data"));
+      IF lvItemRec.FINDSET(FALSE) THEN BEGIN
+        REPEAT
+          IF LocationHasItemEntries(pLocationCode, lvItemRec."No.") THEN
+            EXIT(TRUE);
+        UNTIL lvItemRec.NEXT = 0;
+      END;
+      //<<160120 ITERO.AC RFC033-2b
+      EXIT(FALSE);
+    END;
+
+    PROCEDURE LocationHasItemEntries@1100285009(pLocationCode@1100285001 : Code[10];pItemCode@1100285002 : Code[20]) : Boolean;
+    VAR
+      lvItemLedgerEntry@1100285000 : Record 32;
+    BEGIN
+      // 160120 ITERO.AC RFC033-2b
+      // This function checks if there are Item Ledger entries for a certain Item and a certain Location Code
+      // The purpose is to determine if the Item is in stock at the location even if Quantity "InStock" is zero
+      lvItemLedgerEntry.SETRANGE("Location Code", pLocationCode);
+      lvItemLedgerEntry.SETRANGE("Item No.", pItemCode);
+      EXIT(lvItemLedgerEntry.FINDFIRST);
+    END;
+
+    LOCAL PROCEDURE FillTempItem@1100285140(VAR ItemTEMP@1100285100 : TEMPORARY Record 27;VAR Item@1100285102 : Record 27;VAR ItemLedgerEntry@1100285101 : Record 32;ModifyDate@1100285103 : Date);
+    VAR
+      lvItemsInStock@1100285001 : Record 27;
+    BEGIN
+
+      IF Item.FINDSET(FALSE) THEN
+      REPEAT
+        ItemTEMP := Item;
+        IF ItemTEMP.INSERT THEN;
+      UNTIL Item.NEXT = 0;
+
+      //>> 160107 ITERO.AC RFC033 Export all Items in stock for each location code
+      HandymanExportWL.SETRANGE(Type, HandymanExportWL.Type::Location);
+      IF HandymanExportWL.FINDSET(FALSE) THEN
+      REPEAT
+        IF LocationHasEntries(HandymanExportWL.Code) THEN BEGIN
+          lvItemsInStock.SETRANGE("Location Filter", HandymanExportWL.Code);
+          IF lvItemsInStock.FINDSET(FALSE) THEN
+          REPEAT
+            lvItemsInStock.CALCFIELDS(Inventory);
+            IF LocationHasItemEntries(HandymanExportWL.Code, lvItemsInStock."No.") THEN BEGIN
+              IF Item.GET(lvItemsInStock."No.") THEN BEGIN
+                ItemTEMP := Item;
+                ItemTEMP."Last Date Modified" := ModifyDate;
+                IF ItemTEMP.INSERT THEN;
+              END;
+            END;
+          UNTIL lvItemsInStock.NEXT = 0;
+        END;
+      UNTIL HandymanExportWL.NEXT = 0;
+      //<< 160107 ITERO.AC RFC033
+    END;
+
+    LOCAL PROCEDURE "***OTHER***"@1100285136();
+    BEGIN
+    END;
+
+    PROCEDURE UpdateSalarycodes@1100285001();
+    VAR
+      SalaryCode@1100285001 : Code[20];
+      DimensionValue@1100285101 : Record 349;
+      CostCode@1100285100 : Record 11012083;
+      WageComponent@1100285102 : Record 11012014;
+    BEGIN
+      IF NOT GetHandymanSetupThis THEN
+        EXIT;
+
+      DimensionValue.SETRANGE("Dimension Code", 'KOSTNADSOBJEKT');
+      DimensionValue.SETRANGE("Cost Type", DimensionValue."Cost Type"::Labor);
+      DimensionValue.SETRANGE(Blocked, FALSE);
+      WageComponent.SETRANGE(Chargeable, TRUE); // Only charageable wage components.
+      // HandymanSetup.GET;
+
+      IF CostCode.FINDSET(FALSE) THEN REPEAT
+        SalaryCode := HandymanSetupThisComp."Company Prefix" + '_I_' + CostCode.Code;
+        IF NOT HandymanSalaryCode.GET(SalaryCode) THEN BEGIN
+          HandymanSalaryCode.INIT;
+          HandymanSalaryCode."Salary Code" := SalaryCode;
+          HandymanSalaryCode."NAV Cost Code" := CostCode.Code;
+          HandymanSalaryCode.INSERT(TRUE);
+        END;
+        HandymanSalaryCode."NAV Cost Code" := CostCode.Code;
+        HandymanSalaryCode."NAV Wage Component" := '';
+        HandymanSalaryCode."NAV Cost Object" := '';
+
+        IF NOT HandymanSalaryCode."In Handyman" THEN BEGIN
+          HandymanSalaryCode.Description := CostCode.Description;
+          HandymanSalaryCode.Unit := 0;
+          HandymanSalaryCode.SumOnTimesheet := 0;
+          HandymanSalaryCode.InfoMandatory := FALSE;
+          HandymanSalaryCode.Price := 0;
+          HandymanSalaryCode.VATRate := 0;
+          HandymanSalaryCode.AvailableForCategory := 2;
+        END;
+
+        HandymanSalaryCode.MODIFY(TRUE);
+
+      UNTIL CostCode.NEXT = 0;
+
+      IF DimensionValue.FINDSET(FALSE) THEN REPEAT
+        IF WageComponent.FINDSET(FALSE) THEN REPEAT
+          SalaryCode := HandymanSetupThisComp."Company Prefix" + '_P_' + DimensionValue.Code + '_' + WageComponent.Code;  // OBS: Max 20 tecken :)
+          IF NOT HandymanSalaryCode.GET(SalaryCode) THEN BEGIN
+            HandymanSalaryCode.INIT;
+            HandymanSalaryCode."Salary Code" := SalaryCode;
+            HandymanSalaryCode."NAV Wage Component" := WageComponent.Code;
+            HandymanSalaryCode."NAV Cost Object" := DimensionValue.Code;
+            HandymanSalaryCode.INSERT(TRUE);
+          END;
+          IF (HandymanSetupThisComp."Last Export Date" <> 0D) AND (WageComponent."Last Updated Date/Time" > LastExportDateTime) THEN
+            HandymanSalaryCode.Modified := TRUE;
+
+          HandymanSalaryCode."NAV Wage Component" := WageComponent.Code;
+          HandymanSalaryCode."NAV Cost Object" := DimensionValue.Code;
+          HandymanSalaryCode."NAV Cost Code" := '';
+
+          IF NOT HandymanSalaryCode."In Handyman" THEN BEGIN
+            HandymanSalaryCode.AvailableForCategory := 1;
+            HandymanSalaryCode.Description := DimensionValue.Name + ' - ' + WageComponent.Description;
+            HandymanSalaryCode.Unit := 0;
+            IF WageComponent."Component Type" = WageComponent."Component Type"::Hours THEN
+              HandymanSalaryCode.Unit := 0;
+            IF WageComponent."Component Type" = WageComponent."Component Type"::Expenses THEN
+              HandymanSalaryCode.Unit := 1;
+            IF DimensionValue."Unit of Measure" = 'KM' THEN
+              HandymanSalaryCode.Unit := 3;
+            HandymanSalaryCode.SumOnTimesheet := 0;
+            HandymanSalaryCode.InfoMandatory := FALSE;
+            HandymanSalaryCode.Price := 0;
+            IF WageComponent."Component Type" = WageComponent."Component Type"::Expenses THEN
+              HandymanSalaryCode.Price := DimensionValue.Price;
+            HandymanSalaryCode.VATRate := 0;
+          END;
+          HandymanSalaryCode.MODIFY(TRUE);
+
+        UNTIL WageComponent.NEXT = 0;
+      UNTIL DimensionValue.NEXT = 0;
+    END;
+
+    PROCEDURE SyncEmployeeToSalesperson@1100285517();
+    VAR
+      lvEmployee@1100285500 : Record 5200;
+      lvSalesperson@1100285501 : Record 13;
+    BEGIN
+      IF NOT GetHandymanSetupThis THEN
+        EXIT;
+
+      // HandymanSetup.GET;
+      IF lvEmployee.FINDSET(TRUE) THEN REPEAT
+        IF HandymanExportWL.GET(HandymanExportWL.Type::"Cost Centre", lvEmployee."Global Dimension 1 Code") THEN BEGIN
+          IF lvEmployee."Salespers./Purch. Code" = '' THEN BEGIN
+            lvEmployee."Salespers./Purch. Code" := lvEmployee."No.";
+            lvEmployee.MODIFY;
+          END;
+          IF NOT lvSalesperson.GET(lvEmployee."No.") THEN BEGIN
+            lvSalesperson.INIT;
+            lvSalesperson.Name := lvEmployee."First Name" + ' ' + lvEmployee."Last Name";
+            lvSalesperson."Global Dimension 1 Code" := lvEmployee."Global Dimension 1 Code";
+            lvSalesperson.Code := lvEmployee."No.";
+            lvSalesperson.INSERT;
+          END ELSE BEGIN // IME-409 Added update of Salesperson table if record exists
+            IF (lvSalesperson.Name <> lvEmployee."First Name" + ' ' + lvEmployee."Last Name") OR
+               (lvSalesperson."Global Dimension 1 Code" = lvEmployee."Global Dimension 1 Code") THEN BEGIN
+
+              lvSalesperson.Name := lvEmployee."First Name" + ' ' + lvEmployee."Last Name";
+              lvSalesperson."Global Dimension 1 Code" := lvEmployee."Global Dimension 1 Code";
+              lvSalesperson.MODIFY;
+            END;
+          END;
+        END;
+        IF (lvEmployee.Status IN [lvEmployee.Status::Inactive, lvEmployee.Status::Terminated]) AND
+           lvSalesperson.GET(lvEmployee."Salespers./Purch. Code") THEN
+          lvSalesperson.DELETE(FALSE);
+      UNTIL lvEmployee.NEXT = 0;
+
+      IF HandymanSetupThisComp."HM User Expediter" <> '' THEN BEGIN
+        lvSalesperson.INIT;
+        lvSalesperson.Code := HandymanSetupThisComp."HM User Expediter";
+        lvSalesperson.Name := txtHandyman;
+        IF NOT lvSalesperson.INSERT(FALSE) THEN
+          lvSalesperson.MODIFY(FALSE);
+      END;
+
+      IF HandymanSetupThisComp."Free Order Expediter" <> '' THEN BEGIN
+        lvSalesperson.INIT;
+        lvSalesperson.Code := HandymanSetupThisComp."Free Order Expediter";
+        lvSalesperson.Name := txtHandymanFree;
+        IF NOT lvSalesperson.INSERT(FALSE) THEN
+          lvSalesperson.MODIFY(FALSE);
+      END;
+
+      IF HandymanSetupThisComp."Time User Expediter" <> '' THEN BEGIN
+        // ENH057
+        lvSalesperson.INIT;
+        lvSalesperson.Code := HandymanSetupThisComp."Time User Expediter";
+        lvSalesperson.Name := txtHandymanTime;
+        IF NOT lvSalesperson.INSERT(FALSE) THEN
+          lvSalesperson.MODIFY(FALSE);
+      END;
+    END;
+
+    PROCEDURE GetRecordsFromLeadingCompany@1100285518();
+    VAR
+      LastLine@1100285500 : Integer;
+      HandymanImportBufferFROM@1100285501 : Record 81624;
+      HandymanImportBuffer@1100285502 : Record 81624;
+    BEGIN
+      IF HandymanImportBuffer.FINDLAST THEN
+        LastLine := HandymanImportBuffer."Line Key"
+      ELSE
+        LastLine := 0;
+      HandymanSetupThisComp.TESTFIELD("Company Name");
+
+      HandymanImportBufferFROM.CHANGECOMPANY(HandymanSetupThisComp."Company Name");
+      HandymanImportBufferFROM.SETFILTER("Line Key", '>%1', LastLine);
+      IF HandymanImportBufferFROM.FINDSET(FALSE) THEN
+      REPEAT
+        HandymanImportBuffer.COPY(HandymanImportBufferFROM);
+        HandymanImportBuffer.INSERT;
+      UNTIL HandymanImportBufferFROM.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ClearImportLogs@1100285002();
+    VAR
+      lvHandymanImportBuffer@1100285500 : Record 81624;
+      Job@1100285100 : Record 11072003;
+      lvCheckDate@1100285101 : Date;
+    BEGIN
+      // 150622 ITERO.MH Rewrite of log cleaning: Changed filter to be based on Import Buffer instead of loop through all jobs.
+      lvCheckDate := CALCDATE('-3M', TODAY);
+
+      lvHandymanImportBuffer.SETFILTER("Imported Date & Time",  '<%1', CREATEDATETIME(lvCheckDate, 000000T));
+      IF lvHandymanImportBuffer.FINDSET(FALSE) THEN
+      REPEAT
+        IF Job.GET(lvHandymanImportBuffer."Project No.") THEN BEGIN
+          // Job is found, look if project is finished with a ending date longer than 3 months ago.
+          IF ((Job."Ending Date" < lvCheckDate) AND
+              (Job."Project Status" IN [Job."Project Status"::Finished, Job."Project Status"::Archive, Job."Project Status"::Archived])) THEN
+            lvHandymanImportBuffer.DELETE(FALSE);
+        END ELSE // Job cannot be found. Delete transaction:
+          lvHandymanImportBuffer.DELETE(FALSE);
+      UNTIL lvHandymanImportBuffer.NEXT = 0;
+    END;
+
+    PROCEDURE "**PROJECT**"@1100285134();
+    BEGIN
+    END;
+
+    PROCEDURE ProcessProject@1100285526(VAR HandymanImportBuffer@1100285501 : Record 81624);
+    VAR
+      CustomerRec@1100285500 : Record 18;
+      lvType@1100285001 : Record 11012006;
+      lvJob@1100285002 : Record 11072003;
+      lvDiscipline@1100285101 : Record 11020204;
+      xRecJob@1100285504 : Record 11072003;
+      Job@1100285100 : Record 11072003;
+      ProjectPrincipal@1100285102 : Record 11012005;
+      Contact@1100285103 : Record 5050;
+      modifValues@1100285104 : Boolean;
+    BEGIN
+      // HandymanSetup.GET;
+      IF NOT GetHandymanSetupThis THEN
+        EXIT;
+
+      WITH HandymanImportBuffer DO BEGIN
+        IF NOT Internal THEN BEGIN
+          IF "Project No." <> '' THEN BEGIN
+            Job.GET("Project No.");
+            xRecJob.GET("Project No."); // IME356 150622
+            // ENH057
+            IF Job.Expediter <> HandymanSetupThisComp."Time User Expediter" THEN BEGIN // ENH057: Only update projects not marked as HM Time
+              //Job.VALIDATE("Salesperson Code", "Customer No.");
+              IF (Job."Bill-to Customer No." <> "Customer No.")  AND (Job."Bill-to Customer No." = '') THEN BEGIN
+                  Job.InsertProjPrincipalExt("Customer No.", TRUE);
+                  Job.VALIDATE("Bill-to Customer No.", "Customer No.");
+              END;
+      //        IF Manager <> '' THEN; //Job.VALIDATE("Project Manager", Manager);   Never change Project Manager
+
+              CASE TRUE OF
+                ("Employee No." <> ''): Job.VALIDATE(Expediter, "Employee No.");
+                "Free Order":           Job.VALIDATE(Expediter, HandymanSetupThisComp."Free Order Expediter");
+                ELSE                    Job.VALIDATE(Expediter, HandymanSetupThisComp."HM User Expediter");
+              END;
+
+      //        IF Discipline <> '' THEN BEGIN
+      //          Discipline := COPYSTR(Discipline, STRLEN(HandymanSetupThisComp."Company Prefix" + '_') + 1); // Takes away "EL_"
+      //          IF (lvDiscipline.GET(Discipline)) THEN
+      //            ;//Job.VALIDATE(Discipline, Discipline); Commented 140819
+      //        END;
+
+              IF "Row type" <> '' THEN BEGIN
+                "Row type" := COPYSTR("Row type", STRLEN(HandymanSetupThisComp."Company Prefix" + '_T_') + 1); // Takes away "EL_T_"
+                IF lvType.GET("Row type") THEN
+                  Job.VALIDATE(Type, "Row type");
+              END;
+
+              // RFC-094 - Changed functionality to update Status based on previous status: if marked completed in Handyman it should go from Production to Tech. Fin.
+              // <<                                                                         if marked Not Completed it should go from Tech. Finished to Production
+              IF (Job."Single/Main/Sub Project" = Job."Single/Main/Sub Project"::"Sub Project") THEN BEGIN
+                IF Completed AND (Job."Project Status" = Job."Project Status"::Production) THEN
+                  Job.VALIDATE("Project Status", Job."Project Status"::"Technical Finished");
+                IF (NOT Completed) AND (Job."Project Status" = Job."Project Status"::"Technical Finished") THEN
+                  Job.VALIDATE("Project Status", Job."Project Status"::Production);
+              END;
+              // RFC-094 >>
+
+              // Update address ****************************
+              Job.VALIDATE(Address, "Address 1");
+              Job.VALIDATE("Address 2", "Address 2");
+              Job."Post Code" := "Post Code";
+              Job.City := "Postal Area";
+              // Update Start and Ending Date **************
+              IF "Start Date" <> 0D THEN BEGIN
+                IF "End Date" <> 0D THEN
+                  Job."Ending Date" := 0D; // 140905 Possible date end bug fix
+                Job.VALIDATE("Starting Date", "Start Date");
+              END;
+              IF "End Date" <> 0D THEN
+                Job.VALIDATE("Ending Date", "End Date");
+
+              Job.MODIFY(TRUE);
+
+              //>>RFC142
+              ProjectPrincipal.GET(Job."No.",Job."Bill-to Customer No.");
+              IF (ContactName<>'') THEN BEGIN
+                ProjectPrincipal.CALCFIELDS("Contact Person Name");
+                IF (LOWERCASE(ProjectPrincipal."Contact Person Name") <> LOWERCASE(ContactName)) THEN BEGIN
+                  Contact.RESET;
+                  Contact.SETRANGE(Type,Contact.Type::Person);
+                  Contact.SETRANGE("Company No.",ProjectPrincipal."Contact No.");
+                  Contact.SETFILTER(Name,'@%1',ContactName);
+                  IF Contact.FINDFIRST THEN BEGIN
+                    ProjectPrincipal."Contact Person No." := Contact."No.";
+                    ProjectPrincipal.CALCFIELDS("Contact Person Name");
+                    ProjectPrincipal.MODIFY;
+                  END;
+                END;
+              END;
+
+              IF Contact.GET(ProjectPrincipal."Contact Person No.") THEN BEGIN
+                modifValues := FALSE;
+      //          IF ContactName <> '' THEN BEGIN
+      //            IF NOT modifValues THEN
+      //              modifValues := Contact.Name <> ContactName;
+      //            Contact.VALIDATE(Name,ContactName);
+      //          END;
+                IF (Telephone2 <> '') AND (Telephone2 <> '-') THEN BEGIN
+                  IF NOT modifValues THEN
+                    modifValues := Contact."Mobile Phone No." <> Telephone2;
+                  Contact.VALIDATE("Mobile Phone No.",Telephone2);
+                END;
+                IF (Telephone1 <> '') AND (Telephone1 <> '-') THEN BEGIN
+                  IF NOT modifValues THEN
+                    modifValues := Contact."Phone No." <> Telephone1;
+                  Contact.VALIDATE("Phone No.",Telephone1);
+                END;
+                IF modifValues THEN
+                  Contact.MODIFY(TRUE);
+              END;
+              //<<RFC142
+
+              //>>RFC143
+              ProjectPrincipal.GET(Job."No.",Job."Bill-to Customer No.");
+              modifValues := FALSE;
+              IF CustomerReference <> '' THEN BEGIN
+                IF NOT modifValues THEN
+                  modifValues := ProjectPrincipal."Principal Reference" <> CustomerReference;
+                ProjectPrincipal."Principal Reference" := CustomerReference;
+              END;
+              IF Requsition <> '' THEN BEGIN
+                // Requsition
+                IF NOT modifValues THEN
+                  modifValues := ProjectPrincipal."Order No. Customer" <> Requsition;
+                ProjectPrincipal."Order No. Customer" := Requsition;
+              END;
+              IF modifValues THEN
+                ProjectPrincipal.MODIFY(TRUE);
+              //<<RFC143
+
+            END; //ENH057
+          END ELSE BEGIN
+            // ***** RFC 001 **** <<
+            // Synced all project creation to one function:
+            CreateSubProjectFromMainProject_Handyman(Job, "Category ID", "Customer No.", "Employee No.", "Free Order", Discipline, "Row type",
+              "Order Type", "Address 1", "Address 2", "Post Code", "Postal Area", "Start Date", "End Date");
+            // ***** RFC 001 **** >>
+
+            "Project No." := Job."No."; // Saves the created project no.
+            "Cost Center" := COPYSTR(Job."No.", 1, 4); // IME372
+          END;
+        END;
+      END;
+    END;
+
+    PROCEDURE CreateSubProjectFromMainProject_Handyman@1100285103(VAR Job@1100285102 : Record 11072003;MainProjectNo@1100285101 : Code[20];ProjectPrincipalCode@1100285105 : Code[20];ExpediterCode@1100285106 : Code[20];IsFree@1100285107 : Boolean;DisciplineCode@1100285108 : Code[20];RowType@1100285111 : Code[20];OrderType@1100285112 : Integer;Address1@1100285113 : Text;Address2@1100285114 : Text;PostCode@1100285115 : Code[10];City@1100285116 : Text;StartDate@1100285117 : Date;EndDate@1100285118 : Date);
+    VAR
+      CreateSubProjFrm@1100285100 : Page 11128005;
+      CreatedProjNo@1100285103 : Code[30];
+      JobMain@1100285104 : Record 11072003;
+    BEGIN
+      IF NOT GetHandymanSetupThis THEN
+        EXIT;
+
+      // HandymanSetup.GET;
+      CreateSubProjFrm.FillDefaults(MainProjectNo); // Should contain Main project
+      CreateSubProjFrm.CopyProject;
+      CreateSubProjFrm.GetCreatedProjectNo(CreatedProjNo);
+      Job.GET(CreatedProjNo);
+
+      JobMain.GET(MainProjectNo);
+      IF (JobMain."Bill-to Customer No." = '') THEN BEGIN
+        Job.InsertProjPrincipalExt(ProjectPrincipalCode, TRUE);
+        Job.VALIDATE("Bill-to Customer No.", ProjectPrincipalCode);
+      END ELSE BEGIN
+        IF (JobMain."Bill-to Customer No." <> Job."Bill-to Customer No.") THEN BEGIN
+          Job.InsertProjPrincipalExt(JobMain."Bill-to Customer No.", TRUE);
+          Job.VALIDATE("Bill-to Customer No.", JobMain."Bill-to Customer No.");
+        END;
+      END;
+
+      UpdateExpediterOnProject(Job, ExpediterCode, IsFree, HandymanSetupThisComp);
+
+      UpdateDisciplineRowTypeAndOrderType(Job, DisciplineCode, RowType, OrderType, HandymanSetupThisComp);
+
+      CheckIfExistAndCreateResponsiblePerson(Job, ExpediterCode);
+
+      UpdateAddressOnProject(Job, Address1, Address2, PostCode, City);
+
+      Job.VALIDATE("Project Manager", JobMain."Project Manager"); // Get project manager from main project instead.
+      Job.VALIDATE("Settlement Method", JobMain."Settlement Method");
+      Job.VALIDATE("Description 2", JobMain."Description 2");
+
+      // Update Start and Ending Date **************
+      IF (StartDate <> 0D) THEN
+        Job.VALIDATE("Starting Date", StartDate);
+      IF (EndDate <> 0D) THEN
+        Job.VALIDATE("Ending Date", EndDate);
+
+      CLEAR(CreateSubProjFrm);
+
+      Job.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CheckIfExistAndCreateResponsiblePerson@1100285104(VAR Job@1100285100 : Record 11072003;EmployeeCode@1100285101 : Code[20]);
+    VAR
+      ProjectResponsiblePerson@1100285102 : Record 11012040;
+      LineNo@1100285103 : Integer;
+    BEGIN
+      IF EmployeeCode = '' THEN
+        EXIT;
+
+      ProjectResponsiblePerson.SETRANGE("Project No.", Job."No.");
+      ProjectResponsiblePerson.SETRANGE("Employee No.", EmployeeCode);
+      IF NOT ProjectResponsiblePerson.FINDFIRST THEN BEGIN
+        ProjectResponsiblePerson.RESET;
+        ProjectResponsiblePerson.SETRANGE("Project No.", Job."No.");
+        IF ProjectResponsiblePerson.FINDLAST THEN
+          LineNo := ProjectResponsiblePerson."Line No." + 10000
+        ELSE
+          LineNo := 10000;
+        ProjectResponsiblePerson.INIT;
+        ProjectResponsiblePerson.VALIDATE("Project No.", Job."No.");
+        ProjectResponsiblePerson.VALIDATE("Line No.", LineNo);
+        ProjectResponsiblePerson.VALIDATE(Responsibility, 'MF');
+        ProjectResponsiblePerson.VALIDATE("Employee No.", EmployeeCode);
+        ProjectResponsiblePerson.INSERT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateExpediterOnProject@1100285111(VAR Job@1100285100 : Record 11072003;EmployeeCode@1100285101 : Code[20];isFree@1100285102 : Boolean;pHandymanSetup@1100285103 : Record 81609);
+    BEGIN
+      CASE TRUE OF
+        (EmployeeCode <> ''):  Job.VALIDATE(Expediter, EmployeeCode);
+        isFree:  Job.VALIDATE(Expediter, pHandymanSetup."Free Order Expediter");
+        ELSE
+          Job.VALIDATE(Expediter, pHandymanSetup."HM User Expediter");
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateDisciplineRowTypeAndOrderType@1100285116(VAR Job@1100285100 : Record 11072003;DisciplineCode@1100285101 : Code[20];RowType@1100285102 : Code[20];OrderType@1100285103 : Integer;HandymanSetup@1100285104 : Record 81609);
+    VAR
+      Discipline@1100285106 : Record 11020204;
+      Type@1100285105 : Record 11012006;
+    BEGIN
+      IF DisciplineCode <> '' THEN BEGIN
+        DisciplineCode := COPYSTR(DisciplineCode, STRLEN(HandymanSetup."Company Prefix" + '_') + 1); // Takes away "EL_"
+        IF Discipline.GET(DisciplineCode) THEN
+          Job.VALIDATE(Discipline, DisciplineCode);
+      END;
+
+      IF RowType <> '' THEN BEGIN
+        RowType := COPYSTR(RowType, STRLEN(HandymanSetup."Company Prefix" + '_T_') + 1); // Takes away "EL_T_"
+        IF Type.GET(RowType) THEN
+          Job.VALIDATE(Type, RowType);
+      END;
+
+      //CASE OrderType OF
+      //   10: Job.VALIDATE(Description, '');
+      //   11: Job.VALIDATE(Description, 'Reparationsorder');
+      //   12: Job.VALIDATE(Description, 'Serviceorder');
+      //   ELSE Job.VALIDATE(Description, '');
+      //END;
+      Job.VALIDATE(Description, ''); // RFC-048
+    END;
+
+    LOCAL PROCEDURE UpdateAddressOnProject@1100285114(VAR Job@1100285100 : Record 11072003;Address1@1100285101 : Text;Address2@1100285102 : Text;PostCode@1100285103 : Code[20];City@1100285104 : Text);
+    BEGIN
+      IF Address1 <> '' THEN
+        Job.VALIDATE(Address, Address1);
+
+      IF Address2 <> '' THEN
+        Job.VALIDATE("Address 2", Address2);
+
+      IF PostCode <> '' THEN
+        Job."Post Code" := PostCode;
+
+      IF City <> ''     THEN
+        Job.City := City;
+    END;
+
+    PROCEDURE "***COMMENT*"@1100285133();
+    BEGIN
+    END;
+
+    PROCEDURE ProcessComment@1100285512(VAR HandymanImportBuffer@1100285500 : Record 81624);
+    VAR
+      LineNo@1100285501 : Integer;
+      Job@1100285000 : Record 11072003;
+      ExtraLineComment@1100285504 : Text;
+    BEGIN
+      // HandymanSetup.GET;
+      IF NOT GetHandymanSetupThis THEN
+        EXIT;
+      ExtraLineComment := '';
+
+      // RFC015 - Rewrite 150929 ****
+      WITH HandymanImportBuffer DO BEGIN
+        IF ("Description ID" <> '') AND (STRPOS("Description ID", '_') <> 0) THEN BEGIN // Update comment...
+          UpdateCommentOnProject("Description ID", "Project No.", HandymanSetupThisComp, Description, ExtraLineComment);
+        END ELSE BEGIN // Create a new comment on the project. - This line has not existed yet.
+          LineNo := GetNextLineNoForComment("Project No.");
+          Job.GET("Project No.");
+
+          IF (Job.Description = '') AND
+              (NOT Internal) AND
+              ((LineNo = 10000) OR CommentLinesAreJustInternal(Job."No.", HandymanSetupThisComp))
+          THEN BEGIN
+            UpdateJobDescriptionAndExportToSymbrio(Job, Description, ExtraLineComment);
+            "Description ID" := Job."No." + '_00000';
+          END ELSE BEGIN
+            InsertCommentOnProject(Job."No.", LineNo, Description, ExtraLineComment, "Registration Date", Internal, HandymanSetupThisComp);
+            "Description ID" := Job."No." + '_' + FORMAT(LineNo);
+          END;
+          MODIFY(TRUE);
+        END;
+
+        IF (ExtraLineComment <> '') THEN
+          AddRemainingCommentOnProject("Project No.", ExtraLineComment, "Registration Date", Internal, HandymanSetupThisComp);
+      END;
+    END;
+
+    LOCAL PROCEDURE GetNextLineNoForComment@1100285105(ProjectNo@1100285100 : Code[20]) : Integer;
+    VAR
+      CommentLine@1100285101 : Record 97;
+    BEGIN
+      CommentLine.RESET;
+      CommentLine.SETRANGE("Table Name", CommentLine."Table Name"::Job);
+      CommentLine.SETRANGE("No.", ProjectNo);
+
+      IF (CommentLine.FINDLAST) THEN
+        EXIT(CommentLine."Line No." + 10000)
+      ELSE
+        EXIT(10000);
+    END;
+
+    LOCAL PROCEDURE UpdateCommentOnProject@1100285108(LineNoText@1100285100 : Text;ProjectNo@1100285101 : Code[10];VAR HandymanSetup@1100285102 : Record 81609;CommentText@1100285103 : Text;VAR ExtraText@1100285104 : Text);
+    VAR
+      CommentLine@1100285105 : Record 97;
+      LineNo@1100285106 : Integer;
+    BEGIN
+      EVALUATE(LineNo, COPYSTR(LineNoText, STRPOS(LineNoText, '_') + 1)); // Get the Line No.
+
+      IF CommentLine.GET(CommentLine."Table Name"::Job, ProjectNo, LineNo) THEN BEGIN // Does the line exist?
+        IF (CommentLine.Code = HandymanSetup."Handyman Code") OR ((CommentLine.Code = HandymanSetup."Handyman Internal Code")) THEN BEGIN   // Exists = Yes, is it an old HM-line?
+          CommentLine.Comment := COPYSTR(CommentText, 1, MAXSTRLEN(CommentLine.Comment));    // Update line
+          IF STRLEN(CommentText) > MAXSTRLEN(CommentLine.Comment) THEN
+            ExtraText += COPYSTR(CommentText, MAXSTRLEN(CommentLine.Comment) + 1);
+          CommentLine.MODIFY(TRUE);
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE CommentLinesAreJustInternal@1100285121(ProjectNo@1100285100 : Code[20];VAR HandymanSetup@1100285102 : Record 81609) : Boolean;
+    VAR
+      CommentLine@1100285101 : Record 97;
+    BEGIN
+      CommentLine.RESET;
+      CommentLine.SETRANGE("Table Name", CommentLine."Table Name"::Job);
+      CommentLine.SETRANGE("No.", ProjectNo);
+      CommentLine.SETFILTER(Code, '<>%1', HandymanSetup."Handyman Internal Code");
+      EXIT(CommentLine.ISEMPTY);
+    END;
+
+    LOCAL PROCEDURE UpdateJobDescriptionAndExportToSymbrio@1100285109(VAR Job@1100285100 : Record 11072003;CommentText@1100285101 : Text;VAR RemainingText@1100285102 : Text);
+    VAR
+      JobToRecRef@1100285104 : Record 11072003;
+      RecRef@1100285103 : RecordRef;
+    BEGIN
+
+      Job.VALIDATE(Description, COPYSTR(CommentText, 1, MAXSTRLEN(Job.Description)));
+      Job.MODIFY(TRUE);
+
+      IF STRLEN(CommentText) > MAXSTRLEN(Job.Description) THEN
+        RemainingText += COPYSTR(CommentText, MAXSTRLEN(Job.Description) + 1);
+    END;
+
+    LOCAL PROCEDURE InsertCommentOnProject@1100285117(ProjectNo@1100285100 : Code[10];VAR LineNo@1100285105 : Integer;VAR CommentText@1100285101 : Text;VAR RemainingText@1100285102 : Text;DateAndTime@1100285103 : DateTime;isInternal@1100285104 : Boolean;VAR HandymanSetup@1100285106 : Record 81609);
+    VAR
+      CommentLine@1100285107 : Record 97;
+    BEGIN
+      CommentLine.INIT;
+      CommentLine."Table Name" := CommentLine."Table Name"::Job;
+      CommentLine."No." := ProjectNo;
+      CommentLine."Line No." := LineNo;
+
+      IF isInternal THEN
+        CommentLine.Code := HandymanSetup."Handyman Internal Code"
+      ELSE
+        CommentLine.Code := HandymanSetup."Handyman Code";
+
+      CommentLine.Comment := COPYSTR(CommentText, 1, MAXSTRLEN(CommentLine.Comment));
+      IF STRLEN(CommentText) > MAXSTRLEN(CommentLine.Comment) THEN
+        RemainingText += COPYSTR(CommentText, MAXSTRLEN(CommentLine.Comment) + 1);
+      CommentLine.Date := DT2DATE(DateAndTime);
+      CommentLine."Time Created" := DT2TIME(DateAndTime);
+      CommentLine.INSERT(TRUE);
+    END;
+
+    LOCAL PROCEDURE AddRemainingCommentOnProject@1100285110(ProjectNo@1100285100 : Code[20];VAR CommentText@1100285101 : Text;DateAndTime@1100285105 : DateTime;IsInternal@1100285107 : Boolean;VAR HandymanSetup@1100285102 : Record 81609);
+    VAR
+      LineNo@1100285103 : Integer;
+      ExitLoop@1100285104 : Boolean;
+      CommentLine@1100285106 : Record 97;
+      RemainingText@1100285108 : Text;
+    BEGIN
+      LineNo := GetNextLineNoForComment(ProjectNo);
+
+      ExitLoop := FALSE;
+      RemainingText := '';
+
+      REPEAT
+        InsertCommentOnProject(ProjectNo, LineNo, CommentText, RemainingText, DateAndTime, IsInternal, HandymanSetup);
+
+        IF RemainingText <> '' THEN BEGIN
+          CommentText := RemainingText;
+          RemainingText := '';
+        END ELSE
+          ExitLoop := TRUE;
+
+        LineNo += 10000;
+      UNTIL ExitLoop = TRUE;
+    END;
+
+    PROCEDURE "**TIMESHEET**"@1100285131();
+    BEGIN
+    END;
+
+    PROCEDURE ProcessTimesheet@1100285508(VAR HandymanImportBuffer@1100285512 : Record 81624);
+    VAR
+      lvYear@1100285500 : Integer;
+      lvWeek@1100285501 : Integer;
+      lvDay@1100285502 : Integer;
+      lvLineNo@1100285503 : Integer;
+      lvCostCode@1100285504 : Code[30];
+      lvCostObject@1100285505 : Code[30];
+      lvWageComponent@1100285506 : Code[30];
+      lvPos@1100285507 : Integer;
+      lvAmountIsQuantity@1100285508 : Boolean;
+      lvRecRef@1100285509 : RecordRef;
+      lvCommentText@1100285510 : Text[250];
+      lvPresentComment@1100285511 : Text[250];
+      lvCommentLineNo@1100285000 : Integer;
+      lvExtensionContract@1100285513 : Record 11012004;
+      HourAccounting@1100285102 : Record 11012038;
+      HourAccountingLine@1100285101 : Record 11012039;
+      HourAccCommentLine@1100285100 : Record 11128234;
+      CostCode@1100285103 : Record 11012083;
+      DimensionValue@1100285104 : Record 349;
+      WageComponent@1100285105 : Record 11012014;
+    BEGIN
+      // HandymanSetup.GET;
+      IF NOT GetHandymanSetupThis THEN
+        EXIT;
+      WITH HandymanImportBuffer DO BEGIN
+        lvYear := DATE2DWY("Main Date", 3);
+        lvWeek := DATE2DWY("Main Date", 2);
+        lvDay  := DATE2DWY("Main Date", 1);
+
+        // Fix possible w53 bug, 4PS can only handle w.1-52. If 53, change year.
+        //IF (lvWeek = 53) THEN BEGIN  //DL151218
+        IF lvWeek > 53 THEN BEGIN
+          lvWeek := 1;
+          lvYear += 1;
+        END;
+
+        // IF Not exists, create Hour Accounting (i.e. Header for Timesheet)
+        IF NOT HourAccounting.GET(lvYear, lvWeek, "Employee No.") THEN BEGIN
+          HourAccounting.INIT;
+          HourAccounting.VALIDATE(Year, lvYear);
+          HourAccounting.VALIDATE(Week, lvWeek);
+          HourAccounting.VALIDATE("Employee No.", "Employee No.");
+          HourAccounting.INSERT(TRUE);
+        END;
+
+        //>>190225
+        IF HourAccounting.Status <> HourAccounting.Status::Open THEN
+          HourAccounting.SetStatus(FALSE,'');
+        HourAccounting.TESTFIELD(Status,HourAccounting.Status::Open);
+        //<<190225
+
+        // Create a new Hours Accounting Line
+        HourAccountingLine.SETRANGE(Year, lvYear);
+        HourAccountingLine.SETRANGE(Week, lvWeek);
+        HourAccountingLine.SETRANGE("Employee No.", "Employee No.");
+        IF HourAccountingLine.FINDLAST THEN
+          lvLineNo += HourAccountingLine."Line No." + 10000
+        ELSE
+          lvLineNo := 10000;
+        HourAccountingLine.INIT;
+        HourAccountingLine.VALIDATE(Year, lvYear);
+        HourAccountingLine.VALIDATE(Week, lvWeek);
+        HourAccountingLine.VALIDATE("Employee No.", "Employee No.");
+        HourAccountingLine."Line No." := lvLineNo;
+        HourAccountingLine.INSERT(TRUE);
+
+        // Populate Hours accounting line
+        HandymanSalaryCode.GET(HandymanImportBuffer."Salary Code");
+        lvCostCode := HandymanSalaryCode."NAV Cost Code";
+        lvCostObject := HandymanSalaryCode."NAV Cost Object";
+        lvWageComponent := HandymanSalaryCode."NAV Wage Component";
+        lvAmountIsQuantity := FALSE;
+
+        IF lvCostCode <> '' THEN BEGIN
+          HourAccountingLine.VALIDATE(Type, HourAccountingLine.Type::Indirect);
+          HourAccountingLine.VALIDATE("Cost Code", lvCostCode);
+          CostCode.GET(lvCostCode);
+        END;
+        IF lvCostObject <> '' THEN BEGIN
+          HourAccountingLine.VALIDATE(Type, HourAccountingLine.Type::Project);
+          HourAccountingLine.VALIDATE("Project No.", "Project No.");
+          HourAccountingLine.VALIDATE("Cost Object", lvCostObject);
+          HourAccountingLine.VALIDATE("Wage Component", lvWageComponent);
+
+          DimensionValue.GET('KOSTNADSOBJEKT', lvCostObject);
+          WageComponent.GET(lvWageComponent);
+          IF (WageComponent."Component Type" = WageComponent."Component Type"::Expenses) THEN lvAmountIsQuantity := TRUE;
+        END;
+
+        // Element, Extension and Team Code
+        IF "KB1 ExtCont" <> '' THEN BEGIN
+          IF lvExtensionContract.GET("Project No.", "KB1 ExtCont") THEN
+            HourAccountingLine.VALIDATE("Extension Contract", "KB1 ExtCont");
+        END;
+        IF "KB2 Element" <> '' THEN
+          HourAccountingLine.VALIDATE(Element, "KB2 Element");
+        IF "Phase TeamCode" <> '' THEN
+          HourAccountingLine.VALIDATE("Team Code", "Phase TeamCode");
+
+        IF NOT lvAmountIsQuantity THEN BEGIN
+          CASE lvDay OF
+            1: HourAccountingLine.VALIDATE(Monday,    Amount);
+            2: HourAccountingLine.VALIDATE(Tuesday,   Amount);
+            3: HourAccountingLine.VALIDATE(Wednesday, Amount);
+            4: HourAccountingLine.VALIDATE(Thursday,  Amount);
+            5: HourAccountingLine.VALIDATE(Friday,    Amount);
+            6: HourAccountingLine.VALIDATE(Saturday,  Amount);
+            7: HourAccountingLine.VALIDATE(Sunday,    Amount);
+          END;
+        END ELSE BEGIN
+          HourAccountingLine.VALIDATE(Amount, Price);
+          HourAccountingLine.VALIDATE(Quantity, Amount);
+        END;
+
+        // Inserts comments
+        lvCommentText := Comment;
+
+        // IF there is a decimal in this field, validate it on the timesheet table as Amount!
+        IF "Hours Type" IN [4,5] THEN BEGIN
+          // IME-468 Replaced IF
+          IF TextCanBeConvertedToDecimal(Comment) THEN BEGIN
+          //IF ((DELCHR(Comment,'=', '0123456789-., ') = '') AND (Comment <> '')) THEN BEGIN
+            // Now this string only contains numbers!
+            //>> 160704 ITERO.AC IME469
+            // HourAccountingLine."Amount (LCY)" := Str2Dec(Comment);
+      //>>Support #26716
+      //      HourAccountingLine.VALIDATE("Amount (LCY)", Str2Dec(Comment));
+            HourAccountingLine.VALIDATE("Unit Cost (LCY)", Str2Dec(Comment));
+      //<<Support #26716
+            //<< 160704 ITERO.AC IME469
+          END;
+        END;
+      //4PSSE.so IME-1074
+      //  IF STRLEN(lvCommentText) > 50 THEN
+      //    HourAccountingLine.VALIDATE(Comment, COPYSTR(lvCommentText, 1, 47) + '...')
+      //4PSSE.eo IME-1074
+      //4PSSE.sn IME-1074
+        IF STRLEN(lvCommentText) > MAXSTRLEN(HourAccountingLine.Comment) THEN
+          HourAccountingLine.VALIDATE(Comment, COPYSTR(lvCommentText, 1, (MAXSTRLEN(HourAccountingLine.Comment)-3)) + '...')
+      //4PSSE.en IME-1074
+        ELSE IF lvCommentText <> '' THEN
+          HourAccountingLine.VALIDATE(Comment, lvCommentText);
+
+        HourAccountingLine.MODIFY(TRUE);
+
+      //  IF STRLEN(lvCommentText) > 50 THEN BEGIN  //4PSSE.o IME-1074
+        IF STRLEN(lvCommentText) > MAXSTRLEN(HourAccountingLine.Comment) THEN BEGIN //4PSSE.n IME-1074
+          lvRecRef.GETTABLE(HourAccountingLine);
+          HourAccCommentLine.SETRANGE("Table Name",HourAccCommentLine."Table Name"::"Hour Accounting Line");
+          HourAccCommentLine.SETFILTER("Record ID", '=%1', lvRecRef.RECORDID);
+          lvCommentLineNo := 10000;
+          IF HourAccCommentLine.FINDLAST THEN
+            lvCommentLineNo:= HourAccCommentLine."Line No." + 10000;
+
+          REPEAT
+            HourAccCommentLine."Line No." := lvCommentLineNo;
+            HourAccCommentLine."Record ID" := lvRecRef.RECORDID;
+            HourAccCommentLine."Table Name" := HourAccCommentLine."Table Name"::"Hour Accounting Line";
+
+      //4PSSE.so IME-1074
+      //      lvPresentComment := COPYSTR(lvCommentText, 1, 80);
+      //      lvCommentText := COPYSTR(lvCommentText, 80);
+      //4PSSE.eo IME-1074
+      //4PSSE.sn IME-1074
+            lvPresentComment := COPYSTR(lvCommentText, 1, MAXSTRLEN(HourAccCommentLine.Comment));
+            lvCommentText := COPYSTR(lvCommentText, MAXSTRLEN(HourAccCommentLine.Comment));
+      //4PSSE.en IME-1074
+
+            HourAccCommentLine.VALIDATE(Comment, lvPresentComment);
+
+      //180626
+            HourAccCommentLine.Date := WORKDATE;
+            HourAccCommentLine.Time := SYSTEM.TIME;
+      //180626
+
+            HourAccCommentLine.INSERT(TRUE);
+            lvCommentLineNo += 10000;
+
+          UNTIL STRLEN(lvCommentText) <= 0;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE TextCanBeConvertedToDecimal@1100285141(TextAsDecimal@1100285100 : Text) : Boolean;
+    VAR
+      CR@1100285101 : Char;
+      LF@1100285102 : Char;
+      TextAllowed@1100285103 : Text;
+    BEGIN
+      IF TextAsDecimal = '' THEN
+        EXIT(FALSE);
+
+      CR := 13;
+      LF := 10;
+      TextAllowed[1] := CR;
+      TextAllowed[2] := LF;
+      TextAllowed += '0123456789-., ';
+
+      EXIT (DELCHR(TextAsDecimal,'=', TextAllowed) = '');
+    END;
+
+    LOCAL PROCEDURE "**MATERIAL**"@1100285122();
+    BEGIN
+    END;
+
+    PROCEDURE ProcessMaterialList@1100285509(VAR HandymanImportBuffer@1100285501 : Record 81624);
+    VAR
+      MaterialImportOption@1100285108 : ' ,Trade Item,Inventory Item,Mean,Free Item,Ignore';
+    BEGIN
+      //HandymanSetup.GET;
+      IF NOT GetHandymanSetupThis THEN
+        EXIT;
+
+      MaterialImportOption := GetMaterialImportOption(HandymanImportBuffer, HandymanSetupThisComp);
+      HandymanImportBuffer."Material Import Type" := MaterialImportOption;
+
+      CASE MaterialImportOption OF
+        MaterialImportOption::Mean:              ImportMeansOnSettlementSheet(HandymanImportBuffer, HandymanSetupThisComp);
+        MaterialImportOption::"Trade Item":      ImportMaterialUsingCUST002(HandymanImportBuffer, HandymanSetupThisComp);
+        MaterialImportOption::"Inventory Item":  ImportItemToItemJournal(HandymanImportBuffer, HandymanSetupThisComp);
+        MaterialImportOption::"Free Item":       ImportFreeItemOnSettlementSheet(HandymanImportBuffer, HandymanSetupThisComp);
+        MaterialImportOption::Ignore:            EXIT;
+      END;
+    END;
+
+    LOCAL PROCEDURE GetMaterialImportOption@1100285120(VAR HandymanImportBuffer@1100285100 : Record 81624;VAR HandymanSetup@1100285102 : Record 81609) : Integer;
+    VAR
+      MaterialImportOption@1100285101 : ' ,Trade Item,Inventory Item,Mean,Free Item,Ignore';
+      VendorNo@1100285105 : Code[20];
+      LocationCode@1100285104 : Code[20];
+      ItemNo@1100285103 : Code[20];
+    BEGIN
+      IF (HandymanImportBuffer."Item No." = '') AND (COPYSTR(HandymanImportBuffer."Description ID", 1, 3) = '###') THEN BEGIN
+        MaterialImportOption := MaterialImportOption::Ignore;
+        EXIT(MaterialImportOption);
+      END;
+
+      IF HandymanImportBuffer."Item No." = '' THEN BEGIN
+        MaterialImportOption := MaterialImportOption::"Free Item";
+        EXIT(MaterialImportOption);
+      END;
+
+      IF HandymanImportBuffer."Vendor No." = HandymanSetup."Company Prefix" + '_M' THEN BEGIN
+        MaterialImportOption := MaterialImportOption::Mean;
+        EXIT(MaterialImportOption);
+      END;
+
+      IF (GetCheck_TradeVendorAndItem(HandymanImportBuffer, HandymanSetup, VendorNo, ItemNo)) THEN BEGIN
+        MaterialImportOption := MaterialImportOption::"Trade Item";
+        EXIT(MaterialImportOption);
+      END;
+
+      IF (GetCheck_InventoryLocationAndItem(HandymanImportBuffer, HandymanSetup, LocationCode, ItemNo)) THEN BEGIN
+        MaterialImportOption := MaterialImportOption::"Inventory Item";
+        EXIT(MaterialImportOption);
+      END;
+
+      MaterialImportOption := MaterialImportOption::"Free Item";
+      EXIT(MaterialImportOption);
+    END;
+
+    LOCAL PROCEDURE ImportMeansOnSettlementSheet@1100285126(VAR HandymanImportBuffer@1100285100 : Record 81624;VAR HandymanSetup@1100285101 : Record 81609);
+    VAR
+      Job@1100285102 : Record 11072003;
+      SettlementSheet@1100285103 : Record 11012021;
+      CostPlusEntry@1100285108 : Record 11012019;
+      ExtensionContract@1100285107 : Record 11012004;
+      Pos@1100285104 : Integer;
+      MeansNo@1100285105 : Code[20];
+      LineNo@1100285106 : Integer;
+    BEGIN
+      Job.GET(HandymanImportBuffer."Project No.");
+      IF Job."Settlement Method" <> Job."Settlement Method"::"Cost Plus" THEN
+        EXIT;
+
+      Job.TESTFIELD("Bill-to Customer No.");
+
+      GetOrInsertLastSettlementSheet(Job, SettlementSheet);
+
+      Pos := STRLEN(HandymanSetup."Company Prefix" + '_M_');
+      MeansNo := COPYSTR(HandymanImportBuffer."Item No.", Pos + 1);
+
+      // Should not add CostPlusEntry on FixedPrice ŽTA
+      IF ExtensionContractExistsAndIsFixedPrice(Job."No.", HandymanImportBuffer."KB1 ExtCont") THEN
+        EXIT;
+
+      // CostPlusEntry KEYS: "Project No.","Principal","Commission No.","Settl.Sheet No.","Line No."
+      CostPlusEntry.RESET;
+      CostPlusEntry.SETRANGE("Project No.", Job."No.");
+      CostPlusEntry.SETRANGE(Principal, Job."Bill-to Customer No.");
+      CostPlusEntry.SETRANGE("Commission No.", SettlementSheet."Commission No.");
+      CostPlusEntry.SETRANGE("Settl.Sheet No.", SettlementSheet."No.");
+      IF (CostPlusEntry.FINDLAST) THEN
+        LineNo := CostPlusEntry."Line No." + 10000
+      ELSE
+        LineNo := 10000;
+      CostPlusEntry.INIT;
+      CostPlusEntry.VALIDATE("Project No.", Job."No.");
+      CostPlusEntry.VALIDATE(Principal, Job."Bill-to Customer No.");
+      CostPlusEntry.VALIDATE("Commission No.", SettlementSheet."Commission No.");
+      CostPlusEntry.VALIDATE("Settl.Sheet No.", SettlementSheet."No.");
+      IF ExtensionContract.GET(Job."No.", HandymanImportBuffer."KB1 ExtCont") THEN
+        CostPlusEntry.VALIDATE("Extension Contract", HandymanImportBuffer."KB1 ExtCont");
+      CostPlusEntry.VALIDATE(Element, HandymanImportBuffer."KB2 Element");
+      CostPlusEntry.VALIDATE("Line No.", LineNo);
+      CostPlusEntry.VALIDATE("Means No.", MeansNo); // Means
+      CostPlusEntry.VALIDATE(Quantity, HandymanImportBuffer.Amount);
+      IF CostPlusEntry."Cost Object" = '' THEN // 150519
+        CostPlusEntry.VALIDATE("Cost Object", HandymanSetup."Default Cost Object"); // 140527
+      CostPlusEntry.VALIDATE(Description, HandymanImportBuffer.Description);
+
+      CostPlusEntry.INSERT(TRUE);
+    END;
+
+    LOCAL PROCEDURE ImportMaterialUsingCUST002@1100285112(VAR HandymanImportBuffer@1100285100 : Record 81624;VAR HandymanSetup@1100285108 : Record 81609);
+    VAR
+      TradeItemSelStockTransfer@1100285101 : Record 81603;
+      cuTradeItemSelStockTransfer@1100285107 : Codeunit 81601;
+      ExtensionContractNo@1100285102 : Code[20];
+      ElementNo@1100285103 : Code[20];
+      LineNo@1100285104 : Integer;
+      VendorNo@1100285106 : Code[20];
+      TradeItemNo@1100285105 : Code[20];
+    BEGIN
+      LineNo := GetLastLineFromTradeItemSel(TradeItemSelStockTransfer, HandymanImportBuffer."Project No.");
+
+      GetExtensionContractAndElement(ExtensionContractNo, ElementNo, HandymanImportBuffer);
+
+      IF NOT GetCheck_TradeVendorAndItem(HandymanImportBuffer, HandymanSetup, VendorNo, TradeItemNo) THEN
+         ERROR(STRSUBSTNO(txtItemNotFound, TradeItemNo, VendorNo));
+
+      InitAndFillItemSelStockTransfer(TradeItemSelStockTransfer,
+                                      HandymanImportBuffer."Project No.",
+                                      VendorNo,
+                                      TradeItemNo,
+                                      LineNo,
+                                      ElementNo,
+                                      ExtensionContractNo,
+                                      HandymanImportBuffer.Amount
+                                      );
+
+      cuTradeItemSelStockTransfer.RunStockTransferProj(HandymanImportBuffer."Project No.");
+    END;
+
+    LOCAL PROCEDURE ImportItemToItemJournal@1100285137(VAR HandymanImportBuffer@1100285100 : Record 81624;VAR HandymanSetup@1100285101 : Record 81609);
+    VAR
+      LocationCode@1100285102 : Code[20];
+      ItemNo@1100285103 : Code[20];
+      ItemJournalLine@1100285104 : Record 83;
+      ExtensionContractNo@1100285105 : Code[20];
+      ElementNo@1100285106 : Code[20];
+      ItemJnlPostBatch@1100285001 : Codeunit 23;
+    BEGIN
+      IF NOT GetCheck_InventoryLocationAndItem(HandymanImportBuffer, HandymanSetup, LocationCode, ItemNo) THEN
+        EXIT;
+
+      ClearAndInitItemJournal(ItemJournalLine, HandymanSetup."Item Journal Template Name", HandymanSetup."Item Journal Batch Name");
+      ItemJournalLine.VALIDATE("Posting Date", TODAY);
+
+      CASE HandymanImportBuffer.Amount > 0 OF
+        TRUE:  ItemJournalLine.VALIDATE("Entry Type", ItemJournalLine."Entry Type"::Sale);
+        FALSE: ItemJournalLine.VALIDATE("Entry Type", ItemJournalLine."Entry Type"::Purchase);
+      END;
+
+      GetExtensionContractAndElement(ExtensionContractNo, ElementNo, HandymanImportBuffer);
+
+      ItemJournalLine.VALIDATE("Item No.", ItemNo);
+      ItemJournalLine.VALIDATE("Location Code", LocationCode);
+      ItemJournalLine.VALIDATE(Quantity, ABS(HandymanImportBuffer.Amount));
+      ItemJournalLine.VALIDATE("Job No.", HandymanImportBuffer."Project No.");
+      IF ExtensionContractNo <> '' THEN
+        ItemJournalLine.VALIDATE("Extension Contract", ExtensionContractNo);
+      IF ElementNo <> '' THEN
+        ItemJournalLine.VALIDATE(Element, ElementNo);
+      ItemJournalLine.INSERT(TRUE);
+
+      ItemJnlPostBatch.RUN(ItemJournalLine);
+      CLEAR(ItemJnlPostBatch);
+    END;
+
+    LOCAL PROCEDURE ClearAndInitItemJournal@1100285124(VAR ItemJournalLine@1100285100 : Record 83;TemplateName@1100285101 : Code[10];BatchName@1100285102 : Code[10]);
+    BEGIN
+      ItemJournalLine.SETRANGE("Journal Template Name", TemplateName);
+      ItemJournalLine.SETRANGE("Journal Batch Name", BatchName);
+      IF NOT ItemJournalLine.ISEMPTY THEN BEGIN
+        ItemJournalLine.DELETEALL;
+        COMMIT;
+      END;
+      ItemJournalLine.VALIDATE("Journal Template Name", TemplateName);
+      ItemJournalLine.VALIDATE("Journal Batch Name", BatchName);
+      ItemJournalLine.SetUpNewLine(ItemJournalLine);
+      ItemJournalLine.VALIDATE("Line No.", 10000);
+    END;
+
+    LOCAL PROCEDURE ImportFreeItemOnSettlementSheet@1100285128(VAR HandymanImportBuffer@1100285100 : Record 81624;VAR HandymanSetup@1100285106 : Record 81609);
+    VAR
+      Job@1100285101 : Record 11072003;
+      LineNo@1100285102 : Integer;
+      Description@1100285103 : Text;
+      CostPrice@1100285104 : Decimal;
+      ExtensionContract@1100285105 : Record 11012004;
+      SettlementSheet@1100285108 : Record 11012021;
+      CostPlusEntry@1100285107 : Record 11012019;
+    BEGIN
+      Job.GET(HandymanImportBuffer."Project No.");
+      IF Job."Settlement Method" <> Job."Settlement Method"::"Cost Plus" THEN
+        EXIT;
+
+      Job.TESTFIELD("Bill-to Customer No.");
+
+      GetOrInsertLastSettlementSheet(Job, SettlementSheet);
+
+      // CostPlusEntry KEYS: "Project No.","Principal","Commission No.","Settl.Sheet No.","Line No."
+      CostPlusEntry.RESET;
+      CostPlusEntry.SETRANGE("Project No.", Job."No.");
+      CostPlusEntry.SETRANGE(Principal, Job."Bill-to Customer No.");
+      CostPlusEntry.SETRANGE("Commission No.", SettlementSheet."Commission No.");
+      CostPlusEntry.SETRANGE("Settl.Sheet No.", SettlementSheet."No.");
+      IF CostPlusEntry.FINDLAST THEN BEGIN
+        LineNo := CostPlusEntry."Line No." + 10000;
+        CostPlusEntry.SETRANGE(Description, HandymanImportBuffer.Description); // If Description is found - do not init record - copy the found one!
+        IF NOT CostPlusEntry.FINDFIRST THEN
+          CostPlusEntry.INIT;
+      END ELSE BEGIN
+        LineNo := 10000;
+        CostPlusEntry.INIT;
+      END;
+      // IME279 <<
+      IF ExtensionContractExistsAndIsFixedPrice(Job."No.", HandymanImportBuffer."KB1 ExtCont") THEN
+        EXIT;
+
+      // 140819 Added IF-sentences here to only take values from Handyman if record has been intiated.
+      Description := CostPlusEntry.Description; // 141105
+      CostPrice   := CostPlusEntry."Cost Price (LCY)"; // 141105
+      IF CostPlusEntry."Project No." = ''        THEN CostPlusEntry.VALIDATE("Project No.", Job."No.");
+      IF CostPlusEntry.Principal = ''            THEN CostPlusEntry.VALIDATE(Principal, Job."Bill-to Customer No.");
+      IF CostPlusEntry."Commission No." = ''     THEN CostPlusEntry.VALIDATE("Commission No.", SettlementSheet."Commission No.");
+      IF CostPlusEntry."Settl.Sheet No." = ''    THEN CostPlusEntry.VALIDATE("Settl.Sheet No.", SettlementSheet."No.");
+      IF CostPlusEntry."Extension Contract" = '' THEN BEGIN
+        IF ExtensionContract.GET(Job."No.", HandymanImportBuffer."KB1 ExtCont") THEN
+          CostPlusEntry.VALIDATE("Extension Contract", HandymanImportBuffer."KB1 ExtCont");
+      END;
+      IF CostPlusEntry.Element = ''            THEN CostPlusEntry.VALIDATE(Element, HandymanImportBuffer."KB2 Element");
+      CostPlusEntry.VALIDATE("Line No.", LineNo); // Line No. should always be validated.
+      IF CostPlusEntry."Cost Object" = ''      THEN CostPlusEntry.VALIDATE("Cost Object", HandymanSetup."Default Cost Object"); // 140818
+      IF Description = ''                      THEN CostPlusEntry.VALIDATE(Description, HandymanImportBuffer.Description); // 141105 check on lvDescription instead of Description due to validation of it earlier
+      CostPlusEntry.VALIDATE(Quantity, HandymanImportBuffer.Amount);     // Quantity from HM should always be used.
+      // RFC-127:
+      IF HandymanImportBuffer.Price <> 0       THEN CostPlusEntry.VALIDATE("Sales Price (LCY)", HandymanImportBuffer.Price);
+      //IF (CostPrice <> 0)         THEN CostPlusEntry.VALIDATE("Cost Price", HandymanImportBuffer.Price); // 141105 check on lvCostPrice instead of "Cost Price" due to validation of field earlier
+      CostPlusEntry.INSERT(TRUE);
+    END;
+
+    LOCAL PROCEDURE GetOrInsertLastSettlementSheet@1100285132(VAR Job@1100285100 : Record 11072003;VAR SettlementSheet@1100285101 : Record 11012021);
+    BEGIN
+      SettlementSheet.RESET;
+      SettlementSheet.SETRANGE("Project No.", Job."No.");
+      SettlementSheet.SETRANGE(Principal, Job."Bill-to Customer No.");
+
+      IF NOT SettlementSheet.FINDLAST THEN BEGIN
+        Job.InsertSettlementSheet(Job."Bill-to Customer No.");
+        COMMIT;
+        SettlementSheet.FINDFIRST;
+      END;
+    END;
+
+    LOCAL PROCEDURE ExtensionContractExistsAndIsFixedPrice@1100285129(JobNo@1100285100 : Code[20];ExtensionContractNo@1100285101 : Code[20]) : Boolean;
+    VAR
+      ExtensionContract@1100285102 : Record 11012004;
+    BEGIN
+      IF ExtensionContract.GET(JobNo, ExtensionContractNo) THEN
+        IF ExtensionContract."Settlement Method" = ExtensionContract."Settlement Method"::"Fixed Price" THEN
+          EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE GetLastLineFromTradeItemSel@1100285115(VAR TradeItemSelStockTransfer@1100285100 : Record 81603;ProjectNo@1100285101 : Code[20]) : Integer;
+    BEGIN
+      TradeItemSelStockTransfer.RESET;
+      TradeItemSelStockTransfer.SETRANGE("User ID", USERID);
+      TradeItemSelStockTransfer.SETRANGE("Project No.", ProjectNo);
+
+      IF TradeItemSelStockTransfer.FINDLAST THEN
+        EXIT(TradeItemSelStockTransfer."Line No." + 10000);
+      EXIT(10000);
+    END;
+
+    LOCAL PROCEDURE GetExtensionContractAndElement@1100285118(VAR ExtensionContractNo@1100285100 : Code[20];VAR ElementNo@1100285101 : Code[20];VAR HandymanImportBuffer@1100285102 : Record 81624);
+    VAR
+      ExtensionContract@1100285103 : Record 11012004;
+      ProjectElement@1100285104 : Record 11012010;
+    BEGIN
+      ExtensionContractNo := '';
+      ElementNo := '';
+
+      IF ExtensionContract.GET(HandymanImportBuffer."Project No.", HandymanImportBuffer."KB1 ExtCont") THEN
+        ExtensionContractNo := HandymanImportBuffer."KB1 ExtCont";
+
+      IF ProjectElement.GET(HandymanImportBuffer."Project No.", HandymanImportBuffer."KB2 Element") THEN
+        ElementNo := HandymanImportBuffer."KB2 Element";
+    END;
+
+    LOCAL PROCEDURE GetCheck_TradeVendorAndItem@1100285119(VAR HandymanImportBuffer@1100285100 : Record 81624;VAR HandymanSetup@1100285106 : Record 81609;VAR VendorNo@1100285101 : Code[20];VAR TradeItemNo@1100285102 : Code[20]) : Boolean;
+    VAR
+      Pos@1100285104 : Integer;
+      TradeItem@1100285105 : Record 11012317;
+    BEGIN
+      //HandymanSetup.GET;
+      IF NOT GetHandymanSetupThis THEN
+        EXIT;
+
+      Pos := STRLEN(HandymanSetup."Company Prefix" + '_');
+      VendorNo := COPYSTR(HandymanImportBuffer."Vendor No.", Pos + 1);
+      TradeItemNo := HandymanImportBuffer."Item No.";
+      EXIT(TradeItem.GET(VendorNo, TradeItemNo));
+    END;
+
+    LOCAL PROCEDURE GetCheck_InventoryLocationAndItem@1100285125(VAR HandymanImportBuffer@1100285100 : Record 81624;VAR pHandymanSetup@1100285106 : Record 81609;VAR LocationCode@1100285101 : Code[20];VAR ItemNo@1100285102 : Code[20]) : Boolean;
+    VAR
+      Pos@1100285104 : Integer;
+      Item@1100285105 : Record 27;
+      Location@1100285103 : Record 14;
+    BEGIN
+      IF NOT pHandymanSetup."Use Inventory" THEN
+        EXIT(FALSE);
+
+      Pos := STRLEN(pHandymanSetup."Company Prefix" + '_');
+
+      LocationCode := COPYSTR(HandymanImportBuffer."Inventory Code", Pos + 1);
+      //>> 160107 ITERO.AC RFC033 Check for GTIN Code instead of Vendor Item No
+      // Item.SETRANGE("Vendor Item No.", HandymanImportBuffer."Item No.");
+      Item.SETRANGE("GTIN Code", HandymanImportBuffer."Item No.");
+      IF Item.FINDFIRST THEN BEGIN
+        ItemNo := Item."No.";
+      END;
+      //<< 160107 ITERO.AC
+
+      IF (NOT Item.ISEMPTY) AND Location.GET(LocationCode) THEN
+        EXIT(TRUE)
+      ELSE
+        EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE InitAndFillItemSelStockTransfer@1100285127(VAR TradeItemSelStockTransfer@1100285100 : Record 81603;ProjectNo@1100285107 : Code[20];VendorNo@1100285101 : Code[20];TradeItemNo@1100285102 : Code[20];LineNo@1100285103 : Integer;ElementNo@1100285104 : Code[20];ExtensionContractNo@1100285105 : Code[20];Quantity@1100285106 : Decimal);
+    BEGIN
+      TradeItemSelStockTransfer.INIT;
+
+      TradeItemSelStockTransfer.VALIDATE("User ID",            USERID);
+      TradeItemSelStockTransfer.VALIDATE("Project No.",        ProjectNo);
+      TradeItemSelStockTransfer.VALIDATE("Vendor Trade Item",  VendorNo);
+      TradeItemSelStockTransfer.VALIDATE("Trade Item",         TradeItemNo);
+      TradeItemSelStockTransfer.VALIDATE("Line No.",           LineNo);
+      TradeItemSelStockTransfer.VALIDATE(Quantity,             Quantity);
+      TradeItemSelStockTransfer.VALIDATE(Element,              ElementNo);
+      // ITERO.MH IME464 160229 Added Extension Contract No validation if exists
+      IF ExtensionContractNo <> '' THEN
+        TradeItemSelStockTransfer.VALIDATE("Extension Contract", ExtensionContractNo);
+
+      TradeItemSelStockTransfer.INSERT;
+    END;
+
+    PROCEDURE "***FILE IMPORT***"@1100285123();
+    BEGIN
+    END;
+
+    PROCEDURE ImportFileToBuffer@1100285514(VAR HandymanImportBufferFile@1100285515 : Record 81624) : Boolean;
+    VAR
+      xn_node@1100285504 : ARRAY [7] OF DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      PrimaryKeyInt@1100285516 : Integer;
+      ImportFilename@1100285514 : Text;
+      NameOfFile@1100285505 : Text;
+      NodeName@1100285503 : ARRAY [5] OF Text;
+      hasChild@1100285502 : ARRAY [5] OF Boolean;
+      Value@1100285501 : Text;
+      int@1100285500 : ARRAY [5] OF Integer;
+      lvProjNo@1100285506 : Code[30];
+      lvHSOrderID@1100285511 : Integer;
+      lvDate@1100285507 : Date;
+      lvTime@1100285508 : Time;
+      lvImportBuffer2@1100285509 : Record 81624;
+      HandymanImportBuffer@1100285510 : Record 81624;
+      lvCategoryType@1100285512 : Code[5];
+      lvCategoryID@1100285513 : Code[20];
+      lvDiscipline@1100285005 : Code[20];
+      lvLineKey@1100285000 : Integer;
+      lvInternalOrder@1100285002 : Boolean;
+      lvMainParticipantHasCome@1100285003 : Boolean;
+      lvCurrentDateTime@1100285004 : DateTime;
+      lvRowType@1100285006 : Code[30];
+      HasHSIDOnComment@1100285100 : Boolean;
+    BEGIN
+      IF NOT GetHandymanSetupOther(HandymanImportBufferFile."Company Name") THEN
+        EXIT(FALSE);
+
+      ImportFilename := HandymanImportBufferFile.Description;
+      NameOfFile := HandymanImportBufferFile.Filename;
+      CLEAR(HandymanImportBuffer);
+      CLEAR(lvImportBuffer2);
+      HandymanImportBuffer.CHANGECOMPANY(HandymanImportBufferFile."Company Name");
+      lvImportBuffer2.CHANGECOMPANY(HandymanImportBufferFile."Company Name");
+      // HandymanSetup.CHANGECOMPANY(HandymanImportBufferFile."Company Name");
+      IF HandymanImportBuffer.FINDLAST THEN
+        PrimaryKeyInt := HandymanImportBuffer."Line Key" + 1
+      ELSE
+        PrimaryKeyInt := 1;
+      // HandymanSetup.GET;
+
+      xmldoc := xmldoc.XmlDocument;
+
+      xmldoc.Load(ImportFilename);
+      IF NOT (xmldoc.HasChildNodes) THEN EXIT(FALSE);
+
+      lvCurrentDateTime := CURRENTDATETIME;
+
+      xn_node[1] := xmldoc.FirstChild;
+      IF ISNULL(xn_node[1]) THEN EXIT(FALSE);
+      xn_node[1] := xn_node[1].NextSibling;
+      IF ISNULL(xn_node[1]) THEN EXIT(FALSE);
+
+      IF (GetXMLChild(xn_node[1], NodeName[1], Value, int[1], hasChild[1], xn_node[2])) THEN
+      REPEAT
+        int[2] := 0;
+        NodeName[2] := '';
+        lvInternalOrder := FALSE;
+        // LOOP Each Order (Project) ********************
+        IF (GetXMLChild(xn_node[2], NodeName[2], Value, int[2], hasChild[2], xn_node[3])) THEN
+        REPEAT
+          IF NodeName[2] = 'OrderNo' THEN BEGIN
+            lvProjNo := Value;
+          END;
+          IF NodeName[2] = 'HSOrderNumber' THEN
+            lvHSOrderID := Str2Dec(Value);
+
+
+          // ***************************************************************************************************************************************
+          // ********************************* MAIN PROJECT UPDATE *********************************************************************************
+          // ***************************************************************************************************************************************
+          IF (hasChild[2]) AND (NodeName[2] = 'OrderHead') THEN BEGIN
+            int[3] := 0;
+            NodeName[3] := '';
+            WITH HandymanImportBuffer DO BEGIN
+              INIT;
+              lvImportBuffer2.RESET;
+              lvImportBuffer2.SETCURRENTKEY("HM Client ID", Type, HSID);
+              lvImportBuffer2.SETRANGE("HM Client ID", HandymanSetupOtherComp."Client Number Handyman");
+              lvImportBuffer2.SETRANGE(Type, Type::Project);
+              lvImportBuffer2.SETRANGE(HSID, lvHSOrderID);
+              IF NOT lvImportBuffer2.FINDFIRST THEN BEGIN
+                "Line Key" := PrimaryKeyInt;
+                PrimaryKeyInt += 1;
+              END ELSE BEGIN
+                lvLineKey := lvImportBuffer2."Line Key";
+                GET(lvLineKey);
+              END;
+
+              "HM Client ID" := HandymanSetupOtherComp."Client Number Handyman";
+              IF (GetXMLChild(xn_node[3], NodeName[3], Value, int[3], hasChild[3], xn_node[4])) THEN
+              REPEAT
+                int[4] := 0;
+                NodeName[4] := '';
+                //********************************************* CATEGORY ************************************
+                IF (NodeName[3] = 'CategoryList') THEN BEGIN
+                  NodeName[4] := '';
+                  int[4] := 0;
+                  lvCategoryID := '';
+
+                  IF (GetXMLChild(xn_node[4], NodeName[4], Value, int[4], hasChild[4], xn_node[5])) THEN
+                  REPEAT
+                    NodeName[5] := '';
+                    int[5] := 0;
+                    IF (GetXMLChild(xn_node[5], NodeName[5], Value, int[5], hasChild[5], xn_node[6])) THEN
+                    REPEAT
+                      CASE NodeName[5] OF
+                        //*************************************************
+                        // Handle Cateogry as Main Project (categoryID = 0) or Discipline (categoryID = 1)
+
+                        'CategoryType': lvCategoryType := Value;
+                        'CategoryID': BEGIN
+                          IF lvCategoryType = '0' THEN BEGIN
+                            lvCategoryID := Value;
+                            ReplaceMainProjNo(lvProjNo,lvCategoryID);  //RFC1091 (OrderNo,CategoryID)
+                          END;
+                          IF lvCategoryType = '1' THEN BEGIN
+                            IF (STRPOS(Value, '_T_') <> 0) THEN
+                              lvRowType := Value
+                            ELSE
+                              lvDiscipline := Value;
+                          END;
+                        END;
+                      END;
+                    UNTIL (GetXMLChild(xn_node[5], NodeName[5], Value, int[5], hasChild[5], xn_node[6]) = FALSE);
+                  UNTIL (GetXMLChild(xn_node[4], NodeName[4], Value, int[4], hasChild[4], xn_node[5]) = FALSE);
+                END;
+                //********************************************* ADDRESS ************************************
+                IF (NodeName[3] = 'Location') THEN BEGIN
+                  NodeName[4] := '';
+                  int[4] := 0;
+
+                  IF (GetXMLChild(xn_node[4], NodeName[4], Value, int[4], hasChild[4], xn_node[5])) THEN
+                  REPEAT
+                    CASE NodeName[4] OF
+                      'Address1': "Address 1" := COPYSTR(Value, 1, MAXSTRLEN("Address 1"));
+                      'StreetNo': IF (Value <> '') THEN "Address 1" := COPYSTR("Address 1" + ' ' + Value, 1, MAXSTRLEN("Address 1")); //140527 Add street no to address
+                      'Address2': "Address 2" := COPYSTR(Value, 1, MAXSTRLEN("Address 2"));
+                      'PostalCode': "Post Code" := Value;
+                      'PostalArea': "Postal Area" := COPYSTR(Value, 1, MAXSTRLEN("Postal Area"));
+                      'AddressName': "Address Name" := COPYSTR(Value, 1, MAXSTRLEN("Address Name"));
+                    END;
+                  UNTIL (GetXMLChild(xn_node[4], NodeName[4], Value, int[4], hasChild[4], xn_node[5]) = FALSE);
+                END;
+                // ******************************************** OTHER FIELDS *********************************
+
+                CASE NodeName[3] OF
+                  'OrderDate':
+                    IF EVALUATE(lvDate, COPYSTR(Value, 1, 10)) AND EVALUATE(lvTime, COPYSTR(Value, 12)) THEN
+                      "Registration Date" := CREATEDATETIME(lvDate, lvTime);
+                  'StartDate':
+                      IF EVALUATE(lvDate, COPYSTR(Value, 1, 10)) THEN
+                        "Start Date" := lvDate;
+                  'FinishDate': BEGIN
+                      EVALUATE(lvDate, COPYSTR(Value, 1, 10));
+                      "End Date" := lvDate;
+                    END;
+                  'InternalOrder': lvInternalOrder := (Value = '1') ;
+                  'Completed':     Completed := (Value = '1'); // IME410 added else FALSE
+                  'FreeOrder':     "Free Order" :=  (Value = '1'); // IME410 added else FALSE
+                  'Manager':       Manager := Value;
+                  'OrderType':     "Order Type" := Str2Dec(Value);
+
+                  //RFC143
+                  'CustomerReference':  CustomerReference := Value;
+                  'Requsition':         Requsition := Value;
+                  //RFC142
+                  'ContactName':        ContactName := Value;
+                  'Telephone1':         Telephone1 := Value;
+                  'Telephone2':         Telephone2 := Value;
+
+                END;
+              UNTIL GetXMLChild(xn_node[3], NodeName[3], Value, int[3], hasChild[3], xn_node[4]) = FALSE;
+              //************************************************************************************************
+
+              IF NOT lvInternalOrder THEN BEGIN // Only handle projects marked as not internal.
+                "Imported Date & Time" := lvCurrentDateTime;
+                Filename := NameOfFile;
+                Type := Type::Project;
+                HSID := lvHSOrderID;
+                "Handyman OrderID" := lvHSOrderID;
+                "Category ID" := lvCategoryID;
+                Status := Status::"In Buffer";
+                "Project No." := lvProjNo;
+                "Cost Center" := COPYSTR(lvProjNo, 1, 4); // IME372
+                Discipline := lvDiscipline;
+                "Row type" := lvRowType;
+                IF NOT lvImportBuffer2.FINDFIRST THEN BEGIN
+                  INSERT;
+                END ELSE BEGIN
+                  // Saves the project no. if has been created before:
+                  IF (lvImportBuffer2."Project No." <> '') AND ("Project No." = '') THEN BEGIN
+                    "Project No." := lvImportBuffer2."Project No.";
+                    "Cost Center" := COPYSTR(lvImportBuffer2."Project No.", 1, 4); // IME372
+                  END;
+                  MODIFY;
+                END;
+              END;
+            END;
+          END;
+          IF (hasChild[2]) AND (NodeName[2] = 'Customer') AND (NOT lvInternalOrder) THEN BEGIN
+            int[3] := 0;
+            NodeName[3] := '';
+            IF (GetXMLChild(xn_node[3], NodeName[3], Value, int[3], hasChild[3], xn_node[4])) THEN
+            REPEAT
+              IF (NodeName[3] = 'CustomerNo') THEN BEGIN
+                IF (HandymanImportBuffer.Type = HandymanImportBuffer.Type::Project) THEN BEGIN
+                  HandymanImportBuffer."Customer No." := Value;  // Saves the Customer No. from the project
+                  HandymanImportBuffer.MODIFY;
+                END;
+              END;
+            UNTIL GetXMLChild(xn_node[3], NodeName[3], Value, int[3], hasChild[3], xn_node[4]) = FALSE;
+          END;
+          IF (hasChild[2]) AND (NodeName[2] = 'ParticipantList') AND (NOT lvInternalOrder) THEN BEGIN
+            int[3] := 0;
+            NodeName[3] := '';
+            lvMainParticipantHasCome := FALSE;
+            IF (GetXMLChild(xn_node[3], NodeName[3], Value, int[3], hasChild[3], xn_node[4])) THEN
+            REPEAT
+              int[4] := 0;
+              NodeName[4] := '';
+              IF (HandymanImportBuffer.Type = HandymanImportBuffer.Type::Project) AND (NOT lvMainParticipantHasCome) THEN BEGIN
+                IF (GetXMLChild(xn_node[4], NodeName[4], Value, int[4], hasChild[4], xn_node[5])) THEN
+                REPEAT
+                  IF (NodeName[4] = 'EmployeeNo') AND (NOT lvMainParticipantHasCome) THEN
+                    HandymanImportBuffer."Employee No." := Value;
+                  IF (NodeName[4] = 'MainParticipant') AND (Value = '1') THEN
+                    lvMainParticipantHasCome := TRUE;
+                UNTIL GetXMLChild(xn_node[4], NodeName[4], Value, int[4], hasChild[4], xn_node[5]) = FALSE;
+                IF NOT HandymanImportBuffer.MODIFY THEN;
+              END;
+            UNTIL GetXMLChild(xn_node[3], NodeName[3], Value, int[3], hasChild[3], xn_node[4]) = FALSE;
+          END;
+
+
+          // ***************************************************************************************************************************************
+          // ********************************* ORDER DESCRIPTION IMPORT ****************************************************************************
+          // ***************************************************************************************************************************************
+          IF (hasChild[2]) AND (NodeName[2] = 'OrderDescriptionList') AND NOT (lvInternalOrder) THEN BEGIN
+            int[3] := 0;
+            NodeName[3] := '';
+            WITH HandymanImportBuffer DO BEGIN
+              IF (GetXMLChild(xn_node[3], NodeName[3], Value, int[3], hasChild[3], xn_node[4])) THEN
+              REPEAT
+                IF hasChild[3] THEN BEGIN
+                  int[4] := 0;
+                  NodeName[4] := '';
+                  HasHSIDOnComment := FALSE;
+                  INIT;
+                  IF (GetXMLChild(xn_node[4], NodeName[4], Value, int[4], hasChild[4], xn_node[5])) THEN
+                  REPEAT
+                    CASE NodeName[4] OF
+                      'HSDescriptionID': BEGIN
+                          // 150529 << ITERO.MH Fixed comment not imported:
+                          HSID := Str2Dec(Value);
+                          HasHSIDOnComment := TRUE;
+                          lvImportBuffer2.RESET;
+                          lvImportBuffer2.SETCURRENTKEY("HM Client ID", Type, HSID);
+                          lvImportBuffer2.SETRANGE("HM Client ID", HandymanSetupOtherComp."Client Number Handyman");
+                          lvImportBuffer2.SETRANGE(Type, Type::Comment);
+                          lvImportBuffer2.SETRANGE(HSID, HSID);
+                          INIT;
+                          IF NOT (lvImportBuffer2.FINDFIRST) THEN BEGIN
+                            "Line Key" := PrimaryKeyInt;
+                            PrimaryKeyInt +=1;
+                          END ELSE BEGIN
+                            GET(lvImportBuffer2."Line Key");
+                          END;
+                          HSID := Str2Dec(Value);
+                          // 150529 >>
+                        END;
+                      'DescriptionID': "Description ID" := Value;
+                      'DateTime':
+                          IF EVALUATE(lvDate, COPYSTR(Value, 1, 10)) AND EVALUATE(lvTime, COPYSTR(Value, 12)) THEN
+                            "Registration Date" := CREATEDATETIME(lvDate, lvTime);
+                      'Text':           Description := COPYSTR(Value, 1, MAXSTRLEN(Description));
+                      'Internal':       IF (EVALUATE(Internal, Value)) THEN;
+                    END;
+                  UNTIL GetXMLChild(xn_node[4], NodeName[4], Value, int[4], hasChild[4], xn_node[5]) = FALSE;
+                  "HM Client ID" := HandymanSetupOtherComp."Client Number Handyman";
+                  "Imported Date & Time" := lvCurrentDateTime;
+                  Filename := NameOfFile;
+                  Type := Type::Comment;
+                  Status := Status::"In Buffer";
+                  "Project No." := lvProjNo;
+                  "Cost Center" := COPYSTR(lvProjNo, 1, 4); // IME372
+                  "Handyman OrderID" := lvHSOrderID;
+                  IF NOT HasHSIDOnComment THEN BEGIN
+                    "Line Key" := PrimaryKeyInt;
+                    PrimaryKeyInt += 1;
+                    INSERT;
+                  END ELSE IF NOT lvImportBuffer2.FINDFIRST THEN BEGIN
+                    INSERT;
+                  END ELSE BEGIN
+                    MODIFY;
+                    //lvImportBuffer2.INIT;
+                    //lvImportBuffer2.TRANSFERFIELDS(HandymanImportBuffer);
+                    //lvImportBuffer2."Line Key" := lvLineKey;
+                    //lvImportBuffer2.MODIFY(TRUE);
+                  END;
+                END;
+              UNTIL GetXMLChild(xn_node[3], NodeName[3], Value, int[3], hasChild[3], xn_node[4]) = FALSE;
+            END;
+          END;
+
+
+          // ***************************************************************************************************************************************
+          // ********************************* MATERIAL LIST IMPORT ********************************************************************************
+          // ***************************************************************************************************************************************
+          IF (hasChild[2]) AND (NodeName[2] = 'MaterialList') AND (NOT lvInternalOrder) THEN BEGIN
+            int[3] := 0;
+            NodeName[3] := '';
+            WITH HandymanImportBuffer DO BEGIN
+              IF GetXMLChild(xn_node[3], NodeName[3], Value, int[3], hasChild[3], xn_node[4]) THEN REPEAT
+                IF hasChild[3] THEN BEGIN
+                  int[4] := 0;
+                  NodeName[4] := '';
+                  INIT;
+                  "HM Client ID" := HandymanSetupOtherComp."Client Number Handyman";
+                  IF (GetXMLChild(xn_node[4], NodeName[4], Value, int[4], hasChild[4], xn_node[5])) THEN
+                  REPEAT
+                    CASE NodeName[4] OF
+                      'HSMaterialID': HSID := Str2Dec(Value);
+                      'MaterialID': "Description ID" := COPYSTR(Value, 1, MAXSTRLEN("Description ID")); // RFC-131
+                      'Date':
+                        IF EVALUATE(lvDate, COPYSTR(Value, 1, 10)) AND EVALUATE(lvTime, COPYSTR(Value, 12)) THEN
+                            "Registration Date" := CREATEDATETIME(lvDate, lvTime);
+                      'Quantity':       Amount := Str2Dec(Value);
+                      'StoreNo':        "Inventory Code" := COPYSTR(Value, 1, MAXSTRLEN("Inventory Code")); // RFC-033
+                      'WholesalerNo':   "Vendor No." :=     COPYSTR(Value, 1, MAXSTRLEN("Vendor No."));
+                      'ItemNo':         "Item No." :=       COPYSTR(Value, 1, MAXSTRLEN("Item No."));
+                      'Description':    Description :=      COPYSTR(Value, 1, MAXSTRLEN(Description));
+                      'CustomerPrice':  Price :=            Str2Dec(Value); // RFC-127
+                      'KB1':            "KB1 ExtCont" :=    COPYSTR(Value, 1, MAXSTRLEN("KB1 ExtCont"));
+                      'KB2':            "KB2 Element" :=    COPYSTR(Value, 1, MAXSTRLEN("KB2 Element"));
+                      'Phase':          "Phase TeamCode" := COPYSTR(Value, 1, MAXSTRLEN("Phase TeamCode"));
+                    END;
+                  UNTIL GetXMLChild(xn_node[4], NodeName[4], Value, int[4], hasChild[4], xn_node[5]) = FALSE;
+                  "Imported Date & Time" := lvCurrentDateTime;
+                  Filename := NameOfFile;
+                  Type := Type::Material;
+                  Status := Status::"In Buffer";
+                  "Project No." := lvProjNo;
+                  "Cost Center" := COPYSTR(lvProjNo, 1, 4); // IME372
+                  "Handyman OrderID" :=  lvHSOrderID;
+                  lvImportBuffer2.RESET;
+                  lvImportBuffer2.SETCURRENTKEY("HM Client ID", Type, HSID);
+                  lvImportBuffer2.SETRANGE("HM Client ID", HandymanSetupOtherComp."Client Number Handyman");
+                  lvImportBuffer2.SETRANGE(Type, Type::Material);
+                  lvImportBuffer2.SETRANGE(HSID, HSID);
+                  IF lvImportBuffer2.ISEMPTY THEN BEGIN
+                    "Line Key" := PrimaryKeyInt;
+                    PrimaryKeyInt += 1;
+                    INSERT;
+                  END;
+                END;
+              UNTIL GetXMLChild(xn_node[3], NodeName[3], Value, int[3], hasChild[3], xn_node[4]) = FALSE;
+            END;
+          END;
+
+          // ***************************************************************************************************************************************
+          // ********************************* SALARY CODE LIST IMPORT *****************************************************************************
+          // ***************************************************************************************************************************************
+          IF (hasChild[2]) AND (NodeName[2] = 'SalaryCodeRegistrationList') THEN BEGIN
+            int[3] := 0;
+            NodeName[3] := '';
+            WITH HandymanImportBuffer DO BEGIN
+              IF GetXMLChild(xn_node[3], NodeName[3], Value, int[3], hasChild[3], xn_node[4]) THEN
+              REPEAT
+                IF hasChild[3] THEN BEGIN
+                  int[4] := 0;
+                  NodeName[4] := '';
+                  INIT;
+                  "HM Client ID" := HandymanSetupOtherComp."Client Number Handyman";
+                  IF GetXMLChild(xn_node[4], NodeName[4], Value, int[4], hasChild[4], xn_node[5]) THEN
+                  REPEAT
+                    CASE NodeName[4] OF
+                      'HSSalaryCodeID': HSID := Str2Dec(Value);
+                      'EmployeeNo':     "Employee No." := Value;
+                      'Date':           EVALUATE("Main Date", Value);
+                      'RegistrationDate':
+                          IF EVALUATE(lvDate, COPYSTR(Value, 1, 10)) AND EVALUATE(lvTime, COPYSTR(Value, 12)) THEN
+                            "Registration Date" := CREATEDATETIME(lvDate, lvTime);
+                      'Amount':         Amount := Str2Dec(Value);
+                      'SalaryCode':     "Salary Code" := COPYSTR(Value, 1, MAXSTRLEN("Salary Code"));
+                      'Price':          Price := Str2Dec(Value);
+                      'Info':           Comment := COPYSTR(Value, 1, MAXSTRLEN(Comment));
+                      'HoursType':      "Hours Type" := Str2Dec(Value);
+                      'KB1':            "KB1 ExtCont" :=    COPYSTR(Value, 1, MAXSTRLEN("KB1 ExtCont"));
+                      'KB2':            "KB2 Element" :=    COPYSTR(Value, 1, MAXSTRLEN("KB2 Element"));
+                      'Phase':          "Phase TeamCode" := COPYSTR(Value, 1, MAXSTRLEN("Phase TeamCode"));
+                    END;
+                  UNTIL GetXMLChild(xn_node[4], NodeName[4], Value, int[4], hasChild[4], xn_node[5]) = FALSE;
+                  "Imported Date & Time" := lvCurrentDateTime;
+                  Filename := NameOfFile;
+                  Type := Type::Timesheet;
+                  Status := Status::"In Buffer";
+                  "Project No." := lvProjNo;
+                  "Cost Center" := COPYSTR(lvProjNo, 1, 4); // IME372
+                  Internal := lvInternalOrder; // IME248
+                  "Handyman OrderID" := lvHSOrderID;
+                  lvImportBuffer2.RESET;
+                  lvImportBuffer2.SETCURRENTKEY("HM Client ID", Type, HSID);
+                  lvImportBuffer2.SETRANGE("HM Client ID", HandymanSetupOtherComp."Client Number Handyman");
+                  lvImportBuffer2.SETRANGE(Type, Type::Timesheet);
+                  lvImportBuffer2.SETRANGE(HSID, HSID);
+                  IF (lvImportBuffer2.ISEMPTY) THEN BEGIN
+                      "Line Key" := PrimaryKeyInt;
+                      PrimaryKeyInt += 1;
+                      INSERT;
+                  END;
+                END;
+              UNTIL GetXMLChild(xn_node[3], NodeName[3], Value, int[3], hasChild[3], xn_node[4]) = FALSE;
+            END;
+          END;
+        UNTIL (GetXMLChild(xn_node[2], NodeName[2], Value, int[2], hasChild[2], xn_node[3]) = FALSE);
+
+      UNTIL (GetXMLChild(xn_node[1], NodeName[1], Value, int[1], hasChild[1], xn_node[2]) = FALSE);
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE "***HELPFUNCTIONS***"@1100285139();
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE GetXMLChild@1100285005(VAR Node@1100285000 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";VAR NodeName@1100285001 : Text;VAR NodeValue@1100285002 : Text;VAR Count@1100285008 : Integer;VAR HasChildren@1100285006 : Boolean;VAR ChildNode@1100285010 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode") FoundNext : Boolean;
+    VAR
+      LocalElement@1100285005 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlElement";
+      LocalNodeList@1100285004 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      LocalNode@1100285003 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      LocalNodeUnder@1100285007 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+    BEGIN
+      HasChildren := FALSE;
+      IF ISNULL(Node) THEN
+        EXIT(FALSE);
+      IF NOT Node.HasChildNodes THEN
+        EXIT(FALSE);
+      LocalNode := Node.LastChild;
+
+      IF NodeName <> '' THEN BEGIN
+        LocalNodeList := Node.ChildNodes;
+        IF Count >= LocalNodeList.Count THEN
+          EXIT(FALSE);
+
+        IF SelectNode(NodeName, LocalNode, LocalNodeList, Count) THEN
+          LocalNode := LocalNode.NextSibling;
+        IF ISNULL(LocalNode) THEN
+          EXIT(FALSE);
+      END ELSE
+        LocalNode := Node.FirstChild;
+
+      NodeName := LocalNode.Name;
+      LocalNodeUnder := LocalNode.FirstChild;
+      IF ISNULL(LocalNodeUnder) THEN BEGIN
+        NodeValue := '';
+        HasChildren := FALSE;
+      END ELSE IF LocalNodeUnder.Name = '#text' THEN BEGIN
+        NodeValue := LocalNode.InnerText;
+        HasChildren := FALSE;
+      END ELSE BEGIN
+        NodeValue := '';
+        HasChildren := TRUE;
+        ChildNode := LocalNode;
+      END;
+
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE SelectNode@1100285004(NodeName@1100285000 : Text;VAR xmlNode@1100285001 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";VAR xmlNodeList@1100285004 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";VAR int@1100285003 : Integer) Return : Boolean;
+    BEGIN
+      // Function to select the node named in NodeName from the node list xmlNodeList.
+      // Returns TRUE if found and sets xmlNode to this node, if not found returns FALSE.
+      Return := FALSE;
+
+      IF xmlNodeList.Count > 0 THEN
+      REPEAT
+        xmlNode := xmlNodeList.Item(int);
+        int+= 1; // int := int + 1;
+      UNTIL (xmlNode.Name = NodeName) OR (int = xmlNodeList.Count);
+      IF xmlNode.Name = NodeName THEN
+        Return := TRUE;
+    END;
+
+    LOCAL PROCEDURE Str2Dec@1100285513(StrNumber@1100285000 : Text) Return : Decimal;
+    VAR
+      pos@1100285001 : Integer;
+      Before@1100285002 : Integer;
+      After@1100285003 : Integer;
+      BeforeStr@1100285004 : Text[100];
+      AfterStr@1100285005 : Text[100];
+      i@1100285006 : Integer;
+      exp@1100285007 : Integer;
+    BEGIN
+      // Function to generate a decimal out of a text which contains either no decimal sign or the decimal sign . or ,
+      StrNumber := DELCHR(StrNumber, '=', DELCHR(StrNumber, '=', '0123456789-,.')); // 150611
+      pos := STRLEN(StrNumber);
+      IF pos = 0 THEN
+        EXIT(0);
+
+      IF pos > 1 THEN
+      REPEAT
+        pos -= 1;
+      UNTIL (pos = 1) OR (StrNumber[pos] = '.') OR (StrNumber[pos] = ',');
+
+      IF pos = 1 THEN BEGIN
+        IF NOT EVALUATE(Return, StrNumber) THEN
+          Return := 0;
+      END ELSE BEGIN
+        BeforeStr := COPYSTR(StrNumber, 1, pos - 1);
+        AfterStr := COPYSTR(StrNumber, pos + 1);
+        IF NOT (EVALUATE(Before, BeforeStr)) THEN
+          Before := 0;
+        IF NOT (EVALUATE(After, AfterStr)) THEN
+          After := 0;
+        exp := 10;
+
+        FOR i := 1 TO (STRLEN(StrNumber) - pos - 1) DO
+          exp := exp * 10;
+
+        IF Before >= 0 THEN
+          Return := Before + After / exp
+        ELSE
+          Return := Before - After / exp;
+      END;
+
+      IF (StrNumber[1] = '-') AND (Return > 0) THEN
+        Return := Return * -1;
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE GetHandymanSetupThis@1100285159();
+    BEGIN
+      IF GotHandymanSetupThis THEN
+        EXIT;
+      HandymanSetupThisComp.GET;
+      LastExportDateTime := 0DT;
+      IF HandymanSetupThisComp."Last Export Date"<>0D THEN
+        LastExportDateTime := CREATEDATETIME(HandymanSetupThisComp."Last Export Date",HandymanSetupThisComp."Last Export Time");
+      GotHandymanSetupThis := TRUE;
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE GetHandymanSetupOther@1100285164(CompanyName@1100285100 : Text[30]);
+    BEGIN
+      HandymanSetupOtherComp.CHANGECOMPANY(CompanyName);
+      HandymanSetupOtherComp.GET;
+    END;
+
+    LOCAL PROCEDURE ReplaceMainProjNo@1100285144(lvOrderNo@1100285100 : Code[30];VAR lvMainProjNo@1101285000 : Code[20]);
+    VAR
+      SESetup@1100285101 : Record 11128004;
+    BEGIN
+      //RFC1091
+      IF lvOrderNo <> '' THEN
+        EXIT;
+
+      IF NOT SESetup.GET(SESetup."Line type"::Mapping,'HMPROJREPL','PROJNO') THEN BEGIN
+        SESetup."Line type" := SESetup."Line type"::Mapping;
+        SESetup.Code := 'HMPROJREPL';
+        SESetup."Code 2" := 'PROJNO';
+        SESetup.Description := '™vers„ttning av Projektnr vid import fr†n Handyman ''PROJNO->(txt)''';
+        SESetup."Value (txt)" := '(txt)';
+        SESetup.INSERT;
+      END;
+
+      IF SESetup.GET(SESetup."Line type"::Mapping,'HMPROJREPL',lvMainProjNo) THEN
+        lvMainProjNo := SESetup."Value (txt)";
+    END;
+
+    EVENT xmldoc@1100285101::NodeInserting@93(sender@1100285101 : Variant;e@1100285100 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT xmldoc@1100285101::NodeInserted@94(sender@1100285101 : Variant;e@1100285100 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT xmldoc@1100285101::NodeRemoving@95(sender@1100285101 : Variant;e@1100285100 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT xmldoc@1100285101::NodeRemoved@96(sender@1100285101 : Variant;e@1100285100 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT xmldoc@1100285101::NodeChanging@97(sender@1100285101 : Variant;e@1100285100 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT xmldoc@1100285101::NodeChanged@98(sender@1100285101 : Variant;e@1100285100 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    BEGIN
+    {
+      140527 ITERO.MH Bug adjustments
+      140603 ITERO.MH Bug adjustments
+      140702 ITERO.MH New Function ExportBasicDataOnTime and changed main export of basic data.
+                      Minor bug fixes
+                      Import of Extension Contract and Element from Material list
+      180818 ITERO.MH Bug adjustments
+      140905 ITERO.MH Date Bug adjustments
+      141001 ITERO.MH IME202 Deleted function for synchronization between companies
+                              Added synchronization of Salesperson/Purchaser from Employee based on Handyman Whitelist
+      141016 ITERo.MH IME202, IME214 Added sync of Customer table on NAS run
+      141116 ITERO.MH IME202, IME214 Corrections
+      150107 ITERO.MH IME264 Project Manager not changed from creation of new project
+      150109 ITERO.MH IME248 Added process of internal order
+                             Deleted Company name key in import buffer
+      150121 ITERO.MH IME257 Added delay in export of Salary Codes
+      150128 ITERO.MH Changed export routine to verify alla projects exported.
+      150204 ITERO.MH IME279 Added Extension Contract Not Fixed price Criteria in order to populate CostPlus Entry
+      150304 ITERO.MH Added criteria for export of project: Main Project, Project Manager
+      150316 ITERO.MH ENH057, IME306
+      150320 ITERO.MH IME312
+      150326 ITERO.MH Critical comment error fix
+      150413 ITERO.MH Added Administrative finished to trigger export,
+                      Added new field on setup to make tries with errors
+                      Changed PM not to be edited from HM
+                      Added Symbrio export
+      150416 ITERO.MH Added Export Criteria for Projects
+      150511 ITERO.MH Changed table import for multi company environment
+                      Added import of table info from Leading company
+                      Removed LookForFiles function
+      150518 ITERO.MH Added functionality to trigger "Job Active" when job is run.
+      150519 ITERO.MH Added check of Cost Object on Means import
+      150529 ITERO.MH Fixed comment not imported
+      150611 ITERO.MH Removed Import Trigger from FileImportFunction
+                      Added DELCHR on Str2Dec to correct space-bug
+      150612 ITERO.MH IME-373 Divided onRun on other functions: HandleImport and HandleExport
+                      Moved import before Export
+                      Seperated Project Import from all other import
+                      IME-289 Commented Price List validation and Bill-to Customer No. if not the same
+      150622 ITERO.MH Speed corrections
+                      IME-356 Added xRecJob-handler for Symbrio export in ProcessProject
+      150820 ITERO.MH IME-395 Correction to export basic data
+      150928 ITERO.MH IME-372 Added "Cost Center" field on all import of project lines
+                      Seperated ProjectExport function to different local
+      150928 ITERO.MH IME-409 Added correction of salary export
+      150928 ITERO.MH IME-410 added else FALSE when importing project
+      150929 ITERO.MH RFC015 * Rewrite of ProcessComment wih seperation of features on local funtctions
+                             * added new rules for comment/description update
+                             * Added locktable in onRun
+      151022 ITERO.MH Added COMMIT after import of project
+      151116 ITERO.MH RFC-033 * Rewrite of ProcessMaterial with seperation of features on local functions
+                              * Added possibility to import Inventory and post to Item Journal
+                              * Added export och Inventory XML
+      151218 ITERO.DL Week 53 Bug
+      160107 ITERO.AC RFC-033 * Added COMMITs in order to Avoid record locks
+                              * New function LocationHasEntries used to check if a certain location has items with updated Inventory amount efter a certain Date
+                              * Changed GetCheck_InventoryLocationAndItem to search for GTIN Code instead of "Vendor Item No"
+                              * Changes in FillTempItem in order to export all Items per location code
+      160120 ITERO.AC RFC-033  Added in function LocationHasItemEntries The purpose is to check if a certain location has current Item in stock even if InStock Quatity is Zero
+                               (Imtech wants to export all items for one location even if quatity InStock is zero or negative)
+      160229 ITERO.MH IME464 Added Extension Contract No. from import of material using cust002
+      160429 ITERO.MH IME468 Added new function to check if text is allowed to be converted to decimal
+      160612 ITERO.AC Pure 092304 Bug fix in date compare when data is exported to Handyman for the first time each day
+      160704 ITERO.AC IME469 Added validation for Amount (LCY) in ProcessTimeSheet
+      160718 ITERO.MH RFC-127 Added "CustomerPrice" from material line and validation of price to cost plus entry  - use Sales Price
+      160819 ITERO.MH RFC-131 Added Symbrio Invoice Line as trigger for project export
+      160907 ITERO.MH RFC-094 Updated Project Status back to production if "Completed" is turned off from Handyman
+      180427 ORANGO.DL RFC143 handle import of new fields CustomerReference, Requsition
+      180427 ORANGO.DL RFC142 handle import of new fields ContactName, Telephone1, Telephone2
+      180625 ORANGO.WG IME-1074 Handle Comment from Handyman to Timesheet, changed to MAXSTRLEN
+      180712 ORANGO.DL RFC1058 Handyman Importlogg, fler f”rs”k under X antal dagar
+                       RFC1091 ”vers„ttning av projektnummer vid import
+      180903 ORANGO.DL RFC1091 adjustment after test
+      180905 ORANGO.DL RFC1058 r„ttning efter test
+      190225 ORANGO.DL Support #22873 Misst„nkt fel i 4ps (tid„rende)
+      191203 ORANGO.DL Support #26716, RFC1274 wrong field filled in fr†n Handyman
+      200114 ORANGO.DL moved Symbrio-calls to Events in cod11127975
+    }
+    END.
+  }
+}
+

@@ -1,0 +1,291 @@
+OBJECT Codeunit 11125988 Waste Flow Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+
+    PROCEDURE PrintSelectedLines@1100528301(VAR WasteFlowLine@1100528300 : Record 11126031);
+    BEGIN
+      WasteFlowLine.SETRANGE(Printed, FALSE);
+      WasteFlowLine.SETRANGE(Approved, FALSE);
+      WasteFlowLine.SETRANGE(Processed, FALSE);
+      WasteFlowLine.SETFILTER("Estimated Quantity", '<>%1', 0);
+      IF (NOT WasteFlowLine.FINDSET) THEN
+        EXIT;
+
+      REPORT.RUNMODAL(REPORT::"Waste Flow Permit", TRUE, FALSE, WasteFlowLine);
+    END;
+
+    PROCEDURE ProcessSelectedLines@1100528302(VAR WasteFlowLine@1100528300 : Record 11126031);
+    VAR
+      WasteFlow@1100528301 : Record 11126030;
+    BEGIN
+      WasteFlowLine.SETRANGE(Printed, TRUE);
+      WasteFlowLine.SETRANGE(Approved, TRUE);
+      WasteFlowLine.SETRANGE(Processed, FALSE);
+      WasteFlowLine.SETFILTER("Delivered Quantity", '<>%1', 0);
+      IF (NOT WasteFlowLine.FINDSET) THEN
+        EXIT;
+
+      REPEAT
+        WasteFlow.GET(WasteFlowLine."Waste Flow No.");
+        CASE WasteFlow."Price Agreement Type" OF
+          WasteFlow."Price Agreement Type"::BlanketOrder:
+            ProcessSelectedLineBlanketOrder(WasteFlow, WasteFlowLine);
+          ELSE
+            ProcessSelectedLineOrder(WasteFlow, WasteFlowLine);
+        END;
+      UNTIL (WasteFlowLine.NEXT = 0);
+    END;
+
+    LOCAL PROCEDURE "---Locals---"@1100528304();
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseHeaderFromBlanketOrder@1100528311(PurchaseHeaderBlanketOrder@1100528301 : Record 38;VAR PurchaseHeader@1100528300 : Record 38;WasteFlow@1100529500 : Record 11126030);
+    VAR
+      PurchasesPayablesSetup@1100528303 : Record 312;
+      NoSeriesManagement@1100528302 : Codeunit 396;
+    BEGIN
+      PurchasesPayablesSetup.GET;
+      PurchasesPayablesSetup.TESTFIELD("Order Nos.");
+      PurchasesPayablesSetup.TESTFIELD("Posted Receipt Nos.");
+
+      PurchaseHeader.COPY(PurchaseHeaderBlanketOrder);
+      PurchaseHeader."Document Type" := PurchaseHeader."Document Type"::Order;
+      PurchaseHeader."No." := '';
+      PurchaseHeader."No. Series" := '';
+      IF (PurchaseHeader."Posting Date" = 0D) THEN
+        PurchaseHeader.VALIDATE("Posting Date", TODAY);
+      NoSeriesManagement.InitSeries(PurchasesPayablesSetup."Order Nos.", '', PurchaseHeader."Posting Date",
+        PurchaseHeader."No.", PurchaseHeader."No. Series");
+      NoSeriesManagement.InitSeries(PurchasesPayablesSetup."Posted Receipt Nos.", '', PurchaseHeader."Posting Date",
+        PurchaseHeader."Receiving No.", PurchaseHeader."Receiving No. Series");
+      NoSeriesManagement.InitSeries(PurchasesPayablesSetup."Posted Invoice Nos.", '', PurchaseHeader."Posting Date",
+        PurchaseHeader."Posting No.", PurchaseHeader."Posting No. Series");
+      PurchaseHeader."Vendor Invoice No." := WasteFlow."No.";
+      PurchaseHeader.INSERT(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseLineFromBlanketOrder@1100528312(PurchaseLineBlanketOrder@1100528300 : Record 39;PurchaseHeader@1100528302 : Record 38;VAR PurchaseLine@1100528301 : Record 39);
+    VAR
+      Vendor@1100528304 : Record 23;
+      PurchaseLineExtension@1100528306 : Record 11020644;
+      PrepaymentMgt@1100528305 : Codeunit 441;
+      PurchRouteRefManagement@1100528307 : Codeunit 11012045;
+      LastRefNo@1100528308 : Code[20];
+    BEGIN
+      Vendor.GET(PurchaseHeader."Buy-from Vendor No.");
+
+      PurchaseLine.COPY(PurchaseLineBlanketOrder);
+      PurchaseLine."Document Type" := PurchaseHeader."Document Type";
+      PurchaseLine."Document No." := PurchaseHeader."No.";
+      PurchaseLine."Line No." := PurchaseLine.GetLastLineNo + 10000;
+      PurchaseLine."Blanket Order No." := PurchaseLineBlanketOrder."Document No.";
+      PurchaseLine."Blanket Order Line No." := PurchaseLineBlanketOrder."Line No.";
+      ResetPurchaseLineQuantities(PurchaseLine);
+      IF (PurchaseLineBlanketOrder."Job No." <> '') THEN
+        PurchaseLine."Contract Type" := PurchaseLine."Contract Type"::"Project Blanket Order"
+      ELSE
+        PurchaseLine."Contract Type" := PurchaseLine."Contract Type"::"General Blanket Order";
+      SetPurchaseLineFields(PurchaseLine, PurchaseLineBlanketOrder, PurchaseHeader);
+      IF (Vendor."Prepayment %" <> 0) THEN
+        PurchaseLine."Prepayment %" := Vendor."Prepayment %";
+      PrepaymentMgt.SetPurchPrepaymentPct(PurchaseLine, PurchaseHeader."Posting Date");
+      PurchaseLine.VALIDATE("Prepayment %");
+      PurchaseLine.DefaultDeferralCode;
+      PurchaseLine."Input by" := USERID;
+      PurchaseLine."Input Date" := TODAY;
+      PurchaseLine.INSERT;
+
+      PurchaseLine.CreatePurchOrderControl(FALSE);
+      PurchaseLineExtension.CopyPurchLineExtension(PurchaseLineBlanketOrder."Document Type", PurchaseLineBlanketOrder."Document No.",
+        PurchaseLineBlanketOrder."Line No.", PurchaseLine."Document Type", PurchaseLine."Document No.", PurchaseLine."Line No.");
+      IF (PurchaseLineBlanketOrder."Purchase Route Reference" <> '') THEN BEGIN
+        PurchaseLine."Purchase Route Reference" := PurchaseLineBlanketOrder."Purchase Route Reference";
+      END ELSE BEGIN
+        LastRefNo := PurchRouteRefManagement.GetLastRefNo();
+        LastRefNo := INCSTR(LastRefNo);
+        PurchaseLine."Purchase Route Reference" := LastRefNo;
+        PurchaseLineBlanketOrder."Purchase Route Reference" := LastRefNo;
+      END;
+      IF (PurchaseLine."Qty. to Receive" = 0) THEN
+        PurchaseLine.VALIDATE("Qty. to Receive", PurchaseLine.Quantity);
+      PurchaseLine."Marked for Receipt Run" := TRUE;
+      PurchaseLine."Modified by" := USERID;
+      PurchaseLine."Last Date Modified" := TODAY;
+      PurchaseLine.MODIFY;
+
+      ResetBlanketOrderLineQtyToReceive(PurchaseLineBlanketOrder);
+      PurchRouteRefManagement.WriteLastRefNo(LastRefNo);
+    END;
+
+    LOCAL PROCEDURE ProcessSelectedLineOrder@1100528305(WasteFlow@1100528302 : Record 11126030;WasteFlowLine@1100528300 : Record 11126031);
+    VAR
+      PurchaseHeader@1100528303 : Record 38;
+      PurchaseLine@1100528301 : Record 39;
+      PurchPost@1100528304 : Codeunit 90;
+    BEGIN
+      PurchaseHeader.GET(PurchaseHeader."Document Type"::Order, WasteFlow."Purchase Order No.");
+      IF (PurchaseHeader.Status = PurchaseHeader.Status::Closed) THEN
+        PurchaseHeader.FIELDERROR(Status);
+
+      PurchaseLine.GET(PurchaseHeader."Document Type", PurchaseHeader."No.", WasteFlow."Purchase Order Line No.");
+      IF (PurchaseLine."Qty. to Receive" = 0) THEN BEGIN
+        PurchaseLine.VALIDATE("Qty. to Receive", WasteFlowLine."Delivered Quantity");
+        PurchaseLine."Marked for Receipt Run" := TRUE;
+        PurchaseLine."Modified by" := USERID;
+        PurchaseLine."Last Date Modified" := TODAY;
+        PurchaseLine.MODIFY;
+
+        WasteFlowLine."Purchase Order No." := PurchaseLine."Document No.";
+        WasteFlowLine."Purchase Order Line No." := PurchaseLine."Line No.";
+        WasteFlowLine.MODIFY;
+      END;
+
+      PurchaseHeader."Vendor Invoice No." := WasteFlowLine.GetPermitNo;
+      PurchaseHeader."Markedonly Receipt Run" := TRUE;
+      PurchaseHeader.Receive := TRUE;
+      PurchaseHeader.Invoice := TRUE;
+      PurchaseHeader.MODIFY;
+
+      COMMIT;
+      IF (NOT PurchPost.RUN(PurchaseHeader)) THEN BEGIN
+        ERROR(GETLASTERRORTEXT);
+      END ELSE BEGIN
+        WasteFlowLine.Processed := TRUE;
+        WasteFlowLine.MODIFY;
+      END;
+    END;
+
+    LOCAL PROCEDURE ProcessSelectedLineBlanketOrder@1100528303(WasteFlow@1100528302 : Record 11126030;VAR WasteFlowLine@1100528300 : Record 11126031);
+    VAR
+      PurchaseHeaderBlanketOrder@1100528303 : Record 38;
+      PurchaseLineBlanketOrder@1100528301 : Record 39;
+      PurchaseHeader@1100528305 : Record 38;
+      PurchaseLine@1100528304 : Record 39;
+      PurchPost@1100528306 : Codeunit 90;
+    BEGIN
+      PurchaseHeaderBlanketOrder.GET(PurchaseHeaderBlanketOrder."Document Type"::"Blanket Order", WasteFlow."Purchase Order No.");
+      IF (PurchaseHeaderBlanketOrder.Status = PurchaseHeaderBlanketOrder.Status::Closed) THEN
+        PurchaseHeaderBlanketOrder.FIELDERROR(Status);
+
+      PurchaseLineBlanketOrder.GET(PurchaseLineBlanketOrder."Document Type"::"Blanket Order", WasteFlow."Purchase Order No.", WasteFlow."Purchase Order Line No.");
+      PurchaseLineBlanketOrder.VALIDATE("Qty. to Receive", WasteFlowLine."Delivered Quantity");
+      PurchaseLineBlanketOrder.MODIFY;
+
+      IF (WasteFlowLine."Purchase Order Line No." = 0) THEN BEGIN
+        UpdatePurchaseOrderLineForBlanketOrderLine(WasteFlow, WasteFlowLine, PurchaseHeaderBlanketOrder, PurchaseHeader, PurchaseLine);
+        WasteFlowLine."Purchase Order No." := PurchaseLine."Document No.";
+        WasteFlowLine."Purchase Order Line No." := PurchaseLine."Line No.";
+        WasteFlowLine.MODIFY;
+      END ELSE BEGIN
+        PurchaseHeader.GET(PurchaseHeader."Document Type"::Order, WasteFlowLine."Purchase Order No.");
+        PurchaseLine.GET(PurchaseHeader."Document Type", PurchaseHeader."No.", WasteFlowLine."Purchase Order Line No.");
+      END;
+
+      PurchaseHeader."Vendor Invoice No." := WasteFlowLine.GetPermitNo;
+      PurchaseHeader."Markedonly Receipt Run" := TRUE;
+      PurchaseHeader.Receive := TRUE;
+      PurchaseHeader.Invoice := TRUE;
+      PurchaseHeader.MODIFY;
+
+      COMMIT;
+      IF (NOT PurchPost.RUN(PurchaseHeader)) THEN BEGIN
+        ERROR(GETLASTERRORTEXT);
+      END ELSE BEGIN
+        WasteFlowLine.Processed := TRUE;
+        WasteFlowLine.MODIFY;
+      END;
+    END;
+
+    LOCAL PROCEDURE ResetBlanketOrderLineQtyToReceive@1100528321(PurchaseLine@1100528300 : Record 39);
+    BEGIN
+      PurchaseLine.VALIDATE("Qty. to Receive", 0);
+      PurchaseLine."Modified by" := USERID;
+      PurchaseLine."Last Date Modified" := TODAY;
+      PurchaseLine.MODIFY;
+    END;
+
+    LOCAL PROCEDURE ResetPurchaseLineQuantities@1100528323(VAR PurchaseLine@1100528300 : Record 39);
+    BEGIN
+      PurchaseLine.Quantity := 0;
+      PurchaseLine."Quantity (Base)" := 0;
+      PurchaseLine."Qty. Rcd. Not Invoiced" := 0;
+      PurchaseLine."Quantity Received" := 0;
+      PurchaseLine."Quantity Invoiced" := 0;
+      PurchaseLine."Qty. Rcd. Not Invoiced (Base)" := 0;
+      PurchaseLine."Qty. Received (Base)" := 0;
+      PurchaseLine."Qty. Invoiced (Base)" := 0;
+    END;
+
+    LOCAL PROCEDURE SetPurchaseLineFields@1100528324(VAR PurchaseLine@1100528300 : Record 39;PurchaseLineBlanketOrder@1100528301 : Record 39;PurchaseHeader@1100528302 : Record 38);
+    VAR
+      PurchLineReserve@1100528303 : Codeunit 99000834;
+    BEGIN
+      IF (PurchaseLine.Type <> PurchaseLine.Type::" ") THEN BEGIN
+        PurchaseLine.Amount := 0;
+        PurchaseLine."Amount Including VAT" := 0;
+        PurchaseLine.VALIDATE(Quantity, PurchaseLineBlanketOrder."Qty. to Receive");
+        IF (PurchaseLineBlanketOrder."Expected Receipt Date" <> 0D) THEN
+          PurchaseLine.VALIDATE("Expected Receipt Date", PurchaseLineBlanketOrder."Expected Receipt Date")
+        ELSE
+          PurchaseLine.VALIDATE("Order Date", PurchaseHeader."Order Date");
+        PurchaseLine.VALIDATE("Direct Unit Cost", PurchaseLineBlanketOrder."Direct Unit Cost");
+        PurchaseLine.VALIDATE("Line Discount %", PurchaseLineBlanketOrder."Line Discount %");
+        IF (PurchaseLine.Quantity <> 0) THEN
+          PurchaseLine.VALIDATE("Inv. Discount Amount", PurchaseLineBlanketOrder."Inv. Discount Amount");
+        PurchaseLineBlanketOrder.CALCFIELDS("Reserved Qty. (Base)");
+        IF (PurchaseLineBlanketOrder."Reserved Qty. (Base)" <> 0) THEN
+          PurchLineReserve.TransferPurchLineToPurchLine(PurchaseLineBlanketOrder, PurchaseLine,
+            PurchaseLineBlanketOrder."Qty. to Receive (Base)");
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdatePurchaseOrderLineForBlanketOrderLine@1100528307(WasteFlow@1100528300 : Record 11126030;WasteFlowLine@1100528301 : Record 11126031;PurchaseHeaderBlanketOrder@1100528304 : Record 38;VAR PurchaseHeader@1100528305 : Record 38;VAR PurchaseLine@1100528302 : Record 39);
+    VAR
+      PurchaseLineBlanketOrder@1100528306 : Record 39;
+      HeaderFound@1100528303 : Boolean;
+    BEGIN
+      HeaderFound := FALSE;
+      PurchaseLine.SETRANGE("Document Type", PurchaseLine."Document Type"::Order);
+      PurchaseLine.SETRANGE("Blanket Order No.", WasteFlow."Purchase Order No.");
+      PurchaseLine.SETRANGE("Blanket Order Line No.", WasteFlow."Purchase Order Line No.");
+      IF (NOT PurchaseLine.FINDSET) THEN BEGIN
+        PurchaseHeader.RESET;
+        CreatePurchaseHeaderFromBlanketOrder(PurchaseHeaderBlanketOrder, PurchaseHeader, WasteFlow);
+        HeaderFound := TRUE;
+      END ELSE BEGIN
+        REPEAT
+          PurchaseHeader.GET(PurchaseLine."Document Type", PurchaseLine."Document No.");
+          IF (PurchaseHeader.Status = PurchaseHeader.Status::Open) THEN
+            HeaderFound := TRUE;
+        UNTIL (PurchaseLine.NEXT = 0) OR (HeaderFound);
+      END;
+
+      IF (NOT HeaderFound) THEN BEGIN
+        PurchaseHeader.RESET;
+        CreatePurchaseHeaderFromBlanketOrder(PurchaseHeaderBlanketOrder, PurchaseHeader, WasteFlow);
+      END;
+
+      PurchaseLineBlanketOrder.GET(PurchaseHeaderBlanketOrder."Document Type", WasteFlow."Purchase Order No.",
+        WasteFlow."Purchase Order Line No.");
+      CreatePurchaseLineFromBlanketOrder(PurchaseLineBlanketOrder, PurchaseHeader, PurchaseLine);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

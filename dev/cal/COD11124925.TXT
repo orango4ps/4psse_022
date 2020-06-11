@@ -1,0 +1,267 @@
+OBJECT Codeunit 11124925 WHA Replication Msg. Processor
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1100528002 : TextConst 'ENU=No such command: %1 - %2';
+      Text001@1100528001 : TextConst 'ENU=Could not find record. (%1 %2)';
+      Text002@1100528000 : TextConst 'ENU=Could not insert record. (%1 %2)';
+      AppReplicationMsgManager@1100528005 : Code[10];
+      BaseLib@1100528004 : Codeunit 11130048;
+      JsonConvert@1100528003 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.JsonConvert";
+
+    PROCEDURE ProcessReplicationMessage@1100528000(VAR AppReplicationMessage@1100528000 : Record 11130032) : Boolean;
+    BEGIN
+      AppReplicationMessage.TESTFIELD(App, BaseLib.AppCodeWHA);
+
+      CASE AppReplicationMessage."Request Type" OF
+        'WarehouseOrderAssignOrder' : ProcessAssignWarehouseOrder(AppReplicationMessage);
+        'WarehouseOrderSubmitHeader' : ProcessSubmitWarehouseOrderHeader(AppReplicationMessage);
+        'WarehouseOrderSubmitLines': ProcessSubmitWarehouseOrderLines(AppReplicationMessage);
+
+      ELSE
+        ERROR(Text000, AppReplicationMessage.App, AppReplicationMessage."Request Type");
+      END;
+    END;
+
+    LOCAL PROCEDURE "=== Processors ==="@1100528001();
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE ProcessAssignWarehouseOrder@1100528002(VAR AppReplicationMessage@1100528000 : Record 11130032);
+    VAR
+      WarehouseOrder@1100528001 : Record 11126687;
+      WarehouseOrderDotNet@1100528002 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      PickerNo@1100528003 : Code[20];
+      DotNetExceptionHandler@1100528004 : Codeunit 1291;
+      JsonManagement@1100528700 : Codeunit 5459;
+    BEGIN
+      CLEAR(JsonManagement);
+      JsonManagement.InitializeObject(AppReplicationMessage.GetRequestDataUTF8);
+      JsonManagement.GetJSONObject(WarehouseOrderDotNet);
+
+      PickerNo := BaseLib.GetPropertyValueByNameAsText(WarehouseOrderDotNet, 'PickerNo');
+      IF PickerNo = '' THEN
+        ERROR('PickerNo is empty');
+
+      WarehouseOrder.GET(BaseLib.GetPropertyValueByNameAsText(WarehouseOrderDotNet, 'No'));
+      WarehouseOrder.TESTFIELD("Picker No.", '');
+      WarehouseOrder.VALIDATE("Picker No.", PickerNo);
+      WarehouseOrder.MODIFY(TRUE);
+      AppReplicationMessage."Response Type" := BaseLib.ResponseOK
+    END;
+
+    LOCAL PROCEDURE ProcessSubmitWarehouseOrderHeader@1100528004(VAR AppReplicationMessage@1100528000 : Record 11130032);
+    VAR
+      WarehouseOrderDotNet@1100528001 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      WarehouseOrder@1100528002 : Record 11126687;
+      No@1100528007 : Code[20];
+      Comment@1100528003 : Text;
+      ReceivingCompany@1100528004 : Text[30];
+      JsonManagement@1100528700 : Codeunit 5459;
+    BEGIN
+      CLEAR(JsonManagement);
+      JsonManagement.InitializeObject(AppReplicationMessage.GetRequestDataUTF8);
+      JsonManagement.GetJSONObject(WarehouseOrderDotNet);
+
+      No := BaseLib.GetPropertyValueByNameAsText(WarehouseOrderDotNet, 'No');
+
+      WarehouseOrder.INIT;
+      IF No <> '' THEN
+        WarehouseOrder."No." := No
+      ELSE
+        WarehouseOrder."No." := '';
+      WarehouseOrder.INSERT(TRUE);
+
+      BaseLib.SetPropertyByName(WarehouseOrderDotNet, 'No', WarehouseOrder."No.");
+
+      SetProcess(WarehouseOrder, BaseLib.GetPropertyValueByNameAsInt(WarehouseOrderDotNet, 'Process'), BaseLib.GetPropertyValueByNameAsInt(WarehouseOrderDotNet, 'SourceType'));
+      WarehouseOrder.VALIDATE(Status, WarehouseOrder.Status::Open);
+
+      ReceivingCompany := BaseLib.GetPropertyValueByNameAsText(WarehouseOrderDotNet, 'ReceivingCompany');
+      IF (ReceivingCompany = '') OR (ReceivingCompany = BaseLib.GetPropertyValueByNameAsText(WarehouseOrderDotNet, 'SourceCompany')) THEN BEGIN
+        WarehouseOrder.VALIDATE("Receiving Company", '');
+      END ELSE BEGIN
+        WarehouseOrder.VALIDATE("Receiving Company", ReceivingCompany);
+      END;
+
+      WarehouseOrder.VALIDATE("Location Code", BaseLib.GetPropertyValueByNameAsText(WarehouseOrderDotNet, 'FromLocationCode'));
+      WarehouseOrder.VALIDATE("Scanner ID", BaseLib.GetPropertyValueByNameAsText(WarehouseOrderDotNet, 'ScannerId'));
+      WarehouseOrder.VALIDATE("Picker No.", BaseLib.GetPropertyValueByNameAsText(WarehouseOrderDotNet, 'PickerNo'));
+      WarehouseOrder.VALIDATE("Order Date", DT2DATE(BaseLib.GetPropertyValueByNameAsDateTime(WarehouseOrderDotNet, 'OrderDateTime')));
+      WarehouseOrder.VALIDATE("Order Time", DT2TIME(BaseLib.GetPropertyValueByNameAsDateTime(WarehouseOrderDotNet, 'OrderDateTime')));
+
+
+      IF WarehouseOrder.Process IN [WarehouseOrder.Process::"Project Delivery", WarehouseOrder.Process::"Project Retour"] THEN BEGIN
+        WarehouseOrder.VALIDATE("Project No.", BaseLib.GetPropertyValueByNameAsText(WarehouseOrderDotNet, 'SourceNo'));
+        WarehouseOrder.VALIDATE("Extension Contract", BaseLib.GetPropertyValueByNameAsText(WarehouseOrderDotNet, 'ExtensionContract'));
+      END;
+
+      IF WarehouseOrder.Process IN [WarehouseOrder.Process::"Service Delivery", WarehouseOrder.Process::"Service Retour"] THEN
+        WarehouseOrder.VALIDATE("Service Order No.", BaseLib.GetPropertyValueByNameAsText(WarehouseOrderDotNet, 'SourceNo'));
+      IF WarehouseOrder.Process IN [WarehouseOrder.Process::Sales, WarehouseOrder.Process::"Sales Return"] THEN
+        WarehouseOrder.VALIDATE("Customer No.", BaseLib.GetPropertyValueByNameAsText(WarehouseOrderDotNet, 'CustomerNo'));
+      IF WarehouseOrder.Process = WarehouseOrder.Process::"Stock Transfer" THEN
+        WarehouseOrder.VALIDATE("To Location Code", BaseLib.GetPropertyValueByNameAsText(WarehouseOrderDotNet, 'ToLocationCode'));
+
+      Comment := BaseLib.GetPropertyValueByNameAsText(WarehouseOrderDotNet, 'Comment');
+      IF WarehouseOrder.Process IN [WarehouseOrder.Process::Sales, WarehouseOrder.Process::"Sales Return"] THEN
+        ProcessCommentLines(WarehouseOrder, Comment);
+
+      WarehouseOrder.MODIFY(TRUE);
+
+      AppReplicationMessage.SetResponseData(BaseLib.ConvertUTF8ToBase64(JsonConvert.SerializeObject(WarehouseOrderDotNet)));
+      AppReplicationMessage."Response Type" := BaseLib.ResponseOK;
+    END;
+
+    LOCAL PROCEDURE ProcessSubmitWarehouseOrderLines@1100528003(VAR AppReplicationMessage@1100528000 : Record 11130032);
+    VAR
+      JsonManagement@1100528700 : Codeunit 5459;
+      WarehouseOrderDotNet@1100528005 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      WarehouseOrder@1100528004 : Record 11126687;
+    BEGIN
+      CLEAR(JsonManagement);
+      JsonManagement.InitializeObject(AppReplicationMessage.GetRequestDataUTF8);
+      JsonManagement.GetJSONObject(WarehouseOrderDotNet);
+
+      WarehouseOrder.GET(BaseLib.GetPropertyValueByNameAsText(WarehouseOrderDotNet, 'No'));
+      IF WarehouseOrder.Status = WarehouseOrder.Status::Finished THEN
+        WarehouseOrder.FIELDERROR(Status);
+
+      CreateOrUpdateLines(WarehouseOrder."No.", WarehouseOrderDotNet);
+      WarehouseOrder.VALIDATE(Status, WarehouseOrder.Status::Finished);
+      WarehouseOrder.MODIFY(TRUE);
+      CreateQueue(WarehouseOrder);
+
+      AppReplicationMessage."Response Type" := BaseLib.ResponseOK;
+    END;
+
+    LOCAL PROCEDURE CreateOrUpdateLines@1100528015(WarehouseOrderNo@1100528000 : Code[20];VAR WarehouseOrderDotNet@1100528001 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject");
+    VAR
+      DotNetLine@1100528002 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      WarehouseOrderLine@1100528003 : Record 11126688;
+      LineNo@1100528004 : Integer;
+      Lines@1100528701 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JArray";
+      Value@1100528702 : Variant;
+    BEGIN
+      BaseLib.GetPropertyValueByName(WarehouseOrderDotNet, 'WarehouseOrderLines', Value);
+      Lines := Value;
+
+      FOREACH DotNetLine IN Lines DO BEGIN
+        IF BaseLib.GetPropertyValueByNameAsInt(DotNetLine, 'LineNo') = 0 THEN BEGIN
+          WarehouseOrderLine.INIT;
+          WarehouseOrderLine.VALIDATE("Order No.", WarehouseOrderNo);
+          WarehouseOrderLine.VALIDATE("Line No.", GetLastLineNo(WarehouseOrderNo) + 10000);
+          WarehouseOrderLine.INSERT(TRUE);
+
+          WarehouseOrderLine.VALIDATE(Element, BaseLib.GetPropertyValueByNameAsText(DotNetLine, 'ElementCode'));
+          WarehouseOrderLine.VALIDATE("Item No.", BaseLib.GetPropertyValueByNameAsText(DotNetLine, 'ItemNo')); //something with GTIN?
+          WarehouseOrderLine.VALIDATE(Quantity, BaseLib.GetPropertyValueByNameAsDecimal(DotNetLine, 'Quantity'));
+          WarehouseOrderLine.VALIDATE("Reason Code", BaseLib.GetPropertyValueByNameAsText(DotNetLine, 'ReasonCode'));
+          WarehouseOrderLine.VALIDATE("Requested Quantity", BaseLib.GetPropertyValueByNameAsDecimal(DotNetLine, 'RequestedQuantity'));
+          WarehouseOrderLine.MODIFY(TRUE);
+        END ELSE BEGIN
+          WarehouseOrderLine.GET(WarehouseOrderNo, BaseLib.GetPropertyValueByNameAsInt(DotNetLine, 'LineNo'));
+          WarehouseOrderLine.VALIDATE(Element, BaseLib.GetPropertyValueByNameAsText(DotNetLine, 'ElementCode'));
+          WarehouseOrderLine.VALIDATE("Reason Code", BaseLib.GetPropertyValueByNameAsText(DotNetLine, 'ReasonCode'));
+          WarehouseOrderLine.VALIDATE(Quantity, BaseLib.GetPropertyValueByNameAsDecimal(DotNetLine, 'Quantity'));
+          WarehouseOrderLine.MODIFY(TRUE);
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE "=== Other Functions ==="@1100528010();
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE SetProcess@1100528011(VAR WarehouseOrder@1100528000 : Record 11126687;DotNetProcess@1100528001 : Integer;DotNetSourceType@1100528002 : Integer);
+    BEGIN
+            // delivery, = 0   return, = 1   inventory, = 2   transfer, = 3   purchaseproposal, = 4    sales, = 5    salesreturn = 6
+             //SourceType = None,   //ServiceOrder,     //Project
+      IF (DotNetProcess = 0) AND (DotNetSourceType = 1) THEN
+        WarehouseOrder.Process := WarehouseOrder.Process::"Service Delivery"
+      ELSE IF (DotNetProcess = 0) AND (DotNetSourceType = 2) THEN
+        WarehouseOrder.Process := WarehouseOrder.Process::"Project Delivery"
+      ELSE IF (DotNetProcess = 1) AND (DotNetSourceType = 1) THEN
+        WarehouseOrder.Process := WarehouseOrder.Process::"Service Retour"
+      ELSE IF (DotNetProcess = 1) AND (DotNetSourceType = 2) THEN
+        WarehouseOrder.Process := WarehouseOrder.Process::"Project Retour"
+      ELSE IF DotNetProcess = 2 THEN
+        WarehouseOrder.Process := WarehouseOrder.Process::"Phys. Inventory"
+      ELSE IF DotNetProcess = 3 THEN
+        WarehouseOrder.Process := WarehouseOrder.Process::"Stock Transfer"
+      ELSE IF DotNetProcess = 4 THEN
+        WarehouseOrder.Process := WarehouseOrder.Process::"Purch. Requisition"
+      ELSE IF DotNetProcess = 5 THEN
+        WarehouseOrder.Process := WarehouseOrder.Process::Sales
+      ELSE IF DotNetProcess = 6 THEN
+        WarehouseOrder.Process := WarehouseOrder.Process::"Sales Return"
+      ELSE
+        ERROR('(t:)Incorrect combination of DotNetProcess (%1) and SourceType (%2)', DotNetProcess, DotNetSourceType);
+    END;
+
+    LOCAL PROCEDURE GetLastLineNo@1100528017(OrderNo@1100528000 : Code[20]) : Integer;
+    VAR
+      WarehouseOrderLine@1100528001 : Record 11126688;
+    BEGIN
+      WarehouseOrderLine.SETRANGE("Order No.", OrderNo);
+      IF WarehouseOrderLine.FINDLAST THEN
+        EXIT(WarehouseOrderLine."Line No.")
+      ELSE
+        EXIT(0);
+    END;
+
+    LOCAL PROCEDURE ProcessCommentLines@1100528005(VAR WarehouseOrder@1100528001 : Record 11126687;VAR Comment@1100528002 : Text);
+    VAR
+      CommentLine@1100528000 : Record 97;
+    BEGIN
+      CommentLine.INIT;
+      CommentLine.VALIDATE("Table Name", CommentLine."Table Name"::EmpolyOrder);
+      CommentLine.VALIDATE("No.", WarehouseOrder."No.");
+      CommentLine.VALIDATE("Line No.", GetLastCommentLineNo(WarehouseOrder."No.") + 10000);
+      CommentLine.VALIDATE(Date, TODAY);
+      CommentLine.VALIDATE("Time Created", TIME);
+      CommentLine.VALIDATE(Comment, Comment);
+      CommentLine.INSERT(TRUE);
+    END;
+
+    LOCAL PROCEDURE GetLastCommentLineNo@1100528006(WarehouseOrderNo@1100528000 : Code[20]) : Integer;
+    VAR
+      CommentLine@1100528001 : Record 97;
+    BEGIN
+      CommentLine.SETRANGE("Table Name", CommentLine."Table Name"::EmpolyOrder);
+      CommentLine.SETRANGE("No.", WarehouseOrderNo);
+      IF CommentLine.FINDLAST THEN
+        EXIT(CommentLine."Line No.")
+      ELSE
+        EXIT(0);
+    END;
+
+    LOCAL PROCEDURE CreateQueue@1100528301(WarehouseOrder@1100526002 : Record 11126687);
+    VAR
+      EmpolySetup@1100526000 : Record 11126692;
+      EmpolyProcessManagement@1100526001 : Codeunit 11126683;
+    BEGIN
+      EmpolySetup.GET;
+      IF (EmpolySetup."Process App Orders Automatical") AND (WarehouseOrder.Status = WarehouseOrder.Status::Finished) THEN BEGIN
+        EmpolyProcessManagement.InitGenericProcessQueue(WarehouseOrder);
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

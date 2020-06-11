@@ -1,0 +1,599 @@
+OBJECT XMLport 11012005 Import/Export Budget
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00,4PSSE;
+  }
+  PROPERTIES
+  {
+    CaptionML=ENU=Import/Export Budget;
+    DefaultFieldsValidation=No;
+    PreserveWhiteSpace=Yes;
+    TextEncoding=WINDOWS;
+    OnPreXMLport=BEGIN
+                   //C016643.sn
+                   ProjectFilter := "Budget Line".GETFILTER("Project No.");
+                   ExtensionFilter := "Budget Line".GETFILTER("Extension Contract");
+                   AdjustmentFilter := "Budget Line".GETFILTER(Adjustment);
+                   OptionFilter := "Budget Line".GETFILTER(Option);
+                   //C016643.en
+                   // //>> LAHE 130522, incoming data control
+                   // ProjectFilter := "Budget Line".GETFILTER("Project No.");
+                   // AdjustmentFilter := "Budget Line".GETFILTER(Adjustment);
+                   // ExtensionFilter := "Budget Line".GETFILTER("Extension Contract");
+                   // OptionFilter := "Budget Line".GETFILTER(Option);
+                   // //<< LAHE 130522
+                   IF currXMLport.IMPORTFILE THEN
+                     Job.GET(ProjectFilter);
+                 END;
+
+    OnPostXMLport=VAR
+                    BudgetSummarySheet@1100409000 : Record 11012064;
+                  BEGIN
+                    //C021015.sn
+                    IF currXMLport.IMPORTFILE THEN BEGIN
+                      BudgetSummarySheet."Project No." := ProjectFilter;
+                      BudgetSummarySheet.ReCalcSummaryLines('');
+                      BudgetSummarySheet.UpdateBudgetLines(TRUE,'');
+                    END;
+                    //C021015.en
+                  END;
+
+    Format=Variable Text;
+    FieldDelimiter=<None>;
+    FieldSeparator=[;];
+  }
+  ELEMENTS
+  {
+    { [{01A8AC87-65E0-49D6-B998-D49C50F6D9AA}];  ;Root                ;Element ;Text     }
+
+    { [{98B1AF3A-A78B-41D7-AB4E-66C58F133906}];1 ;BudgetLine          ;Element ;Table   ;
+                                                  SourceTable=Table11012001;
+                                                  Import::OnAfterInitRecord=BEGIN
+                                                                              "Budget Line"."Project No." := ProjectFilter; // LAHE 130523
+                                                                              "Budget Line"."Extension Contract" := ExtensionFilter; // LAHE 130523
+                                                                              "Budget Line".Adjustment := AdjustmentFilter; // LAHE 130523
+                                                                            END;
+
+                                                  Import::OnBeforeInsertRecord=VAR
+                                                                                 BudgetLine@1100525000 : Record 11012001;
+                                                                                 RateDec@1000000000 : Decimal;
+                                                                               BEGIN
+                                                                                 //C021015.sn
+                                                                                 IF "Budget Line"."Budget Summary Line" THEN
+                                                                                   currXMLport.SKIP;
+                                                                                 //C021015.en
+
+                                                                                 //C016643.sn
+                                                                                 "Budget Line"."Project No." := ProjectFilter;
+                                                                                 "Budget Line"."Main Project No." := Job."Main Project";
+                                                                                 "Budget Line"."Extension Contract" := ExtensionFilter;
+                                                                                 "Budget Line".Adjustment := AdjustmentFilter;
+                                                                                 "Budget Line"."Option Filter":= OptionFilter;
+                                                                                 //C016643.en
+
+                                                                                 //DP00886.sn
+                                                                                 "Budget Line"."Department Code" := Job."Global Dimension 1 Code";
+                                                                                 "Budget Line"."Currency Code" := Job."Currency Code";
+                                                                                 //DP00886.en
+
+                                                                                 // LAHE 130612 IF ("Budget Line"."Cost Object" <> '') AND ValidateCostObject THEN
+                                                                                 IF ("Budget Line"."Cost Object" <> '') THEN // LAHE 130612
+                                                                                   "Budget Line".GetDefaultsCostObject(FALSE);
+
+                                                                                 //C063268.sn
+                                                                                 IF "Budget Line".Norm <> 0 THEN
+                                                                                   "Budget Line".VALIDATE(Norm);  //fill production rate
+                                                                                 IF "Budget Line"."Rate (LCY)" <> 0 THEN
+                                                                                   "Budget Line".VALIDATE("Rate (LCY)");  //fill rate (fcy)
+                                                                                 IF "Budget Line"."Price (LCY)" <> 0 THEN
+                                                                                   "Budget Line".VALIDATE("Price (LCY)"); //fill price (fcy)
+                                                                                 "Budget Line".CalcTotals;  //fill hours, amount (lcy/fcy)
+                                                                                 //C063268.en
+
+                                                                                 //C016643.sn
+                                                                                 IF "Budget Line".BudgetFixed("Budget Line") THEN
+                                                                                   "Budget Line".GiveErrorMessageBudgetFixed("Budget Line");
+                                                                                 //C016643.en
+
+                                                                                 RecRef.GETTABLE("Budget Line");
+                                                                                 XMLportStatusDialogMgt.ShowImportStatus(RecRef);
+
+                                                                                 //>> LAHE 130522, always add new line
+                                                                                 //Project No.,Adjustment,Extension Contract,Option,Line No.
+                                                                                 BudgetLine := "Budget Line";
+                                                                                 BudgetLine.SETRECFILTER;
+                                                                                 BudgetLine.SETRANGE("Line No.");
+                                                                                 IF NOT BudgetLine.FINDLAST() THEN
+                                                                                   BudgetLine."Line No." := 0;
+                                                                                 BudgetLine."Line No." += 10000;
+                                                                                 "Budget Line"."Line No." := BudgetLine."Line No.";
+                                                                                 //<< LAHE 130522
+                                                                                 IF BudgetLine.GET(
+                                                                                   "Budget Line"."Project No.",
+                                                                                   "Budget Line".Adjustment,
+                                                                                   "Budget Line"."Extension Contract",
+                                                                                   "Budget Line".Option,
+                                                                                   "Budget Line"."Line No.")
+                                                                                 THEN BEGIN
+                                                                                   UpdateBudgetLine(BudgetLine, "Budget Line");
+                                                                                   currXMLport.SKIP;
+                                                                                 END;
+
+                                                                                 //>> ITERO.FH pure#270467 & 275164
+                                                                                 "Budget Line".VALIDATE("Cost Object",CostObject);
+                                                                                 "Budget Line".VALIDATE("Rate Code",RateCode);
+
+                                                                                 IF EVALUATE(RateDec,Rate) THEN
+                                                                                   "Budget Line".VALIDATE("Rate (LCY)",RateDec);
+                                                                                 //<< ITERO.FH pure#270467 & 275164
+                                                                               END;
+
+                                                  Export::OnAfterGetRecord=BEGIN
+                                                                             "Budget Line".Description := CONVERTSTR("Budget Line".Description, '"', ''''); //change " (= fieldseperator) to '
+                                                                             "Budget Line"."Description 2" := CONVERTSTR("Budget Line"."Description 2", '"', '''');
+
+                                                                             RecRef.GETTABLE("Budget Line");
+                                                                             XMLportStatusDialogMgt.ShowExportStatus(RecRef);
+                                                                           END;
+
+                                                  Import::OnAfterInsertRecord=BEGIN
+                                                                                //>> 131126
+                                                                                Quantity:='';
+                                                                                Norm:='';
+                                                                                Rate:='';
+                                                                                Hours:='';
+                                                                                Price:='';
+                                                                                TimeQuantity:='';
+                                                                                //<<
+                                                                                // >> ITERO.FH pure#270467 & 275164
+                                                                                RateCode :='';
+                                                                                CostObject := '';
+                                                                                //<< ITERO.FH pure#270467 & 275164
+                                                                              END;
+                                                                               }
+
+    { [{843CA324-DD44-43D6-8144-8219F548EE25}];2 ;ProjectNo           ;Element ;Field   ;
+                                                  DataType=Code;
+                                                  SourceField=Budget Line::Project No.;
+                                                  MinOccurs=Zero }
+
+    { [{09412B0B-3DC8-40CC-9949-68865D0769AB}];2 ;Element             ;Element ;Field   ;
+                                                  DataType=Code;
+                                                  FieldValidate=No;
+                                                  SourceField=Budget Line::Element;
+                                                  MinOccurs=Zero;
+                                                  Import::OnAfterAssignField=BEGIN
+                                                                               //>> LAHE 130520
+                                                                               JobsSetup.GET();
+
+                                                                               "Budget Line"."Project No." := ProjectFilter;//170830 ITERO.FH
+
+                                                                               //>>IME-031
+                                                                               //IF STRLEN("Budget Line".Element) > STRLEN(DELCHR(JobsSetup."Project Element Format",'=','.')) THEN
+                                                                               //  ERROR(Text001,JobsSetup.FIELDCAPTION("Project Element Format"),JobsSetup.TABLECAPTION
+                                                                               //    ,"Budget Line".Element,JobsSetup."Project Element Format");
+                                                                               //FormatMgmt.CreateProjElem("Budget Line"."Project No.","Budget Line".Element
+                                                                               //    ,"Budget Line".Chapter,"Budget Line".Paragraph,ElementLevel);
+
+                                                                               //>>IME-048
+                                                                               IF "Budget Line".Element <> '' THEN BEGIN
+                                                                                   //
+                                                                                   //MESSAGE('1) Proj %1, Element %2',"Budget Line"."Project No.","Budget Line".Element );
+                                                                                   //
+                                                                               //<<IME-048
+                                                                                  IF STRLEN(DELCHR("Budget Line".Element,'=','.')) <> STRLEN(DELCHR(JobsSetup."Project Element Format",'=','.')) THEN BEGIN
+                                                                                    ERROR(Text001,JobsSetup.FIELDCAPTION("Project Element Format"),JobsSetup.TABLECAPTION
+                                                                                      ,"Budget Line".Element,JobsSetup."Project Element Format");
+                                                                                  END;
+                                                                                  //
+                                                                                  IF ("Budget Line".Element <> '') THEN
+                                                                                     FormatMgmt.CreateProjElem("Budget Line"."Project No.","Budget Line".Element
+                                                                                    ,"Budget Line".Chapter,"Budget Line".Paragraph,ElementLevel);
+                                                                                  //<<IME-031
+                                                                                 IF NOT ProjElement.GET("Budget Line"."Project No.","Budget Line".Element) THEN BEGIN
+                                                                                   //
+                                                                                   //MESSAGE('2) Proj %1, Element %2',"Budget Line"."Project No.","Budget Line".Element );
+                                                                                   //
+                                                                                   ProjElement.INIT;
+                                                                                   ProjElement.VALIDATE("Project No.","Budget Line"."Project No.");
+                                                                                   ProjElement.VALIDATE(Element,"Budget Line".Element);
+                                                                                   IF ProjElement.INSERT(TRUE) THEN;
+                                                                                 END;
+
+                                                                                 "Budget Line".VALIDATE(Element,ProjElement.Element);
+                                                                               //>>IME-048
+                                                                               END;
+                                                                               //<<IME-048
+
+                                                                               //<< LAHE 130520
+                                                                             END;
+                                                                              }
+
+    { [{344471AC-B66F-4FDC-A420-A42274661EFE}];2 ;CostObject          ;Element ;Text    ;
+                                                  DataType=Code;
+                                                  MinOccurs=Zero;
+                                                  Export::OnBeforePassVariable=BEGIN
+                                                                                 CostObject := "Budget Line"."Cost Object";
+                                                                               END;
+                                                                                }
+
+    { [{55D2B003-04A5-464B-A59C-21B8DCE73EF8}];2 ;Description         ;Element ;Field   ;
+                                                  DataType=Text;
+                                                  SourceField=Budget Line::Description;
+                                                  MinOccurs=Zero }
+
+    { [{F6A8D69C-3F0A-4602-A266-C62C157B60BE}];2 ;Quantity            ;Element ;Text    ;
+                                                  DataType=Decimal;
+                                                  MinOccurs=Zero;
+                                                  Import::OnAfterAssignVariable=VAR
+                                                                                  QuantityDec@1100285000 : Decimal;
+                                                                                BEGIN
+                                                                                  //>> 131126 ITERO.SB
+                                                                                  IF EVALUATE(QuantityDec,Quantity) THEN
+                                                                                    "Budget Line".VALIDATE(Quantity,QuantityDec);//Import text variable to budget line
+                                                                                END;
+
+                                                  Export::OnBeforePassVariable=BEGIN
+                                                                                 IF "Budget Line".Quantity=0 THEN
+                                                                                   Quantity:=''
+                                                                                 ELSE
+                                                                                   Quantity:=FORMAT("Budget Line".Quantity);//Export budget line field as text
+                                                                               END;
+                                                                                }
+
+    { [{A3F95291-BAD1-4BE9-A00F-D184AE6E79E5}];2 ;UnitOfMeasure       ;Element ;Field   ;
+                                                  DataType=Code;
+                                                  FieldValidate=Yes;
+                                                  SourceField=Budget Line::Unit of Measure;
+                                                  MinOccurs=Zero }
+
+    { [{D9D84424-5595-4111-B415-6898BCC22A28}];2 ;Norm                ;Element ;Text    ;
+                                                  DataType=Decimal;
+                                                  MinOccurs=Zero;
+                                                  Import::OnAfterAssignVariable=VAR
+                                                                                  NormDec@1100285000 : Decimal;
+                                                                                BEGIN
+                                                                                  IF EVALUATE(NormDec,Norm) THEN
+                                                                                    "Budget Line".VALIDATE(Norm,NormDec);//Import text variable to budget line
+                                                                                END;
+
+                                                  Export::OnBeforePassVariable=BEGIN
+                                                                                 IF "Budget Line".Norm=0 THEN
+                                                                                   Norm:=''
+                                                                                 ELSE
+                                                                                   Norm:=FORMAT("Budget Line".Norm);//Export budget line field as text
+                                                                               END;
+                                                                                }
+
+    { [{E2B0DCD6-3A2A-4294-9B6E-BF20299CBADE}];2 ;RateCode            ;Element ;Text    ;
+                                                  DataType=Code;
+                                                  MinOccurs=Zero;
+                                                  Export::OnBeforePassVariable=BEGIN
+                                                                                 RateCode := "Budget Line"."Rate Code";
+                                                                               END;
+                                                                                }
+
+    { [{71033B66-CB4A-4053-BE4D-FF5B86B13F17}];2 ;Rate                ;Element ;Text    ;
+                                                  DataType=Decimal;
+                                                  MinOccurs=Zero;
+                                                  Import::OnAfterAssignVariable=VAR
+                                                                                  RateDec@1100285000 : Decimal;
+                                                                                BEGIN
+                                                                                  IF EVALUATE(RateDec,Rate) THEN
+                                                                                    "Budget Line".VALIDATE("Rate (LCY)",RateDec);//Import text variable to budget line
+                                                                                END;
+
+                                                  Export::OnBeforePassVariable=BEGIN
+                                                                                 IF "Budget Line"."Rate (LCY)"=0 THEN
+                                                                                   Rate:=''
+                                                                                 ELSE
+                                                                                   Rate:=FORMAT("Budget Line"."Rate (LCY)");//Export budget line field as text
+                                                                               END;
+                                                                                }
+
+    { [{C560CCE4-5620-4703-BCF3-E3A6114FB0E8}];2 ;Hours               ;Element ;Text    ;
+                                                  DataType=Decimal;
+                                                  MinOccurs=Zero;
+                                                  Import::OnAfterAssignVariable=VAR
+                                                                                  HoursDec@1100285000 : Decimal;
+                                                                                BEGIN
+                                                                                  IF EVALUATE(HoursDec,Hours) THEN
+                                                                                    "Budget Line".VALIDATE(Hours,HoursDec);//Import text variable to budget line
+                                                                                END;
+
+                                                  Export::OnBeforePassVariable=BEGIN
+                                                                                 IF "Budget Line".Hours=0 THEN
+                                                                                   Hours:=''
+                                                                                 ELSE
+                                                                                   Hours:=FORMAT("Budget Line".Hours);//Export budget line field as text
+                                                                               END;
+                                                                                }
+
+    { [{D1C38E50-9FB6-4151-B9AF-EB1D0F8E0611}];2 ;Amount              ;Element ;Field   ;
+                                                  DataType=Decimal;
+                                                  SourceField=Budget Line::Amount (LCY);
+                                                  MinOccurs=Zero }
+
+    { [{2E40F1B8-492F-4E8D-8EBC-1C3737D734EA}];2 ;LineNo              ;Element ;Field   ;
+                                                  DataType=Integer;
+                                                  SourceField=Budget Line::Line No.;
+                                                  MinOccurs=Zero }
+
+    { [{E4BC4F58-CC20-4E16-B0D4-E5A846519B63}];2 ;CostType            ;Element ;Field   ;
+                                                  DataType=Option;
+                                                  SourceField=Budget Line::Cost Type;
+                                                  MinOccurs=Zero }
+
+    { [{2B7800A2-F3D6-4BDF-9C07-3C942644899B}];2 ;Price               ;Element ;Text    ;
+                                                  DataType=Decimal;
+                                                  MinOccurs=Zero;
+                                                  Import::OnAfterAssignVariable=VAR
+                                                                                  PriceDec@1100285000 : Decimal;
+                                                                                BEGIN
+                                                                                  IF EVALUATE(PriceDec,Price) THEN
+                                                                                    "Budget Line".VALIDATE("Price (LCY)",PriceDec);//Import text variable to budget line
+                                                                                END;
+
+                                                  Export::OnBeforePassVariable=BEGIN
+                                                                                 IF "Budget Line"."Price (LCY)"=0 THEN
+                                                                                   Price:=''
+                                                                                 ELSE
+                                                                                   Price:=FORMAT("Budget Line"."Price (LCY)");//Export budget line field as text
+                                                                               END;
+                                                                                }
+
+    { [{C86B5EE4-9012-4B6D-B16D-9830995D5E6A}];2 ;TimeQuantity        ;Element ;Text    ;
+                                                  DataType=Decimal;
+                                                  MinOccurs=Zero;
+                                                  Import::OnAfterAssignVariable=VAR
+                                                                                  TimeQuantityDec@1100285000 : Decimal;
+                                                                                BEGIN
+                                                                                  IF EVALUATE(TimeQuantityDec,TimeQuantity) THEN
+                                                                                    "Budget Line".VALIDATE("Time Quantity",TimeQuantityDec)
+                                                                                  ELSE
+                                                                                    //>>131127 When timequantity is empty, '1' should be imported by default
+                                                                                    "Budget Line".VALIDATE("Time Quantity",1);//Import text variable to budget line
+                                                                                    //<<
+                                                                                END;
+
+                                                  Export::OnBeforePassVariable=VAR
+                                                                                 TimeQty@1100285000 : Decimal;
+                                                                               BEGIN
+                                                                                 IF "Budget Line"."Time Quantity"=0 THEN
+                                                                                   TimeQuantity:=''
+                                                                                 ELSE
+                                                                                   TimeQuantity:=FORMAT("Budget Line"."Time Quantity");//Export budget line field as text
+
+                                                                                 //<<
+                                                                               END;
+                                                                                }
+
+    { [{460E89AE-1B9B-4EAE-B752-20CB340C04FA}];2 ;UnitOfTime          ;Element ;Field   ;
+                                                  DataType=Code;
+                                                  SourceField=Budget Line::Unit of Time;
+                                                  MinOccurs=Zero }
+
+    { [{3CBD2E5D-4C44-42F3-903E-5E56A841DBCE}];2 ;Adjustment          ;Element ;Field   ;
+                                                  DataType=Code;
+                                                  SourceField=Budget Line::Adjustment;
+                                                  MinOccurs=Zero }
+
+    { [{37E8DC9B-CE90-4845-AC52-B26F9C68AF4E}];2 ;ExtensionContract   ;Element ;Field   ;
+                                                  DataType=Code;
+                                                  SourceField=Budget Line::Extension Contract;
+                                                  MinOccurs=Zero }
+
+    { [{999C735F-9F81-4553-BDDC-E339807EB5D0}];2 ;Option              ;Element ;Field   ;
+                                                  DataType=Code;
+                                                  SourceField=Budget Line::Option;
+                                                  MinOccurs=Zero }
+
+    { [{13110C73-2721-480D-986C-621CA05180E9}];2 ;Description2        ;Element ;Field   ;
+                                                  DataType=Text;
+                                                  SourceField=Budget Line::Description 2;
+                                                  MinOccurs=Zero }
+
+    { [{7AA50FB7-3B26-4A39-BB45-42147AAB0D9D}];2 ;ElementDescription  ;Element ;Text    ;
+                                                  DataType=Text;
+                                                  MinOccurs=Zero;
+                                                  Import::OnAfterAssignVariable=BEGIN
+                                                                                  //>>ITERO.FH pure#275346
+                                                                                  "Budget Line"."Element Description" := ElementDescription;
+
+                                                                                  //>>IME-048
+                                                                                  //IF ProjElement."Project No." <> '' THEN BEGIN
+                                                                                  IF (ProjElement."Project No." <> '') AND ("Budget Line".Element <> '') THEN BEGIN
+                                                                                  //<<ITERO.FH pure#275346
+                                                                                  //<<IME-048
+                                                                                    ProjElement.Description := "Budget Line"."Element Description";
+                                                                                    ProjElement.MODIFY();
+                                                                                  //>>IME-048
+                                                                                  END;
+                                                                                  //<<IME-048
+                                                                                END;
+
+                                                  Export::OnBeforePassVariable=BEGIN
+                                                                                 //>> ITERO.FH pure#275346
+                                                                                 "Budget Line".CALCFIELDS("Element Description");
+                                                                                 ElementDescription := "Budget Line"."Element Description";
+                                                                                 //<< ITERO.FH pure#275346
+                                                                               END;
+                                                                                }
+
+    { [{E4BC4F58-CC20-4E16-B0D4-E5A846529B63}];2 ;CostType            ;Element ;Field   ;
+                                                  DataType=Option;
+                                                  FieldValidate=Yes;
+                                                  SourceField=Budget Line::Cost Type;
+                                                  MinOccurs=Zero }
+
+    { [{0FEDF738-335B-4B71-A9AF-40D1199F1BE5}];2 ;Manufacturer        ;Element ;Field   ;
+                                                  DataType=Code;
+                                                  FieldValidate=Yes;
+                                                  SourceField=Budget Line::Manufacturer;
+                                                  MinOccurs=Zero }
+
+    { [{007F4D58-F052-4737-AA2E-4B5F69E6A5C6}];2 ;BasicItemNo         ;Element ;Field   ;
+                                                  DataType=Code;
+                                                  FieldValidate=Yes;
+                                                  SourceField=Budget Line::Basic Item;
+                                                  MinOccurs=Zero }
+
+    { [{23BFA934-13A7-4840-A68C-7C663EC6CAD3}];2 ;TradeItemVendorNo   ;Element ;Field   ;
+                                                  DataType=Code;
+                                                  FieldValidate=Yes;
+                                                  SourceField=Budget Line::Vendor (Trade Item);
+                                                  MinOccurs=Zero }
+
+    { [{B7EE8B21-CC0B-47FB-8B9D-F9937DEFA00B}];2 ;TradeItemNo         ;Element ;Field   ;
+                                                  DataType=Code;
+                                                  FieldValidate=Yes;
+                                                  SourceField=Budget Line::Trade Item;
+                                                  MinOccurs=Zero }
+
+    { [{4DD27574-7AA2-4C43-9BCF-0E958D7D3910}];2 ;Description2        ;Element ;Field   ;
+                                                  DataType=Text;
+                                                  SourceField=Budget Line::Description 2;
+                                                  MinOccurs=Zero }
+
+    { [{666ABE63-D650-46A2-BCBD-3950705BC868}];2 ;CostComponent       ;Element ;Field   ;
+                                                  DataType=Code;
+                                                  SourceField=Budget Line::Cost Component }
+
+    { [{F508A7E4-DF02-4037-A226-104FEDBCC7C0}];2 ;BudgetSummaryLine   ;Element ;Field   ;
+                                                  DataType=Boolean;
+                                                  SourceField=Budget Line::Budget Summary Line }
+
+  }
+  EVENTS
+  {
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      OnOpenPage=BEGIN
+                   EnableFields; //mg, 23-11-10: M23401
+                   IF currXMLport.IMPORTFILE THEN
+                     Direction := Direction::Import
+                   ELSE
+                     Direction := Direction::Export;
+                 END;
+
+    }
+    CONTROLS
+    {
+      { 1210190003;0;Container;
+                  ContainerType=ContentArea }
+
+      { 1210190000;1;Group  ;
+                  CaptionML=[ENU=Options;
+                             SVE=Alternativ] }
+
+      { 1210190002;2;Field  ;
+                  CaptionML=[ENU=Direction;
+                             SVE=Riktning];
+                  OptionCaptionML=[ENU=Import,Export;
+                                   SVE=Importera, exportera];
+                  SourceExpr=Direction;
+                  OnValidate=BEGIN
+                               //mg.sn, 23-11-10: M23401
+                               currXMLport.IMPORTFILE(Direction = Direction::Import);
+                               EnableFields;
+                               //mg.en, 23-11-10: M23401
+                             END;
+                              }
+
+      { 1210190001;2;Field  ;
+                  Name=cbValidateCostObject;
+                  CaptionML=ENU=Validate Cost Object;
+                  SourceExpr=ValidateCostObject;
+                  Visible=FALSE;
+                  Editable=cbValidateCostObjectEditable }
+
+    }
+  }
+  CODE
+  {
+    VAR
+      Job@1100525000 : Record 11072003;
+      RecRef@1100525002 : RecordRef;
+      XMLportStatusDialogMgt@1100525003 : Codeunit 11130006;
+      ProjectFilter@1100525001 : Code[20];
+      ExtensionFilter@1100529400 : Code[20];
+      AdjustmentFilter@1100529401 : Code[20];
+      OptionFilter@1100529402 : Code[20];
+      ValidateCostObject@1210190000 : Boolean;
+      Direction@1210190001 : 'Import,Export';
+      cbValidateCostObjectEditable@1210190002 : Boolean INDATASET;
+      "-EVRY-"@1000000000 : Integer;
+      FormatMgmt@1000000002 : Codeunit 11012022;
+      JobsSetup@1000000005 : Record 315;
+      ProjElement@1000000001 : Record 11012010;
+      ElementLevel@1000000003 : Integer;
+      Text001@1000000004 : TextConst 'ENU=Element code specified (%3) is not according to %1 (%4) in the %2;SVE=Elementkoden (%3) matchar inte %1 (%4) i %2';
+      filterProjectNo@1000000006 : Code[20];
+      filterAdjustment@1000000007 : Code[10];
+      filterExtContr@1000000008 : Code[10];
+      filterOption@1000000009 : Code[20];
+      Text002@1000000010 : TextConst 'ENU=Imported %1 must be "%2";SVE=Inl„st %1 m†ste vara "%2"';
+
+    PROCEDURE EnableFields@1210190005();
+    BEGIN
+      cbValidateCostObjectEditable := (Direction = Direction::Import);
+    END;
+
+    PROCEDURE UpdateBudgetLine@1100525000(VAR BudgetLine@1100525000 : Record 11012001;BudgetLineImport@1100525001 : Record 11012001);
+    VAR
+      RateDec@1100285100 : Decimal;
+    BEGIN
+      //DP00886.sn
+      BudgetLine."Department Code" := BudgetLineImport."Department Code";
+      BudgetLine."Currency Code" := BudgetLineImport."Currency Code";
+      //DP00886.en
+      IF BudgetLine.Element <> '' THEN
+      //
+        BudgetLine.VALIDATE(Element, BudgetLineImport.Element)  //fill chapter, paragraph
+      ELSE
+        BudgetLine.VALIDATE(Element, '' );
+      BudgetLine."Cost Type" := BudgetLineImport."Cost Type";
+      BudgetLine."Cost Object" := BudgetLineImport."Cost Object";
+      BudgetLine.Description := BudgetLineImport.Description;
+      BudgetLine."Description 2" := BudgetLineImport."Description 2";
+      BudgetLine."Time Quantity" := BudgetLineImport."Time Quantity";
+      BudgetLine."Unit of Time" := BudgetLineImport."Unit of Time";
+      BudgetLine.Quantity := BudgetLineImport.Quantity;
+      BudgetLine."Unit of Measure" := BudgetLineImport."Unit of Measure";
+      BudgetLine.VALIDATE(Norm, BudgetLineImport.Norm);  //fill production rate
+      BudgetLine."Rate Code" := BudgetLineImport."Rate Code";
+      BudgetLine.VALIDATE("Rate (LCY)", BudgetLineImport."Rate (LCY)");  //fill rate (fcy)
+      BudgetLine.VALIDATE("Price (LCY)", BudgetLineImport."Price (LCY)");  //fill price (fcy)
+      BudgetLine.CalcTotals;  //fill hours, amount (lcy/fcy)
+      //BudgetLine.GetDiscipline;
+      BudgetLine.MODIFY;
+    END;
+
+    BEGIN
+    {
+      CC: Dataport 11012001
+      -EVRY-
+      LAHE 130520 IMSE-044
+      LAHE 130522 Always add new lines
+      LAHE 130523 Remove data control and assign selected "Extension Contract" (filtered)
+
+      GHE  131001 >>IME-031
+
+      131126 ITERO.SB IME-031 Handle decimals as text to get blanks instead of 0,00
+      131127 ITERO.SB IME-031 When timequantity is empty, '1' should be imported by default
+      150206 ITERO.DL IME-287 changed definiton of local variable QuantityDec  from Int -> Dec
+      150223 ITERO.WG IME-285 Changed filter for Adjustment and Option
+      170705 ITERO.FH pure#270467 & pure#275164 VALIDATE in rate from file, and "Rate Code"
+      170830 ITERO.FH pure#275346 "Element Description" imports and exports properly.
+      170830 ITERO.FH pure#275523 If a file donsn't have a "Project no", it get's it from filter on Req page
+    }
+    END.
+  }
+}
+

@@ -1,0 +1,3382 @@
+OBJECT Codeunit 11125349 Approval Management 4PS Constr
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00,4PSSE;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData 25=rm,
+                TableData 122=rm,
+                TableData 124=rm,
+                TableData 454=rimd,
+                TableData 455=rimd,
+                TableData 456=rimd,
+                TableData 457=rimd;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      UnsupportedRecordTypeErr@1100528200 : TextConst '@@@=Record type Customer is not supported by this workflow response.;ENU=Record type %1 is not supported by this workflow response.;NOR=Posttypen %1 st›ttes ikke av dette arbeidsflytsvaret.;SVE=Posttyp %1 st”ds inte i arbetsfl”dessvaret.';
+      DocumentCaptureSetup@1100528202 : Record 6085573;
+      DCSetupRead@1100528201 : Boolean;
+      Text001@1100528206 : TextConst 'ENU=No open approval entries found.';
+      Text013@1100525000 : TextConst 'ENU=You are not allowed to perform this action.\\In order to perform this action you must be member of the role ''%1''.';
+      Text11012001@1100528205 : TextConst '@@@="%1=document type, %2=document no., e.g. Order 321 must be approved...";ENU=%1 %2 must be approved and released before you can perform this action.;NOR=%1 %2 m† godkjennes og frigis f›r du kan utf›re denne handlingen.;SVE=%1 %2 m†ste godk„nnas och sl„ppas innan du kan utf”ra den h„r †tg„rden.';
+      Text024@1100528204 : TextConst 'ENU=%1 %2 was put on hold.;SVE=%1 %2 „r stoppad.';
+      Text11012003@1100528203 : TextConst 'ENU=Specific On Hold Code in the Approval Setup is not set.';
+      Text11012005@1100528212 : TextConst 'ENU=Post %1 %2 not possible because %3 %4.';
+      WebSearchMgt@1100528213 : Codeunit 6085748;
+      Text007@1100528215 : TextConst 'ENU=%1 %2 was rejected';
+      Text008@1100528214 : TextConst 'ENU=%1 %2 was sent back';
+      Text027@1100528216 : TextConst 'ENU=%1 approved by %2 on behalf of %3.';
+      Text302@1100528224 : TextConst 'ENU=Assigned Amounts differ from Imported Amounts. Approval not allowed.';
+      NoWorkflowEnabledErr@1100528400 : TextConst 'ENU=This record is not supported by related approval workflow.';
+      WorkflowManagement@1100528401 : Codeunit 1501;
+      WorkflowEventHandling4PS@1100528402 : Codeunit 11125350;
+      Text020@1100528403 : TextConst 'ENU=Approved and forwarded from %1 to %2;SVE="Godk„nd och vidarebefordrad fr†n %1 till %2     "';
+      Text005@1100528404 : TextConst 'ENU=Forwarded from %1 to %2';
+      Text009@1100528406 : TextConst 'ENU=Send back to %1,Reject';
+      Text010@1100525001 : TextConst 'ENU=Reject is not possible, approval can not be transferred to other approver.';
+      Text030@1100525002 : TextConst 'ENU=Updating ...\\@1@@@@@@@@@@@@@@@@@@@@';
+      Text031@1100525006 : TextConst 'ENU=must be Open or Created.';
+      Text032@1100525005 : TextConst 'ENU=Do you want to change %1 to %2?;SVE=Vill du „ndra %1 till %2?';
+      Text035@1100525007 : TextConst 'ENU=Approver %1 changed to %2';
+      Text036@1100525003 : TextConst 'ENU=Approver %1 was deleted';
+      WorkflowStepInstance@1100525004 : Record 1504;
+      Text037@1100528207 : TextConst 'ENU=Approver %1 added by %2.';
+      Text038@1100525008 : TextConst 'ENU=You must enter a comment.';
+      Text039@1100527450 : TextConst 'ENU=%1 (%2) is not equal to entries balance (%3).';
+      Text040@1100529600 : TextConst 'ENU=The number of approvers for %1 should be %2. Current number of approvers is %3.';
+      Text041@1100529601 : TextConst 'ENU=\Continue?';
+
+    PROCEDURE OpenApprovalEntryPurchDoc@1100528200(Variant@1000 : Variant) : Boolean;
+    VAR
+      RecRef@1100528201 : RecordRef;
+      ApprovalEntry@1011 : Record 454;
+      PurchInvHeader@1100528200 : Record 122;
+      PurchCrMHeader@1100528202 : Record 124;
+    BEGIN
+      RecRef.GETTABLE(Variant);
+      CASE RecRef.NUMBER OF
+        DATABASE::"Purch. Inv. Header":
+          BEGIN
+            RecRef.SETTABLE(PurchInvHeader);
+            WITH ApprovalEntry DO BEGIN
+              RESET;
+              SETRANGE("Table ID",DATABASE::"Purch. Inv. Header");
+              SETRANGE("Document Type",ApprovalEntry."Document Type"::Invoice);
+              SETRANGE("Document No.",PurchInvHeader."No.");
+              SETFILTER(Status, '%1|%2',Status::Created,Status::Open);
+              IF FINDSET THEN
+                EXIT(TRUE);
+            END;
+          END;
+        DATABASE::"Purch. Cr. Memo Hdr.":
+          BEGIN
+            RecRef.SETTABLE(PurchCrMHeader);
+             WITH ApprovalEntry DO BEGIN
+              RESET;
+              SETRANGE("Table ID",DATABASE::"Purch. Cr. Memo Hdr.");
+              SETRANGE("Document Type",ApprovalEntry."Document Type"::"Credit Memo");
+              SETRANGE("Document No.",PurchCrMHeader."No.");
+              SETFILTER(Status, '%1|%2',Status::Created,Status::Open);
+              IF FINDSET THEN
+                EXIT(TRUE);
+            END;
+          END;
+        ELSE
+          ERROR(UnsupportedRecordTypeErr,RecRef.CAPTION);
+      END;
+      EXIT(FALSE);
+    END;
+
+    PROCEDURE FilterApprovalEntryOpen@1100528203(lTableID@1100527650 : Integer;lDocType@1100528200 : Integer;lDocNo@1100528201 : Code[20];VAR ApprovalEntry@1000000001 : Record 454;OnlyCurrUser@161024012 : Boolean);
+    VAR
+      UserFilter@161024013 : Text[1024];
+    BEGIN
+      ApprovalEntry.SETCURRENTKEY("Table ID","Document Type","Document No.");
+      ApprovalEntry.SETRANGE("Table ID", lTableID);
+      ApprovalEntry.SETRANGE("Document Type", lDocType);
+      ApprovalEntry.SETRANGE("Document No.",lDocNo);
+
+      IF OnlyCurrUser THEN BEGIN
+        UserFilter := GetApprovalSharingToUserFilter(USERID);
+        IF UserFilter = '' THEN
+          ApprovalEntry.SETRANGE("Approver ID",USERID)
+        ELSE
+          ApprovalEntry.SETFILTER("Approver ID",USERID + '|' + UserFilter);
+      END;
+
+      ApprovalEntry.SETRANGE(Status,ApprovalEntry.Status::Open);
+      IF NOT ApprovalEntry.FINDFIRST THEN
+        ERROR(Text001);
+    END;
+
+    PROCEDURE FilterApprovalEntryCreatedAndOpen@1100528220(lTableID@1100527650 : Integer;lDocType@1100528200 : Integer;lDocNo@1100528201 : Code[20];VAR ApprovalEntry@1000000001 : Record 454;OnlyCurrUser@161024012 : Boolean);
+    VAR
+      UserFilter@161024013 : Text[1024];
+    BEGIN
+      ApprovalEntry.SETCURRENTKEY("Table ID","Document Type","Document No.");
+      ApprovalEntry.SETRANGE("Table ID", lTableID);
+      ApprovalEntry.SETRANGE("Document Type", lDocType);
+      ApprovalEntry.SETRANGE("Document No.",lDocNo);
+
+      IF OnlyCurrUser THEN BEGIN
+        UserFilter := GetApprovalSharingToUserFilter(USERID);
+        IF UserFilter = '' THEN
+          ApprovalEntry.SETRANGE("Approver ID",USERID)
+        ELSE
+          ApprovalEntry.SETFILTER("Approver ID",USERID + '|' + UserFilter);
+      END;
+
+      ApprovalEntry.SETFILTER(Status, '%1|%2',ApprovalEntry.Status::Created,ApprovalEntry.Status::Open);
+
+      IF NOT ApprovalEntry.FINDFIRST THEN
+        ERROR(Text001);
+    END;
+
+    PROCEDURE SwitchOnHold@1100528205(lTableID@1100527650 : Integer;lDocType@1100528201 : Integer;lDocNo@1100528200 : Code[20];AskComment@1100528205 : Boolean;GiveMessage@1100528204 : Boolean);
+    VAR
+      WorkFlowSetup4PSConstruct@1100525000 : Record 11229316;
+      PurchInvHeader@1100528202 : Record 122;
+      PurchCrMemoHdr@1100528203 : Record 124;
+      PurchaseHeader@1100527651 : Record 38;
+    BEGIN
+      WorkFlowSetup4PSConstruct.GET;
+      IF WorkFlowSetup4PSConstruct."Specific On Hold Code" = '' THEN
+        ERROR(Text11012003);
+
+      IF lTableID = DATABASE::"Purch. Inv. Header" THEN BEGIN
+        PurchInvHeader.GET(lDocNo);
+        IF (PurchInvHeader."On Hold" = '') OR (PurchInvHeader."On Hold" = WorkFlowSetup4PSConstruct."Specific On Hold Code") THEN
+          PutOnHold(lTableID, lDocType, lDocNo,FALSE,FALSE,TRUE)
+        ELSE
+          PutOnSpecificHold(lTableID, lDocType, lDocNo,WorkFlowSetup4PSConstruct."Specific On Hold Code",TRUE,TRUE);
+      END;
+      IF lTableID = DATABASE::"Purch. Cr. Memo Hdr." THEN BEGIN
+        PurchCrMemoHdr.GET(lDocNo);
+        IF (PurchCrMemoHdr."On Hold" = '') OR (PurchCrMemoHdr."On Hold" = WorkFlowSetup4PSConstruct."Specific On Hold Code") THEN
+          PutOnHold(lTableID, lDocType, lDocNo,TRUE,TRUE,TRUE)
+        ELSE
+          PutOnSpecificHold(lTableID, lDocType, lDocNo,WorkFlowSetup4PSConstruct."Specific On Hold Code",TRUE,TRUE);
+      END;
+      IF lTableID = DATABASE::"Purchase Header" THEN BEGIN
+        PurchaseHeader.GET(lDocType, lDocNo);
+        IF (PurchaseHeader."On Hold" = '') OR (PurchaseHeader."On Hold" = WorkFlowSetup4PSConstruct."Specific On Hold Code") THEN
+          PutOnHold(lTableID, lDocType, lDocNo,FALSE,FALSE,TRUE)
+        ELSE
+          PutOnSpecificHold(lTableID, lDocType, lDocNo,WorkFlowSetup4PSConstruct."Specific On Hold Code",TRUE,TRUE);
+      END;
+    END;
+
+    PROCEDURE PutOnHold@1100528204(lTableID@1100527650 : Integer;lDocType@1100528201 : Integer;lDocNo@1100528200 : Code[20];AskComment@1100528205 : Boolean;GiveMessage@1100528206 : Boolean;OnlyCurrUser@1100528207 : Boolean);
+    VAR
+      ApprovalEntry@1100528208 : Record 454;
+      PurchInvHeader@1100528202 : Record 122;
+      PurchCrMemoHdr@1100528203 : Record 124;
+      OnHoldCodeRec@1100528204 : Record 11012031;
+      UserSetup@1100529400 : Record 91;
+      PurchaseHeader@1100527651 : Record 38;
+    BEGIN
+      //**4PS
+      FilterApprovalEntryCreatedAndOpen(lTableID, lDocType, lDocNo,ApprovalEntry,OnlyCurrUser);
+
+      IF lTableID IN [DATABASE::"Purchase Header", DATABASE::"Purch. Inv. Header"] THEN
+        OnHoldCodeRec.SETRANGE("Default Value Purchase Invoice", TRUE);
+      IF lTableID = DATABASE::"Purch. Cr. Memo Hdr." THEN
+        OnHoldCodeRec.SETRANGE("Default Value Credit Memo", TRUE);
+
+      IF NOT OnHoldCodeRec.FIND('-') THEN BEGIN
+        UserSetup.INIT;
+        IF UserSetup.GET(USERID) THEN;
+        IF UserSetup."Approvement Initials" <> '' THEN
+          OnHoldCodeRec.Code := COPYSTR(UserSetup."Approvement Initials",1,MAXSTRLEN(OnHoldCodeRec.Code))
+        ELSE
+          OnHoldCodeRec.Code := COPYSTR(USERID,1,MAXSTRLEN(OnHoldCodeRec.Code));
+      END;
+
+      IF lTableID = DATABASE::"Purch. Inv. Header" THEN BEGIN
+        PurchInvHeader.GET(lDocNo);
+        PurchInvHeader."On Hold" := OnHoldCodeRec.Code;
+        PurchInvHeader.MODIFY(TRUE);
+        PurchInvHeader.UpdateOnHoldOfPurchaseInvoice(lDocNo,OnHoldCodeRec.Code,FALSE);
+        IF GiveMessage THEN
+          MESSAGE(Text024,ApprovalEntry."Document Type",PurchInvHeader."No.");
+      END;
+      IF lTableID = DATABASE::"Purch. Cr. Memo Hdr." THEN BEGIN
+        PurchCrMemoHdr.GET(lDocNo);
+        PurchCrMemoHdr."On Hold" := OnHoldCodeRec.Code;
+        PurchCrMemoHdr.MODIFY(TRUE);
+        PurchCrMemoHdr.UpdateOnHoldOfPurchCreditMemo(lDocNo,OnHoldCodeRec.Code,FALSE);
+        IF GiveMessage THEN
+          MESSAGE(Text024,ApprovalEntry."Document Type",PurchCrMemoHdr."No.");
+      END;
+      IF lTableID = DATABASE::"Purchase Header" THEN BEGIN
+        PurchaseHeader.GET(lDocType, lDocNo);
+        PurchaseHeader."On Hold" := OnHoldCodeRec.Code;
+        PurchaseHeader.MODIFY(TRUE);
+        IF GiveMessage THEN
+          MESSAGE(Text024,ApprovalEntry."Document Type",PurchaseHeader."No.");
+      END;
+    END;
+
+    PROCEDURE PutOnSpecificHold@1100528223(lTableID@1100527650 : Integer;lDocType@1100528201 : Integer;lDocNo@1100528200 : Code[20];lOnHoldCode@1100528207 : Code[3];AskComment@1100528205 : Boolean;GiveMessage@1100528206 : Boolean);
+    VAR
+      ApprovalEntry@161024017 : Record 454;
+      PurchInvHeader@1100528202 : Record 122;
+      PurchCrMemoHdr@1100528203 : Record 124;
+      OnHoldCodeRec@1100528204 : Record 11012031;
+      PurchaseHeader@1100527651 : Record 38;
+    BEGIN
+      IF lOnHoldCode = '' THEN
+        EXIT;
+
+      FilterApprovalEntryOpen(lTableID, lDocType, lDocNo,ApprovalEntry,TRUE);
+
+      IF AskComment THEN
+        RequestComment(lTableID, lDocType, lDocNo);
+
+      OnHoldCodeRec.GET(lOnHoldCode);
+
+      IF lTableID = DATABASE::"Purch. Inv. Header" THEN BEGIN
+        PurchInvHeader.GET(lDocNo);
+        PurchInvHeader."On Hold" := OnHoldCodeRec.Code;
+        PurchInvHeader.MODIFY(TRUE);
+        PurchInvHeader.UpdateOnHoldOfPurchaseInvoice(lDocNo,OnHoldCodeRec.Code,FALSE);
+        IF GiveMessage THEN
+          MESSAGE(Text024,ApprovalEntry."Document Type",PurchInvHeader."No.", lOnHoldCode);
+      END;
+      IF lTableID = DATABASE::"Purch. Cr. Memo Hdr." THEN BEGIN
+        PurchCrMemoHdr.GET(lDocNo);
+        PurchCrMemoHdr."On Hold" := OnHoldCodeRec.Code;
+        PurchCrMemoHdr.MODIFY(TRUE);
+        PurchCrMemoHdr.UpdateOnHoldOfPurchCreditMemo(lDocNo,OnHoldCodeRec.Code,FALSE);
+        IF GiveMessage THEN
+          MESSAGE(Text024,ApprovalEntry."Document Type",PurchCrMemoHdr."No.", lOnHoldCode);
+      END;
+      IF lTableID = DATABASE::"Purchase Header"  THEN BEGIN
+        PurchaseHeader.GET(lDocType, lDocNo);
+        PurchaseHeader."On Hold" := OnHoldCodeRec.Code;
+        PurchaseHeader.MODIFY(TRUE);
+        IF GiveMessage THEN
+          MESSAGE(Text024,ApprovalEntry."Document Type",PurchCrMemoHdr."No.");
+      END;
+    END;
+
+    PROCEDURE CheckResetOnHold@1100525002(Variant@1100525000 : Variant);
+    VAR
+      RecRef@1100525001 : RecordRef;
+      ApprovalEntry@161024017 : Record 454;
+      PurchInvHeader@1100528202 : Record 122;
+      PurchCrMemoHdr@1100528203 : Record 124;
+      WorkFlowSetup4PSConstruct@1100528206 : Record 11229316;
+      ApprovalEntry2@1100528200 : Record 454;
+    BEGIN
+      WorkFlowSetup4PSConstruct.GET;
+      IF WorkFlowSetup4PSConstruct."Specific On Hold Code" = '' THEN
+        EXIT;
+
+      RecRef.GETTABLE(Variant);
+      IF RecRef.NUMBER = DATABASE::"Approval Entry" THEN BEGIN
+        RecRef.SETTABLE(ApprovalEntry2);
+        RecRef.GET(ApprovalEntry2."Record ID to Approve");
+      END;
+
+      CASE RecRef.NUMBER OF
+        DATABASE::"Purch. Inv. Header":
+          BEGIN
+            RecRef.SETTABLE(PurchInvHeader);
+            WITH ApprovalEntry DO BEGIN
+              INIT;
+              SETRANGE("Table ID",DATABASE::"Purch. Inv. Header");
+              SETRANGE("Document Type",ApprovalEntry."Document Type"::Invoice);
+              SETRANGE("Document No.",PurchInvHeader."No.");
+              SETRANGE(Status,Status::Created,Status::Open);
+              IF FINDSET(TRUE,FALSE) THEN BEGIN
+                PurchInvHeader.FIND('=');
+                IF PurchInvHeader."On Hold" = WorkFlowSetup4PSConstruct."Specific On Hold Code" THEN
+                  PutOnHold(DATABASE::"Purch. Inv. Header", 2, PurchInvHeader."No.", FALSE,FALSE,FALSE)
+              END;
+            END;
+          END;
+        DATABASE::"Purch. Cr. Memo Hdr.":
+           BEGIN
+            RecRef.SETTABLE(PurchCrMemoHdr);
+            WITH ApprovalEntry DO BEGIN
+              INIT;
+              SETRANGE("Table ID",DATABASE::"Purch. Cr. Memo Hdr.");
+              SETRANGE("Document Type",ApprovalEntry."Document Type"::"Credit Memo");
+              SETRANGE("Document No.",PurchCrMemoHdr."No.");
+              SETRANGE(Status,Status::Created,Status::Open);
+              IF FINDSET(TRUE,FALSE) THEN BEGIN
+                PurchCrMemoHdr.FIND('=');
+                IF PurchCrMemoHdr."On Hold" = WorkFlowSetup4PSConstruct."Specific On Hold Code" THEN
+                  PutOnHold(DATABASE::"Purch. Cr. Memo Hdr.", 3, PurchCrMemoHdr."No.", FALSE,FALSE,FALSE)
+              END;
+            END;
+          END;
+        DATABASE::"Purchase Header": ;
+      ELSE
+        ERROR(UnsupportedRecordTypeErr,RecRef.CAPTION);
+      END;
+    END;
+
+    PROCEDURE RemoveOnHold@1100528239(Variant@1100525000 : Variant);
+    VAR
+      RecRef@1100525001 : RecordRef;
+      PurchInvHeader@1100528202 : Record 122;
+      PurchCrMemoHdr@1100528203 : Record 124;
+      ApprovalEntry2@1100528200 : Record 454;
+      PurchaseHeader@1100528201 : Record 38;
+    BEGIN
+      RecRef.GETTABLE(Variant);
+      IF RecRef.NUMBER = DATABASE::"Approval Entry" THEN BEGIN
+        RecRef.SETTABLE(ApprovalEntry2);
+        RecRef.GET(ApprovalEntry2."Record ID to Approve");
+      END;
+
+      CASE RecRef.NUMBER OF
+        DATABASE::"Purch. Inv. Header":
+          BEGIN
+            RecRef.SETTABLE(PurchInvHeader);
+            PurchInvHeader.FIND('=');
+            IF PurchInvHeader."On Hold" <> '' THEN
+              PurchInvHeader.UpdateOnHoldOfPurchaseInvoice(PurchInvHeader."No.", '', TRUE);
+            PurchInvHeader.FIND('=');
+          END;
+        DATABASE::"Purch. Cr. Memo Hdr.":
+          BEGIN
+            RecRef.SETTABLE(PurchCrMemoHdr);
+            PurchCrMemoHdr.FIND('=');
+            IF PurchCrMemoHdr."On Hold" <> '' THEN
+              PurchCrMemoHdr.UpdateOnHoldOfPurchCreditMemo(PurchCrMemoHdr."No.", '', TRUE);
+            PurchCrMemoHdr.FIND('=');
+          END;
+        DATABASE::"Purchase Header":
+          BEGIN
+            RecRef.SETTABLE(PurchaseHeader);
+            PurchaseHeader.FIND('=');
+            IF PurchaseHeader."On Hold" <> '' THEN BEGIN
+              PurchaseHeader.VALIDATE("On Hold", '');
+              PurchaseHeader.MODIFY(TRUE);
+            END;
+          END;
+      ELSE
+        ERROR(UnsupportedRecordTypeErr,RecRef.CAPTION);
+      END;
+    END;
+
+    PROCEDURE CalcPurchDocAmount@24(PurchHeader@1002 : Record 38;VAR ApprovalAmount@1001 : Decimal;VAR ApprovalAmountLCY@1000 : Decimal);
+    VAR
+      TempPurchLine@1009 : TEMPORARY Record 39;
+      TotalPurchLine@1008 : Record 39;
+      TotalPurchLineLCY@1007 : Record 39;
+      PurchPost@1006 : Codeunit 90;
+      TempAmount@1005 : Decimal;
+      VAtText@1004 : Text[30];
+    BEGIN
+      PurchHeader.CalcInvDiscForHeader;
+      PurchPost.GetPurchLines(PurchHeader,TempPurchLine,0);
+      CLEAR(PurchPost);
+      PurchPost.SumPurchLinesTemp(
+        PurchHeader,TempPurchLine,0,TotalPurchLine,TotalPurchLineLCY,
+        TempAmount,VAtText);
+      ApprovalAmount := TotalPurchLine.Amount;
+      ApprovalAmountLCY := TotalPurchLineLCY.Amount;
+    END;
+
+    PROCEDURE IsDocumentCaptureActive@1100409000() : Boolean;
+    VAR
+      FPSLicenseManagement@1100527400 : Codeunit 11229289;
+    BEGIN
+      IF NOT DCSetupRead THEN BEGIN
+        IF NOT FPSLicenseManagement.LicenseAndReadPermissionForTable(DocumentCaptureSetup) THEN
+          EXIT(FALSE);
+        IF DocumentCaptureSetup.GET THEN;
+          DCSetupRead := TRUE;
+      END;
+      EXIT(DocumentCaptureSetup."Document Nos." <> '');
+    END;
+
+    PROCEDURE CheckPostedApprovalEntries@1100528211(DocNo@1100528201 : Code[20];TableID@1100528200 : Integer) : Boolean;
+    VAR
+      PostedApprvlEntry@1000 : Record 456;
+    BEGIN
+      //**4PS
+      PostedApprvlEntry.SETRANGE("Table ID",TableID);
+      PostedApprvlEntry.SETRANGE("Document No.",DocNo);
+      IF PostedApprvlEntry.FINDFIRST THEN
+        EXIT(TRUE);
+
+      EXIT(FALSE)
+    END;
+
+    PROCEDURE PrePostApprovalCheckPurch@39(VAR PurchaseHeader@1001 : Record 38) : Boolean;
+    VAR
+      WorkFlowSetup4PSConstruct@1100525000 : Record 11229316;
+      PurchaseHeaderDCInfo@1100525001 : Record 6085767;
+      ApprovalEntry@1100525002 : Record 454;
+    BEGIN
+      IF NOT CheckApprPurchaseDocument(PurchaseHeader) THEN
+        EXIT(TRUE);
+
+      IF IsDocumentCaptureActive THEN BEGIN
+        WorkFlowSetup4PSConstruct.GET;
+        IF WorkFlowSetup4PSConstruct."Appr. P. Hdr. And P. I. Hdr." THEN BEGIN   //** Procedure: 'Advice Request' is active
+          IF PurchaseHeaderDCInfo.GetApprovalFlowCode(PurchaseHeader) = '' THEN BEGIN
+            //This part may lead to errors, startof. //if problems when this check is done before the approval entry is set to approved. in that case remove this check.
+            ApprovalEntry.SETCURRENTKEY("Table ID","Document Type","Document No.","Sequence No.");
+            ApprovalEntry.SETRANGE("Table ID",DATABASE::"Purchase Header");
+            ApprovalEntry.SETRANGE("Document Type",PurchaseHeader."Document Type");
+            ApprovalEntry.SETRANGE("Document No.",PurchaseHeader."No.");
+            ApprovalEntry.SETFILTER(Status,'%1|%2',ApprovalEntry.Status::Created,ApprovalEntry.Status::Open);
+            IF ApprovalEntry.ISEMPTY THEN
+            //This part may lead to errors, endof
+              EXIT(TRUE);
+          END;
+        END;
+      END;
+
+      IF NOT (PurchaseHeader.Status IN [PurchaseHeader.Status::Released,PurchaseHeader.Status::"Pending Prepayment"]) THEN
+        ERROR(Text11012001,PurchaseHeader."Document Type",PurchaseHeader."No.");
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE CheckApprPurchaseDocument@29(VAR PurchaseHeader@1000 : Record 38) : Boolean;
+    VAR
+      ApprovalsMgmt@1100528400 : Codeunit 1535;
+    BEGIN
+      IF ApprovalsMgmt.IsPurchaseApprovalsWorkflowEnabled(PurchaseHeader) THEN
+        EXIT(TRUE)
+      ELSE
+        EXIT(FALSE)
+    END;
+
+    PROCEDURE DCKeepOnHold@1100525008() : Boolean;
+    VAR
+      WorkFlowSetup4PSConstruct@1100528200 : Record 11229316;
+    BEGIN
+      //**4PS
+      //Procedure 'Advice Request'.
+      //Aproval procedure sequentially on table 38 (occasionally user defined) and on table 122 (always)
+      //Done by manually setting approval flow code on 38.
+      IF NOT IsDocumentCaptureActive THEN
+        EXIT(FALSE);
+
+      IF WorkFlowSetup4PSConstruct.GET THEN BEGIN
+        IF WorkFlowSetup4PSConstruct."Purch. Hdr. Inv. Keep On Hold" AND WorkFlowSetup4PSConstruct."Appr. P. Hdr. And P. I. Hdr." THEN
+          EXIT(TRUE);
+      END;
+
+      EXIT(FALSE);
+    END;
+
+    PROCEDURE RejectPurchInvHeader4PS@1100528208(VAR PurchInvHeader@1100528201 : Record 122);
+    VAR
+      ApprovalEntry@1000000002 : Record 454;
+      ApprovalsBridge4PSConstruct@1100528202 : Codeunit 11125348;
+      Answer@161024012 : 'Dialog Cancelled,Send Back,Reject';
+      DummyApprovalEntry@1100528200 : Record 454;
+    BEGIN
+      ApprovalsBridge4PSConstruct.FilterApprovalEntry4PS(DATABASE::"Purch. Inv. Header",2,PurchInvHeader."No.",ApprovalEntry,TRUE);
+
+      Answer := SendBackOrRejectApprovalReq(ApprovalEntry);
+      IF Answer = Answer::"Dialog Cancelled" THEN
+        ERROR('');
+
+      IF Answer = Answer::"Send Back" THEN
+        ApprovalsBridge4PSConstruct.SendBackApprovalRequest(ApprovalEntry)
+      ELSE
+        ApprovalsBridge4PSConstruct.RejectApprovalRequest(ApprovalEntry);
+
+      IF IsDocumentCaptureActive THEN BEGIN
+        WebSearchMgt.UpdateWebSearchFromAppvlEntry(ApprovalEntry,ApprovalEntry."Approver ID");
+        WebSearchMgt.UpdateWebSearchFromAppvlEntry(ApprovalEntry,USERID);
+      END;
+
+      DummyApprovalEntry."Document Type" := DummyApprovalEntry."Document Type"::Invoice;
+      IF ApprovalEntry.ISEMPTY THEN BEGIN
+        IF Answer = Answer::"Send Back" THEN
+          MESSAGE(Text008, DummyApprovalEntry."Document Type",PurchInvHeader."No.")
+        ELSE
+          MESSAGE(Text007, DummyApprovalEntry."Document Type",PurchInvHeader."No.");
+      END;
+    END;
+
+    PROCEDURE RejectPurchCrMemoHdr4PS@1100528207(VAR PurchCrMemoHdr@1100528200 : Record 124);
+    VAR
+      ApprovalEntry@1000000002 : Record 454;
+      Answer@161024012 : 'Dialog Cancelled,Send Back,Reject';
+      DummyApprovalEntry@1100528201 : Record 454;
+      ApprovalsBridge4PSConstruct@1100528202 : Codeunit 11125348;
+    BEGIN
+      ApprovalsBridge4PSConstruct.FilterApprovalEntry4PS(DATABASE::"Purch. Cr. Memo Hdr.", 3, PurchCrMemoHdr."No.",ApprovalEntry,TRUE);
+
+      Answer := SendBackOrRejectApprovalReq(ApprovalEntry);
+
+      IF Answer = Answer::"Dialog Cancelled" THEN
+        ERROR('');
+
+      IF Answer = Answer::"Send Back" THEN
+        ApprovalsBridge4PSConstruct.SendBackApprovalRequest(ApprovalEntry)
+      ELSE
+        ApprovalsBridge4PSConstruct.RejectApprovalRequest(ApprovalEntry);
+
+      IF IsDocumentCaptureActive THEN BEGIN
+        WebSearchMgt.UpdateWebSearchFromAppvlEntry(ApprovalEntry,ApprovalEntry."Approver ID");
+        WebSearchMgt.UpdateWebSearchFromAppvlEntry(ApprovalEntry,USERID);
+      END;
+
+      DummyApprovalEntry."Document Type" := DummyApprovalEntry."Document Type"::"Credit Memo";
+      IF ApprovalEntry.ISEMPTY THEN BEGIN
+        IF Answer = Answer::"Send Back" THEN
+          MESSAGE(Text008,DummyApprovalEntry."Document Type",PurchCrMemoHdr."No.")
+        ELSE
+          MESSAGE(Text007,DummyApprovalEntry."Document Type",PurchCrMemoHdr."No.");
+      END;
+    END;
+
+    PROCEDURE IsApprovalAdminUser@161024028(ShowError@161024014 : Boolean) : Boolean;
+    VAR
+      DCSetup@1100525001 : Record 6085573;
+      ContiniaUserSetup@1100525000 : Record 6086002;
+    BEGIN
+      IF NOT DCSetup.GET THEN
+        EXIT(TRUE);
+
+      ContiniaUserSetup.SETRANGE("Continia User ID",GetCurrUserID);
+      IF ShowError THEN
+        ContiniaUserSetup.FINDFIRST
+      ELSE
+        IF NOT ContiniaUserSetup.FINDFIRST THEN
+          EXIT(FALSE);
+
+      IF ContiniaUserSetup."Approval Administrator" THEN
+        EXIT(TRUE);
+
+      IF ShowError THEN
+        ERROR(Text013,ContiniaUserSetup.FIELDCAPTION("Approval Administrator"));
+    END;
+
+    PROCEDURE GetCurrUserID@11() : Code[50];
+    VAR
+      ApprovalsBridge4PSConstruct@1000 : Codeunit 11125348;
+    BEGIN
+      IF ApprovalsBridge4PSConstruct.GetCurrentUser <> '' THEN
+        EXIT(ApprovalsBridge4PSConstruct.GetCurrentUser)
+      ELSE
+        EXIT(USERID);
+    END;
+
+    PROCEDURE MakeApprovalEntry@23(ApprovalEntryArgument@1007 : Record 454;SequenceNo@1001 : Integer;ApproverId@1003 : Code[50]);
+    VAR
+      ApprovalEntry@1002 : Record 454;
+      ApprovalsBridge4PSConstruct@1100528400 : Codeunit 11125348;
+    BEGIN
+      WITH ApprovalEntry DO BEGIN
+        IF SequenceNo = 0 THEN
+          SequenceNo := ApprovalsBridge4PSConstruct.GetLastApprovalEntrySequenceNo(ApprovalEntryArgument) + 1;
+
+        "Table ID" := ApprovalEntryArgument."Table ID";
+        "Document Type" := ApprovalEntryArgument."Document Type";
+        "Document No." := ApprovalEntryArgument."Document No.";
+        "Salespers./Purch. Code" := ApprovalEntryArgument."Salespers./Purch. Code";
+        "Sequence No." := SequenceNo;
+        "Sender ID" := GetCurrUserID;
+        Amount := ApprovalEntryArgument.Amount;
+        "Amount (LCY)" := ApprovalEntryArgument."Amount (LCY)";
+        "Currency Code" := ApprovalEntryArgument."Currency Code";
+        "Approver ID" := ApproverId;
+        "Date-Time Sent for Approval" := CREATEDATETIME(TODAY,TIME);
+        "Last Date-Time Modified" := CREATEDATETIME(TODAY,TIME);
+        "Last Modified By User ID" := GetCurrUserID;
+        "Due Date" := ApprovalsBridge4PSConstruct.GetApprovalDueDate;
+
+        "Available Credit Limit (LCY)" := ApprovalEntryArgument."Available Credit Limit (LCY)";
+
+        "Approval Type" := ApprovalsBridge4PSConstruct.GetApprovalType();
+        "Limit Type" := ApprovalsBridge4PSConstruct.GetLimitType();
+        "Approval Code" := ApprovalEntryArgument."Approval Code";
+
+        "Original Approver ID" := "Approver ID";
+        "Due Date Document" := ApprovalEntryArgument."Due Date Document";
+        "Vendor No." := ApprovalEntryArgument."Vendor No.";
+
+        IF NOT (ApprovalEntry."Table ID" IN [DATABASE::"Purchase Header",
+          DATABASE::"Purch. Inv. Header", DATABASE::"Purch. Cr. Memo Hdr."])
+        THEN
+          EXIT;
+
+        UpdateApprEntryFromDocument(ApprovalEntry);
+
+        ApprovalsBridge4PSConstruct.FinishApprovalEntry(ApprovalEntry,ApprovalEntryArgument);
+        ApprovalsBridge4PSConstruct.InsertApprovalEntry(ApprovalEntry);
+      END;
+    END;
+
+    PROCEDURE OnAfterApproveApprovalRequest@161024018(VAR WorkflowStepInstance@1100528202 : Record 1504;VAR ApprovalEntry@1002 : Record 454);
+    VAR
+      PurchInvHeader@1100528201 : Record 122;
+      PurchCrMemoHdr@1100528200 : Record 124;
+    BEGIN
+      IF NOT (ApprovalEntry."Table ID" IN [DATABASE::"Purch. Inv. Header", DATABASE::"Purch. Cr. Memo Hdr."]) THEN
+        EXIT;
+
+      CASE ApprovalEntry."Table ID" OF
+        DATABASE::"Purch. Inv. Header":
+          BEGIN
+            IF NOT PurchInvHeader.GET(ApprovalEntry."Document No.") THEN
+              EXIT;
+          END;
+       DATABASE::"Purch. Cr. Memo Hdr.":
+         BEGIN
+           IF NOT PurchCrMemoHdr.GET(ApprovalEntry."Document No.") THEN
+             EXIT;
+         END;
+      END;
+
+      IF ApprovalEntry."Approver ID" <> GetCurrUserID THEN BEGIN
+        CreateAppvlCmtLine(
+          WorkflowStepInstance.ID, ApprovalEntry,
+          STRSUBSTNO(Text027,ApprovalEntry."Document Type",RemoveDomainName(GetCurrUserID),RemoveDomainName(ApprovalEntry."Approver ID")));
+
+        ApprovalEntry."Approver ID" := GetCurrUserID;
+        ApprovalEntry.MODIFY;
+      END;
+
+      IF IsDocumentCaptureActive THEN BEGIN
+        WebSearchMgt.UpdateWebSearchFromAppvlEntry(ApprovalEntry,ApprovalEntry."Approver ID");
+        WebSearchMgt.UpdateWebSearchFromAppvlEntry(ApprovalEntry,GetCurrUserID);
+      END;
+    END;
+
+    PROCEDURE CreateAppvlCmtLine@6085573(WorkflowStepInstanceID@1100528200 : GUID;ApprovalEntry@1100528201 : Record 454;Comment@6085575 : Text[80]);
+    VAR
+      ApprovalCmtLine@6085576 : Record 455;
+    BEGIN
+      ApprovalCmtLine."Table ID" := ApprovalEntry."Table ID";
+      ApprovalCmtLine."Document Type" := ApprovalEntry."Document Type";
+      ApprovalCmtLine."Document No." := ApprovalEntry."Document No.";
+      ApprovalCmtLine."Document Line No." := ApprovalEntry."Document Line No.";
+      ApprovalCmtLine.Comment := Comment;
+      ApprovalCmtLine."Workflow Step Instance ID" := WorkflowStepInstanceID;
+
+      ApprovalCmtLine.SETRANGE("Table ID",ApprovalEntry."Table ID");
+      ApprovalCmtLine.SETRANGE("Record ID to Approve",ApprovalEntry."Record ID to Approve");
+      ApprovalCmtLine.INSERT(TRUE);
+    END;
+
+    PROCEDURE ApprovePurchInvHeader4PS@1100528209(VAR PurchInvHeader@1100528200 : Record 122);
+    VAR
+      VendLedgEntry@1100528201 : Record 25;
+      PostInvoiceApproval@1100409000 : Codeunit 11012027;
+      ApprovalEntry@1100528203 : Record 454;
+      InvoiceApprovalLine@1100409001 : Record 11012032;
+    BEGIN
+      //**4PS
+      VendLedgEntry.SETCURRENTKEY("Document No.");
+      VendLedgEntry.SETRANGE("Document No.",PurchInvHeader."No.");
+      VendLedgEntry.SETRANGE("Document Type", VendLedgEntry."Document Type"::Invoice);
+      VendLedgEntry.SETRANGE("Vendor No.",PurchInvHeader."Pay-to Vendor No.");
+      IF VendLedgEntry.FIND('-') THEN BEGIN
+        VendLedgEntry.VALIDATE("On Hold", '');
+        VendLedgEntry.MODIFY;
+      END;
+
+      PurchInvHeader.FIND('=');
+
+      ApprovalEntry.SETCURRENTKEY("Table ID","Document Type","Document No.");
+      ApprovalEntry.SETRANGE("Table ID",DATABASE::"Purch. Inv. Header");
+      ApprovalEntry.SETRANGE("Document Type",ApprovalEntry."Document Type"::Invoice);
+      ApprovalEntry.SETRANGE("Document No.",PurchInvHeader."No.");
+
+      MoveApprvalEntryToPosted(ApprovalEntry,DATABASE::"Purch. Inv. Header",PurchInvHeader."No.");
+      DeleteApprovalEntry(DATABASE::"Purch. Inv. Header",ApprovalEntry."Document Type"::Invoice,PurchInvHeader."No.");
+
+      IF NOT PurchInvHeader."Invoice Approved" THEN BEGIN
+        PurchInvHeader.AddToDMSWorkFlow();
+        IF NOT PurchInvHeader.PostingAllowedInDMSStatus THEN
+          MESSAGE(Text11012005, PurchInvHeader.TABLECAPTION, PurchInvHeader."No.",
+                  PurchInvHeader.FIELDCAPTION("DMS Status"),PurchInvHeader."DMS Status")
+        ELSE BEGIN
+          InvoiceApprovalLine.SETRANGE("Journal Template Name", PurchInvHeader."Journal Template");
+          InvoiceApprovalLine.SETRANGE("Document Type", InvoiceApprovalLine."Document Type"::"Purchase Invoice");
+          InvoiceApprovalLine.SETRANGE("Document No.", PurchInvHeader."No.");
+          IF InvoiceApprovalLine.FINDFIRST THEN
+            PostInvoiceApproval.Post(InvoiceApprovalLine,FALSE);
+        END;
+      END;
+
+      //**4PS CALL C018917 sn
+      IF IsDocumentCaptureActive THEN BEGIN
+        ApprovalEntry.RESET;
+        ApprovalEntry.SETCURRENTKEY("Table ID","Document Type","Document No.");
+        ApprovalEntry.SETRANGE("Table ID",DATABASE::"Purch. Inv. Header");
+        ApprovalEntry.SETRANGE("Document Type",ApprovalEntry."Document Type"::Invoice);
+        ApprovalEntry.SETRANGE("Document No.",PurchInvHeader."No.");
+        IF ApprovalEntry.ISEMPTY THEN
+          WebSearchMgt.UpdateWebSearchFromInvoice2(PurchInvHeader);
+      END;
+      //**4PS CALL C018916 en
+    END;
+
+    PROCEDURE ApprovePurchCrMemo4PS@1100528210(PurchCrMemoHdr@1100528200 : Record 124);
+    VAR
+      VendLedgEntry@1100528201 : Record 25;
+      PostInvoiceApproval@1100409001 : Codeunit 11012027;
+      ApprovalEntry@1100528203 : Record 454;
+      InvoiceApprovalLine@1100409000 : Record 11012032;
+    BEGIN
+      //**4PS
+      PurchCrMemoHdr.FIND('=');
+      PurchCrMemoHdr.VALIDATE("On Hold", '');
+      PurchCrMemoHdr.MODIFY(TRUE);
+
+      VendLedgEntry.SETCURRENTKEY("Document No.");
+      VendLedgEntry.SETRANGE("Document No.",PurchCrMemoHdr."No.");
+      VendLedgEntry.SETRANGE("Document Type", VendLedgEntry."Document Type"::"Credit Memo");
+      VendLedgEntry.SETRANGE("Vendor No.",PurchCrMemoHdr."Pay-to Vendor No.");
+      IF VendLedgEntry.FIND('-') THEN BEGIN
+        VendLedgEntry."On Hold" := PurchCrMemoHdr."On Hold";
+        VendLedgEntry.MODIFY;
+      END;
+
+      ApprovalEntry.SETCURRENTKEY("Table ID","Document Type","Document No.");
+      ApprovalEntry.SETRANGE("Table ID",DATABASE::"Purch. Cr. Memo Hdr.");
+      ApprovalEntry.SETRANGE("Document Type",ApprovalEntry."Document Type"::"Credit Memo");
+      ApprovalEntry.SETRANGE("Document No.",PurchCrMemoHdr."No.");
+
+      MoveApprvalEntryToPosted(ApprovalEntry,DATABASE::"Purch. Cr. Memo Hdr.",PurchCrMemoHdr."No.");
+      DeleteApprovalEntry(DATABASE::"Purch. Cr. Memo Hdr.",ApprovalEntry."Document Type"::"Credit Memo",PurchCrMemoHdr."No.");
+
+      IF NOT PurchCrMemoHdr."Credit Memo Approved" THEN BEGIN
+        PurchCrMemoHdr.AddToDMSWorkFlow();
+        IF NOT PurchCrMemoHdr.PostingAllowedInDMSStatus THEN
+          MESSAGE(Text11012005, PurchCrMemoHdr.TABLECAPTION, PurchCrMemoHdr."No.",
+                  PurchCrMemoHdr.FIELDCAPTION("DMS Status"),PurchCrMemoHdr."DMS Status")
+        ELSE BEGIN
+          InvoiceApprovalLine.SETRANGE("Journal Template Name", PurchCrMemoHdr."Journal Template");
+          InvoiceApprovalLine.SETRANGE("Document Type", InvoiceApprovalLine."Document Type"::"Credit Memo");
+          InvoiceApprovalLine.SETRANGE("Document No.", PurchCrMemoHdr."No.");
+          IF InvoiceApprovalLine.FINDFIRST THEN
+            PostInvoiceApproval.Post(InvoiceApprovalLine,FALSE);
+        END;
+      END;
+
+      //**4PS CALL C018917 sn
+      IF IsDocumentCaptureActive THEN BEGIN
+        ApprovalEntry.RESET;
+        ApprovalEntry.SETCURRENTKEY("Table ID","Document Type","Document No.");
+        ApprovalEntry.SETRANGE("Table ID",DATABASE::"Purch. Cr. Memo Hdr.");
+        ApprovalEntry.SETRANGE("Document Type",ApprovalEntry."Document Type"::"Credit Memo");
+        ApprovalEntry.SETRANGE("Document No.",PurchCrMemoHdr."No.");
+        IF ApprovalEntry.ISEMPTY THEN
+          WebSearchMgt.UpdateWebSearchFromCrMemo2(PurchCrMemoHdr);
+      END;
+      //**4PS CALL C018916 en
+    END;
+
+    PROCEDURE ApproveProjectPurchaseAction@1100528225(VAR ProjectPurchaseAction@1100528200 : Record 11012026);
+    BEGIN
+      ProjectPurchaseAction.VALIDATE(Status,ProjectPurchaseAction.Status::Approved);
+      ProjectPurchaseAction."Approval Date" := TODAY;
+      ProjectPurchaseAction.MODIFY(TRUE);
+    END;
+
+    PROCEDURE ApproveAdviceOrderLine@1100528231(VAR AdviceOrderLine@1100528200 : Record 11012055);
+    BEGIN
+      AdviceOrderLine.VALIDATE("Process Status", AdviceOrderLine."Process Status"::Released);
+      AdviceOrderLine."Consented Date-Time" := CURRENTDATETIME;
+      AdviceOrderLine.MODIFY(TRUE);
+    END;
+
+    PROCEDURE ApprovePurchaseRequisition@1100528232(VAR PurchaseRequisition@1100528200 : Record 11229330);
+    VAR
+      PurchaseRequisitionMgt@1100528201 : Codeunit 11229287;
+    BEGIN
+      PurchaseRequisition.SETRANGE("No.",PurchaseRequisition."No.");
+      PurchaseRequisitionMgt.ApproveRequisition(PurchaseRequisition);
+    END;
+
+    PROCEDURE ApproveSiteMngmntHours@1100528235(VAR SiteMngmntHoursHeader@1100528200 : Record 11012360);
+    BEGIN
+      SiteMngmntHoursHeader.SETRECFILTER;
+      SiteMngmntHoursHeader.ApproveLines;
+    END;
+
+    PROCEDURE ApproveHourAccounting@1100528238(VAR HourAccounting@1100528200 : Record 11012038);
+    BEGIN
+      HourAccounting.SETRECFILTER;
+      HourAccounting.ApproveLines;
+    END;
+
+    PROCEDURE MoveApprvalEntryToPosted@14(VAR ApprovalEntry@1001 : Record 454;ToTableId@1002 : Integer;ToNo@1003 : Code[20]);
+    VAR
+      PostedApprvlEntry@1000 : Record 456;
+      ApprovalCommentLine@1004 : Record 455;
+      PostedApprovalCommentLine@1005 : Record 457;
+    BEGIN
+      WITH ApprovalEntry DO BEGIN
+        IF FIND('-') THEN
+          REPEAT
+            PostedApprvlEntry.INIT;
+            PostedApprvlEntry.TRANSFERFIELDS(ApprovalEntry);
+            PostedApprvlEntry."Table ID" := ToTableId;
+            PostedApprvlEntry."Document No." := ToNo;
+            PostedApprvlEntry."Entry No." := 0;
+            PostedApprvlEntry.INSERT;
+          UNTIL NEXT = 0;
+
+        ApprovalCommentLine.SETRANGE("Table ID","Table ID");
+        ApprovalCommentLine.SETRANGE("Document Type","Document Type");
+        ApprovalCommentLine.SETRANGE("Document No.","Document No.");
+        IF ApprovalCommentLine.FIND('-') THEN
+          REPEAT
+            PostedApprovalCommentLine.INIT;
+            PostedApprovalCommentLine.TRANSFERFIELDS(ApprovalCommentLine);
+            PostedApprovalCommentLine."Entry No." := 0;
+            PostedApprovalCommentLine."Table ID" := ToTableId;
+            PostedApprovalCommentLine."Document No." := ToNo;
+            PostedApprovalCommentLine.INSERT(TRUE);
+          UNTIL ApprovalCommentLine.NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE DeleteApprovalEntry@9(TableId@1000 : Integer;DocumentType@1001 : Option;DocumentNo@1002 : Code[20]);
+    VAR
+      ApprovalEntry@1003 : Record 454;
+    BEGIN
+      ApprovalEntry.SETRANGE("Table ID",TableId);
+      ApprovalEntry.SETRANGE("Document Type",DocumentType);
+      ApprovalEntry.SETRANGE("Document No.",DocumentNo);
+      DeleteApprovalCommentLine(TableId,DocumentType,DocumentNo);
+      IF ApprovalEntry.FINDFIRST THEN
+        ApprovalEntry.DELETEALL;
+    END;
+
+    PROCEDURE DeleteApprovalCommentLine@15(TableId@1002 : Integer;DocumentType@1001 : 'Quote,Order,Invoice,Credit Memo,Blanket Order,Return Order';DocumentNo@1000 : Code[20]);
+    VAR
+      ApprovalCommentLine@1003 : Record 455;
+    BEGIN
+      ApprovalCommentLine.SETRANGE("Table ID",TableId);
+      ApprovalCommentLine.SETRANGE("Document Type",DocumentType);
+      ApprovalCommentLine.SETRANGE("Document No.",DocumentNo);
+      IF ApprovalCommentLine.FINDFIRST THEN
+        ApprovalCommentLine.DELETEALL;
+    END;
+
+    PROCEDURE RemoveDomainName@1160040003(UserName@1160040000 : Code[250]) : Text[250];
+    BEGIN
+      IF STRPOS(UserName,'\') = 0 THEN
+        EXIT(UserName);
+
+      EXIT(COPYSTR(UserName,LastIndexOf(UserName,'\',TRUE)+1));
+    END;
+
+    PROCEDURE HasUserDocumentPermission@161024022(ApprovalEntry@161024012 : Record 454) IsValidApprover : Boolean;
+    VAR
+      ApprovalEntry2@161024014 : Record 454;
+      ApprovalSharingWorkflow@161024016 : Record 11229350;
+      UserSetup@161024017 : Record 91;
+    BEGIN
+      IF ApprovalEntry."Approval Type" = ApprovalEntry."Approval Type"::"Advanced Approver" THEN
+        EXIT(TRUE);
+
+      IF ApprovalEntry."Approver ID" = GetCurrUserID THEN
+        EXIT(TRUE);
+
+      ApprovalEntry2.SETRANGE("Table ID",DATABASE::"Purchase Header");
+      ApprovalEntry2.SETRANGE("Document Type",ApprovalEntry."Document Type");
+      ApprovalEntry2.SETRANGE("Document No.",ApprovalEntry."Document No.");
+      ApprovalEntry2.SETFILTER("Sequence No.",'>%1',ApprovalEntry."Sequence No.");
+      IF NOT ApprovalEntry2.ISEMPTY THEN
+        EXIT(TRUE);
+
+      FilterApprovalSharingToUser(ApprovalSharingWorkflow,GetCurrUserID);
+      ApprovalSharingWorkflow.SETRANGE("Owner User ID",ApprovalEntry."Approver ID");
+      IF ApprovalSharingWorkflow.FINDSET THEN
+        REPEAT
+          IF ApprovalSharingWorkflow."Owners Limits and Permissions" THEN
+            UserSetup.GET(ApprovalSharingWorkflow."Owner User ID")
+          ELSE
+            UserSetup.GET(ApprovalSharingWorkflow."Shared to User ID");
+
+          IF UserSetup."Unlimited Purchase Approval" THEN
+            IsValidApprover := TRUE
+          ELSE IF UserSetup."Purchase Amount Approval Limit" >= ApprovalEntry."Amount (LCY)" THEN
+            IsValidApprover := TRUE
+        UNTIL (ApprovalSharingWorkflow.NEXT = 0) OR IsValidApprover;
+    END;
+
+    PROCEDURE LastIndexOf@1160040005(Text@161024012 : Text[1024];CharToFind@161024013 : Text[1];IgnoreCase@161024014 : Boolean) : Integer;
+    VAR
+      StartIndex@161024015 : Integer;
+    BEGIN
+      IF IgnoreCase THEN BEGIN
+        Text := UPPERCASE(Text);
+        CharToFind := UPPERCASE(CharToFind);
+      END;
+
+      StartIndex := STRLEN(Text);
+      WHILE StartIndex > 0 DO BEGIN
+        IF COPYSTR(Text,StartIndex,1) = CharToFind THEN
+          EXIT(StartIndex)
+        ELSE
+          StartIndex -= 1;
+      END;
+    END;
+
+    PROCEDURE FilterApprovalSharingToUser@161024012(VAR ApprovalSharingWorkflow@161024012 : Record 11229350;_UserId@161024013 : Code[50]) : Boolean;
+    BEGIN
+      ApprovalSharingWorkflow.RESET;
+      ApprovalSharingWorkflow.SETCURRENTKEY("Shared to User ID");
+      ApprovalSharingWorkflow.SETRANGE("Shared to User ID",_UserId);
+      ApprovalSharingWorkflow.SETRANGE("Valid From",0D,TODAY);
+      ApprovalSharingWorkflow.SETFILTER("Valid To",'%1|%2..',0D,TODAY);
+      EXIT(ApprovalSharingWorkflow.FINDFIRST);
+    END;
+
+    PROCEDURE ApprovePurchHeaderDC@1000000011(VAR PurchHeader@1000000000 : Record 38) : Boolean;
+    VAR
+      PurchDocMgnt@1000000001 : Codeunit 6085709;
+      AmountExclVAT@1000000005 : Decimal;
+      AmountInclVAT@1000000004 : Decimal;
+      LineAmountExclVAT@1000000003 : Decimal;
+      LineAmountInclVAT@1000000002 : Decimal;
+      AutomaticApprovalstartUp@1100409000 : Boolean;
+      PurchaseHeaderDCInfo@1100525000 : Record 6085767;
+      WorkFlowSetup4PSConstruct@1100528200 : Record 11229316;
+    BEGIN
+      //**4PS  DC
+      IF NOT IsDocumentCaptureActive() THEN //Call C038446
+        EXIT(TRUE);
+
+      PurchHeader.FIND('=');
+      WorkFlowSetup4PSConstruct.GET;//CALL C020358
+
+      IF PurchHeader."Ext. Document ID" <> '' THEN BEGIN
+        IF PurchDocMgnt.DocumentExists(PurchHeader) THEN BEGIN
+          AutomaticApprovalstartUp := PurchDocMgnt.TemplateStep2Approve(PurchHeader); //CALL C020358
+          //**4PS Call C020358 sn
+          IF NOT (
+               (WorkFlowSetup4PSConstruct."Appr. P. Hdr. And P. I. Hdr.") AND (PurchaseHeaderDCInfo.GetApprovalFlowCode(PurchHeader) <> '')
+                 )
+          THEN BEGIN
+          // NOT (Purchase Order Send for Advice to another Approver. Thus the amounts may be incorrect.)
+          //**4PS Call C020358 en
+            PurchDocMgnt.GetPurchStatusAmounts(PurchHeader, AmountExclVAT, AmountInclVAT, LineAmountExclVAT, LineAmountInclVAT);
+            IF NOT PurchHeader."Manually VAT Posting" THEN BEGIN
+              IF (AmountInclVAT <> LineAmountInclVAT) OR (AmountExclVAT <> LineAmountExclVAT) THEN
+                ERROR(Text302);
+            END ELSE
+              IF (AmountInclVAT <> LineAmountInclVAT) THEN // Deviation amount excl. VAT is allowed.
+                ERROR(Text302);
+          END;//**4PS Call C020358
+        END;
+      END;
+
+      IF AutomaticApprovalstartUp THEN BEGIN //CALL C020358
+        IF NOT WorkFlowSetup4PSConstruct."Purch. Hdr. Inv. Keep On Hold" THEN //CALL C020358
+          PurchHeader.VALIDATE("On Hold", '');
+        PurchHeader.MODIFY(TRUE);
+      //CALL C020358 sn
+      END ELSE BEGIN
+        IF NOT WorkFlowSetup4PSConstruct."Purch. Hdr. Inv. Keep On Hold" THEN
+          PurchHeader.VALIDATE("On Hold", '');
+      END;
+      //CALL C020358 en
+    END;
+
+    PROCEDURE FinishApprovals@1100528212(Variant@1000 : Variant);
+    VAR
+      RecRef@1100528200 : RecordRef;
+    BEGIN
+      RecRef.GETTABLE(Variant);
+      CASE RecRef.NUMBER OF
+        DATABASE::"Purch. Inv. Header": FinishApprovalEntryPurchInv(Variant);
+        DATABASE::"Purch. Cr. Memo Hdr.": FinishApprovalEntryPurchCrM(Variant);
+        DATABASE::"Purchase Header": ;
+      ELSE
+        ERROR(UnsupportedRecordTypeErr,RecRef.CAPTION);
+      END;
+    END;
+
+    PROCEDURE FinishApprovalEntryPurchInv@1100528216(VAR PurchInvHeader@1100528401 : Record 122);
+    VAR
+      ApprovalEntry@1011 : Record 454;
+    BEGIN
+      WITH ApprovalEntry DO BEGIN
+        INIT;
+        SETRANGE("Table ID",DATABASE::"Purch. Inv. Header");
+        SETRANGE("Document Type",ApprovalEntry."Document Type"::Invoice);
+        SETRANGE("Document No.",PurchInvHeader."No.");
+        SETRANGE(Status,Status::Created,Status::Open);
+        IF FINDSET(TRUE,FALSE) THEN BEGIN
+          PurchInvHeader.FIND('=');
+          IF PurchInvHeader."On Hold" = '' THEN
+            PutOnHold(DATABASE::"Purch. Inv. Header", 2, PurchInvHeader."No.",FALSE,FALSE,FALSE);
+        END;
+      END;
+    END;
+
+    PROCEDURE FinishApprovalEntryPurchCrM@1100528215(VAR PurchCrMemoHdr@1100528400 : Record 124);
+    VAR
+      ApprovalEntry@1011 : Record 454;
+    BEGIN
+      WITH ApprovalEntry DO BEGIN
+        INIT;
+        SETRANGE("Table ID",DATABASE::"Purch. Cr. Memo Hdr.");
+        SETRANGE("Document Type",ApprovalEntry."Document Type"::"Credit Memo");
+        SETRANGE("Document No.",PurchCrMemoHdr."No.");
+        SETRANGE(Status,Status::Created,Status::Open);
+        IF FINDSET(TRUE,FALSE) THEN BEGIN
+          PurchCrMemoHdr.FIND('=');
+          IF PurchCrMemoHdr."On Hold" = '' THEN
+            PutOnHold(DATABASE::"Purch. Cr. Memo Hdr.", 3, PurchCrMemoHdr."No.",FALSE, FALSE, FALSE);
+        END;
+      END;
+    END;
+
+    PROCEDURE CreateApprovalRequests4PS_ConsentRules@1100528400(Variant@1000 : Variant;WorkflowStepInstance@1100528400 : Record 1504) Handled : Boolean;
+    VAR
+      RecRef@1100528201 : RecordRef;
+      ApprovalEntry@1100529900 : Record 454;
+      ApprovalsMgmt@1100529901 : Codeunit 1535;
+      ApproveAmountLCY@1100529600 : Decimal;
+    BEGIN
+      RecRef.GETTABLE(Variant);
+      CASE RecRef.NUMBER OF
+        DATABASE::"Purchase Header": SendPurchaseHeaderApprovalRequestConsentRules(RecRef, WorkflowStepInstance, ApproveAmountLCY);
+        DATABASE::"Purch. Inv. Header": SendPurchInvHdrApprovalRequestConsentRules(RecRef, WorkflowStepInstance, ApproveAmountLCY);
+        DATABASE::"Purch. Cr. Memo Hdr.": SendPurchCrMemoApprovalRequestConsentRules(RecRef, WorkflowStepInstance, ApproveAmountLCY);
+        DATABASE::"Project Purchase Action": SendProjectPurchaseActionApprovalRequestConsentRules(RecRef, WorkflowStepInstance, ApproveAmountLCY);
+        DATABASE::"Purchase Requisition": SendPurchaseRequisitionApprovalRequestConsentRules(RecRef, WorkflowStepInstance, ApproveAmountLCY);
+        DATABASE::"Advice Order Line": SendAdviceOrderLineApprovalRequestConsentRules(RecRef, WorkflowStepInstance, ApproveAmountLCY);
+        DATABASE::"Hour Accounting": SendHourAccountingApprovalRequestConsentRules(RecRef, WorkflowStepInstance);
+        DATABASE::"Site Mngmnt. Hours Header": SendSiteMngmntHoursHeaderApprovalRequestConsentRules(RecRef, WorkflowStepInstance);
+      ELSE
+        ERROR(UnsupportedRecordTypeErr,RecRef.CAPTION);
+      END;
+
+      //jth 23-06-2017 sn
+      //Check approval entries created
+      ApprovalEntry.SETCURRENTKEY("Table ID","Record ID to Approve",Status,"Workflow Step Instance ID","Sequence No.");
+      ApprovalEntry.SETRANGE("Table ID",RecRef.NUMBER);
+      ApprovalEntry.SETRANGE("Record ID to Approve",RecRef.RECORDID);
+      ApprovalEntry.SETRANGE("Workflow Step Instance ID",WorkflowStepInstance.ID);
+      ApprovalEntry.SETFILTER(Status, '%1|%2|%3', ApprovalEntry.Status::Open, ApprovalEntry.Status::Created,ApprovalEntry.Status::Approved);
+      IF ApprovalEntry.ISEMPTY THEN
+        ApprovalsMgmt.CreateAndAutomaticallyApproveRequest(RecRef,WorkflowStepInstance);
+      //jth 23-06-2017 en
+
+      CheckNumberOfCreatedEntries(RecRef, ApprovalEntry, FALSE, ApproveAmountLCY, TRUE);
+    END;
+
+    PROCEDURE SendPurchaseHeaderApprovalRequestConsentRules@1100528425(RecRef@1100528203 : RecordRef;WorkflowStepInstance@1100528401 : Record 1504;VAR ApproveAmountLCY@1100529600 : Decimal);
+    VAR
+      PurchaseHeader@1100528200 : Record 38;
+      ConsentManagement@1100528400 : Codeunit 11012132;
+      PurchaseLine@1100528500 : Record 39;
+      AmountHeader@1100527450 : Decimal;
+      AmountLines@1100527451 : Decimal;
+      PurchLine@1100527452 : Record 39;
+    BEGIN
+      RecRef.SETTABLE(PurchaseHeader);
+      ConsentManagement.ApprovalsPurchaseHeader(PurchaseHeader, WorkflowStepInstance, ApproveAmountLCY);
+      IF NOT IsDocumentCaptureActive THEN
+        EXIT;
+      IF NOT DocumentCaptureSetup."Auto. Post Purch. Allocation" THEN
+        EXIT;
+      IF NOT CheckInvoiceMargin(PurchaseHeader, AmountHeader, AmountLines) THEN
+        ERROR(STRSUBSTNO(Text039, PurchaseHeader.FIELDCAPTION("Amount incl. VAT"), AmountHeader, AmountLines));
+      IF PurchaseHeader."Manually VAT Posting" THEN BEGIN
+        PurchLine."Document Type" := PurchaseHeader."Document Type";
+        PurchLine."Document No." := PurchaseHeader."No.";
+        PurchLine.CALCFIELDS("Balance Excl. VAT");
+        IF PurchaseHeader."Amount excl. VAT" <> PurchLine."Balance Excl. VAT" THEN
+          ERROR(STRSUBSTNO(Text039, PurchaseHeader.FIELDCAPTION("Amount excl. VAT"), PurchaseHeader."Amount excl. VAT", PurchLine."Balance Excl. VAT"));
+      END;
+      PurchaseLine.RESET;
+      PurchaseLine.SETRANGE("Document Type", PurchaseHeader."Document Type");
+      PurchaseLine.SETRANGE("Document No.", PurchaseHeader."No.");
+      IF PurchaseLine.FINDFIRST THEN BEGIN
+        PurchaseLine.CALCFIELDS("Balance Incl. VAT", "Balance Excl. VAT");
+      END;
+    END;
+
+    PROCEDURE SendPurchInvHdrApprovalRequestConsentRules@1100528402(RecRef@1100528203 : RecordRef;WorkflowStepInstance@1100528401 : Record 1504;VAR ApproveAmountLCY@1100529600 : Decimal);
+    VAR
+      PurchInvHeader@1100528200 : Record 122;
+      ConsentManagement@1100528400 : Codeunit 11012132;
+      ApprovalEntry@1100528201 : Record 454;
+    BEGIN
+      RecRef.SETTABLE(PurchInvHeader);
+      ConsentManagement.ApprovalsPurchaseInvHeader(PurchInvHeader, WorkflowStepInstance, ApproveAmountLCY);
+      ApprovalEntry.SETRANGE("Table ID", DATABASE::"Purch. Inv. Header");
+      ApprovalEntry.SETRANGE("Document Type", ApprovalEntry."Document Type"::Invoice);
+      ApprovalEntry.SETRANGE("Document No.", PurchInvHeader."No.");
+      ApprovalEntry.SETFILTER(Status,'%1|%2', ApprovalEntry.Status::Created, ApprovalEntry.Status::Open);
+      IF ApprovalEntry.FINDLAST THEN
+        UpdateApprovalCommentsOriginatingFromPurchaseHeader(ApprovalEntry)
+      ELSE
+        DeleteApprovalCommentsOriginatingFromPurchaseHeader(PurchInvHeader);
+    END;
+
+    PROCEDURE SendPurchCrMemoApprovalRequestConsentRules@1100528401(RecRef@1100528205 : RecordRef;WorkflowStepInstance@1100528401 : Record 1504;VAR ApproveAmountLCY@1100529600 : Decimal);
+    VAR
+      PurchCrMemoHdr@1100528400 : Record 124;
+      ConsentManagement@1100528215 : Codeunit 11012132;
+      ApprovalEntry@1100528200 : Record 454;
+    BEGIN
+      RecRef.SETTABLE(PurchCrMemoHdr);
+      ConsentManagement.ApprovalsPurchCrMemoHdr(PurchCrMemoHdr, WorkflowStepInstance, ApproveAmountLCY);
+      ApprovalEntry.SETRANGE("Table ID", DATABASE::"Purch. Cr. Memo Hdr.");
+      ApprovalEntry.SETRANGE("Document Type", ApprovalEntry."Document Type"::"Credit Memo");
+      ApprovalEntry.SETRANGE("Document No.", PurchCrMemoHdr."No.");
+      ApprovalEntry.SETFILTER(Status,'%1|%2', ApprovalEntry.Status::Created, ApprovalEntry.Status::Open);
+      IF ApprovalEntry.FINDLAST THEN
+        UpdateApprovalCommentsOriginatingFromPurchaseHeader(ApprovalEntry)
+      ELSE
+        DeleteApprovalCommentsOriginatingFromPurchaseHeader(PurchCrMemoHdr);
+    END;
+
+    PROCEDURE SendProjectPurchaseActionApprovalRequestConsentRules@1100528427(RecRef@1100528205 : RecordRef;WorkflowStepInstance@1100528401 : Record 1504;VAR ApproveAmountLCY@1100529600 : Decimal);
+    VAR
+      ProjectPurchaseAction@1100528400 : Record 11012026;
+      ConsentManagement@1100528215 : Codeunit 11012132;
+    BEGIN
+      RecRef.SETTABLE(ProjectPurchaseAction);
+      ConsentManagement.ApprovalsProjectPurchaseAction(ProjectPurchaseAction, WorkflowStepInstance, ApproveAmountLCY);
+    END;
+
+    PROCEDURE SendAdviceOrderLineApprovalRequestConsentRules@1100528429(RecRef@1100528205 : RecordRef;WorkflowStepInstance@1100528401 : Record 1504;VAR ApproveAmountLCY@1100529600 : Decimal);
+    VAR
+      AdviceOrderLine@1100528400 : Record 11012055;
+      ConsentManagement@1100528215 : Codeunit 11012132;
+    BEGIN
+      RecRef.SETTABLE(AdviceOrderLine);
+      ConsentManagement.ApprovalsAdviceOrderLine(AdviceOrderLine, WorkflowStepInstance, ApproveAmountLCY);
+    END;
+
+    PROCEDURE SendPurchaseRequisitionApprovalRequestConsentRules@1100528222(RecRef@1100528205 : RecordRef;WorkflowStepInstance@1100528401 : Record 1504;VAR ApproveAmountLCY@1100529600 : Decimal);
+    VAR
+      PurchaseRequisition@1100528400 : Record 11229330;
+      ConsentManagement@1100528215 : Codeunit 11012132;
+    BEGIN
+      RecRef.SETTABLE(PurchaseRequisition);
+      ConsentManagement.ApprovalsPurchaseRequisition(PurchaseRequisition, WorkflowStepInstance, ApproveAmountLCY);
+    END;
+
+    PROCEDURE SendHourAccountingApprovalRequestConsentRules@1100528405(RecRef@1100528205 : RecordRef;WorkflowStepInstance@1100528401 : Record 1504);
+    VAR
+      HourAccounting@1100528400 : Record 11012038;
+      HoursConsentManagement@1100528215 : Codeunit 11012206;
+    BEGIN
+      RecRef.SETTABLE(HourAccounting);
+      HoursConsentManagement.MakeApprovalLines(HourAccounting, WorkflowStepInstance);
+    END;
+
+    PROCEDURE SendSiteMngmntHoursHeaderApprovalRequestConsentRules@1100528430(RecRef@1100528205 : RecordRef;WorkflowStepInstance@1100528401 : Record 1504);
+    VAR
+      SiteMngmntHoursHeader@1100528400 : Record 11012360;
+      HoursConsentManagement@1100528215 : Codeunit 11012206;
+    BEGIN
+      RecRef.SETTABLE(SiteMngmntHoursHeader);
+      HoursConsentManagement.MakeApprovalLinesSiteMgt(SiteMngmntHoursHeader, WorkflowStepInstance);
+    END;
+
+    PROCEDURE GetLastApproverNameHourLine@1100528224(HourAccountingLine@1100528400 : Record 11012039) : Code[50];
+    VAR
+      ApprovalEntry@161024013 : Record 454;
+      HourAccounting@1100528401 : Record 11012038;
+    BEGIN
+      ApprovalEntry.SETCURRENTKEY("Record ID to Approve", "Workflow Step Instance ID", "Last Date-Time Modified");
+      IF HourAccountingLine."Line No." = 0 THEN
+        EXIT('');
+      IF NOT HourAccounting.GET(HourAccountingLine.Year, HourAccountingLine.Week, HourAccountingLine."Employee No.") THEN
+        EXIT('');
+
+      ApprovalEntry.SETRANGE("Table ID",DATABASE::"Hour Accounting");
+      ApprovalEntry.SETRANGE("Record ID to Approve", HourAccounting.RECORDID);
+      ApprovalEntry.SETRANGE("Document Line No.",HourAccountingLine."Line No.");
+      ApprovalEntry.SETRANGE(Status,ApprovalEntry.Status::Approved);
+      IF ApprovalEntry.FINDLAST THEN
+        EXIT(GetApproverName(ApprovalEntry."Approved by"));
+    END;
+
+    PROCEDURE GetNextApproverNameHourLine@6085574(HourAccountingLine@161024012 : Record 11012039) : Text[250];
+    VAR
+      ApprovalEntry@161024013 : Record 454;
+      HourAccounting@1100528400 : Record 11012038;
+    BEGIN
+      ApprovalEntry.SETCURRENTKEY("Record ID to Approve","Workflow Step Instance ID","Sequence No.");
+      IF HourAccountingLine."Line No." = 0 THEN
+        EXIT('');
+      IF NOT HourAccounting.GET(HourAccountingLine.Year, HourAccountingLine.Week, HourAccountingLine."Employee No.") THEN
+        EXIT('');
+      ApprovalEntry.SETRANGE("Table ID",DATABASE::"Hour Accounting");
+      ApprovalEntry.SETRANGE("Record ID to Approve", HourAccounting.RECORDID);
+      ApprovalEntry.SETRANGE("Document Line No.",HourAccountingLine."Line No.");
+      ApprovalEntry.SETRANGE(Status,ApprovalEntry.Status::Open);
+      IF ApprovalEntry.FINDFIRST THEN
+        EXIT(GetApproverName(ApprovalEntry."Approver ID"));
+    END;
+
+    PROCEDURE GetLastApproverNameSiteMngmntHourLine@1100528234(SiteMngmntHoursLine@1100528400 : Record 11012361) : Code[50];
+    VAR
+      ApprovalEntry@161024013 : Record 454;
+      SiteMngmntHoursHeader@1100528401 : Record 11012360;
+    BEGIN
+      ApprovalEntry.SETCURRENTKEY("Record ID to Approve", "Workflow Step Instance ID", "Last Date-Time Modified");
+      IF SiteMngmntHoursLine."Line No." = 0 THEN
+        EXIT('');
+      IF NOT SiteMngmntHoursHeader.GET(SiteMngmntHoursLine.Year, SiteMngmntHoursLine.Week, SiteMngmntHoursLine."Supplying Company",SiteMngmntHoursLine."Employee No.") THEN
+        EXIT('');
+
+      ApprovalEntry.SETRANGE("Table ID",DATABASE::"Site Mngmnt. Hours Header");
+      ApprovalEntry.SETRANGE("Record ID to Approve", SiteMngmntHoursHeader.RECORDID);
+      ApprovalEntry.SETRANGE("Document Line No.",SiteMngmntHoursLine."Line No.");
+      ApprovalEntry.SETRANGE(Status,ApprovalEntry.Status::Approved);
+      IF ApprovalEntry.FINDLAST THEN
+        EXIT(GetApproverName(ApprovalEntry."Approver ID"));
+    END;
+
+    PROCEDURE GetNextApproverNameSiteMngmntHourLine@1100528233(SiteMngmntHoursLine@1100528200 : Record 11012361) : Text[250];
+    VAR
+      ApprovalEntry@161024013 : Record 454;
+      SiteMngmntHoursHeader@1100528201 : Record 11012360;
+    BEGIN
+      ApprovalEntry.SETCURRENTKEY("Record ID to Approve","Workflow Step Instance ID","Sequence No.");
+      IF SiteMngmntHoursLine."Line No." = 0 THEN
+        EXIT('');
+      IF NOT SiteMngmntHoursHeader.GET(SiteMngmntHoursLine.Year, SiteMngmntHoursLine.Week, SiteMngmntHoursLine."Supplying Company",SiteMngmntHoursLine."Employee No.") THEN
+        EXIT('');
+      ApprovalEntry.SETRANGE("Table ID",DATABASE::"Site Mngmnt. Hours Header");
+      ApprovalEntry.SETRANGE("Record ID to Approve", SiteMngmntHoursHeader.RECORDID);
+      ApprovalEntry.SETRANGE("Document Line No.",SiteMngmntHoursLine."Line No.");
+      ApprovalEntry.SETRANGE(Status,ApprovalEntry.Status::Open);
+      IF ApprovalEntry.FINDFIRST THEN
+        EXIT(GetApproverName(ApprovalEntry."Approver ID"));
+    END;
+
+    PROCEDURE GetApproverName@1160040000(ApproverID@1160040000 : Code[50]) : Text[250];
+    VAR
+      UserSetup@1160040004 : Record 91;
+      SalesPurch@1160040003 : Record 13;
+    BEGIN
+      IF UserSetup.GET(ApproverID) THEN
+        IF SalesPurch.GET(UserSetup."Salespers./Purch. Code") THEN
+          EXIT(SalesPurch.Name);
+      EXIT(ApproverID);
+    END;
+
+    PROCEDURE AddApproverAfter@1100528403(VAR ApprovalEntry@1000 : Record 454);
+    VAR
+      ApprovalEntry2@1003 : Record 454;
+      ApprovalsBridge4PSConstruct@1100528400 : Codeunit 11125348;
+      ConsentRule@1100528200 : Record 11012227;
+      HourConsentRule@1100528201 : Record 11229805;
+      ApproverGroupMember@1100528500 : Record 11012232;
+      ApproverID@1100528203 : Code[50];
+    BEGIN
+      ApprovalEntry.TESTFIELD(Status, ApprovalEntry.Status::Open);
+
+      IF OpenPreviouslyApprovedApprovalEntries(ApprovalEntry) THEN BEGIN
+        MoveApprovalEntriesForward(ApprovalEntry, 1);  //1 step
+        CopyApprovalEntriesForward(ApprovalEntry, 1);  //1 step
+        EXIT;
+      END;
+
+      IF (ApprovalEntry."Table ID" = DATABASE::"Hour Accounting") OR (ApprovalEntry."Table ID" = DATABASE::"Site Mngmnt. Hours Header") THEN BEGIN
+        IF HourConsentRule.GET(ApprovalEntry."Consent Rule Line No.") THEN BEGIN
+          ApproverID := HourConsentRule."Super Approver";
+        END;
+      END ELSE BEGIN
+        IF ConsentRule.GET(ApprovalEntry."Consent Rule Process", ApprovalEntry."Consent Rule Line No.") THEN BEGIN
+          ApproverID := ConsentRule."Super Approver";
+        END;
+      END;
+
+      IF (ApproverID = '') OR (ApproverID = ApprovalEntry."Approver ID" ) THEN
+        ERROR(Text010);
+
+      MoveApprovalEntriesForward(ApprovalEntry, 2);  //2 steps
+
+      ApprovalEntry2 := ApprovalEntry;
+      ApprovalEntry2."Sender ID" := GetCurrUserID;
+      ApprovalEntry2."Last Modified By User ID" := GetCurrUserID;
+      ApprovalEntry2."Last Date-Time Modified" := CURRENTDATETIME;
+      ApprovalEntry2.Status := ApprovalEntry2.Status::Open;
+      ApprovalEntry2."Approver ID" := ApproverID;
+      ApprovalEntry2."Sequence No." += 1;
+      ApprovalsBridge4PSConstruct.InsertApprovalEntry(ApprovalEntry2);
+
+      ApprovalEntry2 := ApprovalEntry;
+      ApprovalEntry2."Sender ID" := GetCurrUserID;
+      ApprovalEntry2."Last Modified By User ID" := GetCurrUserID;
+      ApprovalEntry2."Last Date-Time Modified" := CURRENTDATETIME;
+      ApprovalEntry2.Status := ApprovalEntry2.Status::Created;
+      ApprovalEntry2."Sequence No." += 2;
+      ApprovalsBridge4PSConstruct.InsertApprovalEntry(ApprovalEntry2);
+      ApprovalEntry2.Status := ApprovalEntry2.Status::Created; //Because ONINSERT Event in CU 6085927
+      ApprovalEntry2.MODIFY;
+
+
+      IF ApprovalEntry2."Approver Group Code" <> '' THEN BEGIN
+        ApproverGroupMember.SETRANGE("Approver Group Code", ApprovalEntry2."Approver Group Code");
+        ApproverGroupMember.SETFILTER("Approver User ID", '<>%1', ApprovalEntry2."Approver ID");
+        IF ApproverGroupMember.FINDSET THEN
+          REPEAT
+            ApprovalEntry2."Approver ID" := ApproverGroupMember."Approver User ID";
+            ApprovalsBridge4PSConstruct.InsertApprovalEntry(ApprovalEntry2);
+            ApprovalEntry2.Status := ApprovalEntry2.Status::Created; //Because ONINSERT Event in CU 6085927
+            ApprovalEntry2.MODIFY;
+          UNTIL ApproverGroupMember.NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE InsertExtraApprover@1100528217(VAR ApprovalEntry@1000 : Record 454);
+    VAR
+      ApprovalEntry2@1003 : Record 454;
+      Approver@1001 : Record 11012229;
+      ApprovalsBridge4PSConstruct@1100528200 : Codeunit 11125348;
+    BEGIN
+      ApprovalEntry.TESTFIELD(Status, ApprovalEntry.Status::Created);
+
+      Approver.SETFILTER("User ID", '<>%1', GetCurrUserID);
+      IF PAGE.RUNMODAL(0,Approver) <> ACTION::LookupOK THEN
+        ERROR('');
+
+      ApprovalEntry2 := ApprovalEntry;
+      ApprovalEntry2."Sequence No." += 1; //Because otherwise te insert would be after the current record.
+      MoveApprovalEntriesForward(ApprovalEntry2, 1);
+
+      ApprovalEntry2 := ApprovalEntry;
+      ApprovalEntry2."Sender ID" := GetCurrUserID;
+      ApprovalEntry2."Last Modified By User ID" := GetCurrUserID;
+      ApprovalEntry2."Last Date-Time Modified" := CURRENTDATETIME;
+      ApprovalEntry2.Status := ApprovalEntry2.Status::Created;
+      ApprovalEntry2."Approver ID" := Approver."User ID";
+      ApprovalEntry2."Approver Group Code" := '';
+      ApprovalsBridge4PSConstruct.InsertApprovalEntry(ApprovalEntry2);
+
+      CreateAppvlCmtLine(
+        ApprovalEntry2."Workflow Step Instance ID", ApprovalEntry2,
+        STRSUBSTNO(Text037,RemoveDomainName(ApprovalEntry2."Approver ID"),RemoveDomainName(GetCurrUserID)));
+    END;
+
+    LOCAL PROCEDURE OpenPreviouslyApprovedApprovalEntries@1100528240(VAR ApprovalEntry@1100528200 : Record 454) HasPreviouslyApproved : Boolean;
+    VAR
+      ApprovalEntry2@1100528201 : Record 454;
+      CurrentSeqNo@1100528202 : Integer;
+    BEGIN
+      WHILE GetPreviousApprovedApprovalEntry(ApprovalEntry, ApprovalEntry2) DO BEGIN
+        IF NOT HasPreviouslyApproved THEN
+          CurrentSeqNo := ApprovalEntry2."Sequence No."
+        ELSE BEGIN
+          IF CurrentSeqNo <> ApprovalEntry2."Sequence No." THEN
+            EXIT;
+        END;
+        ApprovalEntry2.Status := ApprovalEntry.Status::Open;
+        ApprovalEntry2.MODIFY;
+        HasPreviouslyApproved := TRUE;
+      END;
+    END;
+
+    LOCAL PROCEDURE "---------------new from DC to 4PS"@1100528404();
+    BEGIN
+    END;
+
+    PROCEDURE GetNoOfApprovalEntriesUser@1100528202(IUserID@1100528201 : Code[50]) : Integer;
+    VAR
+      ApprovalEntry@1000000001 : Record 454;
+    BEGIN
+      ApprovalEntry.SETCURRENTKEY("Approver ID");
+      ApprovalEntry.SETRANGE("Approver ID",IUserID);
+      ApprovalEntry.SETFILTER(Status, '%1|%2',ApprovalEntry.Status::Created,ApprovalEntry.Status::Open);
+      EXIT(ApprovalEntry.COUNT);
+    END;
+
+    PROCEDURE GetNoOfApprovalEntriesDocument@1100528421(lDocType@1100528201 : Integer;lDocNo@1100528200 : Code[20]) : Integer;
+    VAR
+      ApprovalEntry@1000000001 : Record 454;
+    BEGIN
+      CASE lDocType OF
+        2:
+        BEGIN
+          ApprovalEntry.SETRANGE("Table ID",DATABASE::"Purch. Inv. Header");
+          ApprovalEntry.SETRANGE("Document Type",2);
+          ApprovalEntry.SETRANGE("Document No.",lDocNo);
+          EXIT(ApprovalEntry.COUNT);
+        END;
+        3:
+        BEGIN
+          ApprovalEntry.SETRANGE("Table ID",DATABASE::"Purch. Cr. Memo Hdr.");
+          ApprovalEntry.SETRANGE("Document Type",3);
+          ApprovalEntry.SETRANGE("Document No.",lDocNo);
+          EXIT(ApprovalEntry.COUNT);
+        END
+        ELSE
+        BEGIN
+          ApprovalEntry.SETRANGE("Table ID",DATABASE::"Purchase Header");
+          ApprovalEntry.SETRANGE("Document Type",lDocType);
+          ApprovalEntry.SETRANGE("Document No.",lDocNo);
+          EXIT(ApprovalEntry.COUNT);
+        END;
+      END;
+
+      EXIT(0);
+    END;
+
+    PROCEDURE GetNoOfOpenApprovalEntriesDocument@1100528201(lDocType@1100528201 : Integer;lDocNo@1100528200 : Code[20]) : Integer;
+    VAR
+      ApprovalEntry@1000000001 : Record 454;
+    BEGIN
+      ApprovalEntry.SETFILTER(Status, '%1|%2',ApprovalEntry.Status::Created,ApprovalEntry.Status::Open);
+      CASE lDocType OF
+        2:
+        BEGIN
+          ApprovalEntry.SETRANGE("Table ID",DATABASE::"Purch. Inv. Header");
+          ApprovalEntry.SETRANGE("Document Type",2);
+          ApprovalEntry.SETRANGE("Document No.",lDocNo);
+          EXIT(ApprovalEntry.COUNT);
+        END;
+        3:
+        BEGIN
+          ApprovalEntry.SETRANGE("Table ID",DATABASE::"Purch. Cr. Memo Hdr.");
+          ApprovalEntry.SETRANGE("Document Type",3);
+          ApprovalEntry.SETRANGE("Document No.",lDocNo);
+          EXIT(ApprovalEntry.COUNT);
+        END
+        ELSE
+        BEGIN
+          ApprovalEntry.SETRANGE("Table ID",DATABASE::"Purchase Header");
+          ApprovalEntry.SETRANGE("Document Type",lDocType);
+          ApprovalEntry.SETRANGE("Document No.",lDocNo);
+          EXIT(ApprovalEntry.COUNT);
+        END;
+      END;
+      EXIT(0);
+    END;
+
+    PROCEDURE GetNoOfPostApprovalEntriesDocument@1100528229(lDocType@1100528201 : Integer;lDocNo@1100528200 : Code[20]) : Integer;
+    VAR
+      PostedApprovalEntry@1000000001 : Record 456;
+    BEGIN
+      CASE lDocType OF
+        2:
+          BEGIN
+            PostedApprovalEntry.SETRANGE("Table ID",DATABASE::"Purch. Inv. Header");
+            PostedApprovalEntry.SETRANGE("Document No.",lDocNo);
+            EXIT(PostedApprovalEntry.COUNT);
+          END;
+        3:
+          BEGIN
+            PostedApprovalEntry.SETRANGE("Table ID",DATABASE::"Purch. Cr. Memo Hdr.");
+            PostedApprovalEntry.SETRANGE("Document No.",lDocNo);
+            EXIT(PostedApprovalEntry.COUNT);
+          END;
+        ELSE
+          BEGIN
+            PostedApprovalEntry.SETRANGE("Table ID",DATABASE::"Purchase Header");
+            PostedApprovalEntry.SETRANGE("Document No.",lDocNo);
+            EXIT(PostedApprovalEntry.COUNT);
+          END;
+      END;
+      EXIT(0);
+    END;
+
+    PROCEDURE GetNoOfApprovalCommentsDocument@1100528214(lDocType@1100528201 : Integer;lDocNo@1100528200 : Code[20]) : Integer;
+    VAR
+      ApprovalCmt@1000000001 : Record 455;
+    BEGIN
+      ApprovalCmt.FILTERGROUP(4);
+      IF lDocType = 2 THEN BEGIN
+        ApprovalCmt.SETCURRENTKEY("Table ID","Document Type","Document No.");
+        ApprovalCmt.SETRANGE("Table ID",DATABASE::"Purch. Inv. Header");
+        ApprovalCmt.SETRANGE("Document Type",2);
+        ApprovalCmt.SETRANGE("Document No.",lDocNo);
+        EXIT(ApprovalCmt.COUNT);
+      END;
+      IF lDocType = 3 THEN BEGIN
+        ApprovalCmt.SETCURRENTKEY("Table ID","Document Type","Document No.");
+        ApprovalCmt.SETRANGE("Table ID",DATABASE::"Purch. Cr. Memo Hdr.");
+        ApprovalCmt.SETRANGE("Document Type",3);
+        ApprovalCmt.SETRANGE("Document No.",lDocNo);
+        EXIT(ApprovalCmt.COUNT);
+      END;
+      IF (lDocType = 0) OR (lDocType = 1) THEN BEGIN
+        ApprovalCmt.SETCURRENTKEY("Table ID","Document Type","Document No.");
+        ApprovalCmt.SETRANGE("Table ID",DATABASE::"Purchase Header");
+        ApprovalCmt.SETRANGE("Document Type",lDocType);
+        ApprovalCmt.SETRANGE("Document No.",lDocNo);
+        EXIT(ApprovalCmt.COUNT);
+      END;
+      EXIT(0);
+    END;
+
+    PROCEDURE GetNoOfPostApprovalCommentsDocument@1100528226(lDocType@1100528201 : Integer;lDocNo@1100528200 : Code[20]) : Integer;
+    VAR
+      PostedApprovalCmt@1000000001 : Record 457;
+    BEGIN
+      PostedApprovalCmt.FILTERGROUP(4);
+      IF lDocType = 2 THEN BEGIN
+        PostedApprovalCmt.SETCURRENTKEY("Table ID","Document No.");
+        PostedApprovalCmt.SETRANGE("Table ID",DATABASE::"Purch. Inv. Header");
+        PostedApprovalCmt.SETRANGE("Document No.",lDocNo);
+        EXIT(PostedApprovalCmt.COUNT);
+      END;
+      IF lDocType = 3 THEN BEGIN
+        PostedApprovalCmt.SETCURRENTKEY("Table ID","Document No.");
+        PostedApprovalCmt.SETRANGE("Table ID",DATABASE::"Purch. Cr. Memo Hdr.");
+        PostedApprovalCmt.SETRANGE("Document No.",lDocNo);
+        EXIT(PostedApprovalCmt.COUNT);
+      END;
+      EXIT(0);
+    END;
+
+    PROCEDURE DrillDownApprovalEntriesDocument@1100528420(lDocType@1100528201 : Integer;lDocNo@1100528200 : Code[20]) : Integer;
+    VAR
+      ApprovalEntry@1000000001 : Record 454;
+      PurchaseHeader@1100528202 : Record 38;
+    BEGIN
+      CASE lDocType OF
+        2:
+        BEGIN
+          ApprovalEntry.FILTERGROUP(4);
+          ApprovalEntry.SETRANGE("Table ID",DATABASE::"Purch. Inv. Header");
+          ApprovalEntry.SETRANGE("Document Type",2);
+          ApprovalEntry.SETRANGE("Document No.",lDocNo);
+          ApprovalEntry.FILTERGROUP(0);
+          PAGE.RUN(PAGE::"Approval Entries",ApprovalEntry);
+        END;
+        3:
+        BEGIN
+          ApprovalEntry.FILTERGROUP(4);
+          ApprovalEntry.SETRANGE("Table ID",DATABASE::"Purch. Cr. Memo Hdr.");
+          ApprovalEntry.SETRANGE("Document Type",3);
+          ApprovalEntry.SETRANGE("Document No.",lDocNo);
+          ApprovalEntry.FILTERGROUP(0);
+          PAGE.RUN(PAGE::"Approval Entries",ApprovalEntry);
+        END;
+        ELSE
+          IF PurchaseHeader.GET(lDocType, lDocNo) THEN BEGIN
+            ApprovalEntry.FILTERGROUP(4);
+            ApprovalEntry.SETRANGE("Table ID",DATABASE::"Purchase Header");
+            ApprovalEntry.SETRANGE("Document Type",PurchaseHeader."Document Type");
+            ApprovalEntry.SETRANGE("Document No.",PurchaseHeader."No.");
+            ApprovalEntry.FILTERGROUP(0);
+            PAGE.RUN(PAGE::"Approval Entries",ApprovalEntry);
+         END;
+      END;
+    END;
+
+    PROCEDURE DrillDownPosApprovalEntriesDocument@1100528228(lDocType@1100528201 : Integer;lDocNo@1100528200 : Code[20]) : Integer;
+    VAR
+      PostedApprovalEntry@1000000001 : Record 456;
+      PurchaseHeader@1100528202 : Record 38;
+    BEGIN
+      CASE lDocType OF
+        2:
+        BEGIN
+          PostedApprovalEntry.FILTERGROUP(4);
+          PostedApprovalEntry.SETRANGE("Table ID",DATABASE::"Purch. Inv. Header");
+          PostedApprovalEntry.SETRANGE("Document No.",lDocNo);
+          PostedApprovalEntry.FILTERGROUP(0);
+          PAGE.RUN(PAGE::"Posted Approval Entries",PostedApprovalEntry);
+        END;
+        3:
+        BEGIN
+          PostedApprovalEntry.FILTERGROUP(4);
+          PostedApprovalEntry.SETRANGE("Table ID",DATABASE::"Purch. Cr. Memo Hdr.");
+          PostedApprovalEntry.SETRANGE("Document No.",lDocNo);
+          PostedApprovalEntry.FILTERGROUP(0);
+          PAGE.RUN(PAGE::"Posted Approval Entries",PostedApprovalEntry);
+        END;
+        ELSE
+          IF PurchaseHeader.GET(lDocType, lDocNo) THEN BEGIN
+            PostedApprovalEntry.FILTERGROUP(4);
+            PostedApprovalEntry.SETRANGE("Table ID",DATABASE::"Purchase Header");
+            //PostedApprovalEntry.SETRANGE("Document Type",PurchaseHeader."Document Type");
+            PostedApprovalEntry.SETRANGE("Document No.",PurchaseHeader."No.");
+            PostedApprovalEntry.FILTERGROUP(0);
+            PAGE.RUN(PAGE::"Posted Approval Entries",PostedApprovalEntry);
+         END;
+       END;
+    END;
+
+    PROCEDURE DrillDownApprovalCommentsDocument@1100528424(lDocType@1100528201 : Integer;lDocNo@1100528200 : Code[20]) : Integer;
+    VAR
+      ApprovalCmt@161024012 : Record 455;
+    BEGIN
+      IF lDocType = 2 THEN BEGIN
+        ApprovalCmt.FILTERGROUP(4);
+        ApprovalCmt.SETCURRENTKEY("Table ID","Document Type","Document No.");
+        ApprovalCmt.SETRANGE("Table ID",DATABASE::"Purch. Inv. Header");
+        ApprovalCmt.SETRANGE("Document Type",2);
+        ApprovalCmt.SETRANGE("Document No.",lDocNo);
+        ApprovalCmt.FILTERGROUP(0);
+        PAGE.RUN(PAGE::"Approval Comments",ApprovalCmt);
+      END;
+      IF lDocType = 3 THEN BEGIN
+        ApprovalCmt.FILTERGROUP(4);
+        ApprovalCmt.SETCURRENTKEY("Table ID","Document Type","Document No.");
+        ApprovalCmt.SETRANGE("Table ID",DATABASE::"Purch. Cr. Memo Hdr.");
+        ApprovalCmt.SETRANGE("Document Type",3);
+        ApprovalCmt.SETRANGE("Document No.",lDocNo);
+        ApprovalCmt.FILTERGROUP(0);
+        PAGE.RUN(PAGE::"Approval Comments",ApprovalCmt);
+      END;
+    END;
+
+    PROCEDURE DrillDownPosApprovalCommentsDocument@1100528230(lDocType@1100528201 : Integer;lDocNo@1100528200 : Code[20]) : Integer;
+    VAR
+      PostedApprovalCmt@161024012 : Record 457;
+    BEGIN
+      IF lDocType = 2 THEN BEGIN
+        PostedApprovalCmt.FILTERGROUP(4);
+        PostedApprovalCmt.SETCURRENTKEY("Table ID","Document No.");
+        PostedApprovalCmt.SETRANGE("Table ID",DATABASE::"Purch. Inv. Header");
+        PostedApprovalCmt.SETRANGE("Document No.",lDocNo);
+        PostedApprovalCmt.FILTERGROUP(0);
+        PAGE.RUN(PAGE::"Posted Approval Comments",PostedApprovalCmt);
+      END;
+      IF lDocType = 3 THEN BEGIN
+        PostedApprovalCmt.FILTERGROUP(4);
+        PostedApprovalCmt.SETCURRENTKEY("Table ID","Document No.");
+        PostedApprovalCmt.SETRANGE("Table ID",DATABASE::"Purch. Cr. Memo Hdr.");
+        PostedApprovalCmt.SETRANGE("Document No.",lDocNo);
+        PostedApprovalCmt.FILTERGROUP(0);
+        PAGE.RUN(PAGE::"Posted Approval Comments",PostedApprovalCmt);
+      END;
+    END;
+
+    PROCEDURE GetLastApprover@1100528423(PurchHeader@161024012 : Record 38) : Code[50];
+    VAR
+      ApprovalEntry@161024013 : Record 454;
+    BEGIN
+      //**4PS
+      ApprovalEntry.SETRANGE("Table ID",DATABASE::"Purchase Header");
+      ApprovalEntry.SETRANGE("Document Type",PurchHeader."Document Type");
+      ApprovalEntry.SETRANGE("Document No.",PurchHeader."No.");
+      ApprovalEntry.SETRANGE(Status,ApprovalEntry.Status::Approved);
+      IF ApprovalEntry.FINDLAST THEN
+        EXIT(ApprovalEntry."Approver ID");
+    END;
+
+    PROCEDURE GetLastApproverDocument@1100528227(lDocType@1100528201 : Integer;lDocNo@1100528200 : Code[20]) : Code[50];
+    VAR
+      PostedApprovalEntry@1100528204 : Record 456;
+    BEGIN
+      IF lDocType = 2 THEN BEGIN
+        PostedApprovalEntry.SETRANGE("Table ID",DATABASE::"Purch. Inv. Header");
+      END;
+      IF lDocType = 3 THEN BEGIN
+        PostedApprovalEntry.SETRANGE("Table ID",DATABASE::"Purch. Cr. Memo Hdr.");
+      END;
+      PostedApprovalEntry.SETCURRENTKEY("Table ID","Document No.","Last Date-Time Modified","Sequence No.");
+      PostedApprovalEntry.SETRANGE("Document No.",lDocNo);
+      PostedApprovalEntry.SETRANGE(Status,PostedApprovalEntry.Status::Approved);
+      IF PostedApprovalEntry.FINDLAST THEN
+        EXIT(PostedApprovalEntry."Approver ID");
+    END;
+
+    PROCEDURE GetLastApproverNameDocument@1100528431(DocType@1100528201 : Integer;DocNo@1100528200 : Code[20]) ApproverName : Text[250];
+    VAR
+      ApproverID@1100528400 : Code[50];
+    BEGIN
+      ApproverID := GetLastApproverDocument(DocType, DocNo);
+      ApproverName := GetUserFullName(ApproverID);
+    END;
+
+    PROCEDURE GetNextApproverDocument@1100528213(lDocType@1100528201 : Integer;lDocNo@1100528200 : Code[20]) : Code[50];
+    VAR
+      ApprovalEntry@1100528204 : Record 454;
+    BEGIN
+      //**4PS
+      IF lDocType = 2 THEN BEGIN
+        ApprovalEntry.SETRANGE("Table ID",DATABASE::"Purch. Inv. Header");
+        ApprovalEntry.SETRANGE("Document Type",2);
+      END;
+      IF lDocType = 3 THEN BEGIN
+        ApprovalEntry.SETRANGE("Table ID",DATABASE::"Purch. Cr. Memo Hdr.");
+        ApprovalEntry.SETRANGE("Document Type",3);
+      END;
+
+      ApprovalEntry.SETRANGE("Document No.",lDocNo);
+      ApprovalEntry.SETRANGE(Status,ApprovalEntry.Status::Open);
+      IF ApprovalEntry.FINDFIRST THEN
+        EXIT(ApprovalEntry."Approver ID");
+    END;
+
+    PROCEDURE GetNoOfApprovalEntriesHdr@1000000035(ApprovalEntry@1100528400 : Record 454) : Integer;
+    VAR
+      ApprovalEntry2@1000000001 : Record 454;
+    BEGIN
+      ApprovalEntry2.SETCURRENTKEY("Record ID to Approve");
+      ApprovalEntry2.SETRANGE("Record ID to Approve",ApprovalEntry."Record ID to Approve");
+      //ApprovalEntry2.SETRANGE("Document Line No.", ApprovalEntry."Document Line No.");
+      EXIT(ApprovalEntry2.COUNT);
+    END;
+
+    PROCEDURE GetNoOfApprovalCommentsHdr@161024019(ApprovalEntry@1100528400 : Record 454) : Integer;
+    VAR
+      ApprovalCmt@1000000001 : Record 455;
+    BEGIN
+      IF FORMAT(ApprovalEntry."Record ID to Approve") = '' THEN
+        EXIT;
+      ApprovalCmt.SETCURRENTKEY("Record ID to Approve");
+      ApprovalCmt.SETRANGE("Record ID to Approve",ApprovalEntry."Record ID to Approve");
+      //ApprovalCmt.SETRANGE("Document Line No.", ApprovalEntry."Document Line No.");
+      EXIT(ApprovalCmt.COUNT);
+    END;
+
+    PROCEDURE DrillDownApprovalEntriesHdr@1000000033(ApprovalEntry@1100528400 : Record 454) : Integer;
+    VAR
+      ApprovalEntry2@1000000001 : Record 454;
+    BEGIN
+      ApprovalEntry2.FILTERGROUP(4);
+      ApprovalEntry2.SETCURRENTKEY("Record ID to Approve");
+      ApprovalEntry2.SETRANGE("Record ID to Approve",ApprovalEntry."Record ID to Approve");
+      //ApprovalEntry2.SETRANGE("Document Line No.", ApprovalEntry."Document Line No.");
+      ApprovalEntry2.FILTERGROUP(0);
+      PAGE.RUN(PAGE::"Approval Entries",ApprovalEntry2);
+    END;
+
+    PROCEDURE DrillDownApprovalCommentsHdr@161024017(ApprovalEntry@1100528400 : Record 454;VAR ApprovalCommentLine@1100528500 : Record 455) : Integer;
+    VAR
+      ApprovalComments@1100528501 : Page 660;
+    BEGIN
+      //**4PS C040353
+      ApprovalCommentLine.SETRANGE("Document Line No."); //Remove filter
+      ApprovalComments.SETTABLEVIEW(ApprovalCommentLine);
+      ApprovalComments.SetUpLine(ApprovalEntry);
+      ApprovalComments.SetWorkflowStepInstanceID(ApprovalCommentLine."Workflow Step Instance ID");
+      ApprovalComments.RUNMODAL;
+    END;
+
+    PROCEDURE GetNoOfApprovalEntriesLine@1100528419(ApprovalEntry@1100528400 : Record 454) : Integer;
+    VAR
+      ApprovalEntry2@1000000001 : Record 454;
+    BEGIN
+      IF FORMAT(ApprovalEntry."Record ID to Approve") = '' THEN
+        EXIT;
+      ApprovalEntry2.SETCURRENTKEY("Record ID to Approve");
+      ApprovalEntry2.SETRANGE("Record ID to Approve",ApprovalEntry."Record ID to Approve");
+      ApprovalEntry2.SETRANGE("Document Line No.", ApprovalEntry."Document Line No.");
+      EXIT(ApprovalEntry2.COUNT);
+    END;
+
+    PROCEDURE GetNoOfApprovalCommentsLine@1100528418(ApprovalEntry@1100528400 : Record 454) : Integer;
+    VAR
+      ApprovalCmt@1000000001 : Record 455;
+    BEGIN
+      ApprovalCmt.SETCURRENTKEY("Record ID to Approve");
+      ApprovalCmt.SETRANGE("Record ID to Approve",ApprovalEntry."Record ID to Approve");
+      ApprovalCmt.SETRANGE("Document Line No.", ApprovalEntry."Document Line No.");
+      EXIT(ApprovalCmt.COUNT);
+    END;
+
+    PROCEDURE DrillDownApprovalEntriesLine@1100528417(ApprovalEntry@1100528400 : Record 454) : Integer;
+    VAR
+      ApprovalEntry2@1000000001 : Record 454;
+    BEGIN
+      ApprovalEntry2.FILTERGROUP(4);
+      ApprovalEntry2.SETCURRENTKEY("Record ID to Approve");
+      ApprovalEntry2.SETRANGE("Record ID to Approve",ApprovalEntry."Record ID to Approve");
+      ApprovalEntry2.SETRANGE("Document Line No.", ApprovalEntry."Document Line No.");
+      ApprovalEntry2.FILTERGROUP(0);
+      PAGE.RUN(PAGE::"Approval Entries",ApprovalEntry2);
+    END;
+
+    PROCEDURE DrillDownApprovalCommentsLine@1100528416(ApprovalEntry@1100528400 : Record 454;VAR ApprovalCommentLine@1100528500 : Record 455) : Integer;
+    VAR
+      ApprovalComments@1100528501 : Page 660;
+    BEGIN
+      //**4PS C040353
+      ApprovalComments.SETTABLEVIEW(ApprovalCommentLine);
+      ApprovalComments.SetUpLine(ApprovalEntry);
+      ApprovalComments.SetWorkflowStepInstanceID(ApprovalCommentLine."Workflow Step Instance ID");
+      ApprovalComments.RUNMODAL;
+    END;
+
+    PROCEDURE GetNextApprover@161024027(RecordIDtoApprove@161024012 : RecordID;DocumentLineNo@1100528400 : Integer) : Code[50];
+    VAR
+      ApprovalEntry@161024013 : Record 454;
+    BEGIN
+      ApprovalEntry.SETCURRENTKEY("Record ID to Approve");
+      ApprovalEntry.SETRANGE("Record ID to Approve",RecordIDtoApprove);
+      ApprovalEntry.SETRANGE("Document Line No.", DocumentLineNo);
+      ApprovalEntry.SETRANGE(Status,ApprovalEntry.Status::Open);
+      IF ApprovalEntry.FINDFIRST THEN
+        EXIT(ApprovalEntry."Approver ID")
+      ELSE BEGIN
+        ApprovalEntry.SETRANGE("Document Line No.");
+        IF ApprovalEntry.FINDFIRST THEN
+          EXIT(ApprovalEntry."Approver ID")
+      END;
+    END;
+
+    PROCEDURE GetNextApproverName@1100528406(RecordIDtoApprove@1100528401 : RecordID;DocumentLineNo@1100528400 : Integer) : Text[250];
+    VAR
+      ApprovalEntry@161024013 : Record 454;
+    BEGIN
+      ApprovalEntry.SETCURRENTKEY("Record ID to Approve");
+      ApprovalEntry.SETRANGE("Record ID to Approve",RecordIDtoApprove);
+      ApprovalEntry.SETRANGE("Document Line No.", DocumentLineNo);
+      ApprovalEntry.SETRANGE(Status,ApprovalEntry.Status::Open);
+      IF ApprovalEntry.FINDFIRST THEN
+        EXIT(GetUserFullName(ApprovalEntry."Approver ID"))
+      ELSE BEGIN
+        ApprovalEntry.SETRANGE("Document Line No.");
+        IF ApprovalEntry.FINDFIRST THEN
+        EXIT(GetUserFullName(ApprovalEntry."Approver ID"));
+      END;
+    END;
+
+    PROCEDURE GetUserFullName@1100528408(ApproverID@1160040000 : Code[50]) : Text[100];
+    VAR
+      User@1160040004 : Record 2000000120;
+    BEGIN
+      User.SETRANGE("User Name", ApproverID);
+      IF User.FINDFIRST THEN
+        EXIT(User."Full Name");
+      EXIT(ApproverID);
+    END;
+
+    LOCAL PROCEDURE MoveApprovalEntriesForward@1100528414(VAR ApprovalEntry@1000 : Record 454;Steps@1100528400 : Integer);
+    VAR
+      ApprovalEntry2@1001 : Record 454;
+      ApprovalEntry3@1002 : Record 454;
+      ApprovalsBridge4PSConstruct@1003 : Codeunit 11125348;
+      ConsentManagement@1100529600 : Codeunit 11012132;
+    BEGIN
+      // Move pending approval entries forward
+      ApprovalEntry2 := ApprovalEntry;
+
+      ApprovalEntry2.SETCURRENTKEY("Table ID","Document Type","Document No.","Sequence No.","Record ID to Approve");
+      ApprovalEntry2.SETRANGE("Table ID",ApprovalEntry2."Table ID");
+      ApprovalEntry2.SETRANGE("Document Type",ApprovalEntry2."Document Type");
+      ApprovalEntry2.SETRANGE("Document No.",ApprovalEntry2."Document No.");
+      ApprovalEntry2.SETRANGE("Document Line No.", ApprovalEntry2."Document Line No.");
+      ApprovalEntry2.SETRANGE("Workflow Step Instance ID", ApprovalEntry2."Workflow Step Instance ID");
+      ApprovalEntry2.SETRANGE("Record ID to Approve",ApprovalEntry2."Record ID to Approve");
+      ApprovalEntry2.SETFILTER("Sequence No.",'>%1',ApprovalEntry2."Sequence No.");
+      ApprovalEntry2.SETFILTER(Status,'<>%1',ApprovalEntry2.Status::Canceled); // Needed in 90
+      ApprovalEntry2.ASCENDING(FALSE);
+      IF ApprovalEntry2.FINDFIRST THEN
+        REPEAT
+          ApprovalEntry3 := ApprovalEntry2;
+          ApprovalEntry3."Sequence No." := ApprovalEntry3."Sequence No." + Steps;
+          IF ApprovalEntry2.Status = ApprovalEntry2.Status::Open THEN
+            ApprovalEntry3.Status := ApprovalEntry3.Status::Created;
+          ApprovalEntry3."Last Modified By User ID" := GetCurrUserID;
+          ApprovalEntry3."Last Date-Time Modified" := CURRENTDATETIME;
+          ApprovalsBridge4PSConstruct.InsertApprovalEntry(ApprovalEntry3);
+          IF ApprovalEntry2.Status = ApprovalEntry2.Status::Open THEN  BEGIN
+            ApprovalEntry3.Status := ApprovalEntry3.Status::Created;  //Because ONINSERT event in CU6085927 for table 454
+            ApprovalEntry3.MODIFY;
+          END;
+          IF ApprovalEntry3.Status = ApprovalEntry3.Status::Approved THEN
+            IF NOT ConsentManagement.EntryCanBeApprovedAutomatically(ApprovalEntry3) THEN BEGIN
+              ApprovalEntry3.Status := ApprovalEntry3.Status::Created;
+              ApprovalEntry3.MODIFY;
+            END;
+          ApprovalEntry2.DELETE;
+        UNTIL ApprovalEntry2.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CopyApprovalEntriesForward@1100528242(VAR ApprovalEntry@1000 : Record 454;Steps@1100528400 : Integer);
+    VAR
+      ApprovalEntry2@1001 : Record 454;
+      ApprovalEntry3@1002 : Record 454;
+      ApprovalsBridge4PSConstruct@1003 : Codeunit 11125348;
+    BEGIN
+      // Copy pending approval entries steps forward, and set status created on new records.
+      ApprovalEntry2 := ApprovalEntry;
+
+      ApprovalEntry2.SETCURRENTKEY("Record ID to Approve","Workflow Step Instance ID","Sequence No.");
+      ApprovalEntry2.SETRANGE("Record ID to Approve",ApprovalEntry."Record ID to Approve");
+      ApprovalEntry2.SETRANGE("Workflow Step Instance ID",ApprovalEntry."Workflow Step Instance ID");
+      ApprovalEntry2.SETRANGE("Sequence No.",ApprovalEntry."Sequence No.");
+      ApprovalEntry2.SETRANGE("Approver Group Code",ApprovalEntry."Approver Group Code");
+      ApprovalEntry2.SETRANGE("Document Line No.",ApprovalEntry."Document Line No.");
+      ApprovalEntry2.SETRANGE("Consent Rule Process",ApprovalEntry."Consent Rule Process");
+      ApprovalEntry2.SETRANGE("Consent Rule Line No.",ApprovalEntry."Consent Rule Line No.");
+      ApprovalEntry2.SETRANGE(Status,ApprovalEntry2.Status::Open);
+      IF ApprovalEntry2.FINDSET THEN
+        REPEAT
+          ApprovalEntry3 := ApprovalEntry2;
+          ApprovalEntry3."Sender ID" := GetCurrUserID;
+          ApprovalEntry3."Last Modified By User ID" := GetCurrUserID;
+          ApprovalEntry3."Last Date-Time Modified" := CURRENTDATETIME;
+          ApprovalEntry3.Status := ApprovalEntry2.Status::Created;
+          ApprovalEntry3."Sequence No." += Steps;
+          ApprovalsBridge4PSConstruct.InsertApprovalEntry(ApprovalEntry3);
+          ApprovalEntry3.Status := ApprovalEntry3.Status::Created;
+          ApprovalEntry3.MODIFY;
+        UNTIL ApprovalEntry2.NEXT = 0;
+    END;
+
+    PROCEDURE ApproveAndDelegate4PS@32(VAR ApprovalEntry@1000 : Record 454;NewUserId@1002 : Code[50]);
+    VAR
+      ApprovalsBridge4PSConstruct@1100528400 : Codeunit 11125348;
+      ApprovalsMgmt@1100528401 : Codeunit 1535;
+    BEGIN
+      IF NewUserId = ApprovalEntry."Approver ID" THEN //Call C044094.n
+        ERROR(''); //Call C044094.n
+      ApprovalEntry."Delegated To User ID" := NewUserId;
+      ApprovalEntry.MODIFY;
+      ApprovalsMgmt.ApproveSelectedApprovalRequestInGroup(ApprovalEntry);
+      ApprovalsBridge4PSConstruct.OnApproveAndDelegateRequested(ApprovalEntry);
+    END;
+
+    PROCEDURE DelegateWithoutApproval4PS@31(VAR ApprovalEntry@1000 : Record 454;NewUserId@1002 : Code[50]);
+    VAR
+      ApprovalsBridge4PSConstruct@1100528400 : Codeunit 11125348;
+    BEGIN
+      IF NewUserId = ApprovalEntry."Approver ID" THEN //Call C044094.n
+        ERROR(''); //Call C044094.n
+      ApprovalEntry."Delegated To User ID" := ApprovalEntry."Approver ID"; //misuse of variable, save previous approver. because of double notifications if Approver ID is not changed here.
+      ApprovalEntry."Approver ID" := NewUserId; //Call C044094
+      ApprovalEntry.MODIFY;
+      ApprovalsBridge4PSConstruct.OnDelegateWithoutApprovalRequested(ApprovalEntry);
+    END;
+
+    PROCEDURE DelegateAndSendBack4PS@30(VAR ApprovalEntry@1000 : Record 454;NewUserId@1002 : Code[50]);
+    VAR
+      ApprovalsBridge4PSConstruct@1100528400 : Codeunit 11125348;
+    BEGIN
+      IF NewUserId = ApprovalEntry."Approver ID" THEN //Call C044094.n
+        ERROR(''); //Call C044094.n
+      ApprovalEntry."Delegated To User ID" := NewUserId;
+      ApprovalEntry.MODIFY;
+      ApprovalsBridge4PSConstruct.OnDelegateAndSendBackRequested(ApprovalEntry);
+    END;
+
+    PROCEDURE ApproveAndDelegate@12(VAR WorkflowStepInstance@1100528200 : Record 1504;VAR ApprovalEntry@1001 : Record 454;NewUserID@1004 : Code[50]);
+    VAR
+      ApprovalEntry2@1003 : Record 454;
+      ApprovalEntry3@1002 : Record 454;
+      ApprovalAction@1010 : 'ApproveAndDelegate,DelegateWithoutApproval,DelegateAndSendBack';
+      Comment@1007 : Text[80];
+      PrevUserID@1009 : Code[50];
+      RecreateHierarchy@1008 : Boolean;
+      ApprovalsBridge4PSConstruct@1100528201 : Codeunit 11125348;
+    BEGIN
+      InitializeDelegationVariables(ApprovalEntry,ApprovalEntry2,NewUserID,PrevUserID,RecreateHierarchy);
+
+      MoveApprovalEntriesForward(ApprovalEntry,1);
+
+      // Insert the new entry
+      ApprovalEntry2 := ApprovalEntry;
+      ApprovalEntry2."Approver Group Code" := '';
+      ApprovalEntry2.Status := ApprovalEntry2.Status::Created;
+
+      ApprovalEntry2."Sequence No." := ApprovalEntry2."Sequence No." + 1;
+      ApprovalEntry2."Last Modified By User ID" := GetCurrUserID;
+      ApprovalEntry2."Last Date-Time Modified" := CURRENTDATETIME;
+      ApprovalEntry2."Approver ID" := NewUserID;
+      ApprovalEntry2."Original Approver ID" := GetCurrUserID;
+      ApprovalsBridge4PSConstruct.InsertApprovalEntry(ApprovalEntry2);
+      IF ApprovalEntry2.Status = ApprovalEntry2.Status::Approved THEN BEGIN
+        ApprovalEntry2.Status := ApprovalEntry2.Status::Created;
+        ApprovalEntry2.MODIFY;
+      END;
+
+      Comment := COPYSTR(STRSUBSTNO(Text020,PrevUserID,NewUserID),1,MAXSTRLEN(Comment));
+
+      ApprovalEntry.SETRECFILTER;
+
+      OnAfterDelegate(WorkflowStepInstance, ApprovalEntry,ApprovalEntry2,ApprovalEntry3,RecreateHierarchy,Comment,ApprovalAction::ApproveAndDelegate);
+    END;
+
+    PROCEDURE DelegateWithoutApproval@13(VAR WorkflowStepInstance@1100528200 : Record 1504;VAR ApprovalEntry@1011 : Record 454;NewUserID@1010 : Code[50]);
+    VAR
+      ApprovalEntry2@1007 : Record 454;
+      ApprovalEntry3@1006 : Record 454;
+      ApprovalAction@1009 : 'ApproveAndDelegate,DelegateWithoutApproval,DelegateAndSendBack';
+      Comment@1004 : Text[80];
+      PrevUserID@1003 : Code[50];
+      RecreateHierarchy@1002 : Boolean;
+    BEGIN
+      InitializeDelegationVariables(ApprovalEntry,ApprovalEntry2,NewUserID,PrevUserID,RecreateHierarchy);
+      //Attention in this particular case NewUser and PrevUserID are switched. To get the notification to the correct person
+      Comment := COPYSTR(STRSUBSTNO(Text005,NewUserID,PrevUserID),1,MAXSTRLEN(Comment));
+
+      ApprovalEntry3 := ApprovalEntry;
+      ApprovalEntry3."Last Modified By User ID" := GetCurrUserID;
+      ApprovalEntry3."Last Date-Time Modified" := CURRENTDATETIME;
+      ApprovalEntry3."Delegated To User ID" := NewUserID;
+      ApprovalEntry3.MODIFY;
+
+      OnAfterDelegate(WorkflowStepInstance, ApprovalEntry,ApprovalEntry2,ApprovalEntry3,RecreateHierarchy,Comment,ApprovalAction::DelegateWithoutApproval);
+    END;
+
+    PROCEDURE DelegateAndSendBack@1100528415(VAR WorkflowStepInstance@1100528200 : Record 1504;VAR ApprovalEntry@1011 : Record 454;NewUserID@1010 : Code[50]);
+    VAR
+      ApprovalEntry2@1007 : Record 454;
+      ApprovalEntry3@1006 : Record 454;
+      ApprovalsBridge4PSConstruct@1001 : Codeunit 11125348;
+      ApprovalAction@1009 : 'ApproveAndDelegate,DelegateWithoutApproval,DelegateAndSendBack';
+      Comment@1004 : Text[80];
+      PrevUserID@1003 : Code[50];
+      RecreateHierarchy@1002 : Boolean;
+    BEGIN
+      InitializeDelegationVariables(ApprovalEntry,ApprovalEntry2,NewUserID,PrevUserID,RecreateHierarchy);
+
+      ApprovalEntry2.SETRANGE("Document Line No.", ApprovalEntry."Document Line No.");
+      ApprovalEntry2.ASCENDING(FALSE);
+      IF ApprovalEntry2.FINDSET THEN
+        REPEAT
+          ApprovalEntry3 := ApprovalEntry2;
+          IF ApprovalEntry2."Sequence No." = ApprovalEntry."Sequence No." THEN
+            ApprovalEntry3.Status := ApprovalEntry3.Status::Created;
+          ApprovalEntry3."Sequence No." := ApprovalEntry3."Sequence No." + 1;
+          ApprovalEntry3."Last Modified By User ID" := GetCurrUserID;
+          ApprovalEntry3."Last Date-Time Modified" := CURRENTDATETIME;
+          ApprovalsBridge4PSConstruct.InsertApprovalEntry(ApprovalEntry3);
+          IF ApprovalEntry2."Sequence No." = ApprovalEntry."Sequence No." THEN BEGIN
+            ApprovalEntry3.Status := ApprovalEntry3.Status::Created;
+            ApprovalEntry3.MODIFY;
+          END;
+          ApprovalEntry2.DELETE;
+
+          IF ApprovalEntry2.NEXT = 0 THEN
+            ApprovalEntry2."Sequence No." := -1;
+        UNTIL ApprovalEntry2."Sequence No." < ApprovalEntry."Sequence No.";
+
+      ApprovalEntry2 := ApprovalEntry;
+      ApprovalEntry2."Approver Group Code" := '';
+      ApprovalEntry2."Last Modified By User ID" := GetCurrUserID;
+      ApprovalEntry2."Last Date-Time Modified" := CURRENTDATETIME;
+      ApprovalEntry2."Approver ID" := NewUserID;
+      ApprovalsBridge4PSConstruct.InsertApprovalEntry(ApprovalEntry2);
+
+      Comment := STRSUBSTNO(Text005,PrevUserID,NewUserID);
+      OnAfterDelegate(WorkflowStepInstance, ApprovalEntry, ApprovalEntry2, ApprovalEntry3, RecreateHierarchy, Comment, ApprovalAction::DelegateAndSendBack);
+    END;
+
+    LOCAL PROCEDURE InitializeDelegationVariables@25(VAR ApprovalEntry@1001 : Record 454;VAR ApprovalEntry2@1006 : Record 454;VAR NewUserID@1009 : Code[50];VAR PrevUserID@1004 : Code[50];VAR RecreateHierarchy@1007 : Boolean);
+    VAR
+      PurchHeader@1003 : Record 38;
+      UserSetup@1005 : Record 91;
+      ApprovalsBridge4PSConstruct@1002 : Codeunit 11125348;
+    BEGIN
+      IF ApprovalEntry."Table ID" = DATABASE::"Purchase Header" THEN
+        PurchHeader.GET(ApprovalEntry."Document Type",ApprovalEntry."Document No.");
+
+      PrevUserID := ApprovalEntry."Approver ID";
+      UserSetup.GET(PrevUserID); //When delegate without approval, this is the new approver
+
+      UserSetup.GET(NewUserID);//When delegate without approval, this is the previous approver
+
+      ApprovalEntry2 := ApprovalEntry;
+
+      ApprovalsBridge4PSConstruct.OrderByTableIDDocTypeAndSeq(ApprovalEntry2,TRUE);
+      ApprovalEntry2.SETRANGE("Table ID",ApprovalEntry2."Table ID");
+      ApprovalEntry2.SETRANGE("Document Type",ApprovalEntry2."Document Type");
+      ApprovalEntry2.SETRANGE("Document No.",ApprovalEntry2."Document No.");
+    END;
+
+    LOCAL PROCEDURE OnAfterDelegate@26(VAR WorkflowStepInstance@1100528200 : Record 1504;VAR ApprovalEntry@1002 : Record 454;VAR ApprovalEntry2@1001 : Record 454;VAR ApprovalEntry3@1000 : Record 454;RecreateHierarchy@1003 : Boolean;Comment@1004 : Text[80];ApprovalAction@1007 : 'ApproveAndDelegate,DelegateWithoutApproval,DelegateAndSendBack');
+    VAR
+      ApprovalsBridge4PSConstruct@1006 : Codeunit 11125348;
+      NextSeqNo@1005 : Integer;
+    BEGIN
+      IF ((ApprovalEntry."Approval Type" = ApprovalEntry."Approval Type"::"Advanced Approver") OR (RecreateHierarchy)) AND
+         (ApprovalAction IN [ApprovalAction::ApproveAndDelegate,ApprovalAction::DelegateWithoutApproval])
+      THEN BEGIN
+        // This will remove duplicated approvers and make sure that approval entries have the correct sequence
+        ApprovalEntry2.ASCENDING(TRUE);
+        ApprovalEntry3.COPY(ApprovalEntry2);
+        ApprovalEntry3.SETFILTER(Status,'%1|%2|%3',ApprovalEntry3.Status::Created,ApprovalEntry3.Status::Open,
+          ApprovalEntry3.Status::Approved);
+
+        ApprovalEntry2.SETRANGE(Status,ApprovalEntry2.Status::Created);
+        IF ApprovalEntry2.FINDSET THEN
+          REPEAT
+            ApprovalEntry3.SETFILTER("Sequence No.",'<>%1',ApprovalEntry2."Sequence No.");
+            ApprovalEntry3.SETRANGE("Approver ID",ApprovalEntry2."Approver ID");
+            IF NOT ApprovalEntry3.ISEMPTY THEN
+              ApprovalEntry2.DELETE(TRUE);
+          UNTIL ApprovalEntry2.NEXT = 0;
+
+        IF ApprovalAction = ApprovalAction::ApproveAndDelegate THEN BEGIN
+          ApprovalEntry2.SETRANGE(Status,ApprovalEntry2.Status::Approved);
+          ApprovalEntry2.FINDFIRST;
+          ApprovalEntry2.SETFILTER("Sequence No.",'>%1',ApprovalEntry2."Sequence No.");
+        END ELSE BEGIN
+          ApprovalEntry2.SETRANGE(Status,ApprovalEntry2.Status::Open);
+          ApprovalEntry2.FINDFIRST;
+        END;
+
+        NextSeqNo := ApprovalEntry2."Sequence No." + 1;
+
+        ApprovalEntry2.SETRANGE(Status,ApprovalEntry2.Status::Created);
+        IF ApprovalEntry2.FINDSET THEN
+          REPEAT
+            IF ApprovalEntry2."Sequence No." <> NextSeqNo THEN BEGIN
+              ApprovalEntry3 := ApprovalEntry2;
+              ApprovalEntry3."Sequence No." := NextSeqNo;
+              ApprovalsBridge4PSConstruct.InsertApprovalEntry(ApprovalEntry3);
+              ApprovalEntry2.DELETE(TRUE);
+            END;
+            NextSeqNo := NextSeqNo + 1;
+          UNTIL ApprovalEntry2.NEXT = 0;
+      END;
+
+      CreateAppvlCmtLine(
+        WorkflowStepInstance.ID, ApprovalEntry, Comment);
+    END;
+
+    PROCEDURE UpdatePurchasePlanPhaseAfterApprovePurchase@1100528206(VAR WorkflowStepInstance@1100528201 : Record 1504;VAR ApprovalEntry@1100528200 : Record 454);
+    VAR
+      PurchasePlanManagement@1100528202 : Codeunit 11012242;
+      RecRef@1100528203 : RecordRef;
+      PurchaseHeader@1100528204 : Record 38;
+    BEGIN
+      RecRef.GET(ApprovalEntry."Record ID to Approve");
+      CASE RecRef.NUMBER OF
+        DATABASE::"Purchase Header":
+          BEGIN
+            RecRef.SETTABLE(PurchaseHeader);
+            PurchasePlanManagement.FinishConsentPhase(PurchaseHeader);
+          END;
+      END;
+    END;
+
+    PROCEDURE UpdateStatusAfterApproveHourLine4PS@1100528236(VAR WorkflowStepInstance@1100528202 : Record 1504;VAR ApprovalEntry@1100528201 : Record 454);
+    VAR
+      SiteMngmntHoursHeader@1100528200 : Record 11012360;
+      HourAccounting@1100528204 : Record 11012038;
+      RecRef@1100528203 : RecordRef;
+    BEGIN
+      RecRef.GET(ApprovalEntry."Record ID to Approve");
+      CASE RecRef.NUMBER OF
+        DATABASE::"Site Mngmnt. Hours Header":
+          BEGIN
+            RecRef.SETTABLE(SiteMngmntHoursHeader);
+            SiteMngmntHoursHeader.SETRECFILTER;
+            SiteMngmntHoursHeader.ApproveLines;
+          END;
+        DATABASE::"Hour Accounting":
+          BEGIN
+            RecRef.SETTABLE(HourAccounting);
+            HourAccounting.SETRECFILTER;
+            HourAccounting.ApproveLines;
+          END;
+      END;
+    END;
+
+    PROCEDURE UpdateStatusAfterRejectHourLine4PS@1100528237(VAR WorkflowStepInstance@1100528202 : Record 1504;VAR ApprovalEntry@1100528201 : Record 454);
+    VAR
+      SiteMngmntHoursHeader@1100528200 : Record 11012360;
+      HourAccounting@1100528204 : Record 11012038;
+      RecRef@1100528203 : RecordRef;
+    BEGIN
+      RecRef.GET(ApprovalEntry."Record ID to Approve");
+      CASE RecRef.NUMBER OF
+        DATABASE::"Site Mngmnt. Hours Header":
+          BEGIN
+            RecRef.SETTABLE(SiteMngmntHoursHeader);
+            SiteMngmntHoursHeader.SETRECFILTER;
+            SiteMngmntHoursHeader.RejectLine(ApprovalEntry."Document Line No.");
+          END;
+        DATABASE::"Hour Accounting":
+          BEGIN
+            RecRef.SETTABLE(HourAccounting);
+            HourAccounting.SETRECFILTER;
+            HourAccounting.RejectLine(ApprovalEntry."Document Line No.");
+          END;
+      END;
+    END;
+
+    LOCAL PROCEDURE "--- new"@1100528407();
+    BEGIN
+    END;
+
+    PROCEDURE CheckPostedPurchaseInvoiceApprovalsWorkflowEnabled@77(VAR PurchInvHeader@1002 : Record 122) : Boolean;
+    BEGIN
+      IF NOT IsPostedPurchaseInvoiceApprovalsWorkflowEnabled(PurchInvHeader) THEN
+        ERROR(NoWorkflowEnabledErr);
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE IsPostedPurchaseInvoiceApprovalsWorkflowEnabled@59(VAR PurchInvHeader@1002 : Record 122) : Boolean;
+    BEGIN
+      EXIT(WorkflowManagement.CanExecuteWorkflow(PurchInvHeader, WorkflowEventHandling4PS.RunWorkflowOnSendPostedPurchaseInvoiceForApprovalCode));
+    END;
+
+    PROCEDURE CheckPostedPurchaseCreditMemoApprovalsWorkflowEnabled@1100528410(VAR PurchCrMemoHdr@1002 : Record 124) : Boolean;
+    BEGIN
+      IF NOT IsPostedPurchaseCreditMemoApprovalsWorkflowEnabled(PurchCrMemoHdr) THEN
+        ERROR(NoWorkflowEnabledErr);
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE IsPostedPurchaseCreditMemoApprovalsWorkflowEnabled@1100528409(VAR PurchCrMemoHdr@1002 : Record 124) : Boolean;
+    BEGIN
+      EXIT(WorkflowManagement.CanExecuteWorkflow(PurchCrMemoHdr, WorkflowEventHandling4PS.RunWorkflowOnSendPostedPurchaseCreditMemoForApprovalCode));
+    END;
+
+    PROCEDURE CheckProjectPurchaseActionApprovalsWorkflowEnabled@1100528412(VAR ProjectPurchaseAction@1002 : Record 11012026) : Boolean;
+    BEGIN
+      IF NOT IsProjectPurchaseActionApprovalsWorkflowEnabled(ProjectPurchaseAction) THEN
+        ERROR(NoWorkflowEnabledErr);
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE IsProjectPurchaseActionApprovalsWorkflowEnabled@1100528411(VAR ProjectPurchaseAction@1002 : Record 11012026) : Boolean;
+    BEGIN
+      EXIT(WorkflowManagement.CanExecuteWorkflow(ProjectPurchaseAction, WorkflowEventHandling4PS.RunWorkflowOnSendProjectPurchaseActionForApprovalCode));
+    END;
+
+    PROCEDURE CheckAdviceOrderLineApprovalsWorkflowEnabled@1100528440(VAR AdviceOrderLine@1002 : Record 11012055) : Boolean;
+    BEGIN
+      IF NOT IsAdviceOrderLineApprovalsWorkflowEnabled(AdviceOrderLine) THEN
+        ERROR(NoWorkflowEnabledErr);
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE IsAdviceOrderLineApprovalsWorkflowEnabled@1100528439(VAR AdviceOrderLine@1002 : Record 11012055) : Boolean;
+    BEGIN
+      EXIT(WorkflowManagement.CanExecuteWorkflow(AdviceOrderLine, WorkflowEventHandling4PS.RunWorkflowOnSendAdviceOrderLineForApprovalCode));
+    END;
+
+    PROCEDURE CheckPurchaseRequisitionApprovalsWorkflowEnabled@1100528221(VAR PurchaseRequisition@1002 : Record 11229330) : Boolean;
+    BEGIN
+      IF NOT IsPurchaseRequisitionApprovalsWorkflowEnabled(PurchaseRequisition) THEN
+        ERROR(NoWorkflowEnabledErr);
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE IsPurchaseRequisitionApprovalsWorkflowEnabled@1100528219(VAR PurchaseRequisition@1002 : Record 11229330) : Boolean;
+    BEGIN
+      EXIT(WorkflowManagement.CanExecuteWorkflow(PurchaseRequisition, WorkflowEventHandling4PS.RunWorkflowOnSendPurchaseRequisitionForApprovalCode));
+    END;
+
+    PROCEDURE CheckHourAccountingApprovalsWorkflowEnabled@1100528428(VAR HourAccounting@1002 : Record 11012038) : Boolean;
+    BEGIN
+      IF NOT IsHourAccountingApprovalsWorkflowEnabled(HourAccounting) THEN
+        ERROR(NoWorkflowEnabledErr);
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE IsHourAccountingApprovalsWorkflowEnabled@1100528426(VAR HourAccounting@1002 : Record 11012038) : Boolean;
+    BEGIN
+      EXIT(WorkflowManagement.CanExecuteWorkflow(HourAccounting, WorkflowEventHandling4PS.RunWorkflowOnSendHourAccountingForApprovalCode));
+    END;
+
+    PROCEDURE CheckSiteMngmntHoursHeaderApprovalsWorkflowEnabled@1100528435(VAR SiteMngmntHoursHeader@1002 : Record 11012360) : Boolean;
+    BEGIN
+      IF NOT IsSiteMngmntHoursHeaderApprovalsWorkflowEnabled(SiteMngmntHoursHeader) THEN
+        ERROR(NoWorkflowEnabledErr);
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE IsSiteMngmntHoursHeaderApprovalsWorkflowEnabled@1100528434(VAR SiteMngmntHoursHeader@1100528400 : Record 11012360) : Boolean;
+    BEGIN
+      EXIT(WorkflowManagement.CanExecuteWorkflow(SiteMngmntHoursHeader, WorkflowEventHandling4PS.RunWorkflowOnSendSiteMngmntHoursHeaderForApprovalCode));
+    END;
+
+    LOCAL PROCEDURE GetPreviousApprovedApprovalEntry@1100528413(ApprovalEntry@1100528400 : Record 454;VAR ApprovalEntry2@1100528401 : Record 454) : Boolean;
+    BEGIN
+      ApprovalEntry2.SETCURRENTKEY("Record ID to Approve", "Workflow Step Instance ID", "Sequence No.");
+      ApprovalEntry2.SETRANGE("Table ID", ApprovalEntry."Table ID");
+      ApprovalEntry2.SETRANGE("Record ID to Approve", ApprovalEntry."Record ID to Approve");
+      ApprovalEntry2.SETRANGE("Workflow Step Instance ID", ApprovalEntry."Workflow Step Instance ID");
+      ApprovalEntry2.SETRANGE("Document Line No.", ApprovalEntry."Document Line No.");
+      ApprovalEntry2.SETRANGE(Status,ApprovalEntry2.Status::Approved);
+
+      EXIT(ApprovalEntry2.FINDLAST);
+    END;
+
+    LOCAL PROCEDURE "-- from DC to make own versions"@1100528422();
+    BEGIN
+    END;
+
+    PROCEDURE GetApprovalSharingToUserFilter@161024014(_UserId@161024013 : Code[50]) FilterString : Text[1024];
+    VAR
+      ApprovalSharingWorkflow@161024012 : Record 11229350;
+    BEGIN
+      IF NOT FilterApprovalSharingToUser(ApprovalSharingWorkflow,_UserId) THEN
+        EXIT('XXXXXXXXX');
+
+      IF ApprovalSharingWorkflow.FINDSET THEN
+        REPEAT
+          IF FilterString = '' THEN
+            FilterString := ApprovalSharingWorkflow."Owner User ID"
+          ELSE
+            FilterString := FilterString + '|' + ApprovalSharingWorkflow."Owner User ID"
+        UNTIL ApprovalSharingWorkflow.NEXT = 0;
+    END;
+
+    PROCEDURE SendBackOrRejectApprovalReq@161024025(ApprovalEntry@161024012 : Record 454) : Integer;
+    VAR
+      ApprovalEntry2@161024013 : Record 454;
+      UserSetup@1001 : Record 91;
+      Purchaser@1000 : Record 13;
+      Answer@161024015 : 'Dialog Cancelled,Send Back,Reject';
+    BEGIN
+      IF GetPreviousApprovedApprovalEntry(ApprovalEntry,ApprovalEntry2) THEN BEGIN
+        UserSetup.GET(ApprovalEntry2."Approver ID");
+        Purchaser.GET(UserSetup."Salespers./Purch. Code");
+        Answer := STRMENU(STRSUBSTNO(Text009,Purchaser.Name))
+      END ELSE
+        Answer := Answer::Reject;
+
+      EXIT(Answer);
+    END;
+
+    PROCEDURE GetOutOfOffice@161024021(ApproverId@161024014 : Code[50];VAR ForwardToApproverId@161024015 : Code[50];VAR FromDate@161024013 : Date;VAR ToDate@161024012 : Date) : Boolean;
+    VAR
+      ApprovalSharingWorkflow@161024016 : Record 11229350;
+    BEGIN
+      ApprovalSharingWorkflow.SETRANGE("Owner User ID",ApproverId);
+      ApprovalSharingWorkflow.SETRANGE("Sharing Type",ApprovalSharingWorkflow."Sharing Type"::"Out of Office");
+
+      IF NOT ApprovalSharingWorkflow.FINDFIRST THEN
+        EXIT(FALSE);
+
+      ForwardToApproverId := ApprovalSharingWorkflow."Shared to User ID";
+      FromDate := ApprovalSharingWorkflow."Valid From";
+      ToDate := ApprovalSharingWorkflow."Valid To";
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE SetOutOfOffice@161024023(ApproverId@161024012 : Code[50];ForwardToApproverId@161024015 : Code[50];FromDate@161024013 : Date;ToDate@161024014 : Date);
+    VAR
+      ApprovalSharingWorkflow@161024016 : Record 11229350;
+    BEGIN
+      ApprovalSharingWorkflow.SETRANGE("Owner User ID",ApproverId);
+      ApprovalSharingWorkflow.SETRANGE("Sharing Type",ApprovalSharingWorkflow."Sharing Type"::"Out of Office");
+      ApprovalSharingWorkflow.DELETEALL;
+
+      IF ((FromDate = 0D) AND (ToDate = 0D)) OR (ForwardToApproverId = '') THEN
+        EXIT;
+
+      ApprovalSharingWorkflow."Owner User ID" := ApproverId;
+      ApprovalSharingWorkflow."Sharing Type" := ApprovalSharingWorkflow."Sharing Type"::"Out of Office";
+      ApprovalSharingWorkflow."Valid From" := FromDate;
+      ApprovalSharingWorkflow."Valid To" := ToDate;
+      ApprovalSharingWorkflow."Shared to User ID" := ForwardToApproverId;
+      ApprovalSharingWorkflow."Forward E-mails" := TRUE;
+      ApprovalSharingWorkflow."Owners Limits and Permissions" := TRUE;
+      ApprovalSharingWorkflow.INSERT(TRUE);
+    END;
+
+    LOCAL PROCEDURE "-- new"@1100525000();
+    BEGIN
+    END;
+
+    PROCEDURE ShowPurchDocFromApprEntry@161024024(VAR ApprovalEntry@161024012 : Record 454);
+    VAR
+      PurchHeader@161024013 : Record 38;
+      PurchInvHeader@1100528204 : Record 122;
+      PurchCrMemoHdr@1100528203 : Record 124;
+      ApprovePurchaseInvoices@1100528202 : Page 11012066;
+      ApproveCreditMemos@1100528201 : Page 11012068;
+      PostedPurchaseInvoices@1100528200 : Page 138;
+      PostedPurchaseCrMemos@1100528205 : Page 140;
+      ApprovalEntry2@1100525000 : Record 454;
+      HourAccounting@1100525001 : Record 11012038;
+      SiteMngmntHoursHeader@1100525002 : Record 11012360;
+      PurchaseRequisition@1100525003 : Record 11229330;
+      ProjectPurchaseAction@1100525004 : Record 11012026;
+      AdviceOrderLine@1100525005 : Record 11012055;
+      SiteMngmntHourAccounting@1101285000 : Page 11072215;
+    BEGIN
+      WITH ApprovalEntry DO BEGIN
+        ApprovalEntry2."Table ID"  := "Table ID";
+        ApprovalEntry2."Document Type" := "Document Type";
+        ApprovalEntry2."Document No." := "Document No.";
+        ApprovalEntry2."Entry No.":= "Entry No.";
+        ApprovalEntry2."Record ID to Approve" := "Record ID to Approve";
+
+        CASE ApprovalEntry."Table ID" OF
+          DATABASE::"Purch. Inv. Header":
+            BEGIN
+              FilterPurchInvHeaderForApprover(ApprovalEntry, ApprovalEntry."Approver ID",PurchInvHeader);
+              IF NOT PurchInvHeader.GET(ApprovalEntry2."Document No.") THEN
+                EXIT;
+              IF PurchInvHeader."Invoice Approved" THEN BEGIN
+                PurchInvHeader.SETRANGE("Invoice Approved", TRUE);
+                PostedPurchaseInvoices.SETTABLEVIEW(PurchInvHeader);
+                PostedPurchaseInvoices.SETRECORD(PurchInvHeader);
+                PostedPurchaseInvoices.RUNMODAL;
+              END ELSE BEGIN
+                ApprovePurchaseInvoices.SetJournalTemplate(PurchInvHeader."Journal Template");
+                ApprovePurchaseInvoices.SETTABLEVIEW(PurchInvHeader);
+                ApprovePurchaseInvoices.SETRECORD(PurchInvHeader);
+                ApprovePurchaseInvoices.RUNMODAL;
+              END;
+            END;
+          DATABASE::"Purch. Cr. Memo Hdr.":
+            BEGIN
+              FilterPurchCrMemoHdrForApprover(ApprovalEntry, ApprovalEntry."Approver ID",PurchCrMemoHdr);
+              IF NOT PurchCrMemoHdr.GET(ApprovalEntry2."Document No.") THEN
+                EXIT;
+              IF PurchCrMemoHdr."Credit Memo Approved" THEN BEGIN
+                PurchCrMemoHdr.SETRANGE("Credit Memo Approved", TRUE);
+                PostedPurchaseCrMemos.SETTABLEVIEW(PurchCrMemoHdr);
+                PostedPurchaseCrMemos.SETRECORD(PurchCrMemoHdr);
+                PostedPurchaseCrMemos.RUNMODAL;
+              END ELSE BEGIN
+                ApproveCreditMemos.SetJournalTemplate(PurchCrMemoHdr."Journal Template");
+                ApproveCreditMemos.SETTABLEVIEW(PurchCrMemoHdr);
+                ApproveCreditMemos.SETRECORD(PurchCrMemoHdr);
+                ApproveCreditMemos.RUNMODAL;
+              END;
+            END;
+          DATABASE::"Purchase Header":
+            BEGIN
+              FilterPurchHeaderForApprover(ApprovalEntry, ApprovalEntry."Approver ID",PurchHeader);
+              IF NOT PurchHeader.GET(ApprovalEntry2."Document Type",ApprovalEntry2."Document No.") THEN
+                EXIT;
+              CASE ApprovalEntry2."Document Type" OF
+                "Document Type"::Quote:
+                  PAGE.RUNMODAL(PAGE::"Purchase Quote",PurchHeader);
+                "Document Type"::Order:
+                  PAGE.RUNMODAL(PAGE::"Purchase Order",PurchHeader);
+                "Document Type"::Invoice:
+                  PAGE.RUNMODAL(PAGE::"Purchase Invoice",PurchHeader);
+                "Document Type"::"Credit Memo":
+                  PAGE.RUNMODAL(PAGE::"Purchase Credit Memo",PurchHeader);
+                "Document Type"::"Blanket Order":
+                  PAGE.RUNMODAL(PAGE::"Blanket Purchase Order",PurchHeader);
+                "Document Type"::"Return Order":
+                  PAGE.RUNMODAL(PAGE::"Purchase Return Order",PurchHeader);
+              END;
+            END;
+          DATABASE::"Hour Accounting":
+            BEGIN
+              FilterHourAccountingForApprover(ApprovalEntry, ApprovalEntry."Approver ID",HourAccounting);
+              IF NOT HourAccounting.GET(ApprovalEntry2."Record ID to Approve") THEN
+                EXIT;
+              PAGE.RUNMODAL(PAGE::"Hour Accounting",HourAccounting);
+            END;
+          DATABASE::"Site Mngmnt. Hours Header":
+            BEGIN
+              FilterSiteMngmntHoursHeaderForApprover(ApprovalEntry, ApprovalEntry."Approver ID",SiteMngmntHoursHeader);
+              IF NOT SiteMngmntHoursHeader.GET(ApprovalEntry2."Record ID to Approve") THEN
+                EXIT;
+              //>> 191125 ORANGO.SB #26696
+              SiteMngmntHourAccounting.SetOverride(TRUE);
+              SiteMngmntHourAccounting.SETTABLEVIEW(SiteMngmntHoursHeader);
+              SiteMngmntHourAccounting.SETRECORD(SiteMngmntHoursHeader);
+              SiteMngmntHourAccounting.RUN;
+              SiteMngmntHourAccounting.SetOverride(FALSE);
+              //PAGE.RUNMODAL(PAGE::"Site Mngmnt. Hour Accounting",SiteMngmntHoursHeader);
+              //<<
+            END;
+          DATABASE::"Purchase Requisition":
+            BEGIN
+              FilterPurchaseRequisitionForApprover(ApprovalEntry, ApprovalEntry."Approver ID",PurchaseRequisition);
+              IF NOT PurchaseRequisition.GET(ApprovalEntry2."Record ID to Approve") THEN
+                EXIT;
+              PAGE.RUNMODAL(PAGE::"Purchase Requisition Header",PurchaseRequisition);
+            END;
+          DATABASE::"Project Purchase Action":
+            BEGIN
+              FilterProjectPurchaseActionForApprover(ApprovalEntry, ApprovalEntry."Approver ID",ProjectPurchaseAction);
+              IF NOT ProjectPurchaseAction.GET(ApprovalEntry2."Record ID to Approve") THEN
+                EXIT;
+              PAGE.RUNMODAL(PAGE::"Project Purchase Action",ProjectPurchaseAction);
+            END;
+          DATABASE::"Advice Order Line":
+            BEGIN
+              FilterAdviceOrderLineForApprover(ApprovalEntry, ApprovalEntry."Approver ID",AdviceOrderLine);
+              IF NOT AdviceOrderLine.GET(ApprovalEntry2."Record ID to Approve") THEN
+                EXIT;
+              PAGE.RUNMODAL(PAGE::"Advice Order Lines",AdviceOrderLine);
+            END;
+          ELSE
+            ShowRecord;
+        END;
+        IF GET(ApprovalEntry2."Entry No.") THEN;
+      END;
+    END;
+
+    PROCEDURE FilterPurchHeaderForApprover@161024030(VAR ApprovalEntry@1100525002 : Record 454;ApproverID@161024012 : Code[50];VAR PurchHeader@161024013 : Record 38);
+    BEGIN
+      ApprovalEntry.FILTERGROUP := 9;
+      ApprovalEntry.SETRANGE("Table ID",ApprovalEntry."Table ID");
+      IF ApprovalEntry.FINDSET THEN
+        REPEAT
+          IF PurchHeader.GET(ApprovalEntry."Document Type", ApprovalEntry."Document No.") THEN
+            PurchHeader.MARK(TRUE)
+        UNTIL ApprovalEntry.NEXT = 0;
+      ApprovalEntry.SETRANGE("Table ID");
+      ApprovalEntry.FILTERGROUP := 0;
+      PurchHeader.MARKEDONLY(TRUE);
+    END;
+
+    PROCEDURE FilterPurchInvHeaderForApprover@1100525001(VAR ApprovalEntry@1100525000 : Record 454;ApproverID@161024012 : Code[50];VAR PurchInvHeader@161024013 : Record 122);
+    BEGIN
+      ApprovalEntry.FILTERGROUP := 9;
+      ApprovalEntry.SETRANGE("Table ID",ApprovalEntry."Table ID");
+      IF ApprovalEntry.FINDSET THEN
+        REPEAT
+          IF PurchInvHeader.GET(ApprovalEntry."Document No.") THEN
+            PurchInvHeader.MARK(TRUE)
+        UNTIL ApprovalEntry.NEXT = 0;
+      ApprovalEntry.SETRANGE("Table ID");
+      ApprovalEntry.FILTERGROUP := 0;
+      PurchInvHeader.MARKEDONLY(TRUE);
+    END;
+
+    PROCEDURE FilterPurchCrMemoHdrForApprover@1100525004(VAR ApprovalEntry@1100525000 : Record 454;ApproverID@161024012 : Code[50];VAR PurchCrMemoHdr@161024013 : Record 124);
+    BEGIN
+      ApprovalEntry.FILTERGROUP := 9;
+      ApprovalEntry.SETRANGE("Table ID",ApprovalEntry."Table ID");
+      IF ApprovalEntry.FINDSET THEN
+        REPEAT
+          IF PurchCrMemoHdr.GET(ApprovalEntry."Document No.") THEN
+            PurchCrMemoHdr.MARK(TRUE)
+        UNTIL ApprovalEntry.NEXT = 0;
+      ApprovalEntry.SETRANGE("Table ID");
+      ApprovalEntry.FILTERGROUP := 0;
+      PurchCrMemoHdr.MARKEDONLY(TRUE);
+    END;
+
+    PROCEDURE FilterHourAccountingForApprover@1100525007(VAR ApprovalEntry@1100525002 : Record 454;ApproverID@161024012 : Code[50];VAR HourAccounting@161024013 : Record 11012038);
+    BEGIN
+      ApprovalEntry.FILTERGROUP := 9;
+      ApprovalEntry.SETRANGE("Table ID",ApprovalEntry."Table ID");
+      IF ApprovalEntry.FINDSET THEN
+        REPEAT
+          IF HourAccounting.GET(ApprovalEntry."Record ID to Approve") THEN
+            HourAccounting.MARK(TRUE)
+        UNTIL ApprovalEntry.NEXT = 0;
+      ApprovalEntry.SETRANGE("Table ID");
+      ApprovalEntry.FILTERGROUP := 0;
+      HourAccounting.MARKEDONLY(TRUE);
+    END;
+
+    PROCEDURE FilterSiteMngmntHoursHeaderForApprover@1100525009(VAR ApprovalEntry@1100525002 : Record 454;ApproverID@161024012 : Code[50];VAR SiteMngmntHoursHeader@161024013 : Record 11012360);
+    BEGIN
+      ApprovalEntry.FILTERGROUP := 9;
+      ApprovalEntry.SETRANGE("Table ID",ApprovalEntry."Table ID");
+      IF ApprovalEntry.FINDSET THEN
+        REPEAT
+          IF SiteMngmntHoursHeader.GET(ApprovalEntry."Record ID to Approve") THEN
+            SiteMngmntHoursHeader.MARK(TRUE)
+        UNTIL ApprovalEntry.NEXT = 0;
+      ApprovalEntry.SETRANGE("Table ID");
+      ApprovalEntry.FILTERGROUP := 0;
+      SiteMngmntHoursHeader.MARKEDONLY(TRUE);
+    END;
+
+    PROCEDURE FilterPurchaseRequisitionForApprover@1100525003(VAR ApprovalEntry@1100525002 : Record 454;ApproverID@161024012 : Code[50];VAR PurchaseRequisition@161024013 : Record 11229330);
+    BEGIN
+      ApprovalEntry.FILTERGROUP := 9;
+      ApprovalEntry.SETRANGE("Table ID",ApprovalEntry."Table ID");
+      IF ApprovalEntry.FINDSET THEN
+        REPEAT
+          IF PurchaseRequisition.GET(ApprovalEntry."Record ID to Approve") THEN
+            PurchaseRequisition.MARK(TRUE)
+        UNTIL ApprovalEntry.NEXT = 0;
+      ApprovalEntry.SETRANGE("Table ID");
+      ApprovalEntry.FILTERGROUP := 0;
+      PurchaseRequisition.MARKEDONLY(TRUE);
+    END;
+
+    PROCEDURE FilterProjectPurchaseActionForApprover@1100525005(VAR ApprovalEntry@1100525002 : Record 454;ApproverID@161024012 : Code[50];VAR ProjectPurchaseAction@161024013 : Record 11012026);
+    BEGIN
+      ApprovalEntry.FILTERGROUP := 9;
+      ApprovalEntry.SETRANGE("Table ID",ApprovalEntry."Table ID");
+      IF ApprovalEntry.FINDSET THEN
+        REPEAT
+          IF ProjectPurchaseAction.GET(ApprovalEntry."Record ID to Approve") THEN
+            ProjectPurchaseAction.MARK(TRUE)
+        UNTIL ApprovalEntry.NEXT = 0;
+      ApprovalEntry.SETRANGE("Table ID");
+      ApprovalEntry.FILTERGROUP := 0;
+      ProjectPurchaseAction.MARKEDONLY(TRUE);
+    END;
+
+    PROCEDURE FilterAdviceOrderLineForApprover@1100525006(VAR ApprovalEntry@1100525002 : Record 454;ApproverID@161024012 : Code[50];VAR AdviceOrderLine@161024013 : Record 11012055);
+    BEGIN
+      ApprovalEntry.FILTERGROUP := 9;
+      ApprovalEntry.SETRANGE("Table ID",ApprovalEntry."Table ID");
+      IF ApprovalEntry.FINDSET THEN
+        REPEAT
+          IF AdviceOrderLine.GET(ApprovalEntry."Record ID to Approve") THEN
+            AdviceOrderLine.MARK(TRUE)
+        UNTIL ApprovalEntry.NEXT = 0;
+      ApprovalEntry.SETRANGE("Table ID");
+      ApprovalEntry.FILTERGROUP := 0;
+      AdviceOrderLine.MARKEDONLY(TRUE);
+    END;
+
+    PROCEDURE UpdateApprEntryFromDocument@1100525010(VAR ApprovalEntry@161024012 : Record 454);
+    VAR
+      PurchaseHeader@1100525001 : Record 38;
+      PurchInvHeader@1100525009 : Record 122;
+      PurchCrMemoHdr@1100525008 : Record 124;
+    BEGIN
+      WITH ApprovalEntry DO
+        CASE "Table ID" OF
+          DATABASE::"Purchase Header" :
+            IF PurchaseHeader.GET("Document Type", "Document No.") THEN BEGIN
+              "Due Date Document" := PurchaseHeader."Due Date";
+              "Vendor No." := PurchaseHeader."Buy-from Vendor No.";
+            END;
+          DATABASE::"Purch. Inv. Header" :
+            IF PurchInvHeader.GET("Document No.") THEN BEGIN
+              "Due Date Document" := PurchInvHeader."Due Date";
+              "Vendor No." := PurchInvHeader."Buy-from Vendor No.";
+            END;
+          DATABASE::"Purch. Cr. Memo Hdr." :
+            IF PurchCrMemoHdr.GET("Document No.") THEN BEGIN
+              "Due Date Document" := PurchCrMemoHdr."Due Date";
+              "Vendor No." := PurchCrMemoHdr."Buy-from Vendor No.";
+            END;
+        END;
+    END;
+
+    PROCEDURE UpdateApprvlEntriesByApprover@161024031(VAR Entries@161024013 : TEMPORARY Record 11128890);
+    VAR
+      ApprovalEntry@161024012 : Record 454;
+      Window@161024017 : Dialog;
+      RecCount@161024018 : Integer;
+      i@161024019 : Integer;
+    BEGIN
+      ApprovalEntry.SETCURRENTKEY("Approver ID", Status);
+      ApprovalEntry.SETFILTER("Table ID",'%1|%2|%3', DATABASE::"Purchase Header",
+         DATABASE::"Purch. Inv. Header", DATABASE::"Purch. Cr. Memo Hdr.");
+      ApprovalEntry.SETRANGE(Status, ApprovalEntry.Status::Open);
+      IF ApprovalEntry.FINDSET THEN BEGIN
+        IF GUIALLOWED THEN BEGIN
+          RecCount := ApprovalEntry.COUNT;
+          Window.OPEN(Text030);
+        END;
+
+        REPEAT
+          ApprovalEntry.SETRANGE("Approver ID", ApprovalEntry."Approver ID");
+
+          Entries.INIT;
+          Entries."Approver ID" := ApprovalEntry."Approver ID";
+          Entries.Name := GetApproverDisplayName(ApprovalEntry."Approver ID");
+          Entries.INSERT;
+
+          IF GUIALLOWED THEN BEGIN
+            i := i + ApprovalEntry.COUNT;
+            Window.UPDATE(1,ROUND(i / RecCount * 10000,1,'>'));
+          END;
+
+          ApprovalEntry.FINDLAST;
+          ApprovalEntry.SETRANGE("Approver ID");
+        UNTIL ApprovalEntry.NEXT = 0;
+
+        Entries.SETFILTER("Due Date Filter",'<%1',TODAY);
+        IF Entries.FINDFIRST THEN;
+
+        IF GUIALLOWED THEN
+          Window.CLOSE;
+      END;
+    END;
+
+    PROCEDURE GetApproverDisplayName@1100525011(ApproverID@1160040000 : Code[50]) : Text[250];
+    VAR
+      ContiniaUser@1160040005 : Record 6086001;
+      UserSetup@1160040004 : Record 91;
+      SalesPurch@1160040003 : Record 13;
+    BEGIN
+      IF ContiniaUser.GET(ApproverID) AND (ContiniaUser.Name <> '') THEN
+        EXIT(ContiniaUser.Name)
+      ELSE
+        IF UserSetup.GET(ApproverID) THEN
+          IF SalesPurch.GET(UserSetup."Salespers./Purch. Code") AND (SalesPurch.Name <> '') THEN
+            EXIT(SalesPurch.Name);
+
+      EXIT(ApproverID);
+    END;
+
+    PROCEDURE ManuallyDeleleteAppvlEntry4PS@1100525012(ApprovalEntry@161024012 : Record 454);
+    VAR
+      ApprovalCmtLine@161024014 : Record 455;
+    BEGIN
+      IsApprovalAdminUser(TRUE);
+      ApprovalEntry.TESTFIELD(Status, ApprovalEntry.Status::Created);
+      ApprovalEntry.DELETE(TRUE);
+
+      CASE ApprovalEntry."Table ID" OF
+        DATABASE::"Purch. Inv. Header":
+          BEGIN
+            ApprovalCmtLine."Table ID" := DATABASE::"Purch. Inv. Header";
+            ApprovalCmtLine."Document Type" := ApprovalEntry."Document Type";
+            ApprovalCmtLine."Document No." := ApprovalEntry."Document No.";
+            ApprovalCmtLine.Comment := COPYSTR(STRSUBSTNO(Text036, ApprovalEntry."Approver ID"),1,MAXSTRLEN(ApprovalCmtLine.Comment));
+            ApprovalCmtLine.SETRANGE("Table ID", ApprovalCmtLine."Table ID");
+            ApprovalCmtLine.SETRANGE("Document Type", ApprovalCmtLine."Document Type");
+            ApprovalCmtLine.SETRANGE("Document No.", ApprovalCmtLine."Document No.");
+
+            ApprovalCmtLine.INSERT(TRUE);
+          END;
+        DATABASE::"Purch. Cr. Memo Hdr.":
+          BEGIN
+            ApprovalCmtLine."Table ID" := DATABASE::"Purch. Cr. Memo Hdr.";
+            ApprovalCmtLine."Document Type" := ApprovalEntry."Document Type";
+            ApprovalCmtLine."Document No." := ApprovalEntry."Document No.";
+            ApprovalCmtLine.Comment := COPYSTR(STRSUBSTNO(Text036, ApprovalEntry."Approver ID"), 1, MAXSTRLEN(ApprovalCmtLine.Comment));
+            ApprovalCmtLine.SETRANGE("Table ID", ApprovalCmtLine."Table ID");
+            ApprovalCmtLine.SETRANGE("Document Type", ApprovalCmtLine."Document Type");
+            ApprovalCmtLine.SETRANGE("Document No.", ApprovalCmtLine."Document No.");
+
+            ApprovalCmtLine.INSERT(TRUE);
+          END;
+      END;
+    END;
+
+    PROCEDURE ManuallyDeleleteAppvlEntry@161024035(ApprovalEntry@161024012 : Record 454);
+    BEGIN
+      IsApprovalAdminUser(TRUE);
+      ApprovalEntry.TESTFIELD(Status, ApprovalEntry.Status::Created);
+      ApprovalEntry.DELETE(TRUE);
+
+      CreateAppvlCmtLine2(
+        DATABASE::"Purchase Header", ApprovalEntry."Document Type", ApprovalEntry."Document No.",
+        STRSUBSTNO(Text036, ApprovalEntry."Approver ID"));
+    END;
+
+    PROCEDURE ManuallyEditAppvlEntry@161024034(VAR ApprovalEntry@161024012 : Record 454);
+    VAR
+      ApprovalEntry2@161024013 : Record 454;
+    BEGIN
+      IsApprovalAdminUser(TRUE);
+
+      ApprovalEntry.TESTFIELD("Approver ID");
+
+      ApprovalEntry2 := ApprovalEntry;
+      IF NOT ApprovalEntry2.FIND THEN
+        EXIT;
+
+      IF ApprovalEntry2."Approver ID" <> '' THEN
+        IF GUIALLOWED THEN
+          IF NOT CONFIRM(Text032, TRUE, ApprovalEntry.FIELDCAPTION("Approver ID"), ApprovalEntry."Approver ID") THEN
+            ERROR('');
+
+      IF NOT (ApprovalEntry.Status IN [ApprovalEntry.Status::Open, ApprovalEntry.Status::Created]) THEN
+        ApprovalEntry.FIELDERROR(Status, Text031);
+
+      ApprovalEntry2.LOCKTABLE;
+      ApprovalEntry2.FIND;
+      IF ApprovalEntry2."Approver ID" <> ApprovalEntry."Approver ID" THEN BEGIN
+        CreateAppvlCmtLine2(
+          DATABASE::"Purchase Header", ApprovalEntry."Document Type", ApprovalEntry."Document No.",
+          STRSUBSTNO(Text035, ApprovalEntry2."Approver ID", ApprovalEntry."Approver ID"));
+
+        ApprovalEntry2.VALIDATE("Approver ID", ApprovalEntry."Approver ID");
+        ApprovalEntry2.MODIFY;
+      END;
+    END;
+
+    PROCEDURE CreateAppvlCmtLine2@1100525013(TableID@1160040000 : Integer;DocType@1160040001 : Integer;DocNo@1160040002 : Code[20];Comment@6085575 : Text[250]) : Boolean;
+    VAR
+      ApprovalCmtLine@6085576 : Record 455;
+    BEGIN
+      IF ApprovalCmtLine.FINDLAST THEN
+        ApprovalCmtLine."Entry No." += 1
+      ELSE
+        ApprovalCmtLine."Entry No." := 1;
+
+      ApprovalCmtLine."Table ID" := TableID;
+      ApprovalCmtLine."Document Type" := DocType;
+      ApprovalCmtLine."Document No." := DocNo;
+      ApprovalCmtLine.Comment := COPYSTR(Comment, 1, MAXSTRLEN(ApprovalCmtLine.Comment));
+
+      EXIT(InsertApprovalCmtLine(ApprovalCmtLine, FALSE));
+    END;
+
+    PROCEDURE InsertApprovalCmtLine@7(VAR ApprovalCmtLine@1000 : Record 455;IsManualEntry@1001 : Boolean) : Boolean;
+    VAR
+      ApprovalCmtLine2@1002 : Record 455;
+      ApprovalEntry@1003 : Record 454;
+      PurchHeader@1004 : Record 38;
+      SalesHeader@1005 : Record 36;
+      PurchInvHeader@1100525000 : Record 122;
+      PurchCrMemoHdr@1100525001 : Record 124;
+    BEGIN
+      IF NOT IsManualEntry THEN
+        ApprovalCmtLine."Workflow Step Instance ID" := WorkflowStepInstance.ID
+      ELSE BEGIN
+        ApprovalEntry.SETRANGE("Table ID", ApprovalCmtLine."Table ID");
+        ApprovalEntry.SETRANGE("Document Type", ApprovalCmtLine."Document Type");
+        ApprovalEntry.SETRANGE("Document No.", ApprovalCmtLine."Document No.");
+        ApprovalEntry.SETRANGE(Status, ApprovalEntry.Status::Open);
+        IF ApprovalEntry.FINDLAST THEN
+          ApprovalCmtLine."Workflow Step Instance ID" := ApprovalEntry."Workflow Step Instance ID";
+      END;
+
+      CASE ApprovalCmtLine."Table ID" OF
+        DATABASE::"Purchase Header" :
+          IF PurchHeader.GET(ApprovalCmtLine."Document Type", ApprovalCmtLine."Document No.") THEN
+            ApprovalCmtLine."Record ID to Approve" := PurchHeader.RECORDID;
+        DATABASE::"Sales Header" :
+          IF SalesHeader.GET(ApprovalCmtLine."Document Type", ApprovalCmtLine."Document No.") THEN
+            ApprovalCmtLine."Record ID to Approve" := SalesHeader.RECORDID;
+        DATABASE::"Purch. Inv. Header":
+          IF PurchInvHeader.GET(ApprovalCmtLine."Document No.") THEN
+            ApprovalCmtLine."Record ID to Approve" := PurchInvHeader.RECORDID;
+        DATABASE::"Purch. Cr. Memo Hdr.":
+          IF PurchCrMemoHdr.GET(ApprovalCmtLine."Document No.") THEN
+            ApprovalCmtLine."Record ID to Approve" := PurchCrMemoHdr.RECORDID;
+      END;
+
+      IF NOT ApprovalCmtLine2.FINDLAST THEN
+        ApprovalCmtLine2.INIT;
+
+      ApprovalCmtLine."Entry No." := ApprovalCmtLine2."Entry No." + 1;
+      ApprovalCmtLine."Date and Time" := CREATEDATETIME(TODAY,TIME);
+      ApprovalCmtLine."User ID" := USERID;
+
+      EXIT(ApprovalCmtLine.INSERT);
+    END;
+
+    PROCEDURE GetBuyFromVendorTest@1100525015(ApprovalEntry@1100528200 : Record 454;VendorFilter@1100409000 : Text[250]) : Boolean;
+    VAR
+      PurchHeader@1100528203 : Record 38;
+      PurchInvHeader@1100528202 : Record 122;
+      PurchCrMemoHdr@1100528201 : Record 124;
+    BEGIN
+      CASE ApprovalEntry."Table ID" OF
+        DATABASE::"Purchase Header":
+          BEGIN
+            PurchHeader.SETRANGE("Document Type", ApprovalEntry."Document Type");
+            PurchHeader.SETRANGE("No.", ApprovalEntry."Document No.");
+            PurchHeader.SETFILTER("Buy-from Vendor No.", VendorFilter);
+            IF PurchHeader.FINDFIRST THEN
+              EXIT(TRUE);
+          END;
+        DATABASE::"Purch. Inv. Header":
+          BEGIN
+            PurchInvHeader.SETRANGE("No.", ApprovalEntry."Document No.");
+            PurchInvHeader.SETFILTER("Buy-from Vendor No.", VendorFilter);
+            IF PurchInvHeader.FINDFIRST THEN
+              EXIT(TRUE);
+          END;
+        DATABASE::"Purch. Cr. Memo Hdr.":
+          BEGIN
+            PurchCrMemoHdr.SETRANGE("No.", ApprovalEntry."Document No.");
+            PurchCrMemoHdr.SETFILTER("Buy-from Vendor No.", VendorFilter);
+            IF PurchCrMemoHdr.FINDFIRST THEN
+              EXIT(TRUE);
+          END;
+      END;
+      EXIT(FALSE);
+    END;
+
+    PROCEDURE GetBuyFromVendorNameTest@1100525014(ApprovalEntry@1100528200 : Record 454;VendorNameFilter@1100409000 : Text[250]) : Boolean;
+    VAR
+      PurchHeader@1100528203 : Record 38;
+      PurchInvHeader@1100528202 : Record 122;
+      PurchCrMemoHdr@1100528201 : Record 124;
+    BEGIN
+      CASE ApprovalEntry."Table ID" OF
+        DATABASE::"Purchase Header":
+          BEGIN
+            PurchHeader.SETRANGE("Document Type", ApprovalEntry."Document Type");
+            PurchHeader.SETRANGE("No.", ApprovalEntry."Document No.");
+            PurchHeader.SETFILTER("Buy-from Vendor Name", VendorNameFilter);
+            IF PurchHeader.FINDFIRST THEN
+              EXIT(TRUE);
+          END;
+        DATABASE::"Purch. Inv. Header":
+          BEGIN
+            PurchInvHeader.SETRANGE("No.", ApprovalEntry."Document No.");
+            PurchInvHeader.SETFILTER("Buy-from Vendor Name", VendorNameFilter);
+            IF PurchInvHeader.FINDFIRST THEN
+              EXIT(TRUE);
+          END;
+        DATABASE::"Purch. Cr. Memo Hdr.":
+          BEGIN
+            PurchCrMemoHdr.SETRANGE("No.", ApprovalEntry."Document No.");
+            PurchCrMemoHdr.SETFILTER("Buy-from Vendor Name", VendorNameFilter);
+            IF PurchCrMemoHdr.FINDFIRST THEN
+              EXIT(TRUE);
+          END;
+      END;
+      EXIT(FALSE);
+    END;
+
+    PROCEDURE PurchHdrApprovalCommentsWithoutApproval@1100485001(Variant@1100485000 : Variant);
+    VAR
+      RecRef@1100528500 : RecordRef;
+      PurchaseHeader@1100485006 : Record 38;
+      ApprovalEntry@1100528101 : Record 454;
+      DocumentType@1100485002 : 'Quote,Order,Invoice,Credit Memo,Blanket Order,Return Order, ,,,,,,,,,,,,,,,,,,,Advice Order,Purchase Action,Purchase Requisition,,,,Hour Accounting,Site Mgt HourAccounting';
+      TableID@1100485001 : Integer;
+    BEGIN
+      RecRef.GETTABLE(Variant);
+
+      CASE RecRef.NUMBER OF
+        DATABASE::"Purchase Header":
+          BEGIN
+            RecRef.SETTABLE(PurchaseHeader);
+            TableID := DATABASE::"Purchase Header";
+            CASE PurchaseHeader."Document Type" OF
+              PurchaseHeader."Document Type"::Invoice:
+                DocumentType := DocumentType::Invoice;
+              PurchaseHeader."Document Type"::"Credit Memo":
+                DocumentType := DocumentType::"Credit Memo";
+              ELSE
+                EXIT;
+            END;
+          END;
+        ELSE
+          EXIT;
+      END;
+
+      ApprovalEntry.RESET;
+      ApprovalEntry."Table ID" := TableID;
+      ApprovalEntry."Document Type" := DocumentType;
+      ApprovalEntry."Document No." := PurchaseHeader."No.";
+      ApprovalEntry."Record ID to Approve" := PurchaseHeader.RECORDID;
+      ApprovalEntry.ShowCommentsEdit;
+    END;
+
+    PROCEDURE CopyApprovalCommentsPurchaseHeaderToPostedDoc@1100528500(PurchaseHeader@1100528501 : Record 38;Variant@1100528500 : Variant);
+    VAR
+      PurchInvHeader@1100485005 : Record 122;
+      PurchCrMemoHdr@1100485004 : Record 124;
+      ApprovalCommentLine@1100525002 : Record 455;
+      ApprovalCommentLine2@1100528200 : Record 455;
+      TempComments@1100525001 : TEMPORARY Record 455;
+      NextNo@1100528201 : Integer;
+      ApprovalEntry@1100528502 : Record 454;
+      RecRef@1100528503 : RecordRef;
+      EmptyGuid@1100528504 : GUID;
+    BEGIN
+      //Only Copy Approval Comments which are made independently of an Approval workflow.
+      ApprovalEntry.SETCURRENTKEY("Record ID to Approve");
+      ApprovalEntry.SETRANGE("Record ID to Approve", PurchaseHeader.RECORDID);
+      IF NOT ApprovalEntry.ISEMPTY THEN
+        EXIT;
+
+      ApprovalCommentLine.RESET;
+      ApprovalCommentLine.SETCURRENTKEY("Table ID", "Document Type", "Document No.");
+      ApprovalCommentLine.SETRANGE("Table ID", DATABASE::"Purchase Header");
+      ApprovalCommentLine.SETRANGE("Document No.",PurchaseHeader."No.");
+      ApprovalCommentLine.SETRANGE("Workflow Step Instance ID",EmptyGuid);
+      RecRef.GETTABLE(Variant);
+      CASE RecRef.NUMBER OF
+        DATABASE::"Purch. Inv. Header":
+          BEGIN
+            ApprovalCommentLine.SETRANGE("Document Type",ApprovalEntry."Document Type"::Invoice);
+          END;
+        DATABASE::"Purch. Cr. Memo Hdr.":
+          BEGIN
+            ApprovalCommentLine.SETRANGE("Document Type",ApprovalEntry."Document Type"::"Credit Memo");
+          END;
+        ELSE
+          EXIT;
+      END;
+
+      IF ApprovalCommentLine.FINDSET THEN
+        REPEAT
+          TempComments.TRANSFERFIELDS(ApprovalCommentLine);
+          TempComments.INSERT;
+        UNTIL ApprovalCommentLine.NEXT = 0;
+
+      IF ApprovalCommentLine2.FINDLAST THEN
+        NextNo := ApprovalCommentLine2."Entry No." + 1
+      ELSE
+        NextNo :=  1;
+
+      ApprovalCommentLine.RESET;
+      IF TempComments.FINDSET THEN
+        REPEAT
+          ApprovalCommentLine.TRANSFERFIELDS(TempComments);
+          ApprovalCommentLine."Entry No." := NextNo;
+          NextNo += 1;
+          ApprovalCommentLine."Table ID" := RecRef.NUMBER;
+          CASE RecRef.NUMBER OF
+          DATABASE::"Purch. Inv. Header":
+            BEGIN
+              RecRef.SETTABLE(PurchInvHeader);
+              ApprovalCommentLine."Document No." := PurchInvHeader."No.";
+              ApprovalCommentLine."Record ID to Approve" := PurchInvHeader.RECORDID;
+            END;
+          DATABASE::"Purch. Cr. Memo Hdr.":
+            BEGIN
+              RecRef.SETTABLE(PurchCrMemoHdr);
+              ApprovalCommentLine."Document No." := PurchCrMemoHdr."No.";
+              ApprovalCommentLine."Record ID to Approve" := PurchCrMemoHdr.RECORDID;
+            END;
+          END;
+          IF ApprovalCommentLine.INSERT THEN;
+        UNTIL TempComments.NEXT=0;
+    END;
+
+    LOCAL PROCEDURE UpdateApprovalCommentsOriginatingFromPurchaseHeader@1100528218(ApprovalEntry@1100485000 : Record 454);
+    VAR
+      ApprovalCommentLine@1100525002 : Record 455;
+      EmptyGuid@1100528500 : GUID;
+    BEGIN
+      //When already comments present with empty workflow, copy them into the workflow.
+      ApprovalCommentLine.SETRANGE("Table ID",ApprovalEntry."Table ID");
+      ApprovalCommentLine.SETRANGE("Document Type",ApprovalEntry."Document Type");
+      ApprovalCommentLine.SETRANGE("Document No.",ApprovalEntry."Document No.");
+      ApprovalCommentLine.SETRANGE("Workflow Step Instance ID",EmptyGuid);
+      IF ApprovalCommentLine.ISEMPTY THEN
+        EXIT;
+
+      IF ApprovalCommentLine.FINDSET(TRUE,FALSE) THEN
+        REPEAT
+          ApprovalCommentLine."Workflow Step Instance ID" := ApprovalEntry."Workflow Step Instance ID";
+          ApprovalCommentLine."Record ID to Approve" := ApprovalEntry."Record ID to Approve" ;
+          ApprovalCommentLine.MODIFY;
+        UNTIL ApprovalCommentLine.NEXT=0;
+    END;
+
+    LOCAL PROCEDURE DeleteApprovalCommentsOriginatingFromPurchaseHeader@1100528506(Variant@1100528500 : Variant);
+    VAR
+      PurchInvHeader@1100485005 : Record 122;
+      PurchCrMemoHdr@1100485004 : Record 124;
+      ApprovalCommentLine@1100525002 : Record 455;
+      ApprovalEntry@1100528502 : Record 454;
+      RecRef@1100528503 : RecordRef;
+      EmptyGuid@1100528504 : GUID;
+    BEGIN
+      //Delete Approval Comments which are made independently of an Approval workflow.
+      ApprovalCommentLine.RESET;
+      ApprovalCommentLine.SETCURRENTKEY("Table ID", "Document Type", "Document No.");
+      ApprovalCommentLine.SETRANGE("Workflow Step Instance ID",EmptyGuid);
+      ApprovalCommentLine.SETRANGE("Table ID", RecRef.NUMBER);
+      RecRef.GETTABLE(Variant);
+      CASE RecRef.NUMBER OF
+        DATABASE::"Purch. Inv. Header":
+          BEGIN
+            RecRef.SETTABLE(PurchInvHeader);
+            ApprovalCommentLine.SETRANGE("Document Type",ApprovalEntry."Document Type"::Invoice);
+            ApprovalCommentLine.SETRANGE("Document No.", PurchInvHeader."No.");
+            ApprovalCommentLine.SETRANGE("Record ID to Approve", PurchInvHeader.RECORDID);
+          END;
+        DATABASE::"Purch. Cr. Memo Hdr.":
+          BEGIN
+            RecRef.SETTABLE(PurchCrMemoHdr);
+            ApprovalCommentLine.SETRANGE("Document Type",ApprovalEntry."Document Type"::"Credit Memo");
+            ApprovalCommentLine.SETRANGE("Document No.", PurchCrMemoHdr."No.");
+            ApprovalCommentLine.SETRANGE("Record ID to Approve", PurchCrMemoHdr.RECORDID);
+          END;
+        ELSE
+          EXIT;
+      END;
+
+      IF ApprovalCommentLine.FINDSET(TRUE,FALSE) THEN
+        REPEAT
+          ApprovalCommentLine.DELETE;
+        UNTIL ApprovalCommentLine.NEXT=0;
+    END;
+
+    PROCEDURE RequestComment@1100525016(TableID@6085576 : Integer;DocumentType@6085575 : Integer;DocumentNo@6085574 : Code[20]);
+    VAR
+      ApprovalCommentLine@6085573 : Record 455;
+      ApprovalEntry@1000 : Record 454;
+      NoOfComments@161024012 : Integer;
+      ApprovalComments@1100528400 : Page 660;
+    BEGIN
+      COMMIT;
+
+      ApprovalEntry.SETCURRENTKEY("Table ID","Document Type","Document No.","Sequence No.","Record ID to Approve");
+      ApprovalEntry.SETRANGE("Table ID", TableID);
+      ApprovalEntry.SETRANGE("Document Type", DocumentType);
+      ApprovalEntry.SETRANGE("Document No.", DocumentNo);
+      ApprovalEntry.SETRANGE(Status, ApprovalEntry.Status::Open);
+      ApprovalEntry.FINDLAST;
+
+      ApprovalCommentLine.SETRANGE("Table ID",ApprovalEntry."Table ID");
+      ApprovalCommentLine.SETRANGE("Record ID to Approve",ApprovalEntry."Record ID to Approve");
+      ApprovalCommentLine.SETRANGE("Workflow Step Instance ID",ApprovalEntry."Workflow Step Instance ID");
+
+      NoOfComments := ApprovalCommentLine.COUNT;
+
+      ApprovalComments.SetUpLine(ApprovalEntry);
+      ApprovalComments.SetWorkflowStepInstanceID(ApprovalEntry."Workflow Step Instance ID");
+      ApprovalComments.SETTABLEVIEW(ApprovalCommentLine);
+      ApprovalComments.LOOKUPMODE(TRUE);
+      IF ApprovalComments.RUNMODAL <> ACTION::LookupOK THEN
+        ERROR('');
+
+      IF NoOfComments = ApprovalCommentLine.COUNT THEN
+        ERROR(Text038);
+    END;
+
+    LOCAL PROCEDURE CheckInvoiceMargin@1100527450(PurchHeader@1100527452 : Record 38;VAR AmountHeader@1100527451 : Decimal;VAR AmountLines@1100527450 : Decimal) : Boolean;
+    VAR
+      PurchSetup@1100527458 : Record 312;
+      Currency@1100527457 : Record 4;
+      Vendor@1100527456 : Record 23;
+      MarginAmount@1100527455 : Decimal;
+      MarginPerc@1100527454 : Decimal;
+      DiffAmount@1100527453 : Decimal;
+    BEGIN
+      IF PurchHeader."Currency Code" = '' THEN
+        Currency.InitRoundingPrecision
+      ELSE
+        Currency.GET(PurchHeader."Currency Code");
+      Currency.TESTFIELD("Invoice Rounding Precision");
+      PurchHeader.CALCFIELDS("Amount Including VAT");
+      AmountHeader := PurchHeader."Amount incl. VAT";
+      AmountLines := ROUND(PurchHeader."Amount Including VAT", Currency."Invoice Rounding Precision", Currency.InvoiceRoundingDirection);
+      IF AmountLines = AmountHeader THEN
+        EXIT(TRUE);
+      Vendor.GET(PurchHeader."Buy-from Vendor No.");
+      MarginAmount := Vendor."Invoice/Receipt Margin Amount";
+      MarginPerc := Vendor."Invoice/Receipt Margin Perc.";
+      IF (MarginAmount = 0) AND (MarginPerc = 0) THEN BEGIN
+        PurchSetup.GET;
+        MarginAmount := PurchSetup."Margin Amount (Header)";
+        MarginPerc := PurchSetup."Margin % (Header)";
+      END;
+      IF (MarginAmount = 0) AND (MarginPerc = 0) THEN
+        EXIT(FALSE);
+      AmountLines := PurchHeader."Amount Including VAT";
+      DiffAmount := AmountHeader - AmountLines;
+      IF (MarginAmount <> 0) AND (ABS(DiffAmount) > MarginAmount) THEN
+        EXIT(FALSE);
+      IF (MarginPerc <> 0) THEN BEGIN
+        IF (AmountLines = 0) THEN
+          EXIT(FALSE)
+        ELSE BEGIN
+          IF (ABS(DiffAmount / AmountLines * 100)  > MarginPerc) THEN
+            EXIT(FALSE);
+        END;
+      END;
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE CheckFourEyesApproval@1100529600(ApprovalEntry@1100529601 : Record 454;RecRef@1100529600 : RecordRef);
+    VAR
+      CheckApprovalEntry@1100529602 : Record 454;
+    BEGIN
+      CheckApprovalEntry.SETCURRENTKEY("Table ID", "Record ID to Approve", Status, "Workflow Step Instance ID", "Sequence No.");
+      CheckApprovalEntry.SETRANGE("Table ID", RecRef.NUMBER);
+      CheckApprovalEntry.SETRANGE("Record ID to Approve", RecRef.RECORDID);
+      CheckApprovalEntry.SETRANGE("Workflow Step Instance ID", ApprovalEntry."Workflow Step Instance ID");
+      CheckApprovalEntry.SETFILTER(Status, '%1|%2|%3', CheckApprovalEntry.Status::Open, CheckApprovalEntry.Status::Created, CheckApprovalEntry.Status::Approved);
+      CheckNumberOfCreatedEntries(RecRef, CheckApprovalEntry, TRUE, 0, TRUE);
+    END;
+
+    LOCAL PROCEDURE CheckNumberOfCreatedEntries@1100529601(RecRef@1100529600 : RecordRef;VAR ApprovalEntry@1100529601 : Record 454;NeedCalcApproveAmtLCY@1100529607 : Boolean;ApproveAmountLCY@1100529606 : Decimal;ShowError@1100529616 : Boolean) : Boolean;
+    VAR
+      FourEyesApproval@1100529602 : Record 11128892;
+      TmpApproverCount@1100529613 : TEMPORARY Record 11012229;
+      ApprovalsMgmt@1100529614 : Codeunit 1535;
+      ApprovalLinesCount@1100529612 : Integer;
+      ApproverID@1100529615 : Code[50];
+    BEGIN
+      IF NOT NeedCheckFourEyesApproval(RecRef, NeedCalcApproveAmtLCY, ApproveAmountLCY, FourEyesApproval) THEN
+        EXIT(TRUE);
+
+      IF ApprovalEntry.ISEMPTY THEN
+        ApprovalLinesCount := 0
+      ELSE BEGIN
+        ApprovalEntry.FINDSET;
+        REPEAT
+          IF ApprovalEntry.Status = ApprovalEntry.Status::Approved THEN
+            ApproverID := ApprovalEntry."Approved by"
+          ELSE
+            ApproverID := ApprovalEntry."Approver ID";
+          TmpApproverCount.SETRANGE("User ID", ApproverID);
+          IF TmpApproverCount.ISEMPTY THEN BEGIN
+            TmpApproverCount."User ID" := ApproverID;
+            TmpApproverCount.INSERT;
+          END;
+        UNTIL ApprovalEntry.NEXT = 0;
+        TmpApproverCount.RESET;
+        ApprovalLinesCount := TmpApproverCount.COUNT;
+      END;
+
+      IF ApprovalLinesCount < FourEyesApproval."No. of Approvers" THEN BEGIN
+        IF NOT ShowError THEN
+          EXIT(FALSE);
+        IF ApprovalEntry.FINDFIRST THEN
+          IF ApprovalsMgmt.CheckUserAsSuperApprover(ApprovalEntry."Document Type") THEN BEGIN
+            IF NOT GUIALLOWED THEN
+              EXIT;
+            IF CONFIRM(Text040 + Text041, TRUE, FourEyesApproval.Process, FourEyesApproval."No. of Approvers", ApprovalLinesCount) THEN
+              EXIT;
+            ERROR('');
+          END;
+        ERROR(Text040, FourEyesApproval.Process, FourEyesApproval."No. of Approvers", ApprovalLinesCount);
+      END;
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE NeedCheckFourEyesApproval@1100529606(RecRef@1100529600 : RecordRef;NeedCalcApproveAmtLCY@1100529607 : Boolean;ApproveAmountLCY@1100529606 : Decimal;VAR FourEyesApproval@1100529601 : Record 11128892) : Boolean;
+    VAR
+      PurchaseHeader@1100529603 : Record 38;
+      PurchInvHeader@1100529604 : Record 122;
+      PurchCrMemoHdr@1100529605 : Record 124;
+      ProjectPurchaseAction@1100529609 : Record 11012026;
+      PurchaseRequisition@1100529610 : Record 11229330;
+      AdviceOrderLine@1100529611 : Record 11012055;
+      ConsentManagement@1100529608 : Codeunit 11012132;
+    BEGIN
+      FourEyesApproval.RESET;
+
+      CASE RecRef.NUMBER OF
+        DATABASE::"Purchase Header":
+          BEGIN
+            RecRef.SETTABLE(PurchaseHeader);
+            CASE PurchaseHeader."Document Type" OF
+              PurchaseHeader."Document Type"::Quote:
+                FourEyesApproval.SETRANGE(Process, FourEyesApproval.Process::"Purchase Quote");
+              PurchaseHeader."Document Type"::Order:
+                FourEyesApproval.SETRANGE(Process, FourEyesApproval.Process::"Purchase Order");
+              PurchaseHeader."Document Type"::Invoice:
+                FourEyesApproval.SETRANGE(Process, FourEyesApproval.Process::"Not Posted Invoice");
+              PurchaseHeader."Document Type"::"Credit Memo":
+                FourEyesApproval.SETRANGE(Process, FourEyesApproval.Process::"Not Posted Credit Memo");
+              ELSE
+                EXIT(FALSE);
+            END;
+          END;
+        DATABASE::"Purch. Inv. Header":
+          BEGIN
+            RecRef.SETTABLE(PurchInvHeader);
+            IF PurchInvHeader."Invoice Approved" THEN
+              FourEyesApproval.SETRANGE(Process, FourEyesApproval.Process::Invoice)
+            ELSE
+              FourEyesApproval.SETRANGE(Process, FourEyesApproval.Process::"Invoice Approval");
+          END;
+        DATABASE::"Purch. Cr. Memo Hdr.":
+          BEGIN
+            RecRef.SETTABLE(PurchCrMemoHdr);
+            IF PurchCrMemoHdr."Credit Memo Approved" THEN
+              FourEyesApproval.SETRANGE(Process, FourEyesApproval.Process::"Credit Memo")
+            ELSE
+              FourEyesApproval.SETRANGE(Process, FourEyesApproval.Process::"Credit Memo Approval");
+          END;
+        DATABASE::"Project Purchase Action":
+          FourEyesApproval.SETRANGE(Process, FourEyesApproval.Process::"Purchase Action");
+        DATABASE::"Purchase Requisition":
+          FourEyesApproval.SETRANGE(Process, FourEyesApproval.Process::"Purchase Requisition");
+        DATABASE::"Advice Order Line":
+          FourEyesApproval.SETRANGE(Process, FourEyesApproval.Process::"Advice Order");
+        ELSE
+          EXIT(FALSE);
+      END;
+
+      IF FourEyesApproval.ISEMPTY THEN
+        EXIT(FALSE);
+
+      FourEyesApproval.FINDFIRST;
+      IF FourEyesApproval."Minimum Amount" = 0 THEN
+        EXIT(TRUE);
+
+      IF NeedCalcApproveAmtLCY THEN
+        CASE RecRef.NUMBER OF
+          DATABASE::"Purchase Header":
+            ApproveAmountLCY := ConsentManagement.CalcPurchaseHeaderAmountLCY(PurchaseHeader);
+          DATABASE::"Purch. Inv. Header":
+            ApproveAmountLCY := ConsentManagement.CalcPurchInvHeaderAmountLCY(PurchInvHeader);
+          DATABASE::"Purch. Cr. Memo Hdr.":
+            ApproveAmountLCY := ConsentManagement.CalcPurchCrMemoHdrAmountLCY(PurchCrMemoHdr);
+          DATABASE::"Project Purchase Action":
+            BEGIN
+              RecRef.SETTABLE(ProjectPurchaseAction);
+              ApproveAmountLCY := ConsentManagement.CalcPurchaseActionAmount(ProjectPurchaseAction);
+            END;
+          DATABASE::"Purchase Requisition":
+            BEGIN
+              RecRef.SETTABLE(PurchaseRequisition);
+              PurchaseRequisition.CALCFIELDS("Requisition Amount (LCY)");
+              ApproveAmountLCY := PurchaseRequisition."Requisition Amount (LCY)";
+            END;
+          DATABASE::"Advice Order Line":
+            BEGIN
+              RecRef.SETTABLE(AdviceOrderLine);
+              ApproveAmountLCY := AdviceOrderLine."Amount (LCY)";
+            END;
+        END;
+
+      EXIT(ApproveAmountLCY >= FourEyesApproval."Minimum Amount");
+    END;
+
+    PROCEDURE AddTmpApprovalEntry@1100529617(ApprovalEntry@1100529600 : Record 454;VAR TmpApprovalEntry@1100529601 : TEMPORARY Record 454);
+    BEGIN
+      IF NOT TmpApprovalEntry.ISTEMPORARY THEN
+        EXIT;
+      IF ApprovalEntry."Approved by" = ApprovalEntry."Approver ID" THEN
+        EXIT;
+      TmpApprovalEntry.SETRANGE("Table ID", ApprovalEntry."Table ID");
+      TmpApprovalEntry.SETRANGE("Record ID to Approve", ApprovalEntry."Record ID to Approve");
+      TmpApprovalEntry.SETRANGE("Workflow Step Instance ID", ApprovalEntry."Workflow Step Instance ID");
+      IF TmpApprovalEntry.ISEMPTY THEN BEGIN
+        TmpApprovalEntry := ApprovalEntry;
+        TmpApprovalEntry.INSERT;
+      END;
+    END;
+
+    PROCEDURE CheckTmpApprovalEntry@1100529616(VAR TmpApprovalEntry@1100529600 : TEMPORARY Record 454);
+    VAR
+      ApprovalEntry@1100529603 : Record 454;
+      ApprovalEntry2@1100529604 : Record 454;
+      RecRef@1100529601 : RecordRef;
+    BEGIN
+      IF NOT TmpApprovalEntry.ISTEMPORARY THEN
+        EXIT;
+      TmpApprovalEntry.RESET;
+      IF TmpApprovalEntry.ISEMPTY THEN
+        EXIT;
+      TmpApprovalEntry.FINDSET;
+      REPEAT
+        IF ApprovalEntry.GET(TmpApprovalEntry."Entry No.") THEN BEGIN
+          ApprovalEntry2.SETRANGE("Table ID", ApprovalEntry."Table ID");
+          ApprovalEntry2.SETRANGE("Record ID to Approve", ApprovalEntry."Record ID to Approve");
+          ApprovalEntry2.SETRANGE("Workflow Step Instance ID", ApprovalEntry."Workflow Step Instance ID");
+          ApprovalEntry2.SETFILTER(Status, '%1|%2', ApprovalEntry2.Status::Open, ApprovalEntry2.Status::Created);
+          IF NOT ApprovalEntry2.ISEMPTY THEN
+            IF RecRef.GET(ApprovalEntry."Record ID to Approve") THEN
+              CheckFourEyesApproval(ApprovalEntry, RecRef);
+        END;
+      UNTIL TmpApprovalEntry.NEXT = 0;
+    END;
+
+    PROCEDURE NextEntryCanBeApproved@1100529603(ApprovalEntry@1100529600 : Record 454) : Boolean;
+    VAR
+      CheckApprovalEntry@1100529601 : Record 454;
+      TmpCheckApprovalEntry@1100529602 : TEMPORARY Record 454;
+      RecRef@1100529603 : RecordRef;
+    BEGIN
+      IF NOT RecRef.GET(ApprovalEntry."Record ID to Approve") THEN
+        EXIT(TRUE);
+
+      CheckApprovalEntry.SETCURRENTKEY("Table ID", "Record ID to Approve", Status, "Workflow Step Instance ID", "Sequence No.");
+      CheckApprovalEntry.SETRANGE("Table ID", RecRef.NUMBER);
+      CheckApprovalEntry.SETRANGE("Record ID to Approve", RecRef.RECORDID);
+      CheckApprovalEntry.SETRANGE("Workflow Step Instance ID", ApprovalEntry."Workflow Step Instance ID");
+      CheckApprovalEntry.SETFILTER(Status, '%1|%2|%3', CheckApprovalEntry.Status::Open, CheckApprovalEntry.Status::Created, CheckApprovalEntry.Status::Approved);
+      IF CheckApprovalEntry.ISEMPTY THEN
+        EXIT(TRUE);
+      CheckApprovalEntry.FINDSET;
+      REPEAT
+        TmpCheckApprovalEntry := CheckApprovalEntry;
+        IF CheckApprovalEntry."Entry No." = ApprovalEntry."Entry No." THEN BEGIN
+          TmpCheckApprovalEntry.Status := TmpCheckApprovalEntry.Status::Approved;
+          TmpCheckApprovalEntry."Approved by" := USERID;
+        END;
+        TmpCheckApprovalEntry.INSERT;
+      UNTIL CheckApprovalEntry.NEXT = 0;
+
+      EXIT(CheckNumberOfCreatedEntries(RecRef, TmpCheckApprovalEntry, TRUE, 0, FALSE));
+    END;
+
+    BEGIN
+    {
+      191125 ORANGO.SB #26696
+    }
+    END.
+  }
+}
+

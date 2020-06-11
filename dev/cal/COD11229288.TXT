@@ -1,0 +1,694 @@
+OBJECT Codeunit 11229288 Purchase Action Mgt
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      GenericTempTable@1100528908 : TEMPORARY Record 11020579;
+      PurchaseHeader@1100528907 : Record 38;
+      TempPurchaseHeader@1100528906 : TEMPORARY Record 38;
+      PurchaseLine@1100528905 : Record 39;
+      CompQuote@1100528902 : Code[20];
+      CheckCurrency@1100528901 : Boolean;
+      VendorCount@1100528900 : Integer;
+      Text007@1100528924 : TextConst 'ENU=Busy with #1####################################################################;NOR=Opptatt med #1####################################################################;SVE=Upptagen med #1####################################################################';
+      Text008@1100528923 : TextConst 'ENU=Creating Quotes;NOR=Oppretter tilbud;SVE=Skapar offerter';
+      Text009@1100528921 : TextConst 'ENU=Creating Quote lines;NOR=Oppretter tilbudsrader;SVE=Skapar offertrader';
+      Text010@1100528919 : TextConst 'ENU=Creating text lines;NOR=Oppretter tekstrader;SVE=Skapar textrader';
+      Text011@1100528918 : TextConst 'ENU=Copying documents;NOR=Kopierer dokumenter;SVE=Kopierar dokument';
+      Text012@1100528917 : TextConst 'ENU=Creating Word Document;NOR=Oppretter Word-dokument;SVE=Skapar Word-dokument';
+      Text013@1100528916 : TextConst 'ENU=Printing Word Document;NOR=Skriver ut Word-dokument;SVE=Skriver ut Word-dokument';
+      Text015@1100528915 : TextConst 'ENU=Status should be definitive;NOR=Status skal v‘re definitiv;SVE=Status ska vara definitiv';
+      Text016@1100528914 : TextConst 'ENU=No Quotes present;NOR=Det finnes ingen tilbud;SVE=Det finns inga offerter';
+      Text017@1100528913 : TextConst 'ENU=No Purchase Order present, continue ?;NOR=Det finnes ingen kj›psordre. Vil du fortsette?;SVE=Det finns inga ink”psorder. Vill du forts„tta?';
+      Text018@1100528912 : TextConst 'ENU="Printing Word document. Note: Possible the printer selection form is in the background. Then enter ''Alt+Tab. ";NOR=Skriver ut Word-dokument. Obs! Skjema for valg av Skriver er muligens i bakgrunnen. Trykk deretter p† ''Alt+Tab.;SVE="Skriver ut Word-dokument. Obs! Formul„ret f”r val av skrivare „r m”jligen i bakgrunden. Tryck d„refter p† ''Alt+Tab. "';
+      Text021@1100528911 : TextConst 'ENU=No Quotes present for Mail;NOR=Ingen tilbud finnes for post;SVE=Inga offerter finns f”r post';
+      Text11012000@1100528910 : TextConst 'ENU=First Associate a Prospect to Customer %1.;NOR=Tilknytt f›rst et prospekt til kunde %1.;SVE=Associera f”rst en tillt„nkt kund till kund %1.';
+      Text11012002@1100528909 : TextConst 'ENU=No purchase quote document present;NOR=Det finnes ikke noe Innkj›pstilbudsdokument;SVE=Det finns inget ink”psoffertdokument';
+
+    PROCEDURE CreateQuote@1210190006(VAR PurchaseAction@1100528901 : Record 11012026;VAR OptionNo@1210190005 : Integer;VAR Counter@1210190006 : Integer);
+    VAR
+      AskForPrinter@1210190000 : Boolean;
+      VendorbyPurchaseAction@1100528900 : Record 11012068;
+      Window@1100529600 : Dialog;
+    BEGIN
+      //PurchaseAction.TESTFIELD(Status, PurchaseAction.Status::Approved);  //C057080+C060128
+
+      Window.OPEN(Text007);
+      TempPurchaseHeader.DELETEALL;
+
+      VendorbyPurchaseAction.RESET;
+      VendorbyPurchaseAction.SETRANGE("Project No.", PurchaseAction."Project No.");
+      VendorbyPurchaseAction.SETRANGE("Purchase Action", PurchaseAction.Code);
+      VendorCount := VendorbyPurchaseAction.COUNT;
+      //
+      CompQuote := '';
+      IF VendorCount > 1 THEN BEGIN
+        PurchaseHeader.RESET;
+        PurchaseHeader.SETCURRENTKEY("Document Type", "Job No.");
+        PurchaseHeader.SETRANGE("Document Type", PurchaseHeader."Document Type"::Quote);
+        PurchaseHeader.SETRANGE("Job No.", PurchaseAction."Project No.");
+        PurchaseHeader.SETRANGE("Purchase Action", PurchaseAction.Code);
+        PurchaseHeader.SETFILTER("Comparison Quote", '<>%1', '');
+        IF PurchaseHeader.FINDFIRST THEN
+          CompQuote := PurchaseHeader."Comparison Quote";
+        IF CompQuote = '' THEN BEGIN
+          PurchaseHeader.RESET;
+          PurchaseHeader.SETCURRENTKEY("Document Type", "Job No.");
+          PurchaseHeader.SETRANGE("Document Type", PurchaseHeader."Document Type"::Quote);
+          PurchaseHeader.SETRANGE("Job No.", PurchaseAction."Project No.");
+          PurchaseHeader.SETRANGE("Purchase Action", PurchaseAction.Code);
+          PurchaseHeader.SETFILTER("Comparison Quote", '=%1', '');
+          IF PurchaseHeader.FINDSET(TRUE, FALSE) THEN BEGIN
+            CompQuote := PurchaseHeader."No.";
+            REPEAT
+              PurchaseHeader."Comparison Quote" := CompQuote;
+              PurchaseHeader.UpdateComparisonQuoteLinks('INSERT');
+              PurchaseHeader.MODIFY(TRUE);
+            UNTIL PurchaseHeader.NEXT = 0;
+          END;
+        END;
+      END;
+      PurchaseHeader.RESET;
+      //
+      FillGenericTempTable(PurchaseAction);
+      IF VendorbyPurchaseAction.FINDSET THEN BEGIN
+        REPEAT
+          GenericTempTable.SETRANGE("Key Code1", VendorbyPurchaseAction."Project No.");
+          GenericTempTable.SETRANGE("Key Code2", VendorbyPurchaseAction."Purchase Action");
+          IF GenericTempTable.FINDSET THEN BEGIN
+            REPEAT
+              //- while Navision accepts only 1 currency per document, budget lines are sorted to generate order with budget currency (may be deviating from vendor)
+              //  update budgetlines (adviced, purchaseorder) will be skipped in CopyBudgetLines and executed afterwards in CloseBudgetLines.
+              PurchaseHeader.RESET;
+              PurchaseHeader.SETCURRENTKEY("Document Type", "Job No.");
+              PurchaseHeader.SETRANGE("Document Type", PurchaseHeader."Document Type"::Quote);
+              IF VendorbyPurchaseAction.Type <> VendorbyPurchaseAction.Type::Contact THEN
+                PurchaseHeader.SETRANGE("Buy-from Vendor No.", VendorbyPurchaseAction."Vendor No.")
+              ELSE
+                PurchaseHeader.SETRANGE("Buy-from Contact No.", VendorbyPurchaseAction."Vendor No.");
+              PurchaseHeader.SETRANGE("Job No.", GenericTempTable."Key Code1");
+              PurchaseHeader.SETRANGE("Purchase Action", GenericTempTable."Key Code2");
+              IF GenericTempTable."Key Code3" <> '' THEN
+                PurchaseHeader.SETRANGE("Currency Code", GenericTempTable."Key Code3");
+              IF NOT PurchaseHeader.FINDFIRST THEN BEGIN
+                IF OptionNo >= 2 THEN //* Check here already. If Word document can't be created
+                  CheckCreateWordDoc(VendorbyPurchaseAction);  //* also create no quote.
+                Window.UPDATE(1, Text008);
+                InsertPurchaseHeader(PurchaseAction, VendorbyPurchaseAction, GenericTempTable."Key Code3");
+                Window.UPDATE(1, Text010);
+                CopyTextLines(PurchaseAction);
+                Window.UPDATE(1, Text009);
+                CopyBudgetLines(PurchaseAction, GenericTempTable."Key Code3");
+                Window.UPDATE(1, Text011);
+                CopyDocuments(PurchaseAction);
+                Counter += 1;
+              END ELSE BEGIN
+                CheckCurrency := TRUE;  //also used for filter on budget lines
+                Window.UPDATE(1, Text009);
+                CopyBudgetLines(PurchaseAction, PurchaseHeader."Currency Code");
+              END;
+            UNTIL GenericTempTable.NEXT = 0;
+          END;
+        UNTIL VendorbyPurchaseAction.NEXT = 0;
+        CloseBudgetLines(PurchaseAction, PurchaseHeader);
+      END;
+      //
+      IF (Counter > 0) AND (OptionNo >= 2) THEN BEGIN
+        COMMIT;
+        IF TempPurchaseHeader.FIND('-') THEN BEGIN
+          REPEAT
+            IF TempPurchaseHeader."Buy-from Vendor No." <> '' THEN BEGIN
+              VendorbyPurchaseAction."Vendor No." := TempPurchaseHeader."Buy-from Vendor No.";
+              VendorbyPurchaseAction.Type := VendorbyPurchaseAction.Type::Vendor;
+            END ELSE BEGIN
+              VendorbyPurchaseAction.Type := VendorbyPurchaseAction.Type::Contact;
+              VendorbyPurchaseAction."Vendor No." := TempPurchaseHeader."Buy-from Contact No.";
+            END;
+            VendorbyPurchaseAction.GET(VendorbyPurchaseAction.Source::Project, '',
+              TempPurchaseHeader."Job No.", TempPurchaseHeader."Purchase Action",
+              VendorbyPurchaseAction.Type, VendorbyPurchaseAction."Vendor No.");
+            IF PurchaseHeader.GET(PurchaseHeader."Document Type"::Quote,TempPurchaseHeader."No.") THEN BEGIN
+              Window.UPDATE(1, Text012);
+              IF NOT CreateWordDoc(PurchaseAction, VendorbyPurchaseAction) THEN
+                TempPurchaseHeader.DELETE;
+            END;
+            COMMIT;
+          UNTIL TempPurchaseHeader.NEXT = 0;
+        END;
+        IF OptionNo >= 3 THEN BEGIN
+          IF OptionNo = 4 THEN
+            AskForPrinter := TRUE;
+          IF TempPurchaseHeader.FIND('-') THEN BEGIN
+            REPEAT
+              IF NOT AskForPrinter THEN
+                Window.UPDATE(1, Text013)
+              ELSE
+                Window.UPDATE(1, Text018);
+              PrintWordDoc(OptionNo = 4, AskForPrinter);
+              AskForPrinter := FALSE;
+            UNTIL TempPurchaseHeader.NEXT = 0;
+          END;
+        END;
+      END;
+      Window.CLOSE;
+    END;
+
+    PROCEDURE CreateOrder@1100485000(VAR PurchaseAction@1100528900 : Record 11012026);
+    VAR
+      CopyBudgetLinesCu@1100528904 : Codeunit 11012008;
+    BEGIN
+      CopyBudgetLinesCu.CopyLinesToNewOrder(PurchaseAction);
+    END;
+
+    LOCAL PROCEDURE InsertPurchaseHeader@1210190004(PurchaseAction@1100528902 : Record 11012026;VendorbyPurchaseAction@1100528901 : Record 11012068;CurrencyCode@1100528900 : Code[10]);
+    VAR
+      NoSeriesMngmntCU@1210190001 : Codeunit 396;
+      PurchSetup@1210190002 : Record 312;
+      PurchaserRec@1210190000 : Record 13;
+      ContactRec@1100485001 : Record 5050;
+    BEGIN
+      PurchSetup.GET;
+      WITH PurchaseHeader DO BEGIN
+        INIT;
+        "Document Type" := "Document Type"::Quote;
+        PurchSetup.TESTFIELD("Quote Nos.");
+        "No." := NoSeriesMngmntCU.GetNextNo(PurchSetup."Quote Nos.",WORKDATE,TRUE);
+        "No. Series" := PurchSetup."Quote Nos.";
+        INSERT(TRUE);
+        //
+        IF VendorbyPurchaseAction.Type <> VendorbyPurchaseAction.Type::Contact THEN
+          VALIDATE("Buy-from Vendor No.", VendorbyPurchaseAction."Vendor No.")
+        ELSE
+          VALIDATE("Buy-from Contact No.", VendorbyPurchaseAction."Vendor No.");
+        VALIDATE("Document Date", TODAY);
+        VALIDATE("Job No.", PurchaseAction."Project No.");
+        "Purchase Action" := PurchaseAction.Code;
+        CheckCurrency := CurrencyCode <> PurchaseHeader."Currency Code";
+        IF CheckCurrency THEN BEGIN
+          IF CurrencyCode <> '' THEN
+            PurchaseHeader.VALIDATE("Currency Code", CurrencyCode);
+        END ELSE
+          CheckCurrency := (CurrencyCode = '') AND (PurchaseHeader."Currency Code" = '');  //also used for filter on budget lines
+        PurchaseHeader."Amounts only" := PurchaseAction."Amounts Only";
+        IF VendorbyPurchaseAction.Contact <> '' THEN BEGIN
+          "Buy-from Contact" := VendorbyPurchaseAction.Contact;
+          IF VendorbyPurchaseAction."Contact Person No." <> '' THEN
+            IF ContactRec.GET(VendorbyPurchaseAction."Contact Person No.") THEN
+              IF ContactRec.Name = VendorbyPurchaseAction.Contact THEN
+                "Buy-from Contact Person No." := VendorbyPurchaseAction."Contact Person No.";
+        END;
+        "Vendors react before" := PurchaseAction."Vendors react before";
+        "Requested Quote Receipt Date" := PurchaseAction."Requested Quote Receipt Date";
+        "Requested Receipt Date" := PurchaseAction."Requested Receipt Date";
+        IF PurchaseAction."Responsible Employee" <> '' THEN
+          IF PurchaserRec.GET(PurchaseAction."Responsible Employee") THEN
+            "Purchaser Code" := PurchaseAction."Responsible Employee";
+        IF (CompQuote = '') AND (VendorCount > 1) THEN
+          CompQuote := PurchaseHeader."No.";
+        IF CompQuote <> '' THEN BEGIN
+          "Comparison Quote" := CompQuote;
+          PurchaseHeader.UpdateComparisonQuoteLinks('INSERT');
+        END;
+        MODIFY(TRUE);
+        //
+        TempPurchaseHeader.INIT;
+        TempPurchaseHeader."Document Type" := PurchaseHeader."Document Type";
+        TempPurchaseHeader."No." := PurchaseHeader."No.";
+        IF (VendorbyPurchaseAction.Type <> VendorbyPurchaseAction.Type::Contact) THEN
+          TempPurchaseHeader."Buy-from Vendor No." := VendorbyPurchaseAction."Vendor No."
+        ELSE
+          TempPurchaseHeader."Buy-from Contact No." := VendorbyPurchaseAction."Vendor No.";
+        TempPurchaseHeader."Job No." := PurchaseAction."Project No.";
+        TempPurchaseHeader."Purchase Action" := PurchaseAction.Code;
+        TempPurchaseHeader.INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE CopyBudgetLines@1210190008(VAR PurchaseAction@1210190001 : Record 11012026;OrigCurrency@1100528900 : Code[10]);
+    VAR
+      DestCurrency@1100528903 : Code[10];
+      CopyBudgetLinesCu@1100528904 : Codeunit 11012008;
+    BEGIN
+      DestCurrency := PurchaseHeader."Currency Code";
+      PurchaseLine.INIT;
+      PurchaseLine."Document Type" := PurchaseHeader."Document Type"::Quote;
+      PurchaseLine."Document No." := PurchaseHeader."No.";
+
+      CopyBudgetLinesCu.CopyLines(PurchaseAction, PurchaseLine, FALSE, CheckCurrency, OrigCurrency, PurchaseHeader."Currency Code");
+    END;
+
+    LOCAL PROCEDURE CopyTextLines@1210190003(PurchaseAction@1210190000 : Record 11012026);
+    VAR
+      PurchaseText@1210190001 : Record 11012067;
+      PurchaseText1@1210190002 : Record 11012067;
+    BEGIN
+      PurchaseText.SETRANGE("Line Type", PurchaseText."Line Type"::"Project Purchase Action");
+      PurchaseText.SETRANGE("No.", PurchaseAction."Project No.");
+      PurchaseText.SETRANGE("Purchase Action", PurchaseAction.Code);
+      IF PurchaseText.ISEMPTY THEN
+        EXIT;
+
+      PurchaseText.FINDSET;
+        REPEAT
+          PurchaseText1.COPY(PurchaseText);
+          CASE PurchaseHeader."Document Type" OF
+            PurchaseHeader."Document Type"::Quote:
+              PurchaseText1."Line Type" := PurchaseText."Line Type"::"Purchase Quote";
+            PurchaseHeader."Document Type"::Order:
+              PurchaseText1."Line Type" := PurchaseText."Line Type"::"Purchase Order";
+          END;
+          PurchaseText1."Purchase Action" := '';
+          PurchaseText1."No." := PurchaseHeader."No.";
+          PurchaseText1.INSERT;
+        UNTIL PurchaseText.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CopyDocuments@1210190005(PurchaseAction@1210190002 : Record 11012026);
+    VAR
+      ProjectPurchaseAction@1100528900 : Record 11012026;
+      PurchActionDocumentRelation@1210190000 : Record 11012071;
+      DocumentRelation@1210190001 : Record 11012407;
+      DocumentProperties@1100528400 : Record 11012746;
+      TenderParagraph@1100528901 : Record 11012072;
+      TenderParagraph2@1100528902 : Record 11012072;
+    BEGIN
+      PurchActionDocumentRelation.SETRANGE(Source, PurchActionDocumentRelation.Source::Project);
+      PurchActionDocumentRelation.SETRANGE("Project No.", ProjectPurchaseAction."Project No.");
+      PurchActionDocumentRelation.SETRANGE("Purchase Action", ProjectPurchaseAction.Code);
+      IF PurchActionDocumentRelation.FINDSET THEN
+        REPEAT
+          DocumentRelation.INIT;
+          CASE PurchaseHeader."Document Type" OF
+            PurchaseHeader."Document Type"::Quote:
+              DocumentRelation."Document Type" := DocumentRelation."Document Type"::"Purchase Quote";
+            PurchaseHeader."Document Type"::Order:
+              DocumentRelation."Document Type" := DocumentRelation."Document Type"::"Purchase Order";
+          END;
+          DocumentRelation."No." := PurchaseHeader."No.";
+          DocumentRelation.Description := PurchActionDocumentRelation.Description;
+          DocumentRelation."Description 2" := PurchActionDocumentRelation."Description 2";
+          DocumentRelation.Quantity := PurchActionDocumentRelation.Quantity;
+          DocumentRelation."Related Document No." := PurchActionDocumentRelation."Related Document No.";
+          PurchActionDocumentRelation.CALCFIELDS("Document No.");
+          DocumentRelation."Document No." := PurchActionDocumentRelation."Document No.";
+          DocumentRelation."Send by E-Mail" := TRUE;
+          IF DocumentProperties.GET(DocumentRelation."Related Document No.") THEN
+            IF DocumentProperties.FileCanBeConvertedToPDF THEN
+              DocumentRelation.Print := TRUE;
+          DocumentRelation.INSERT(TRUE);
+          //
+          TenderParagraph.SETRANGE(Type, TenderParagraph.Type::PurchAction);
+          TenderParagraph.SETRANGE("No.", ProjectPurchaseAction."Project No.");
+          TenderParagraph.SETRANGE("Purchase Action",ProjectPurchaseAction.Code);
+          TenderParagraph.SETRANGE("Document No.", PurchActionDocumentRelation."Related Document No.");
+          IF TenderParagraph.FINDSET THEN
+            REPEAT
+              TenderParagraph2.COPY(TenderParagraph);
+              CASE PurchaseHeader."Document Type" OF
+                PurchaseHeader."Document Type"::Quote:
+                  TenderParagraph2.Type := TenderParagraph2.Type::Quote;
+                PurchaseHeader."Document Type"::Order:
+                  TenderParagraph2.Type := TenderParagraph2.Type::Order;
+              END;
+              TenderParagraph2."No." := PurchaseHeader."No.";
+              TenderParagraph2."Document No." := PurchActionDocumentRelation."Related Document No.";
+              TenderParagraph2."Purchase Action" := '';
+              TenderParagraph2.INSERT;
+            UNTIL TenderParagraph.NEXT = 0;
+        UNTIL PurchActionDocumentRelation.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CheckCreateWordDoc@1100485003(VendorbyPurchaseAction@1100528900 : Record 11012068);
+    VAR
+      Contact@1210190006 : Record 5050;
+      ContactBusinessRelation@1210190005 : Record 5054;
+      DocumentTemplate@1210190008 : Record 11012401;
+    BEGIN
+      IF VendorbyPurchaseAction.Type <> VendorbyPurchaseAction.Type::Contact THEN BEGIN
+        ContactBusinessRelation.SETCURRENTKEY("Link to Table", "No.");
+        ContactBusinessRelation.SETRANGE("Link to Table", ContactBusinessRelation."Link to Table"::Vendor);
+        ContactBusinessRelation.SETRANGE("No.", VendorbyPurchaseAction."Vendor No.");
+        IF NOT ContactBusinessRelation.FINDFIRST THEN
+          ERROR(Text11012000,VendorbyPurchaseAction."Vendor No.");
+        //
+        Contact.GET(ContactBusinessRelation."Contact No.");
+      END ELSE
+        Contact.GET(VendorbyPurchaseAction."Vendor No.");
+      Contact.TESTFIELD("Document Group");
+
+      DocumentTemplate.INIT;
+      DocumentTemplate.SETRANGE("Document Group", Contact."Document Group");
+      DocumentTemplate.SETRANGE(Type, DocumentTemplate.Type::"Purchase Quote");
+      IF VendorbyPurchaseAction."Document Template" <> '' THEN BEGIN
+        DocumentTemplate.SETRANGE("Template Code", VendorbyPurchaseAction."Document Template");
+      END ELSE
+        DocumentTemplate.SETRANGE("Template Code");
+
+      IF NOT DocumentTemplate.FINDFIRST THEN
+        ERROR(Text11012002);
+    END;
+
+    LOCAL PROCEDURE CreateWordDoc@1100525000(PurchaseAction@1100528901 : Record 11012026;VendorbyPurchaseAction@1100528900 : Record 11012068) : Boolean;
+    VAR
+      Contact@1210190006 : Record 5050;
+      ContactBusinessRelation@1210190005 : Record 5054;
+      DocumentTemplate@1210190008 : Record 11012401;
+      Job@1210190000 : Record 11072003;
+      DocumentMgt@1210190007 : Codeunit 11012406;
+      DocLinkRID@1199198000 : ARRAY [5] OF RecordID;
+      RecRef@1199198001 : RecordRef;
+    BEGIN
+      CLEAR(DocumentMgt);
+
+      IF VendorbyPurchaseAction.Type <> VendorbyPurchaseAction.Type::Contact THEN BEGIN
+        ContactBusinessRelation.SETCURRENTKEY("Link to Table", "No.");
+        ContactBusinessRelation.SETRANGE("Link to Table", ContactBusinessRelation."Link to Table"::Vendor);
+        ContactBusinessRelation.SETRANGE("No.", VendorbyPurchaseAction."Vendor No.");
+        IF NOT ContactBusinessRelation.FINDFIRST THEN
+          EXIT(FALSE);
+        //
+        IF NOT Contact.GET(ContactBusinessRelation."Contact No.") THEN
+          EXIT(FALSE);
+      END ELSE BEGIN
+        IF NOT Contact.GET(VendorbyPurchaseAction."Vendor No.") THEN
+          EXIT(FALSE);
+      END;
+      IF Contact."Document Group" = '' THEN
+        EXIT(FALSE);
+
+      DocumentTemplate.INIT;
+      DocumentTemplate.SETRANGE("Document Group", Contact."Document Group");
+      DocumentTemplate.SETRANGE(Type, DocumentTemplate.Type::"Purchase Quote");
+      IF VendorbyPurchaseAction."Document Template" <> '' THEN BEGIN
+        DocumentTemplate.SETRANGE("Template Code", VendorbyPurchaseAction."Document Template");
+      END ELSE
+        DocumentTemplate.SETRANGE("Template Code");
+
+      IF DocumentTemplate.FINDSET THEN BEGIN
+        RecRef.GETTABLE(PurchaseHeader);
+        DocLinkRID[1] := RecRef.RECORDID;
+        //
+        RecRef.GETTABLE(PurchaseAction);
+        DocLinkRID[2] := RecRef.RECORDID;
+        //
+        IF Job.GET(PurchaseAction."Project No.") THEN BEGIN
+          RecRef.GETTABLE(Job);
+          DocLinkRID[3] := RecRef.RECORDID;
+        END;
+        //
+        REPEAT
+          DocumentMgt.GenerateDocFromTemplate(
+            DocumentTemplate, DocLinkRID, PurchaseHeader."Shortcut Dimension 1 Code",
+            Contact."No.", VendorbyPurchaseAction."Contact Person No." , '', FALSE);
+        UNTIL DocumentTemplate.NEXT = 0;
+        EXIT(TRUE);
+      END ELSE
+        EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE PrintWordDoc@1210190009(IWithPrinterSelection@1210190002 : Boolean;IAskForPrinter@1210190003 : Boolean);
+    VAR
+      DocumentProperties@1210190000 : Record 11012746;
+      DocumentProperties2@1100525002 : Record 11012746;
+      DocumentLink@1100525000 : Record 11012747;
+      RecRef@1100525001 : RecordRef;
+      lCduWord@1210190001 : Codeunit 11012400;
+      FileManagement@1100528400 : Codeunit 419;
+      ClientFile@1100527800 : Text;
+    BEGIN
+      COMMIT;
+
+      RecRef.GETTABLE(TempPurchaseHeader);
+
+      DocumentLink.SETCURRENTKEY("Record ID");
+      DocumentLink.SETRANGE("Table No.", DATABASE::"Purchase Header");
+      DocumentLink.SETFILTER("Record ID",  STRSUBSTNO('''%1''',RecRef.RECORDID()));
+      DocumentLink.SETRANGE(Source, TRUE);
+      DocumentLink.SETRANGE("Internal Company", COMPANYNAME);
+      IF DocumentLink.FINDFIRST THEN BEGIN
+        DocumentProperties.GET(DocumentLink."Document No.");
+
+        DocumentProperties2.SETCURRENTKEY("Document Group", "Document Template","Internal Company","Contact No.", "Doc. Action", Version);
+        DocumentProperties2.SETRANGE("Document Group", DocumentProperties."Document Group");
+        DocumentProperties2.SETRANGE("Document Template", DocumentProperties."Document Template");
+        DocumentProperties2.SETRANGE("Contact No.", DocumentProperties."Contact No.");
+        DocumentProperties2.SETRANGE("Internal Company", COMPANYNAME);
+        DocumentProperties2.SETRANGE("Doc. Action", DocumentProperties."Doc. Action");
+        IF DocumentProperties2.FINDLAST THEN
+          IF DocumentProperties2.HasStorageURI THEN BEGIN
+            lCduWord.InitialiseForPrinting;
+            DocumentProperties2.WriteContentToClient(ClientFile);
+            IF NOT IAskForPrinter THEN
+              lCduWord.Print(ClientFile)
+            ELSE
+              lCduWord.PrintWithPrinterSelection(ClientFile);
+            lCduWord.TerminateAfterPrinting;
+            FileManagement.DeleteClientFile(ClientFile);
+          END;
+      END;
+    END;
+
+    PROCEDURE PrintWriteOff@1210190000(PurchaseAction@1100528902 : Record 11012026);
+    VAR
+      DocPrint@1100485002 : Codeunit 229;
+      TempReportSelection@1100485003 : TEMPORARY Record 77;
+      QuoteHeader@1100528900 : Record 38;
+      OrderHeader@1100528901 : Record 38;
+    BEGIN
+      DocPrint.GetReportSelectionForPrintUsageVendor(
+        TempReportSelection.Usage::"P.Quote", '', TRUE, TempReportSelection);
+      TempReportSelection.FIND('-');
+      REPEAT
+        IF PurchaseAction.Status < PurchaseAction.Status::Definitive THEN
+          ERROR(Text015);
+        QuoteHeader.SETRANGE("Document Type", QuoteHeader."Document Type"::Quote);
+        QuoteHeader.SETRANGE("Job No.", PurchaseAction."Project No.");
+        QuoteHeader.SETRANGE("Purchase Action", PurchaseAction.Code);
+        IF NOT QuoteHeader.FINDFIRST THEN
+          ERROR(Text016);
+        OrderHeader.SETRANGE("Document Type", OrderHeader."Document Type"::Order);
+        OrderHeader.SETRANGE("Job No.", PurchaseAction."Project No.");
+        OrderHeader.SETRANGE("Purchase Action", PurchaseAction.Code);
+        IF OrderHeader.FINDSET THEN
+          WriteOff(TempReportSelection."Report ID", QuoteHeader, OrderHeader)
+        ELSE
+          IF CONFIRM(Text017,TRUE) THEN
+            WriteOff(TempReportSelection."Report ID", QuoteHeader, OrderHeader);
+      UNTIL TempReportSelection.NEXT = 0;
+    END;
+
+    PROCEDURE WriteOff@1210190001(ReportID@1100485000 : Integer;VAR QuoteHeader@1100528900 : Record 38;VAR OrderHeader@1100528901 : Record 38);
+    VAR
+      PurchaseQuote@1210190001 : Record 38;
+    BEGIN
+      REPEAT
+        OrderHeader.SETRANGE("Copied from Purchase Quote No.", QuoteHeader."No.");
+        IF NOT OrderHeader.FINDFIRST THEN BEGIN
+          PurchaseQuote.COPYFILTERS(QuoteHeader);
+          PurchaseQuote.SETRANGE("No.", QuoteHeader."No.");
+          REPORT.RUNMODAL(ReportID, FALSE, FALSE, PurchaseQuote);
+        END;
+      UNTIL QuoteHeader.NEXT = 0;
+    END;
+
+    PROCEDURE PrintQuoteDocs@1100485001(PurchaseAction@1100528900 : Record 11012026);
+    VAR
+      AskForPrinter@1100485000 : Boolean;
+      Window@1100529600 : Dialog;
+    BEGIN
+      Window.OPEN(Text007);
+      AskForPrinter := TRUE;
+      PurchaseHeader.RESET;
+      PurchaseHeader.SETCURRENTKEY("Document Type", "Job No.");
+      PurchaseHeader.SETRANGE("Document Type", PurchaseHeader."Document Type"::Quote);
+      PurchaseHeader.SETRANGE("Job No.", PurchaseAction."Project No.");
+      PurchaseHeader.SETRANGE("Purchase Action", PurchaseAction.Code);
+      IF PurchaseHeader.FINDSET THEN
+        REPEAT
+          TempPurchaseHeader := PurchaseHeader;
+          IF NOT AskForPrinter THEN
+            Window.UPDATE(1, Text013)
+          ELSE
+            Window.UPDATE(1, Text018);
+          PrintWordDoc(TRUE, AskForPrinter);
+          AskForPrinter := FALSE;
+        UNTIL PurchaseHeader.NEXT = 0;
+      PurchaseHeader.RESET;
+      Window.CLOSE;
+    END;
+
+    LOCAL PROCEDURE FillGenericTempTable@1100525002(PurchaseAction@1100525000 : Record 11012026);
+    VAR
+      BudgetLine@1100525001 : Record 11012001;
+      PurchaseHeader@1000 : Record 38;
+    BEGIN
+      BudgetLine.SETCURRENTKEY("Project No.", "Purchase Action");
+      BudgetLine.SETRANGE("Project No.", PurchaseAction."Project No.");
+      BudgetLine.SETRANGE("Purchase Action", PurchaseAction.Code);
+      BudgetLine.SETRANGE(Advised, FALSE);  //db, 06-02-20
+      IF BudgetLine.FINDSET THEN BEGIN
+        REPEAT
+          IF BudgetLine."Cost Type" = BudgetLine."Cost Type"::Labor THEN BEGIN
+            BudgetLine.FIELDERROR("Cost Type");  //db, 07-02-20
+            //due to removed filter on CostType when selecting BudgetLines for Purchase Action
+            //CostType Labor can be adjusted to Subcontracting in PurchaseAction, but not processed for Purchase while this procedure is based on Price
+          END;
+          GenericTempTable.INIT;
+          GenericTempTable."Key Code1" := BudgetLine."Project No.";
+          GenericTempTable."Key Code2" := BudgetLine."Purchase Action";
+          GenericTempTable."Key Code3" := BudgetLine."Currency Code";
+          IF GenericTempTable.INSERT THEN;
+        UNTIL BudgetLine.NEXT = 0;
+      END ELSE BEGIN
+        //db.sn, 06-02-20
+        BudgetLine.SETRANGE(Advised, TRUE);
+        IF BudgetLine.FINDFIRST THEN
+          EXIT;  //purchase action has been processed before
+
+        PurchaseHeader.SETCURRENTKEY("Document Type", "Job No.");
+        PurchaseHeader.SETRANGE("Document Type", PurchaseHeader."Document Type"::Quote);
+        PurchaseHeader.SETRANGE("Job No.", PurchaseAction."Project No.");
+        PurchaseHeader.SETRANGE("Purchase Action", PurchaseAction.Code);
+        IF PurchaseHeader.FINDFIRST THEN
+          EXIT;  //no lines present in budget, but action processed before
+        //db.en, 06-02-20
+
+        //C038938: allow generate quote if no budget lines in purchase action
+        GenericTempTable.INIT;
+        GenericTempTable."Key Code1" := PurchaseAction."Project No.";
+        GenericTempTable."Key Code2" := PurchaseAction.Code;
+        GenericTempTable."Key Code3" := '';
+        IF GenericTempTable.INSERT THEN;
+      END;
+    END;
+
+    LOCAL PROCEDURE CloseBudgetLines@1100528900(VAR PurchaseAction@1100528903 : Record 11012026;PurchaseHeader@1100528904 : Record 38);
+    VAR
+      ProjectPurchaseAction@1100528902 : Record 11012026;
+      BudgetLine@1100528900 : Record 11012001;
+    BEGIN
+      IF ProjectPurchaseAction.GET(PurchaseAction."Project No.", PurchaseAction.Code) THEN BEGIN
+        CASE PurchaseHeader."Document Type" OF
+          PurchaseHeader."Document Type"::Quote:
+            IF ProjectPurchaseAction."Activate for" < ProjectPurchaseAction."Activate for"::Quote THEN
+              ProjectPurchaseAction."Activate for" := ProjectPurchaseAction."Activate for"::Quote;
+          PurchaseHeader."Document Type"::Order:
+            IF ProjectPurchaseAction."Activate for" < ProjectPurchaseAction."Activate for"::Purchase THEN
+              ProjectPurchaseAction."Activate for" := ProjectPurchaseAction."Activate for"::Purchase;
+        END;
+        ProjectPurchaseAction.MODIFY;
+      END;
+      //
+      BudgetLine.SETRANGE("Project No.", ProjectPurchaseAction."Project No.");
+      BudgetLine.SETRANGE("Purchase Action", ProjectPurchaseAction.Code);
+      IF BudgetLine.FINDSET THEN
+        REPEAT
+          BudgetLine.Advised := TRUE;
+          BudgetLine."Purchase Order No." := PurchaseHeader."No.";
+          BudgetLine.MODIFY;
+        UNTIL BudgetLine.NEXT = 0;
+    END;
+
+    PROCEDURE SendMailQuote@1100528903(PurchaseAction@1100528900 : Record 11012026);
+    VAR
+      PurchaseHeader@1100528907 : Record 38;
+      DocumentPrint@1100528905 : Codeunit 229;
+      ChangeStatus@1100528904 : 'None,Released,Closed';
+      DirectPostOrder@1100528903 : 'According to Vendor,Not';
+      QuoteTxt@1100528902 : Text[1024];
+      FirstQuote@1100528901 : Boolean;
+    BEGIN
+      WITH PurchaseAction DO BEGIN
+        PurchaseHeader.SETCURRENTKEY("Document Type", "Job No.");
+        PurchaseHeader.SETRANGE("Document Type", PurchaseHeader."Document Type"::Quote);
+        PurchaseHeader.SETRANGE("Job No.", "Project No.");
+        PurchaseHeader.SETRANGE("Purchase Action", Code);
+        FirstQuote := TRUE;
+        IF PurchaseHeader.FINDSET THEN
+          REPEAT
+            IF PurchaseHeader.GetEMailOrder <> '' THEN BEGIN
+              IF FirstQuote THEN
+                QuoteTxt := PurchaseHeader."No."
+              ELSE
+                QuoteTxt := QuoteTxt + '|' + PurchaseHeader."No.";
+              FirstQuote := FALSE;
+            END;
+          UNTIL PurchaseHeader.NEXT = 0;
+        //
+        IF FirstQuote THEN
+          MESSAGE(Text021)
+        ELSE BEGIN
+          PurchaseHeader.SETRECFILTER;
+          PurchaseHeader.SETFILTER("No.", QuoteTxt);
+          IF PurchaseHeader.FINDSET THEN
+            REPEAT
+              DocumentPrint.EmailPurchHeader(
+                PurchaseHeader, FALSE, ChangeStatus::None, DirectPostOrder::"Not", FALSE, TRUE);
+            UNTIL PurchaseHeader.NEXT = 0;
+        END;
+      END;
+    END;
+
+    PROCEDURE SendMailQuoteLetter@1100528904(PurchaseAction@1100528900 : Record 11012026);
+    VAR
+      PurchaseHeader@1100528904 : Record 38;
+      DocumentPrint@1100528903 : Codeunit 229;
+      ChangeStatus@1100528902 : 'None,Released,Closed';
+      DirectPostOrder@1100528901 : 'According to Vendor,Not';
+    BEGIN
+      WITH PurchaseAction DO BEGIN
+        PurchaseHeader.SETCURRENTKEY("Document Type", "Job No.");
+        PurchaseHeader.SETRANGE("Document Type", PurchaseHeader."Document Type"::Quote);
+        PurchaseHeader.SETRANGE("Job No.", "Project No.");
+        PurchaseHeader.SETRANGE("Purchase Action", Code);
+        PurchaseHeader.SETFILTER("Quote Status", '%1|%2|%3',
+          PurchaseHeader."Quote Status"::Sent,
+          PurchaseHeader."Quote Status"::Received,
+          PurchaseHeader."Quote Status"::Rejected);
+        IF PurchaseHeader.FINDSET THEN
+          REPEAT
+            IF PurchaseHeader.GetEMailOrder <> '' THEN
+              PurchaseHeader.MARK(TRUE);
+          UNTIL PurchaseHeader.NEXT = 0;
+
+        PurchaseHeader.MARKEDONLY(TRUE);
+        IF PurchaseHeader.FINDSET THEN BEGIN
+          REPEAT
+            DocumentPrint.EmailPurchHeader(
+              PurchaseHeader, FALSE, ChangeStatus::None, DirectPostOrder::"Not", TRUE, TRUE);
+          UNTIL PurchaseHeader.NEXT = 0;
+        END ELSE
+          MESSAGE(Text021);
+      END;
+    END;
+
+    PROCEDURE ReopenPurchaseAction@1100528200(VAR ProjectPurchaseAction@1100485000 : Record 11012026);
+    BEGIN
+      WITH ProjectPurchaseAction DO BEGIN
+        ProjectPurchaseAction.VALIDATE(Status, ProjectPurchaseAction.Status::Concept);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    BEGIN
+    {
+      DP01267: db, 25-10-16
+      - functions moved from page 11012032 to codeunit 11229288,
+      - conform Requisition Mgt: page 11126653 to codeunit 11229287.
+    }
+    END.
+  }
+}
+

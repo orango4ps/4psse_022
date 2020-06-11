@@ -1,0 +1,547 @@
+OBJECT Codeunit 81617 Datalogic Mgmt
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=RFC-147;
+  }
+  PROPERTIES
+  {
+    TableNo=81614;
+    OnRun=BEGIN
+
+            CASE "Import Type" OF
+               "Import Type"::" ":    HandleIncomingFiles;
+               "Import Type"::File:   ImportSingleFile(Rec);
+               "Import Type"::Buffer: ImportBuffer(Rec);
+            END;
+          END;
+
+  }
+  CODE
+  {
+
+    PROCEDURE HandleIncomingFiles@1100285001();
+    VAR
+      DatalogicImportBufferTEMP@1100285000 : TEMPORARY Record 81614;
+    BEGIN
+
+      MoveFilesToTempDirectory(DatalogicImportBufferTEMP);
+
+      IF NOT DatalogicImportBufferTEMP.ISEMPTY THEN
+         ImportFiles(DatalogicImportBufferTEMP);
+    END;
+
+    PROCEDURE HandleBuffer@1100285003();
+    VAR
+      DatalogicSetup@1100285000 : Record 81613;
+      DatalogicImportBuffer@1100285002 : Record 81614;
+      DatalogicMgmt@1100285003 : Codeunit 81617;
+    BEGIN
+      DatalogicSetup.GET();
+      DatalogicSetup.TESTFIELD("Journal Template Name");
+      DatalogicSetup.TESTFIELD("Journal Batch Name");
+
+      ClearJournal(DatalogicSetup."Journal Template Name", DatalogicSetup."Journal Batch Name");
+
+      ImportToJournal;
+    END;
+
+    PROCEDURE HandleItemJournal@1100285033();
+    VAR
+      DatalogicSetup@1100285000 : Record 81613;
+    BEGIN
+
+      DatalogicSetup.GET();
+      DatalogicSetup.TESTFIELD("Journal Template Name");
+      DatalogicSetup.TESTFIELD("Journal Batch Name");
+      PostJournal(DatalogicSetup."Journal Template Name", DatalogicSetup."Journal Batch Name");
+    END;
+
+    PROCEDURE ClearAllErrors@1100285004();
+    VAR
+      DatalogicImportBuffer@1100285000 : Record 81614;
+    BEGIN
+      DatalogicImportBuffer.SETRANGE("Import Type", DatalogicImportBuffer."Import Type"::Buffer);
+      DatalogicImportBuffer.SETRANGE(Status, DatalogicImportBuffer.Status::Error);
+      DatalogicImportBuffer.MODIFYALL(Status, DatalogicImportBuffer.Status::" ");
+      DatalogicImportBuffer.MODIFYALL("Error Message", '');
+    END;
+
+    PROCEDURE "***"@1100285030();
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE MoveFilesToTempDirectory@1100285000(VAR DatalogicImportBuffer@1100285007 : Record 81614);
+    VAR
+      DatalogicSetup@1100285000 : Record 81613;
+      FileMgmt@1100285001 : Codeunit 419;
+      Folder@1100285003 : DotNet "'mscorlib'.System.IO.Directory" RUNONCLIENT;
+      Lst@1100285004 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Collections.Generic.List`1";
+      Obj@1100285005 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Object";
+      i@1100285006 : Integer;
+      Filename@1100285008 : Text;
+    BEGIN
+      DatalogicSetup.GET();
+
+      Obj := Folder.GetFiles(DatalogicSetup."Incoming File Path", '*.csv');
+      Lst := Lst.List;
+      Lst.AddRange(Obj);
+      FOR i := 0 TO Lst.Count - 1 DO BEGIN
+         Filename := 'fil' + FORMAT(i) + FORMAT(TODAY,0,'<year4><month,2><day,2>') + '_' + FORMAT(TIME,0,'<Standard format,2>')+'.csv';
+         FileMgmt.MoveAndRenameClientFile(Lst.Item(i), Filename, DatalogicSetup."Temporary Path");
+         DatalogicImportBuffer.INIT;
+         DatalogicImportBuffer."Entry No." := i + 1;
+         DatalogicImportBuffer."Import Type" := DatalogicImportBuffer."Import Type"::File;
+         DatalogicImportBuffer.Text1 := COPYSTR(DatalogicSetup."Temporary Path" + Filename, 1, MAXSTRLEN(DatalogicImportBuffer.Text1));
+         DatalogicImportBuffer.INSERT();
+      END;
+    END;
+
+    LOCAL PROCEDURE ImportBuffer@1100285018(VAR DatalogicImportBuffer@1100285000 : Record 81614);
+    VAR
+      DatalogicSetup@1100285001 : Record 81613;
+      ItemJournalLine@1100285002 : Record 83;
+      SKU@1100285104 : Record 5700;
+      LineNo@1100285003 : Integer;
+      DateVar@1100285004 : Date;
+      DecValue@1100285300 : Decimal;
+      LineNoItem@1100285302 : Integer;
+      SO@1100285005 : Record 11012823;
+      Job@1100285006 : Record 11072003;
+      Text002@1100285100 : TextConst 'ENU=Project %1 is missing;NOR=Prosjekt %1 ikke funnet;SVE=Projekt %1 sakas';
+      ItemJournalLineInv@1100285101 : Record 83;
+      LineNoInv@1100285102 : Integer;
+      Text003@1100285103 : TextConst 'ENU=Quantity is mandatory;SVE=Antal m†ste anges';
+      DatalogicItemsA@1000000000 : Record 81641;
+      Text2Dec@1000000001 : Decimal;
+      Item@1101285004 : Record 27;
+      PostingDateIn@1101285003 : Date;
+      NextDocNoInv@1101285002 : Code[20];
+      NoSeriesMgt@1101285001 : Codeunit 396;
+      ItemJnlBatch@1101285000 : Record 233;
+      CalculateInventory@1101285005 : Report 790;
+    BEGIN
+      DatalogicSetup.GET();
+      IF DatalogicImportBuffer.Text5 = 'ORD' THEN BEGIN
+          LineNo := GetLastLineNo(ItemJournalLine, DatalogicSetup."Journal Template Name", DatalogicSetup."Journal Batch Name");
+
+          ItemJournalLine.VALIDATE("Journal Template Name", DatalogicSetup."Journal Template Name");
+          ItemJournalLine.VALIDATE("Journal Batch Name", DatalogicSetup."Journal Batch Name");
+          ItemJournalLine.SetUpNewLine(ItemJournalLine);
+          ItemJournalLine.VALIDATE("Line No.", LineNo);
+          ItemJournalLine.INSERT(TRUE);
+          ItemJournalLine.VALIDATE("Entry Type", ItemJournalLine."Entry Type"::Sale);
+          ItemJournalLine.VALIDATE("Item No.", GetItemNoFromEANCode(DatalogicImportBuffer.Text2));
+          ItemJournalLine.VALIDATE("Job No.", DatalogicImportBuffer.Text1);
+          DatalogicImportBuffer.Text3 := CONVERTSTR(DatalogicImportBuffer.Text3, '.', ',');
+          EVALUATE(DecValue,DatalogicImportBuffer.Text3);
+          IF DecValue <> 0 THEN
+            ItemJournalLine.VALIDATE(Quantity, DecValue)
+          ELSE
+            ERROR(Text003);
+          //>> 171116 ITERO.SB RFC-245
+          IF (EVALUATE(DateVar, COPYSTR(DatalogicImportBuffer.Text4, 1, 10))) THEN
+            ItemJournalLine.VALIDATE("Posting Date", DateVar)
+          ELSE
+            ItemJournalLine.VALIDATE("Posting Date", TODAY);
+          //<<
+          SKU.SETRANGE("Item No.",ItemJournalLine."Item No.");
+          IF SKU.FINDFIRST THEN
+            ItemJournalLine.VALIDATE("Location Code", SKU."Location Code");
+
+          ItemJournalLine.MODIFY(TRUE);
+
+      END ELSE IF DatalogicImportBuffer.Text4='INV' THEN BEGIN
+
+        ItemJournalLineInv.SETRANGE("Journal Template Name", DatalogicSetup."Journal Template Name (Inv)");
+        ItemJournalLineInv.SETRANGE("Journal Batch Name", DatalogicSetup."Journal Batch Name (Inv)");
+        ItemJournalLineInv.SETRANGE("Item No.", GetItemNoFromEANCode(DatalogicImportBuffer.Text1));
+        IF ItemJournalLineInv.FINDFIRST THEN BEGIN
+          DatalogicImportBuffer.Text2 := CONVERTSTR(DatalogicImportBuffer.Text2, '.', ',');
+          EVALUATE(DecValue,DatalogicImportBuffer.Text2);
+          //>> 171116 ITERO.SB RFC-245
+          //DecValue += ItemJournalLineInv."Qty. (Phys. Inventory)";
+          //ItemJournalLineInv.VALIDATE("Qty. (Phys. Inventory)",DecValue);
+          IF ItemJournalLineInv."Phys. Inventory"=TRUE THEN BEGIN
+            DecValue += ItemJournalLineInv."Qty. (Phys. Inventory)";
+            ItemJournalLineInv.VALIDATE("Qty. (Phys. Inventory)",DecValue);
+          END ELSE BEGIN
+            DecValue += ItemJournalLineInv.Quantity;
+            ItemJournalLineInv.VALIDATE(Quantity,DecValue);
+          END;
+          //<<
+          ItemJournalLineInv.MODIFY(TRUE);
+        END ELSE BEGIN
+          // Create new line
+      //191021 ORANGO.EE >>
+          CLEAR(Item);
+          CLEAR(ItemJournalLineInv);
+          CLEAR(CalculateInventory);
+          PostingDateIn := WORKDATE;
+
+
+          ItemJournalLineInv.SETRANGE("Journal Template Name", DatalogicSetup."Journal Template Name (Inv)");
+          ItemJournalLineInv.SETRANGE("Journal Batch Name", DatalogicSetup."Journal Batch Name (Inv)");
+          IF ItemJournalLineInv.FINDFIRST THEN BEGIN
+            CalculateInventory.SetHideValidationDialog(TRUE);
+            CalculateInventory.SetItemJnlLine(ItemJournalLineInv);
+            CalculateInventory.SetPostingDate(PostingDateIn);
+          END ELSE BEGIN
+            LineNoInv := GetLastLineNo(ItemJournalLineInv, DatalogicSetup."Journal Template Name (Inv)", DatalogicSetup."Journal Batch Name (Inv)");
+            ItemJournalLineInv.VALIDATE("Journal Template Name", DatalogicSetup."Journal Template Name (Inv)");
+            ItemJournalLineInv.VALIDATE("Journal Batch Name", DatalogicSetup."Journal Batch Name (Inv)");
+            ItemJournalLineInv.VALIDATE("Posting Date",WORKDATE);
+            ItemJournalLineInv.SetUpNewLine(ItemJournalLineInv);
+            ItemJournalLineInv.VALIDATE("Line No.", LineNoInv);
+            ItemJournalLineInv.INSERT(TRUE);
+            ItemJournalLineInv.MODIFY;
+            CalculateInventory.SetHideValidationDialog(TRUE);
+            CalculateInventory.SetItemJnlLine(ItemJournalLineInv);
+            CalculateInventory.SetPostingDate(PostingDateIn);
+          END;
+
+          Item.SETRANGE("No.", GetItemNoFromEANCode(DatalogicImportBuffer.Text1));
+            IF Item.FINDSET THEN
+              CalculateInventory.SETTABLEVIEW(Item);
+              CalculateInventory.USEREQUESTPAGE(FALSE);
+              CalculateInventory.RUNMODAL;
+
+            //Delete the manually created line
+            ItemJournalLineInv.SETRANGE("Journal Template Name", DatalogicSetup."Journal Template Name (Inv)");
+            ItemJournalLineInv.SETRANGE("Journal Batch Name", DatalogicSetup."Journal Batch Name (Inv)");
+            IF ItemJournalLineInv.FINDFIRST THEN
+              IF ItemJournalLineInv."Item No." = '' THEN
+              ItemJournalLineInv.DELETE;
+
+            //Get the created by report line
+            ItemJournalLineInv.SETRANGE("Journal Template Name", DatalogicSetup."Journal Template Name (Inv)");
+            ItemJournalLineInv.SETRANGE("Journal Batch Name", DatalogicSetup."Journal Batch Name (Inv)");
+            IF ItemJournalLineInv.FINDLAST THEN BEGIN
+            IF ItemJournalLineInv."Posting Date"=0D THEN
+              ItemJournalLineInv.VALIDATE("Posting Date",TODAY);
+            ItemJournalLineInv."Phys. Inventory" := TRUE;
+
+            DatalogicImportBuffer.Text2 := CONVERTSTR(DatalogicImportBuffer.Text2, '.', ',');
+            EVALUATE(DecValue,DatalogicImportBuffer.Text2);
+            ItemJournalLineInv.VALIDATE("Qty. (Phys. Inventory)", DecValue);
+              ItemJournalLineInv.MODIFY(TRUE);
+            END;
+
+          {
+          CLEAR(ItemJournalLineInv);
+          ItemJournalLineInv.INIT;
+          LineNoInv := GetLastLineNo(ItemJournalLineInv, DatalogicSetup."Journal Template Name (Inv)", DatalogicSetup."Journal Batch Name (Inv)");
+          //>> 171116 ITERO.SB RFC-245
+          ItemJournalLineInv.VALIDATE("Journal Template Name", DatalogicSetup."Journal Template Name (Inv)");
+          ItemJournalLineInv.VALIDATE("Journal Batch Name", DatalogicSetup."Journal Batch Name (Inv)");
+          //<<
+          ItemJournalLineInv.SetUpNewLine(ItemJournalLineInv);
+          ItemJournalLineInv.VALIDATE("Line No.", LineNoInv);
+          ItemJournalLineInv.INSERT(TRUE);
+          //>> 171116 ITERO.SB RFC-245
+          IF ItemJournalLineInv."Posting Date"=0D THEN
+            ItemJournalLineInv.VALIDATE("Posting Date",TODAY);
+          ItemJournalLineInv."Qty. (Phys. Inventory)":=0;
+          //<<
+          ItemJournalLineInv.VALIDATE("Phys. Inventory", FALSE);
+
+          ItemJournalLineInv.VALIDATE("Item No.", GetItemNoFromEANCode(DatalogicImportBuffer.Text1));
+          SKU.SETRANGE("Item No.",ItemJournalLineInv."Item No.");
+          IF SKU.FINDFIRST THEN
+            ItemJournalLineInv.VALIDATE("Location Code", SKU."Location Code");
+
+          DatalogicImportBuffer.Text2 := CONVERTSTR(DatalogicImportBuffer.Text2, '.', ',');
+          EVALUATE(DecValue,DatalogicImportBuffer.Text2);
+          ItemJournalLineInv."Qty. (Calculated)" := 0;
+          ItemJournalLineInv.VALIDATE(Quantity, DecValue);
+          ItemJournalLineInv.VALIDATE("Entry Type", ItemJournalLine."Entry Type"::"Positive Adjmt.");
+          ItemJournalLineInv.MODIFY(TRUE);
+        END;}
+      //>> 171116 ITERO.SB RFC-245
+      //END;
+
+      END;
+      //<<
+      END ELSE IF DatalogicImportBuffer.Text4='REP' THEN BEGIN
+        IF DatalogicItemsA.FINDLAST THEN BEGIN
+            LineNoItem:=DatalogicItemsA.LineNo+10
+          END ELSE
+            LineNoItem:=10;
+          DatalogicItemsA.INIT;
+          DatalogicItemsA.VALIDATE(LineNo,LineNoItem);
+          DatalogicItemsA.VALIDATE(ItemNo, GetItemNoFromEANCode(DatalogicImportBuffer.Text1));
+          IF (DatalogicImportBuffer.Text3 <> '') AND (EVALUATE(Text2Dec,DatalogicImportBuffer.Text2)) THEN
+            DatalogicItemsA.VALIDATE(Qty, Text2Dec);
+          DatalogicItemsA.VALIDATE("Time Imp.",CURRENTDATETIME);
+          DatalogicItemsA.INSERT(TRUE);
+      END;
+      //<<
+    END;
+
+    LOCAL PROCEDURE ImportFiles@1100285002(VAR DatalogicImportBuffer@1100285007 : Record 81614);
+    VAR
+      DatalogicMgmt@1100285000 : Codeunit 81617;
+    BEGIN
+
+      IF DatalogicImportBuffer.FINDSET() THEN REPEAT
+         COMMIT;
+         IF NOT (DatalogicMgmt.RUN(DatalogicImportBuffer)) THEN
+            MESSAGE('Kunde ej l„sa in fil:' + DatalogicImportBuffer.Text1);
+      UNTIL DatalogicImportBuffer.NEXT = 0;
+    END;
+
+    PROCEDURE ImportSingleFile@1100285008(VAR DatalogicImportBuffer_File@1100285000 : Record 81614);
+    VAR
+      DatalogicSetup@1100285004 : Record 81613;
+      DatalogicImportBuffer@1100285006 : Record 81614;
+      ImportFile@1100285002 : File;
+      TextLine@1100285001 : Text;
+      InStr@1100285003 : InStream;
+      NewFilename@1100285005 : Text;
+      EntryNo@1100285007 : Integer;
+    BEGIN
+      DatalogicSetup.GET();
+
+      CLEAR(ImportFile);
+      ImportFile.TEXTMODE(TRUE);
+      ImportFile.OPEN(DatalogicImportBuffer_File.Text1);
+      ImportFile.CREATEINSTREAM(InStr);
+      IF (DatalogicImportBuffer.FINDLAST) THEN
+         EntryNo := DatalogicImportBuffer."Entry No." + 1
+      ELSE
+         EntryNo := 1;
+
+
+      REPEAT
+         InStr.READTEXT(TextLine);
+         ImportTextToBuffer(TextLine, DatalogicImportBuffer, EntryNo);
+      UNTIL InStr.EOS;
+
+      ImportFile.CLOSE;
+
+      NewFilename := COPYSTR(DatalogicImportBuffer_File.Text1, STRLEN(DatalogicSetup."Temporary Path"));
+      FILE.RENAME(DatalogicImportBuffer_File.Text1, DatalogicSetup."Archive Path" + NewFilename);
+    END;
+
+    LOCAL PROCEDURE ImportTextToBuffer@1100285005(VAR TextLine@1100285000 : Text;VAR DatalogicImportBuffer@1100285001 : Record 81614;VAR EntryNo@1100285002 : Integer);
+    VAR
+      i@1100285003 : Integer;
+    BEGIN
+
+      DatalogicImportBuffer.INIT;
+      DatalogicImportBuffer."Entry No." := EntryNo;
+      DatalogicImportBuffer."Import Type" := DatalogicImportBuffer."Import Type"::Buffer;
+      DatalogicImportBuffer."Imported Date Time" := CURRENTDATETIME;
+      FOR i := 1 TO STRLEN(DELCHR(TextLine, '=', DELCHR(TextLine, '=', ','))) + 1 DO BEGIN
+         CASE i OF
+           1: DatalogicImportBuffer.Text1 := SELECTSTR(i, DELCHR(TextLine, '=', '"'));
+           2: DatalogicImportBuffer.Text2 := SELECTSTR(i, DELCHR(TextLine, '=', '"'));
+           3: DatalogicImportBuffer.Text3 := SELECTSTR(i, DELCHR(TextLine, '=', '"'));
+           4: DatalogicImportBuffer.Text4 := SELECTSTR(i, DELCHR(TextLine, '=', '"'));
+           5: DatalogicImportBuffer.Text5 := SELECTSTR(i, DELCHR(TextLine, '=', '"'));
+           6: DatalogicImportBuffer.Text6 := SELECTSTR(i, DELCHR(TextLine, '=', '"'));
+           7: DatalogicImportBuffer.Text7 := SELECTSTR(i, DELCHR(TextLine, '=', '"'));
+           8: DatalogicImportBuffer.Text8 := SELECTSTR(i, DELCHR(TextLine, '=', '"'));
+           9: DatalogicImportBuffer.Text9 := SELECTSTR(i, DELCHR(TextLine, '=', '"'));
+
+
+         END;
+      END;
+
+      DatalogicImportBuffer.INSERT();
+      EntryNo += 1;
+    END;
+
+    PROCEDURE ClearJournal@1100285006(TemplateName@1100285001 : Code[10];BatchName@1100285002 : Code[10]);
+    VAR
+      ItemJournalLine@1100285000 : Record 83;
+      Text003@1100285101 : TextConst 'ENU=Delete not posted lines in Item Journal?;SVE=Det finns ej bokf”rda rader i artikeljournalen, vill du ta bort dessa?';
+    BEGIN
+
+      ItemJournalLine.SETRANGE("Journal Template Name", TemplateName);
+      ItemJournalLine.SETRANGE("Journal Batch Name", BatchName);
+      IF NOT ItemJournalLine.ISEMPTY THEN
+        IF CONFIRM(Text003) THEN
+          ItemJournalLine.DELETEALL;
+    END;
+
+    PROCEDURE ImportToJournal@1100285019();
+    VAR
+      DatalogicImportBuffer@1100285000 : Record 81614;
+      DatalogicMgmt@1100285001 : Codeunit 81617;
+    BEGIN
+
+      DatalogicImportBuffer.SETRANGE("Import Type", DatalogicImportBuffer."Import Type"::Buffer);
+      DatalogicImportBuffer.SETRANGE(Status, DatalogicImportBuffer.Status::" ");
+      DatalogicImportBuffer.SETRANGE(Text5,'ORD');
+
+      IF (DatalogicImportBuffer.FINDSET(TRUE)) THEN REPEAT
+         COMMIT;
+         IF (DatalogicMgmt.RUN(DatalogicImportBuffer)) THEN BEGIN
+            DatalogicImportBuffer."Error Message" := '';
+            DatalogicImportBuffer.Status := DatalogicImportBuffer.Status::Imported;
+         END ELSE BEGIN
+            DatalogicImportBuffer.Status := DatalogicImportBuffer.Status::Error;
+            DatalogicImportBuffer."Error Message" := COPYSTR(GETLASTERRORTEXT, 1, MAXSTRLEN(DatalogicImportBuffer."Error Message"));
+         END;
+         DatalogicImportBuffer.MODIFY();
+      UNTIL DatalogicImportBuffer.NEXT = 0;
+      COMMIT;
+    END;
+
+    PROCEDURE PostJournal@1100285021(TemplateName@1100285001 : Code[10];BatchName@1100285002 : Code[10]);
+    VAR
+      ItemJournalLine@1100285000 : Record 83;
+      ItemJnlPostBatch@1100285003 : Codeunit 23;
+    BEGIN
+
+      ItemJournalLine.SETRANGE("Journal Template Name", TemplateName);
+      ItemJournalLine.SETRANGE("Journal Batch Name", BatchName);
+      IF ItemJournalLine.FINDSET() THEN
+         ItemJnlPostBatch.RUN(ItemJournalLine);
+    END;
+
+    PROCEDURE GetLastLineNo@1100285025(VAR ItemJournalLine@1100285000 : Record 83;TemplateName@1100285001 : Code[10];BatchName@1100285002 : Code[10]) : Integer;
+    BEGIN
+      ItemJournalLine.SETRANGE("Journal Template Name", TemplateName);
+      ItemJournalLine.SETRANGE("Journal Batch Name", BatchName);
+      IF (ItemJournalLine.FINDLAST) THEN
+         EXIT(ItemJournalLine."Line No." + 10000)
+      ELSE
+         EXIT(10000);
+    END;
+
+    LOCAL PROCEDURE GetItemNoFromEANCode@1100285300(EANCode@1100285300 : Text) : Code[20];
+    VAR
+      Item@1100285301 : Record 27;
+      ItemCrossReference@1100285302 : Record 5717;
+      Text001@1100285303 : TextConst 'ENU="Item %1 not found ";SVE=Artikel %1 hittades ej';
+    BEGIN
+      IF Item.GET(EANCode) THEN
+        EXIT(EANCode);
+
+      Item.SETRANGE("GTIN Code", EANCode);
+      //>> 171116 ITERO.SB RFC-245
+      Item.SETRANGE(Blocked,FALSE);
+      //<<
+      IF (Item.FINDFIRST()) THEN
+         EXIT(Item."No.")
+      ELSE BEGIN
+        ItemCrossReference.SETRANGE("Cross-Reference Type",ItemCrossReference."Cross-Reference Type"::"Bar Code");
+        ItemCrossReference.SETRANGE("Cross-Reference No.",EANCode);
+        IF ItemCrossReference.FINDFIRST THEN
+          EXIT(ItemCrossReference."Item No.")
+        ELSE
+         ERROR(Text001, EANCode)
+      END;
+    END;
+
+    PROCEDURE HandleBufferInventory@1100285100();
+    VAR
+      DatalogicSetup@1100285000 : Record 81613;
+      DatalogicImportBuffer@1100285002 : Record 81614;
+      DatalogicMgmt@1100285003 : Codeunit 81617;
+    BEGIN
+      DatalogicSetup.GET();
+      DatalogicSetup.TESTFIELD("Journal Template Name (Inv)");
+      DatalogicSetup.TESTFIELD("Journal Batch Name (Inv)");
+
+      ImportToInvJournal;
+    END;
+
+    PROCEDURE ImportToInvJournal@1100285103();
+    VAR
+      DatalogicImportBuffer@1100285000 : Record 81614;
+      DatalogicMgmt@1100285001 : Codeunit 81617;
+    BEGIN
+
+      DatalogicImportBuffer.SETRANGE("Import Type", DatalogicImportBuffer."Import Type"::Buffer);
+      DatalogicImportBuffer.SETRANGE(Status, DatalogicImportBuffer.Status::" ");
+      DatalogicImportBuffer.SETRANGE(Text4,'INV');
+
+      IF (DatalogicImportBuffer.FINDSET(TRUE)) THEN REPEAT
+         COMMIT;
+         IF (DatalogicMgmt.RUN(DatalogicImportBuffer)) THEN BEGIN
+            DatalogicImportBuffer."Error Message" := '';
+            DatalogicImportBuffer.Status := DatalogicImportBuffer.Status::Imported;
+         END ELSE BEGIN
+            DatalogicImportBuffer.Status := DatalogicImportBuffer.Status::Error;
+            DatalogicImportBuffer."Error Message" := COPYSTR(GETLASTERRORTEXT, 1, MAXSTRLEN(DatalogicImportBuffer."Error Message"));
+         END;
+         DatalogicImportBuffer.MODIFY();
+      UNTIL DatalogicImportBuffer.NEXT = 0;
+      COMMIT;
+    END;
+
+    PROCEDURE ResetInventoryJournal@1100285106();
+    VAR
+      DatalogicSetup@1100285101 : Record 81613;
+      ItemJournalLine@1100285100 : Record 83;
+    BEGIN
+      DatalogicSetup.GET;
+      ItemJournalLine.SETRANGE("Journal Template Name", DatalogicSetup."Journal Template Name (Inv)");
+      ItemJournalLine.SETRANGE("Journal Batch Name", DatalogicSetup."Journal Batch Name (Inv)");
+      IF ItemJournalLine.FINDSET(TRUE) THEN
+      REPEAT
+        ItemJournalLine.VALIDATE("Qty. (Phys. Inventory)", 0);
+        ItemJournalLine.MODIFY(TRUE);
+      UNTIL ItemJournalLine.NEXT = 0;
+    END;
+
+    PROCEDURE HandleBufferPurchItems@1000000000();
+    VAR
+      DatalogicSetup@1100285000 : Record 81613;
+      DatalogicImportBuffer@1100285002 : Record 81614;
+      DatalogicMgmt@1100285003 : Codeunit 81617;
+      DatalogicItemsA@1000000000 : Record 81641;
+      Text001@1000000001 : TextConst 'ENU=Delete lines before import?;NOR=Det finnes rader i bestillningsunderlaget, vil du ta bort disse?;SVE=Det finns rader i best„llningsunderlaget, vill du ta bort dessa?';
+    BEGIN
+      //>> 171116 ITERO.SB RFC-245
+      DatalogicSetup.GET();
+
+      IF NOT DatalogicItemsA.ISEMPTY THEN
+        IF CONFIRM(Text001) THEN
+          DatalogicItemsA.DELETEALL(TRUE);
+
+      ImportToPurchItems;
+      //<<
+    END;
+
+    PROCEDURE ImportToPurchItems@1000000002();
+    VAR
+      DatalogicImportBuffer@1100285000 : Record 81614;
+      DatalogicMgmt@1100285001 : Codeunit 81617;
+    BEGIN
+      //>> 171116 ITERO.SB RFC-245
+      DatalogicImportBuffer.SETRANGE("Import Type", DatalogicImportBuffer."Import Type"::Buffer);
+      DatalogicImportBuffer.SETRANGE(Status, DatalogicImportBuffer.Status::" ");
+      DatalogicImportBuffer.SETRANGE(Text4,'REP');
+
+      IF (DatalogicImportBuffer.FINDSET(TRUE)) THEN REPEAT
+         COMMIT;
+         IF (DatalogicMgmt.RUN(DatalogicImportBuffer)) THEN BEGIN
+            DatalogicImportBuffer."Error Message" := '';
+            DatalogicImportBuffer.Status := DatalogicImportBuffer.Status::Imported;
+         END ELSE BEGIN
+            DatalogicImportBuffer.Status := DatalogicImportBuffer.Status::Error;
+            DatalogicImportBuffer."Error Message" := COPYSTR(GETLASTERRORTEXT, 1, MAXSTRLEN(DatalogicImportBuffer."Error Message"));
+         END;
+         DatalogicImportBuffer.MODIFY();
+      UNTIL DatalogicImportBuffer.NEXT = 0;
+      COMMIT;
+      //<<
+    END;
+
+    BEGIN
+    {
+      160513 Look for project if serviceorder is missing
+      160928 ITERO.LP Adjusted import to Journal and Phys.Inv.Journal
+      171116 ITERO.SB RFC-245
+      191021 ORANGO.EE New functionality on
+    }
+    END.
+  }
+}
+

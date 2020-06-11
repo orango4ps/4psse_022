@@ -1,0 +1,176 @@
+OBJECT Codeunit 11012900 Stiko Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      StikoTemplateSetup@1100525000 : Record 11012641;
+      Text001@1100525001 : TextConst 'ENU=A Stiko doesn''t exist for this project, create?';
+      Text002@1100525002 : TextConst 'ENU=There already exists at least one Stiko for this project. Would you like to create a new Stiko?';
+
+    PROCEDURE CreateStiko@1100527600(RecRef@1100527601 : RecordRef);
+    VAR
+      DocumentProperties@1100525002 : TEMPORARY Record 11012746;
+    BEGIN
+      StikoTemplateSetup.GET;
+      IF NOT StikoExists(RecRef, DocumentProperties) THEN BEGIN
+        IF CONFIRM(Text001, TRUE) THEN
+          CreateDocument(RecRef);
+      END ELSE
+        IF CONFIRM(Text002, FALSE) THEN
+          CreateDocument(RecRef);
+    END;
+
+    LOCAL PROCEDURE StikoExists@1100527602(RecRef@1100527600 : RecordRef;VAR DocumentProperties@1100525004 : TEMPORARY Record 11012746) : Boolean;
+    BEGIN
+      IF GetStikoList(RecRef, DocumentProperties) THEN
+        EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE InitDocProperties@1100525017(VAR DocumentProperties@1100525000 : Record 11012746);
+    BEGIN
+      WITH DocumentProperties DO BEGIN
+        Description := StikoTemplateSetup.Filename;
+        "External Document" := TRUE;
+        "Creation Date" := TODAY;
+        "Creation Time" := TIME;
+        "User ID" := USERID;
+        VALIDATE("Internal Company", COMPANYNAME);
+        VALIDATE(Status, Status::Concept);
+        "SharePoint Status" := "SharePoint Status"::New;
+        DocumentProperties."Document Type"  := StikoTemplateSetup."Document Type";
+        FillModificationData;
+      END;
+    END;
+
+    LOCAL PROCEDURE GenerateFilePath@1100525023() : Text[250];
+    BEGIN
+      IF (StikoTemplateSetup.Path[STRLEN(StikoTemplateSetup.Path)] = '\') OR (StikoTemplateSetup.Path[STRLEN(StikoTemplateSetup.Path)] = '/') THEN
+        EXIT(StikoTemplateSetup.Path + StikoTemplateSetup.Filename)
+      ELSE
+        EXIT(StikoTemplateSetup.Path + '\' + StikoTemplateSetup.Filename);
+    END;
+
+    LOCAL PROCEDURE InsertQueuedDoc@1100525006(VAR QueuedExternalDocument@1100525000 : Record 11012148);
+    VAR
+      FileManagement@1100525001 : Codeunit 419;
+    BEGIN
+      WITH QueuedExternalDocument DO BEGIN
+        "Line No." := 0;
+        User := USERID;
+        Folder := FileManagement.GetDirectoryNameWithBackSlash(GenerateFilePath);
+        "File Name" := FileManagement.GetFileName(GenerateFilePath);
+        Source := QueuedExternalDocument.Source::User;
+        INSERT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateDocLink@1100527605(RecRef@1100527600 : RecordRef);
+    VAR
+      QueuedDocumentLink@1100525000 : Record 11125736;
+      SeqNo@1100525001 : Integer;
+      RecID@1100525005 : RecordID;
+      DocumentLinkManagement@1100525006 : Codeunit 11012401;
+    BEGIN
+      WITH QueuedDocumentLink DO BEGIN
+        RecID := RecRef.RECORDID;
+
+        SETRANGE(User, USERID);
+        IF FINDLAST THEN
+          SeqNo := "Seq. No." + 10000
+        ELSE
+          SeqNo := 10000;
+        INIT;
+        User := USERID;
+        "Seq. No." := SeqNo;
+        "Table No." := RecID.TABLENO;
+        "Filter Expression" := DocumentLinkManagement.GetFilterExpression(RecID);
+        "Record ID" := RecID;
+        Source := FALSE;
+        INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE DeleteDocLinks@1100527606();
+    VAR
+      QueuedDocumentLink@1100525000 : Record 11125736;
+    BEGIN
+      WITH QueuedDocumentLink DO BEGIN
+        SETRANGE(User, USERID);
+        DELETEALL;
+      END;
+    END;
+
+    PROCEDURE GetStikoList@1100527603(RecRef@1100525005 : RecordRef;VAR DocumentProperties@1100525006 : TEMPORARY Record 11012746) : Boolean;
+    VAR
+      DocumentFilters@1100525004 : Codeunit 11012432;
+      DocumentFilter@1100525002 : Record 11012073;
+    BEGIN
+      DocumentFilters.CreateTemporaryFilter(RecRef, DocumentFilter);
+      COMMIT;
+
+      DocumentFilters.ApplyDocumentFilter(DocumentFilter, DocumentProperties);
+      DocumentProperties.SETRANGE("Document Type", StikoTemplateSetup."Document Type");
+      DocumentProperties.SETRANGE("From Filter Form", TRUE);
+      DocumentProperties.SETRANGE("External Document", TRUE);
+      IF DocumentProperties.FINDSET THEN
+        EXIT(TRUE);
+    END;
+
+    PROCEDURE OpenStikoList@1100525001(RecRef@1100525000 : RecordRef);
+    VAR
+      DocumentProperties@1100525002 : TEMPORARY Record 11012746;
+    BEGIN
+      StikoTemplateSetup.GET;
+      GetStikoList(RecRef, DocumentProperties);
+      PAGE.RUNMODAL(PAGE::"Document List", DocumentProperties);
+    END;
+
+    PROCEDURE OpenLastStiko@1100525008(RecRef@1100525000 : RecordRef);
+    VAR
+      DocumentProperties@1100525001 : TEMPORARY Record 11012746;
+    BEGIN
+      StikoTemplateSetup.GET;
+      IF StikoExists(RecRef, DocumentProperties) THEN BEGIN
+        IF DocumentProperties.FINDLAST THEN
+          PAGE.RUNMODAL(PAGE::"External Document", DocumentProperties);
+      END ELSE
+        CreateStiko(RecRef);
+    END;
+
+    LOCAL PROCEDURE CreateDocument@1100527604(RecRef@1100525004 : RecordRef);
+    VAR
+      DocumentPropertiesInit@1100525003 : Record 11012746;
+      QueuedExternalDocument@1100525002 : Record 11012148;
+      ErrorTxt@1100525001 : Text[250];
+      DocumentProperties@1100525000 : Record 11012746;
+    BEGIN
+      InitDocProperties(DocumentPropertiesInit);
+      InsertQueuedDoc(QueuedExternalDocument);
+      CreateDocLink(RecRef);
+      IF NOT QueuedExternalDocument.RegisterDocument(DocumentPropertiesInit, FALSE, 0, '', ErrorTxt, DocumentProperties) THEN
+          ERROR(ErrorTxt)
+      ELSE BEGIN
+        QueuedExternalDocument.DELETE;
+        DeleteDocLinks;
+      END;
+      COMMIT;
+      PAGE.RUNMODAL(PAGE::"External Document", DocumentProperties);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

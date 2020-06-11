@@ -1,0 +1,110 @@
+OBJECT Codeunit 81651 MonitorRestart JobQueueEntries
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PSSE;
+  }
+  PROPERTIES
+  {
+    OnRun=VAR
+            JobQueueEntry@1100285100 : Record 472;
+            ScheduledTask@1100285101 : Record 2000000175;
+            NewStatus@1100285102 : Option;
+            UserSessionStarted@1100285103 : DateTime;
+            UserSessionStartedCheck@1100285104 : DateTime;
+            SESetup@1100285105 : Record 11128004;
+          BEGIN
+            IF NOT SESetup.GET(SESetup."Line type"::Setup,'jobtask','check') THEN BEGIN
+              SESetup.INIT;
+              SESetup."Line type" := SESetup."Line type"::Setup;
+              SESetup.Code := 'jobtask';
+              SESetup."Code 2" := 'check';
+              SESetup.Description := 'MonitorRestart JobQueueEntries graceperiod (min)';
+              SESetup."Value (int)" := 30;
+              SESetup.INSERT;
+            END;
+
+            //Ready,In Process,Error,On Hold,Finished,,,,,Temporary on hold
+            UserSessionStarted := CURRENTDATETIME;
+            UserSessionStartedCheck := UserSessionStarted - SESetup."Value (int)"*60*1000;//30min
+
+            //ready but not scheduled
+            JobQueueEntry.SETRANGE(Status,JobQueueEntry.Status::Ready);
+            IF JobQueueEntry.FINDSET(FALSE) THEN
+            REPEAT
+              IF NOT ScheduledTask.GET(JobQueueEntry."System Task ID") THEN
+                RestartJQE(JobQueueEntry);
+            UNTIL JobQueueEntry.NEXT=0;
+
+            //in process but late, >30min, and not scheduled
+            JobQueueEntry.SETRANGE(Status,JobQueueEntry.Status::"In Process");
+            JobQueueEntry.SETFILTER("User Session Started",'..%1',UserSessionStartedCheck);
+            IF JobQueueEntry.FINDSET(FALSE) THEN
+            REPEAT
+              IF NOT ScheduledTask.GET(JobQueueEntry."System Task ID") THEN
+                RestartJQE(JobQueueEntry);
+            UNTIL JobQueueEntry.NEXT=0;
+
+            COMMIT;
+
+            //delete task w/o entry
+            JobQueueEntry.RESET;
+            ScheduledTask.RESET;
+            ScheduledTask.SETRANGE("Run Codeunit",CODEUNIT::"Job Queue Dispatcher");
+            ScheduledTask.SETRANGE("Failure Codeunit",CODEUNIT::"Job Queue Error Handler");
+            ScheduledTask.SETRANGE(Company,COMPANYNAME);
+            IF ScheduledTask.FINDSET THEN
+            REPEAT
+              JobQueueEntry.SETRANGE("System Task ID", ScheduledTask.ID);
+              JobQueueEntry.SETRANGE("User ID", ScheduledTask."User Name");
+              IF JobQueueEntry.ISEMPTY THEN
+                ScheduledTask.DELETE(FALSE);
+            UNTIL ScheduledTask.NEXT = 0;
+          END;
+
+  }
+  CODE
+  {
+
+    LOCAL PROCEDURE RestartJQE@1100285110(pJobQueueEntry@1100285100 : Record 472);
+    VAR
+      JobQueueEntry@1100285101 : Record 472;
+      JobQueueDispatcher@1100285102 : Codeunit 448;
+      JobQueueEnqueue@1100285103 : Codeunit 453;
+      JobQueueLogEntry@1100285104 : Record 474;
+    BEGIN
+      JobQueueEntry.GET(pJobQueueEntry.ID);
+
+      //JobQueueEntry.SetStatus(JobQueueEntry.Status::"On Hold");
+      IF NOT ISNULLGUID(JobQueueEntry."System Task ID") THEN
+        IF TASKSCHEDULER.TASKEXISTS(JobQueueEntry."System Task ID") THEN
+          TASKSCHEDULER.CANCELTASK(JobQueueEntry."System Task ID");
+      CLEAR(JobQueueEntry."System Task ID");
+
+      //JobQueueEntry.SetStatus(JobQueueEntry.Status::Ready);
+      JobQueueEntry."Earliest Start Date/Time" := JobQueueDispatcher.CalcInitialRunTime(JobQueueEntry,CURRENTDATETIME);
+      JobQueueEnqueue.EnqueueJobQueueEntry(JobQueueEntry);  //with modify and commit
+
+
+      JobQueueLogEntry.INIT;
+      JobQueueLogEntry.ID := pJobQueueEntry.ID;
+      JobQueueLogEntry."User ID" := pJobQueueEntry."User ID";
+      JobQueueLogEntry."Start Date/Time" := pJobQueueEntry."User Session Started";
+      JobQueueLogEntry."End Date/Time" := CURRENTDATETIME;
+      JobQueueLogEntry."Object Type to Run" := pJobQueueEntry."Object Type to Run";
+      JobQueueLogEntry."Object ID to Run" := pJobQueueEntry."Object ID to Run";
+      JobQueueLogEntry.Description := pJobQueueEntry.Description;
+
+      JobQueueLogEntry.SetErrorMessage('auto reset from '+FORMAT(pJobQueueEntry.Status));
+
+      JobQueueLogEntry."Job Queue Category Code" := pJobQueueEntry."Job Queue Category Code";
+      JobQueueLogEntry.INSERT(TRUE);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

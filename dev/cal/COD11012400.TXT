@@ -1,0 +1,1037 @@
+OBJECT Codeunit 11012400 Word Automation
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      WordApplication@1100528708 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.ApplicationClass" RUNONCLIENT;
+      WordDocument@1100528709 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document" RUNONCLIENT;
+      WordProcessingDocument@1100528701 : DotNet "'DocumentFormat.OpenXml, Version=2.5.5631.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.DocumentFormat.OpenXml.Packaging.WordprocessingDocument";
+      WordProcessingDocumentType@1100528703 : DotNet "'DocumentFormat.OpenXml, Version=2.5.5631.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.DocumentFormat.OpenXml.WordprocessingDocumentType";
+      Table@1100528711 : DotNet "'DocumentFormat.OpenXml, Version=2.5.5631.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.DocumentFormat.OpenXml.Wordprocessing.Table";
+      TableRow@1100528710 : DotNet "'DocumentFormat.OpenXml, Version=2.5.5631.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.DocumentFormat.OpenXml.Wordprocessing.TableRow";
+      Package@1100529600 : DotNet "'WindowsBase, Version=4.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.System.IO.Packaging.Package";
+      FileMgt@1100528712 : Codeunit 419;
+      CurrentStorageType@1100528400 : Option;
+      TableIndexAlreadyInit@1100528700 : Integer;
+      CurrentServerFileName@1100528702 : Text;
+      CurrentStorageURI@1100528704 : Text;
+      WordProcessingDocumentHasBeenClosed@1100528705 : Boolean;
+      CurrentFileIsReadOnly@1100528706 : Boolean;
+      Text002@1100528707 : TextConst 'ENU=File %1 is read-only.';
+      Text004@1100528715 : TextConst 'ENU=You must specify the URL or the name of the file that you want to get.';
+
+    PROCEDURE Initialise@6();
+    BEGIN
+      TableIndexAlreadyInit := 0;
+    END;
+
+    PROCEDURE SaveAs@16(StorageType@1100528401 : Option;VAR StorageURI@1100528402 : Text);
+    VAR
+      DocumentManagement@1100528400 : Codeunit 11012406;
+      FileManagement@1100528404 : Codeunit 419;
+      Base64Content@1100528403 : BigText;
+    BEGIN
+      CloseWordProcessingDocument;
+      IF CurrentFileIsReadOnly THEN
+        ERROR(Text002, StorageURI);
+      // Check if file is read only (final printed) does not work in document service (cloud),
+      // because it is not possible to find out if DocumentServiceFileName and
+      // CurrentStorageURI point to the same file.
+      DocumentManagement.CreateStorageLocationIfNotExists(
+        StorageType, FileManagement.GetDirectoryName(StorageURI));
+      FileMgt.ReadFileContentToBase64BigText(CurrentServerFileName, Base64Content);
+      DocumentManagement.PutContentToStorageByBase64(Base64Content, StorageType, StorageURI);
+      ERASE(CurrentServerFileName);
+    END;
+
+    PROCEDURE SaveAsWithExtension@1100485008(StorageType@1100528401 : Option;VAR StorageURI@1100528400 : Text;Extension@1100485000 : Text);
+    BEGIN
+      IF Extension = DtDocumentExtension THEN BEGIN
+        WordProcessingDocumentType := WordProcessingDocument.DocumentType;
+        IF FORMAT(WordProcessingDocumentType) = FORMAT(WordProcessingDocumentType.MacroEnabledDocument) THEN
+          Extension := DtDocumentMacroExtension;
+      END;
+      StorageURI := AddExtensionToFileName(StorageURI, Extension);
+      SaveAs(StorageType, StorageURI);
+    END;
+
+    LOCAL PROCEDURE AddExtensionToFileName@1100528400(FileName@1100528400 : Text;Extension@1100528401 : Text) FileNameWithExtension : Text;
+    VAR
+      DtExtension@1100528402 : Text;
+    BEGIN
+      IF Extension[1] = '.' THEN
+        DtExtension := Extension
+      ELSE
+        DtExtension := STRSUBSTNO('.%1', Extension);
+      IF FileNameEndsWithDtExtension(FileName, DtExtension) THEN
+        FileNameWithExtension := FileName
+      ELSE
+        FileNameWithExtension := STRSUBSTNO('%1%2', FileName, DtExtension);
+    END;
+
+    LOCAL PROCEDURE FileNameEndsWithDtExtension@1100528410(FileName@1100528401 : Text;DtExtension@1100528400 : Text) : Boolean;
+    BEGIN
+      IF FileName = '' THEN
+        EXIT(FALSE);
+      IF STRLEN(FileName) < STRLEN(DtExtension) THEN
+        EXIT(FALSE);
+
+      IF LOWERCASE(DtExtension) = LOWERCASE(COPYSTR(FileName, STRLEN(FileName) - STRLEN(DtExtension) + 1)) THEN
+        EXIT(TRUE);
+    END;
+
+    PROCEDURE Open@32(Template@11012000 : Boolean;StorageType@1100528400 : Option;StorageURI@11012001 : Text;ReadOnly@1210190001 : Boolean);
+    VAR
+      DocumentProperties@1100528402 : Record 11012746;
+      OldWordProcessingDocumentType@1100527800 : DotNet "'DocumentFormat.OpenXml, Version=2.5.5631.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.DocumentFormat.OpenXml.WordprocessingDocumentType";
+      DocumentManagement@1100528401 : Codeunit 11012406;
+    BEGIN
+      CurrentStorageType := StorageType;
+      CurrentStorageURI := StorageURI;
+      CurrentFileIsReadOnly := ReadOnly;
+      IF NOT Template AND (StorageType = DocumentProperties."Storage Type"::"File System on Premise") THEN
+        IF TryOpenFileWithLIPHummingBird(StorageURI) THEN
+          EXIT;
+
+      DocumentManagement.CopyContentFromStorageToServerFile(StorageType, StorageURI, CurrentServerFileName);
+      WordProcessingDocument := WordProcessingDocument.Open(CurrentServerFileName, TRUE);
+      IF Template THEN BEGIN
+        OldWordProcessingDocumentType := WordProcessingDocument.DocumentType;
+        ChangeDocumentType(WordProcessingDocument, CurrentStorageURI);
+        IF (FORMAT(OldWordProcessingDocumentType) = FORMAT(OldWordProcessingDocumentType.Template)) OR
+           (FORMAT(OldWordProcessingDocumentType) = FORMAT(OldWordProcessingDocumentType.MacroEnabledTemplate))
+        THEN
+          AttachTemplateToDocument(StorageURI);
+      END;
+      WordProcessingDocumentHasBeenClosed := FALSE;
+    END;
+
+    PROCEDURE OpenStream@1100527800(Template@11012000 : Boolean;Stream@11012001 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.Stream";ReadOnly@1210190001 : Boolean);
+    BEGIN
+      CurrentFileIsReadOnly := ReadOnly;
+      WordProcessingDocument := WordProcessingDocument.Open(Stream, TRUE);
+      ChangeDocumentType(WordProcessingDocument, '');
+      WordProcessingDocumentHasBeenClosed := FALSE;
+    END;
+
+    LOCAL PROCEDURE AttachTemplateToDocument@1100528404(ServerFileName@1100528401 : Text);
+    VAR
+      MainDocumentPart@1100528409 : DotNet "'DocumentFormat.OpenXml, Version=2.5.5631.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.DocumentFormat.OpenXml.Packaging.MainDocumentPart";
+      DocumentSettingsPart@1100528408 : DotNet "'DocumentFormat.OpenXml, Version=2.5.5631.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.DocumentFormat.OpenXml.Packaging.DocumentSettingsPart";
+      AttachedTemplate@1100528407 : DotNet "'DocumentFormat.OpenXml, Version=2.5.5631.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.DocumentFormat.OpenXml.Wordprocessing.AttachedTemplate";
+      StringValue@1100528406 : DotNet "'DocumentFormat.OpenXml, Version=2.5.5631.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.DocumentFormat.OpenXml.StringValue";
+      Uri@1100528404 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Uri";
+      UriKind@1100528403 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.UriKind";
+      WordOpenXMLManagement@1100528402 : Codeunit 11012629;
+      RelationId@1100528410 : Text;
+    BEGIN
+      MainDocumentPart := WordProcessingDocument.MainDocumentPart;
+      DocumentSettingsPart := MainDocumentPart.DocumentSettingsPart;
+      RelationId := 'relationId1';
+      AttachedTemplate := AttachedTemplate.AttachedTemplate;
+      StringValue := StringValue.StringValue(RelationId);
+      AttachedTemplate.Id := StringValue;
+      WordOpenXMLManagement.AppendChild(DocumentSettingsPart.Settings, AttachedTemplate);
+      UriKind := UriKind.Absolute;
+      Uri := Uri.Uri(ServerFileName, UriKind);
+
+      DocumentSettingsPart.AddExternalRelationship(
+        'http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate',
+        Uri, RelationId);
+    END;
+
+    LOCAL PROCEDURE TryOpenFileWithLIPHummingBird@1100528700(ClientFileName@1100528702 : Text) : Boolean;
+    VAR
+      DocumentMgtSetup@1100528701 : Record 11071831;
+      OperatingSystemMgt@1100528700 : Codeunit 11012364;
+    BEGIN
+      IF ClientFileName = '' THEN
+        EXIT(FALSE);
+
+      //LIP link, files with .drf extension.
+      DocumentMgtSetup.GET;
+      IF (STRLEN(ClientFileName) > 4) AND (DocumentMgtSetup."LIP Hummingbird exe" <> '') AND
+          (DocumentMgtSetup."Extension Hummingbird Appl." <> '') THEN BEGIN
+        IF UPPERCASE(COPYSTR(ClientFileName, STRLEN(ClientFileName)-3,4)) =
+            '.' + UPPERCASE(DocumentMgtSetup."Extension Hummingbird Appl.") THEN
+        BEGIN
+          OperatingSystemMgt.ClientShell(
+            STRSUBSTNO('"%1"', DocumentMgtSetup."LIP Hummingbird exe"),
+            STRSUBSTNO('"%1"', ClientFileName),
+            FALSE, FALSE);
+          EXIT(TRUE);
+        END;
+      END;
+
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE CopySourceFileToServerFile@1100528707(FileName@1100528701 : Text;DocumentServiceURL@1100528700 : Text) ServerFileName : Text;
+    VAR
+      DocumentServiceManagement@1100528702 : Codeunit 9510;
+    BEGIN
+      DocumentServiceManagement.SetUseDocumentService4PS(TRUE);
+      IF FileName <> '' THEN
+        ServerFileName := FileMgt.UploadFileSilent(FileName)
+      ELSE
+        IF DocumentServiceURL <> '' THEN
+          ServerFileName := DocumentServiceManagement.DownloadFileFromCloudToServerSilent(DocumentServiceURL)
+        ELSE
+          ERROR(Text004);
+    END;
+
+    PROCEDURE Close@23();
+    BEGIN
+      CloseWordProcessingDocument;
+    END;
+
+    PROCEDURE InitialiseForPrinting@1100528711();
+    BEGIN
+      FileMgt.TestIsWindowsClient;
+      IF ISNULL(WordApplication) THEN
+        WordApplication := WordApplication.ApplicationClass;
+    END;
+
+    PROCEDURE TerminateAfterPrinting@1100528718();
+    VAR
+      Dummy@1100528700 : Variant;
+    BEGIN
+      WordApplication.Quit(Dummy, Dummy, Dummy);
+    END;
+
+    PROCEDURE Print@28(ClientFileName@1100528700 : Text);
+    BEGIN
+      PrintToSelectedPrinter('', ClientFileName);
+    END;
+
+    PROCEDURE PrintToSelectedPrinter@1100485001(Printer@1100485000 : Text;ClientFileName@1100528700 : Text);
+    VAR
+      WordHelper@1100528701 : DotNet "'Microsoft.Dynamics.Nav.Integration.Office, Version=14.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.Integration.Office.Word.WordHelper" RUNONCLIENT;
+      Pos1@1100525000 : Integer;
+      Pos2@1100525001 : Integer;
+      Txt@1100525004 : Text;
+      Name1@1100525005 : Text;
+      Name2@1100525006 : Text;
+    BEGIN
+      IF Printer <> '' THEN BEGIN
+        //Citrix has sometimes this kind of printers "PR04010608 on hglfs01 (from SR01517) in session 17"
+        //For technical reason this must become: \\hglfs01\pr04010608
+        //So \\%"3rd word"\%"1st word"
+        Pos1 := STRPOS(Printer, ' on ');
+        Pos2 := STRPOS(Printer, 'from ');
+        IF (Pos1 > 0) AND (Pos2 > 0) THEN BEGIN
+          Txt := Printer;
+          Pos1 := STRPOS(Txt, ' ');
+          IF Pos1 > 1 THEN
+            Name1 := COPYSTR(Txt, 1, Pos1 - 1);
+          Txt := COPYSTR(Txt, Pos1 +1);  // delete printername
+          Pos1 := STRPOS(Txt, ' ');
+          Txt := COPYSTR(Txt, Pos1 +1);  // delete ' on '
+          Pos1 := STRPOS(Txt, ' ');
+          IF Pos1 > 1 THEN
+            Name2 := COPYSTR(Txt, 1, Pos1 - 1);
+          IF (Name1 <> '') AND (Name2 <> '') THEN BEGIN
+            Printer := '\\' + Name2 + '\' + Name1;
+          END
+        END;
+      END;
+
+      WordDocument := WordHelper.CallOpen(WordApplication, ClientFileName, FALSE, TRUE);
+      IF Printer <> '' THEN
+        WordHelper.CallPrintOut(WordDocument, Printer)
+      ELSE
+        WordHelper.CallPrintOut(WordDocument);
+
+      WaitForPrinter;
+      WordHelper.CallClose(WordDocument, FALSE);
+    END;
+
+    PROCEDURE PrintWithPrinterSelection@1210190000(ClientFileName@1100528705 : Text);
+    VAR
+      WordHelper@1100528700 : DotNet "'Microsoft.Dynamics.Nav.Integration.Office, Version=14.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.Integration.Office.Word.WordHelper" RUNONCLIENT;
+      WordDialogs@1100528702 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Dialogs" RUNONCLIENT;
+      WordDialog@1100528703 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Dialog" RUNONCLIENT;
+      WdWindowState@1100528704 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.WdWindowState" RUNONCLIENT;
+      Window@1100528707 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Window" RUNONCLIENT;
+      Dummy@1100528701 : Variant;
+      I@1100528706 : Integer;
+    BEGIN
+      IF ClientFileName <> '' THEN BEGIN
+        WordDocument := WordHelper.CallOpen(WordApplication, ClientFileName, FALSE, TRUE);
+        WordDialogs := WordApplication.Dialogs;
+
+        FOREACH Window IN WordDocument.Windows DO BEGIN
+          //Workaround to bring print dialog to front.
+          Window.WindowState := WdWindowState.wdWindowStateMinimize;
+          Window.WindowState := WdWindowState.wdWindowStateNormal;
+        END;
+
+        FOREACH WordDialog IN WordDialogs DO BEGIN
+          IF I = 4 THEN //Workaround because Dialogs.Item(4).Show(DummyVar) does not work.
+            WordDialog.Show(Dummy); //Print dialog
+          I := I + 1;
+        END;
+        WaitForPrinter;
+        WordHelper.CallClose(WordDocument, FALSE);
+      END;
+    END;
+
+    PROCEDURE WaitForPrinter@1100485009();
+    BEGIN
+      // Wait for print job to finish
+      IF WordApplication.BackgroundPrintingStatus <> 0 THEN
+        REPEAT
+          SLEEP(100);
+        UNTIL WordApplication.BackgroundPrintingStatus = 0;
+    END;
+
+    PROCEDURE InitTableFields@29(Index@1210190000 : Integer;DeleteRows@1199198000 : Boolean);
+    VAR
+      WordOpenXMLManagement@1100528600 : Codeunit 11012629;
+    BEGIN
+      IF Index = TableIndexAlreadyInit THEN
+        EXIT;
+      IF WordOpenXMLManagement.GetTable(WordProcessingDocument, Index, Table) THEN
+        IF DeleteRows THEN
+          WordOpenXMLManagement.DeleteTableRows(Table);
+      TableIndexAlreadyInit := Index;
+    END;
+
+    PROCEDURE FillTableElement@1210190005(Value@11012000 : Text;ColumnIndex@1210190000 : Integer);
+    VAR
+      WordOpenXMLManagement@1100528600 : Codeunit 11012629;
+    BEGIN
+      IF Value = '' THEN
+        EXIT;
+      WordOpenXMLManagement.SetTableCellValue(TableRow, Value, ColumnIndex);
+    END;
+
+    PROCEDURE TableNewRow@31();
+    VAR
+      WordOpenXMLManagement@1100528600 : Codeunit 11012629;
+    BEGIN
+      WordOpenXMLManagement.AddTableRow(Table, TableRow);
+    END;
+
+    PROCEDURE ReplaceField@18(FieldName@11012000 : Text;Replacement@11012001 : Text);
+    VAR
+      WordOpenXMLManagement@1100528600 : Codeunit 11012629;
+    BEGIN
+      WordOpenXMLManagement.ReplaceField(WordProcessingDocument, FieldName, Replacement);
+    END;
+
+    PROCEDURE AddPageBreak@1210190002();
+    VAR
+      WordOpenXMLManagement@1100528600 : Codeunit 11012629;
+    BEGIN
+      WordOpenXMLManagement.AddPageBreakAtEof(WordProcessingDocument);
+    END;
+
+    PROCEDURE AddFile@1210190004(FileName@1210190000 : Text);
+    VAR
+      TempBlob@1100527803 : TEMPORARY Record 99008535;
+      FileManagement@1100527802 : Codeunit 419;
+      WordOpenXMLManagement@1100527801 : Codeunit 11012629;
+      InStream@1100527800 : InStream;
+    BEGIN
+      IF FileMgt.ClientFileExists(FileName) THEN BEGIN
+        FileManagement.BLOBImport4PS(TempBlob, FileName, FALSE);
+        TempBlob.Blob.CREATEINSTREAM(InStream);
+        WordOpenXMLManagement.InsertADocumentAtEof(WordProcessingDocument, InStream);
+      END;
+    END;
+
+    PROCEDURE FillBookmark@19(BookmarkName@11012000 : Text;BookmarkValue@11012001 : Text;Bold@11012002 : Boolean;Underline@11012003 : Boolean;Italic@11012004 : Boolean;Keep@1199198000 : Boolean);
+    VAR
+      WordOpenXMLManagement@1100528600 : Codeunit 11012629;
+    BEGIN
+      WordOpenXMLManagement.FillBookmark(WordProcessingDocument, BookmarkName, BookmarkValue, Bold, Underline, Italic, Keep);
+    END;
+
+    PROCEDURE FillBookmarkPicture@1210190001(BookmarkName@11012000 : Text;StorageType@11012001 : Option;StorageURI@1100528702 : Text);
+    VAR
+      TempBlob@1100528601 : TEMPORARY Record 99008535;
+      FileManagement@1100528603 : Codeunit 419;
+      WordOpenXMLManagement@1100528600 : Codeunit 11012629;
+      DocumentManagement@1100528400 : Codeunit 11012406;
+      ServerTempFileName@1100528700 : Text;
+      InStream@1100528602 : InStream;
+    BEGIN
+      IF NOT DocumentManagement.CopyContentFromStorageToServerFile(StorageType, StorageURI, ServerTempFileName) THEN
+        EXIT;
+      IF ServerTempFileName <> '' THEN BEGIN
+        FileManagement.BLOBImportFromServerFile(TempBlob, ServerTempFileName);
+        TempBlob.Blob.CREATEINSTREAM(InStream);
+        WordOpenXMLManagement.InsertAPictureAtBookmark(WordProcessingDocument, InStream, BookmarkName, FALSE);
+        ERASE(ServerTempFileName);
+      END;
+    END;
+
+    PROCEDURE FillBookmarkFile@1100528200(BookmarkName@11012000 : Text;StorageType@11012001 : Option;StorageURI@1100528702 : Text);
+    VAR
+      TempBlob@1100528700 : TEMPORARY Record 99008535;
+      FileManagement@1100528600 : Codeunit 419;
+      WordOpenXMLManagement@1100528601 : Codeunit 11012629;
+      DocumentManagement@1100528400 : Codeunit 11012406;
+      ServerTempFileName@1100528701 : Text;
+      InStream@1100528602 : InStream;
+    BEGIN
+      IF NOT DocumentManagement.CopyContentFromStorageToServerFile(StorageType, StorageURI, ServerTempFileName) THEN
+        EXIT;
+      IF ServerTempFileName <> '' THEN BEGIN
+        FileManagement.BLOBImportFromServerFile(TempBlob, ServerTempFileName);
+        TempBlob.Blob.CREATEINSTREAM(InStream);
+        WordOpenXMLManagement.InsertADocumentAtBookmark(WordProcessingDocument, InStream, BookmarkName);
+        ERASE(ServerTempFileName);
+      END;
+    END;
+
+    PROCEDURE DisplayCurrent@5();
+    VAR
+      DocumentProperties@1100528400 : Record 11012746;
+      TempClientFileName@1100528700 : Text[250];
+    BEGIN
+      CloseWordProcessingDocument;
+      IF EXISTS(CurrentServerFileName) THEN
+        ERASE(CurrentServerFileName);
+      IF (CurrentStorageType = DocumentProperties."Storage Type"::"File System on Premise") AND
+         (CurrentStorageURI <> '')
+      THEN BEGIN
+        IF CurrentFileIsReadOnly THEN BEGIN
+          FileMgt.TestIsWindowsClient;
+          TempClientFileName := FileMgt.ClientTempFileName(FileMgt.GetExtension(CurrentStorageURI));
+          FileMgt.CopyClientFile(CurrentStorageURI, TempClientFileName, TRUE);
+          HYPERLINK(TempClientFileName);
+        END ELSE
+          HYPERLINK(CurrentStorageURI);
+      END ELSE
+        IF CurrentStorageURI <> '' THEN
+          HYPERLINK(CurrentStorageURI); // Read only (final printed) is not supported in document service.
+    END;
+
+    PROCEDURE Display@1100528706(ClientFileName@1100528700 : Text;DocumentServiceURL@1100528701 : Text);
+    BEGIN
+      IF ClientFileName <> '' THEN
+        HYPERLINK(ClientFileName)
+      ELSE
+        IF DocumentServiceURL <> '' THEN
+          HYPERLINK(DocumentServiceURL)
+        ELSE
+          ERROR(Text004);
+    END;
+
+    PROCEDURE ApplicableExtension@1100485005(Extension@1100485000 : Text[30];Doc@1100485001 : Boolean;Dot@1100485002 : Boolean) : Boolean;
+    BEGIN
+      Extension := UPPERCASE(Extension);
+      IF Dot THEN BEGIN
+        IF (Extension = UPPERCASE(OldDtTemplateExtension)) OR
+           (Extension = UPPERCASE(DtTemplateExtension)) OR
+           (Extension = UPPERCASE(DtTemplateMacroExtension)) THEN
+          EXIT(TRUE)
+        ELSE
+          IF NOT Doc THEN
+            EXIT(FALSE);
+      END;
+
+      IF (Extension = UPPERCASE(OldDtDocumentExtension)) OR
+         (Extension = UPPERCASE(DtDocumentExtension)) OR
+         (Extension = UPPERCASE(DtDocumentMacroExtension)) THEN
+        EXIT(TRUE)
+      ELSE
+        EXIT(FALSE);
+    END;
+
+    PROCEDURE ExistingFileName@1100485006(FileName@1100485000 : Text[1000];Doc@1100485001 : Boolean;Dot@1100485002 : Boolean;VAR Extension@1100485004 : Text[5]) : Boolean;
+    BEGIN
+      Extension := '';
+      IF FileName = '' THEN
+        EXIT(FALSE);
+
+      IF Dot THEN BEGIN
+        IF FileMgt.ClientFileExists(FileName) THEN BEGIN
+          IF STRPOS(FileName, DtTemplateExtension) > 0 THEN BEGIN
+            Extension := DtTemplateExtension;
+            EXIT(TRUE);
+          END;
+          IF STRPOS(FileName, OldDtTemplateExtension) > 0 THEN BEGIN
+            Extension := OldDtTemplateExtension;
+            EXIT(TRUE);
+          END;
+          IF STRPOS(FileName, DtTemplateMacroExtension) > 0 THEN BEGIN
+            Extension := DtTemplateMacroExtension;
+            EXIT(TRUE);
+          END;
+        END;
+        EXIT(FALSE);
+      END;
+
+      IF FileMgt.ClientFileExists(FileName + OldDtDocumentExtension) THEN BEGIN
+        Extension := OldDtDocumentExtension;
+        EXIT(TRUE);
+      END;
+      IF FileMgt.ClientFileExists(FileName + DtDocumentExtension) THEN BEGIN
+        Extension := DtDocumentExtension;
+        EXIT(TRUE);
+      END;
+      IF FileMgt.ClientFileExists(FileName + DtDocumentMacroExtension) THEN BEGIN
+        Extension := DtDocumentMacroExtension;
+        EXIT(TRUE);
+      END;
+
+      EXIT(FALSE);
+    END;
+
+    PROCEDURE DocfromDot@1100485007(Dot@1100485000 : Text[30]) : Text[30];
+    BEGIN
+      IF UPPERCASE(Dot) = UPPERCASE(DtTemplateExtension) THEN
+        EXIT(DtDocumentExtension);
+
+      IF UPPERCASE(Dot) = UPPERCASE(DtTemplateMacroExtension) THEN
+        EXIT(DtDocumentMacroExtension);
+
+        EXIT(OldDtDocumentExtension);
+    END;
+
+    LOCAL PROCEDURE CloseWordProcessingDocument@1100528703();
+    BEGIN
+
+      WordProcessingDocument.MainDocumentPart.Document.Save;
+      WordProcessingDocument.Close;
+    END;
+
+    LOCAL PROCEDURE ChangeWordTemplateOnServerToWordDocument@1100528701(ServerFileName@11012001 : Text);
+    VAR
+      WordProcessingDocument2@1100528701 : DotNet "'DocumentFormat.OpenXml, Version=2.5.5631.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.DocumentFormat.OpenXml.Packaging.WordprocessingDocument";
+    BEGIN
+      //Extension of file is not changed to .docx!!
+      WordProcessingDocument2 := WordProcessingDocument2.Open(ServerFileName, TRUE);
+      ChangeDocumentType(WordProcessingDocument2, ServerFileName);
+      WordProcessingDocument2.Close;
+    END;
+
+    PROCEDURE BLOBImportWordTemplateClientFileAsWordDocument@1100528704(VAR TempBlob@1100528700 : Record 99008535;WordTemplateClientFile@1100528701 : Text);
+    VAR
+      ServerTempFileName@1100528702 : Text;
+    BEGIN
+      ServerTempFileName := FileMgt.UploadFileSilent(WordTemplateClientFile);
+      ChangeWordTemplateOnServerToWordDocument(ServerTempFileName);
+      TempBlob.Blob.IMPORT(ServerTempFileName);
+      ERASE(ServerTempFileName);
+    END;
+
+    PROCEDURE FileExists@1100528705(DocumentProperties@1100528700 : Record 11012746) : Boolean;
+    BEGIN
+      EXIT(DocumentProperties.HasStorageURI);
+    END;
+
+    PROCEDURE DocumentExtension@1100528708() : Text;
+    BEGIN
+      EXIT('docx');
+    END;
+
+    PROCEDURE DtDocumentExtension@1100528712() : Text;
+    BEGIN
+      EXIT(STRSUBSTNO('.%1', DocumentExtension));
+    END;
+
+    PROCEDURE TemplateExtension@1100528710() : Text;
+    BEGIN
+      EXIT('dotx');
+    END;
+
+    PROCEDURE DtTemplateExtension@1100528713() : Text;
+    BEGIN
+      EXIT(STRSUBSTNO('.%1', TemplateExtension));
+    END;
+
+    PROCEDURE OldDocumentExtension@1100528720() : Text;
+    BEGIN
+      EXIT('doc');
+    END;
+
+    PROCEDURE OldDtDocumentExtension@1100528719() : Text;
+    BEGIN
+      EXIT(STRSUBSTNO('.%1', OldDocumentExtension));
+    END;
+
+    PROCEDURE OldTemplateExtension@1100528717() : Text;
+    BEGIN
+      EXIT('dot');
+    END;
+
+    PROCEDURE OldDtTemplateExtension@1100528716() : Text;
+    BEGIN
+      EXIT(STRSUBSTNO('.%1', OldTemplateExtension));
+    END;
+
+    PROCEDURE TemplateMacroExtension@1100525002() : Text;
+    BEGIN
+      EXIT('dotm');
+    END;
+
+    PROCEDURE DtTemplateMacroExtension@1100525001() : Text;
+    BEGIN
+      EXIT(STRSUBSTNO('.%1', TemplateMacroExtension));
+    END;
+
+    PROCEDURE DocumentMacroExtension@1100525005() : Text;
+    BEGIN
+      EXIT('docm');
+    END;
+
+    PROCEDURE DtDocumentMacroExtension@1100525004() : Text;
+    BEGIN
+      EXIT(STRSUBSTNO('.%1', DocumentMacroExtension));
+    END;
+
+    LOCAL PROCEDURE ChangeDocumentType@1100525000(WordDocument@1100525000 : DotNet "'DocumentFormat.OpenXml, Version=2.5.5631.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.DocumentFormat.OpenXml.Packaging.WordprocessingDocument";FileName@1100525001 : Text);
+    VAR
+      WordProcessingDocumentType@1100525002 : DotNet "'DocumentFormat.OpenXml, Version=2.5.5631.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.DocumentFormat.OpenXml.WordprocessingDocumentType";
+      PathHelper@1100525003 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.Path";
+    BEGIN
+      CASE LOWERCASE(PathHelper.GetExtension(FileName)) OF
+        '.dotx': WordDocument.ChangeDocumentType(WordProcessingDocumentType.Document);
+        '.dotm': WordDocument.ChangeDocumentType(WordProcessingDocumentType.MacroEnabledDocument);
+        ELSE BEGIN
+          WordProcessingDocumentType := WordDocument.DocumentType;
+          IF (FORMAT(WordProcessingDocumentType) = FORMAT(WordProcessingDocumentType.MacroEnabledTemplate)) OR
+             (FORMAT(WordProcessingDocumentType) = FORMAT(WordProcessingDocumentType.MacroEnabledDocument))
+          THEN
+            WordDocument.ChangeDocumentType(WordProcessingDocumentType.MacroEnabledDocument)
+          ELSE
+            WordDocument.ChangeDocumentType(WordProcessingDocumentType.Document);
+        END;
+      END;
+    END;
+
+    PROCEDURE GetExtension@1100527801() : Text;
+    BEGIN
+      WordProcessingDocumentType := WordProcessingDocument.DocumentType;
+      IF FORMAT(WordProcessingDocumentType) = FORMAT(WordProcessingDocumentType.MacroEnabledDocument) THEN
+        EXIT(DtDocumentMacroExtension)
+      ELSE
+        EXIT(DtDocumentExtension);
+    END;
+
+    PROCEDURE ConvertWordDocCreatedFromTemplate@1100529600(ServerFileName@1100529600 : Text) TmpServerFileName : Text;
+    BEGIN
+      IF NOT FileMgt.ServerFileExists(ServerFileName) THEN
+        EXIT('');
+      TmpServerFileName := FileMgt.ServerTempFileName(FileMgt.GetExtension(ServerFileName));
+      FileMgt.CopyServerFile(ServerFileName, TmpServerFileName, TRUE);
+      IF NOT TryConvertWordDocument(TmpServerFileName) THEN
+        EXIT('');
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE TryConvertWordDocument@1100529602(VAR TmpServerFileName@1100529600 : Text);
+    VAR
+      LocTmpServerFileName@1100529601 : Text;
+    BEGIN
+      LocTmpServerFileName := TmpServerFileName;
+      TmpServerFileName := '';
+      WordProcessingDocument := WordProcessingDocument.Open(LocTmpServerFileName, TRUE);
+      IF ISNULL(WordProcessingDocument) THEN
+        EXIT;
+
+      WordProcessingDocumentHasBeenClosed := FALSE;
+      Package := WordProcessingDocument.Package;
+      IF ISNULL(Package) THEN BEGIN
+        WordProcessingDocument.Close;
+        WordProcessingDocumentHasBeenClosed := TRUE;
+        EXIT;
+      END;
+
+      IF NOT ModifyPackagePart('/word/_rels/document2.xml.rels', '/word/_rels/document.xml.rels', '', '') THEN
+        EXIT;
+      IF NOT ModifyPackagePart('/word/document2.xml', '/word/document.xml', '', '') THEN
+        EXIT;
+      IF NOT ModifyPackagePart('/_rels/.rels', '/_rels/.rels2', 'document2.xml', 'document.xml') THEN
+        EXIT;
+      Package.Flush;
+      IF NOT ModifyPackagePart('/_rels/.rels2', '/_rels/.rels', '', '') THEN
+        EXIT;
+      Package.Flush;
+
+      WordProcessingDocument.Close;
+      WordProcessingDocumentHasBeenClosed := TRUE;
+
+      TmpServerFileName := LocTmpServerFileName;
+    END;
+
+    LOCAL PROCEDURE ModifyPackagePart@1100529601(OldURI@1100529600 : Text;NewURI@1100529601 : Text;OldText@1100529617 : Text;NewText@1100529616 : Text) : Boolean;
+    BEGIN
+      IF WordProcessingDocumentHasBeenClosed THEN
+        EXIT(FALSE);
+      IF NOT TryModifyPackagePart(OldURI, NewURI, OldText, NewText) THEN BEGIN
+        WordProcessingDocument.Close;
+        WordProcessingDocumentHasBeenClosed := TRUE;
+        EXIT(FALSE);
+      END;
+      EXIT(TRUE);
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE TryModifyPackagePart@1100529607(OldURI@1100529600 : Text;NewURI@1100529601 : Text;OldText@1100529617 : Text;NewText@1100529616 : Text);
+    VAR
+      IEnum@1100529603 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Collections.IEnumerator";
+      Enum@1100529602 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Collections.Generic.IEnumerable`1";
+      PackagePart@1100529607 : DotNet "'WindowsBase, Version=4.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.System.IO.Packaging.PackagePart";
+      NewPackagePart@1100529606 : DotNet "'WindowsBase, Version=4.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.System.IO.Packaging.PackagePart";
+      UriTypeConv@1100529608 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.UriTypeConverter";
+      Uri@1100529605 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Uri";
+      MemoryStream@1100529612 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.MemoryStream";
+      NewMemoryStream@1100529611 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.MemoryStream";
+      StreamReader@1100529610 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.StreamReader";
+      StreamWriter@1100529609 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.StreamWriter";
+      OldLine@1100529614 : Text;
+      NewLine@1100529615 : Text;
+      i@1100529613 : Integer;
+    BEGIN
+      UriTypeConv := UriTypeConv.UriTypeConverter;
+      Enum := Package.GetParts;
+      IEnum := Enum.GetEnumerator;
+      WHILE IEnum.MoveNext DO BEGIN
+        PackagePart := IEnum.Current;
+        IF FORMAT(PackagePart.Uri) = OldURI THEN BEGIN
+          Uri := UriTypeConv.ConvertFromString(NewURI);
+          MemoryStream := PackagePart.GetStream;
+
+          NewPackagePart := Package.CreatePart(Uri, PackagePart.ContentType, PackagePart.CompressionOption);
+          NewMemoryStream := NewPackagePart.GetStream;
+
+          IF OldText <> '' THEN BEGIN
+            StreamReader := StreamReader.StreamReader(MemoryStream);
+            StreamWriter := StreamWriter.StreamWriter(NewMemoryStream);
+            WHILE NOT StreamReader.EndOfStream DO BEGIN
+              OldLine := StreamReader.ReadLine;
+              NewLine := '';
+              i := STRPOS(OldLine, OldText);
+              WHILE i <> 0 DO BEGIN
+                NewLine := NewLine + COPYSTR(OldLine, 1, i - 1) + NewText;
+                OldLine := COPYSTR(OldLine, i + STRLEN(OldText));
+                i := STRPOS(OldLine, OldText);
+              END;
+              NewLine := NewLine + OldLine;
+              StreamWriter.WriteLine(NewLine);
+            END;
+          END ELSE
+            MemoryStream.CopyTo(NewMemoryStream);
+
+          NewMemoryStream.Flush;
+          IF OldText <> '' THEN BEGIN
+            StreamReader.Close;
+            StreamWriter.Close;
+          END;
+
+          Package.DeletePart(PackagePart.Uri);
+          EXIT;
+        END;
+      END;
+    END;
+
+    EVENT WordApplication@1100528708::Startup@357();
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents4_Event_Quit@358();
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::DocumentChange@359();
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::DocumentOpen@360(Doc@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::DocumentBeforeClose@361(Doc@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";VAR Cancel@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::DocumentBeforePrint@362(Doc@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";VAR Cancel@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::DocumentBeforeSave@363(Doc@1100528702 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";VAR SaveAsUI@1100528701 : Boolean;VAR Cancel@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents4_Event_NewDocument@364(Doc@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::WindowActivate@365(Doc@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";Wn@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Window");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::WindowDeactivate@366(Doc@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";Wn@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Window");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::WindowSelectionChange@367(Sel@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Selection");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::WindowBeforeRightClick@368(Sel@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Selection";VAR Cancel@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::WindowBeforeDoubleClick@369(Sel@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Selection";VAR Cancel@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::EPostagePropertyDialog@370(Doc@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::EPostageInsert@371(Doc@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::MailMergeAfterMerge@372(Doc@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";DocResult@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::MailMergeAfterRecordMerge@373(Doc@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::MailMergeBeforeMerge@374(Doc@1100528703 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";StartRecord@1100528702 : Integer;EndRecord@1100528701 : Integer;VAR Cancel@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::MailMergeBeforeRecordMerge@375(Doc@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";VAR Cancel@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::MailMergeDataSourceLoad@376(Doc@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::MailMergeDataSourceValidate@377(Doc@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";VAR Handled@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::MailMergeWizardSendToCustom@378(Doc@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::MailMergeWizardStateChange@379(Doc@1100528703 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";VAR FromState@1100528702 : Integer;VAR ToState@1100528701 : Integer;VAR Handled@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::WindowSize@380(Doc@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";Wn@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Window");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::XMLSelectionChange@381(Sel@1100528703 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Selection";OldXMLNode@1100528702 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.XMLNode";NewXMLNode@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.XMLNode";VAR Reason@1100528700 : Integer);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::XMLValidationError@382(XMLNode@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.XMLNode");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::DocumentSync@383(Doc@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";SyncEventType@1100528700 : DotNet "'office, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Core.MsoSyncEventType");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::EPostageInsertEx@384(Doc@1100528710 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";cpDeliveryAddrStart@1100528709 : Integer;cpDeliveryAddrEnd@1100528708 : Integer;cpReturnAddrStart@1100528707 : Integer;cpReturnAddrEnd@1100528706 : Integer;xaWidth@1100528705 : Integer;yaHeight@1100528704 : Integer;bstrPrinterName@1100528703 : Text;bstrPaperFeed@1100528702 : Text;fPrint@1100528701 : Boolean;VAR fCancel@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::MailMergeDataSourceValidate2@385(Doc@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";VAR Handled@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ProtectedViewWindowOpen@386(PvWindow@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.ProtectedViewWindow");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ProtectedViewWindowBeforeEdit@387(PvWindow@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.ProtectedViewWindow";VAR Cancel@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ProtectedViewWindowBeforeClose@388(PvWindow@1100528702 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.ProtectedViewWindow";CloseReason@1100528701 : Integer;VAR Cancel@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ProtectedViewWindowSize@389(PvWindow@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.ProtectedViewWindow");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ProtectedViewWindowActivate@390(PvWindow@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.ProtectedViewWindow");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ProtectedViewWindowDeactivate@391(PvWindow@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.ProtectedViewWindow");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents2_Event_Startup@392();
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents2_Event_Quit@393();
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents2_Event_DocumentChange@394();
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents2_Event_DocumentOpen@395(Doc@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents2_Event_DocumentBeforeClose@396(Doc@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";VAR Cancel@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents2_Event_DocumentBeforePrint@397(Doc@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";VAR Cancel@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents2_Event_DocumentBeforeSave@398(Doc@1100528702 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";VAR SaveAsUI@1100528701 : Boolean;VAR Cancel@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents2_Event_NewDocument@399(Doc@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents2_Event_WindowActivate@400(Doc@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";Wn@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Window");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents2_Event_WindowDeactivate@401(Doc@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";Wn@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Window");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents2_Event_WindowSelectionChange@402(Sel@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Selection");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents2_Event_WindowBeforeRightClick@403(Sel@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Selection";VAR Cancel@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents2_Event_WindowBeforeDoubleClick@404(Sel@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Selection";VAR Cancel@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents3_Event_Startup@405();
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents3_Event_Quit@406();
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents3_Event_DocumentChange@407();
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents3_Event_DocumentOpen@408(Doc@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents3_Event_DocumentBeforeClose@409(Doc@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";VAR Cancel@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents3_Event_DocumentBeforePrint@410(Doc@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";VAR Cancel@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents3_Event_DocumentBeforeSave@411(Doc@1100528702 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";VAR SaveAsUI@1100528701 : Boolean;VAR Cancel@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents3_Event_NewDocument@412(Doc@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents3_Event_WindowActivate@413(Doc@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";Wn@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Window");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents3_Event_WindowDeactivate@414(Doc@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";Wn@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Window");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents3_Event_WindowSelectionChange@415(Sel@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Selection");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents3_Event_WindowBeforeRightClick@416(Sel@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Selection";VAR Cancel@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents3_Event_WindowBeforeDoubleClick@417(Sel@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Selection";VAR Cancel@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents3_Event_EPostagePropertyDialog@418(Doc@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents3_Event_EPostageInsert@419(Doc@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents3_Event_MailMergeAfterMerge@420(Doc@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";DocResult@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents3_Event_MailMergeAfterRecordMerge@421(Doc@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents3_Event_MailMergeBeforeMerge@422(Doc@1100528703 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";StartRecord@1100528702 : Integer;EndRecord@1100528701 : Integer;VAR Cancel@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents3_Event_MailMergeBeforeRecordMerge@423(Doc@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";VAR Cancel@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents3_Event_MailMergeDataSourceLoad@424(Doc@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents3_Event_MailMergeDataSourceValidate@425(Doc@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";VAR Handled@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents3_Event_MailMergeWizardSendToCustom@426(Doc@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document");
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents3_Event_MailMergeWizardStateChange@427(Doc@1100528703 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";VAR FromState@1100528702 : Integer;VAR ToState@1100528701 : Integer;VAR Handled@1100528700 : Boolean);
+    BEGIN
+    END;
+
+    EVENT WordApplication@1100528708::ApplicationEvents3_Event_WindowSize@428(Doc@1100528701 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Document";Wn@1100528700 : DotNet "'Microsoft.Office.Interop.Word, Version=15.0.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.Office.Interop.Word.Window");
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

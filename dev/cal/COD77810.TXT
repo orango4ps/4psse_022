@@ -1,0 +1,708 @@
+OBJECT Codeunit 77810 AL Translation Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=TTool;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Window@1100525004 : Dialog;
+      WindowLastUpdated@1100525005 : Time;
+      Counter@1100525000 : Integer;
+      MaxCounter@1100525001 : Integer;
+      LineOfLbl@1100525003 : TextConst 'ENU=Line             #1###### of #2######\';
+      ProcessingLinesLbl@1100525002 : TextConst 'ENU=Processing lines @3@@@@@@@@@@@@@';
+      SourceOrTargetLangEmpty@1100525006 : TextConst 'ENU=Source or target language can''t be empty';
+      CreateForEmptyQst@1100525007 : TextConst 'ENU=Create translations for empty captions?';
+      PrefixTag@1100525009 : Code[10];
+      PostfixTag@1100525008 : Code[10];
+      TagExpQst@1100525010 : TextConst 'ENU=Tag Expression is: ''%1'', do you want to continue?';
+      UseCurrentTag@1100525011 : Boolean;
+      OverwriteNonEmptyQst@1100525012 : TextConst 'ENU=Overwrite non empty captions?';
+
+    PROCEDURE CreateMissingTranslations@1100525000(TTProject@1100525000 : Record 77810);
+    VAR
+      SourceCaption@1100525001 : Record 77812;
+      TargetCaption@1100525002 : Record 77812;
+    BEGIN
+      IF (TTProject."Source Language ID" = '') OR (TTProject."Target Language ID" = '') THEN
+        ERROR(SourceOrTargetLangEmpty);
+
+      SourceCaption.SETFILTER("Language ID",TTProject."Source Language ID");
+      SourceCaption.SETFILTER("Language Filter",TTProject."Target Language ID");
+      SourceCaption.SETFILTER("Project Code",TTProject.Code);
+
+      IF CONFIRM(CreateForEmptyQst) THEN
+        SourceCaption.SETFILTER(Caption1,'<>%1','');
+
+      IF NOT SourceCaption.FINDSET(TRUE) THEN
+        EXIT;
+
+      MaxCounter := SourceCaption.COUNT;
+      OpenWindow(ProcessingLinesLbl,MaxCounter);
+
+      REPEAT
+        Counter += 1;
+        UpdateWindow;
+
+        TargetCaption := SourceCaption;
+        TargetCaption."Language ID" := TTProject."Target Language ID";
+        TargetCaption.SetCaption('');
+        TargetCaption.Status := TargetCaption.Status::Generated;
+        TargetCaption."Entry No." := GetNextCaptionEntryNo;
+        IF TargetCaption.INSERT(TRUE) THEN;
+      UNTIL SourceCaption.NEXT = 0;
+
+      CloseWindow;
+    END;
+
+    PROCEDURE GetPossibleTranslations@1100525021(TgtCaption@1000 : Record 77812;TTProject@1100525002 : Record 77810;VAR TTCaptionResultSet@1100525001 : Record 77812;WithinObject@1100525005 : Boolean);
+    VAR
+      TTCaption@1100525004 : Record 77812;
+    BEGIN
+      IF TgtCaption."Alt. Search Caption" = '' THEN
+        EXIT;
+
+      TTCaption.SETRANGE("Project Code", TTProject.Code);
+      TTCaption.SETRANGE("Language ID", TTProject."Source Language ID");
+      TTCaption.SETRANGE("Search Caption", TgtCaption."Alt. Search Caption");
+      TTCaption.SETRANGE("Language Filter", TTProject."Target Language ID");
+      TTCaption.SETRANGE(Caption1, TgtCaption."Alt. Caption1");
+
+      IF WithinObject THEN BEGIN
+        TTCaption.SETRANGE("Object No.", TgtCaption."Object No.");
+      END;
+
+      IF NOT TTCaption.FINDSET THEN
+        EXIT;
+
+      TTCaptionResultSet."Language ID" := TTProject."Target Language ID";
+      TTCaptionResultSet."Project Code" := TTProject.Code;
+      REPEAT
+        TTCaption.CALCFIELDS("Alt. Caption1");
+        TTCaptionResultSet.SETFILTER(Caption1, '%1', TTCaption."Alt. Caption1");
+        IF TTCaptionResultSet.FINDFIRST THEN BEGIN
+          TTCaptionResultSet."No. of Occurrences" := TTCaptionResultSet."No. of Occurrences" + 1;
+          TTCaptionResultSet.MODIFY;
+        END ELSE BEGIN
+          TTCaptionResultSet."Object No." := TTCaption."Object No.";
+          TTCaptionResultSet.Caption1 := TTCaption."Alt. Caption1";
+          TTCaptionResultSet."No. of Occurrences" := 1;
+          TTCaptionResultSet."Entry No." := GetNextCaptionEntryNo;
+          TTCaptionResultSet.INSERT;
+        END;
+      UNTIL TTCaption.NEXT = 0;
+
+      TTCaptionResultSet.SETRANGE(Caption1);
+      TTCaptionResultSet.SETCURRENTKEY("No. of Occurrences");
+      TTCaptionResultSet.ASCENDING(FALSE);
+    END;
+
+    PROCEDURE FindMatchNAVProject@3(VAR TTALCaption@1100525000 : Record 77812;TTALProduct@1100525001 : Record 77810;NAVProject@1000 : Record 77782) : Boolean;
+    VAR
+      TranslationBuffer@1100525005 : TEMPORARY Record 77786;
+      Translation@1100525004 : Record 77786;
+    BEGIN
+      TTALCaption.CALCFIELDS("Alt. Search Caption", TTALCaption."Alt. Caption1");
+      GetPossibleTranslNAVProj(TTALCaption."Alt. Search Caption",TTALCaption."Alt. Caption1",TTALProduct,NAVProject,TranslationBuffer);
+      TranslationBuffer.SETFILTER(Caption1, '<>%1', '');
+
+      IF NOT TranslationBuffer.FINDFIRST THEN
+        EXIT;
+
+      Translation.GET(
+        TranslationBuffer."Project Code",
+        TranslationBuffer."Language ID",
+        TranslationBuffer."Object ID");
+
+      TTALCaption.SetCaption(Translation.GetCaption);
+      TTALCaption.Status := TTALCaption.Status::"Caption based AutoTrans";
+
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE FindMatchOtherProject@1100525007(VAR TTTgtALCaption@1100525003 : Record 77812;TTALProject@1100525002 : Record 77810;OtherALProject@1100525001 : Record 77810;WithinObject@1100525000 : Boolean) : Boolean;
+    VAR
+      TranslationBuffer@1100525005 : TEMPORARY Record 77812;
+      Translation@1100525004 : Record 77812;
+    BEGIN
+      TTTgtALCaption.CALCFIELDS("Alt. Search Caption",TTTgtALCaption."Alt. Caption1",TTTgtALCaption."Object Type",TTTgtALCaption."Object ID");
+      GetPossibleTranslOtherProj(TTTgtALCaption,TTALProject,OtherALProject,TranslationBuffer,WithinObject);
+
+      TranslationBuffer.SETFILTER(Caption1, '<>%1', '');
+
+      IF NOT TranslationBuffer.FINDFIRST THEN
+        EXIT;
+
+      Translation.GET(
+        TranslationBuffer."Project Code",
+        TranslationBuffer."Language ID",
+        TranslationBuffer."Object No.");
+
+      TTTgtALCaption.SetCaption(Translation.GetCaption);
+      IF WithinObject THEN
+        TTTgtALCaption.Status := TTTgtALCaption.Status::"Obj.-based AutoTrans"
+      ELSE
+        TTTgtALCaption.Status := TTTgtALCaption.Status::"Caption based AutoTrans";
+
+      TTTgtALCaption."Probability%" := TranslationBuffer."No. of Occurrences";
+      TranslationBuffer.CALCSUMS(TranslationBuffer."No. of Occurrences");
+
+      IF TranslationBuffer."No. of Occurrences" <> 0 THEN BEGIN
+        TTTgtALCaption."Probability%" :=
+          ROUND(TTTgtALCaption."Probability%" / TranslationBuffer."No. of Occurrences") * 100;
+        IF WithinObject THEN
+          TTTgtALCaption."Probability%" := 15 + 0.8 * TTTgtALCaption."Probability%";
+      END ELSE BEGIN
+        TTTgtALCaption."Probability%" := 0;
+        EXIT;
+      END;
+
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE FindMatch@1100525027(TranslateMode@1100525002 : 'Translate,Calc. Probability,Calc. Prob. Consistency';VAR TgtCaption@1100525000 : Record 77812;TTProject@1100525001 : Record 77810;WithinObject@1100525006 : Boolean) : Boolean;
+    VAR
+      TranslationBuffer@1100525005 : TEMPORARY Record 77812;
+      Translation@1100525004 : Record 77812;
+    BEGIN
+      IF WithinObject AND (TranslateMode = TranslateMode::"Calc. Prob. Consistency") THEN
+        EXIT;
+
+      TgtCaption.CALCFIELDS("Alt. Search Caption", TgtCaption."Alt. Caption1");
+      GetPossibleTranslations(TgtCaption, TTProject, TranslationBuffer, WithinObject);
+
+      TranslationBuffer.SETFILTER(Caption1, '<>%1', '');
+
+      IF NOT TranslationBuffer.FINDFIRST THEN
+        EXIT;
+
+      Translation.GET(
+        TranslationBuffer."Project Code",
+        TranslationBuffer."Language ID",
+        TranslationBuffer."Object No.");
+      IF TranslateMode = TranslateMode::Translate THEN BEGIN
+        TgtCaption.SetCaption(Translation.GetCaption);
+        IF WithinObject THEN
+          TgtCaption.Status := TgtCaption.Status::"Obj.-based AutoTrans"
+        ELSE
+          TgtCaption.Status := TgtCaption.Status::"Caption based AutoTrans";
+      END;
+
+      TgtCaption."Probability%" := TranslationBuffer."No. of Occurrences";
+      TranslationBuffer.CALCSUMS(TranslationBuffer."No. of Occurrences");
+
+      IF TranslationBuffer."No. of Occurrences" <> 0 THEN BEGIN
+        TgtCaption."Probability%" :=
+          ROUND(TgtCaption."Probability%" / TranslationBuffer."No. of Occurrences") * 100;
+        IF WithinObject THEN
+          TgtCaption."Probability%" := 15 + 0.8 * TgtCaption."Probability%";
+      END ELSE BEGIN
+        TgtCaption."Probability%" := 0;
+        EXIT;
+      END;
+
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE FindExactMatch@1100525022(TranslateMode@1100525003 : 'Translate,Calc. Probability,Calc. Prob. Consistency';VAR TgtCaption@1100525000 : Record 77812;TTProject@1100525001 : Record 77810) : Boolean;
+    VAR
+      Translation@1100525002 : Record 77812;
+      TranslationText@1100525004 : Text;
+    BEGIN
+      IF TranslateMode = TranslateMode::"Calc. Prob. Consistency" THEN
+        EXIT;
+
+      IF NOT Translation.GET(TTProject.Code, TTProject."Source Language ID", TgtCaption."Object No.") THEN
+        EXIT;
+
+      IF TgtCaption.GetAltCaption <> Translation.GetCaption THEN
+        EXIT;
+
+      Translation.SETRANGE("Language Filter", TTProject."Target Language ID");
+      Translation.SETRANGE("Project Code", Translation."Project Code");
+      TranslationText := Translation.GetAltCaption;
+      IF TranslationText = '' THEN
+        EXIT;
+
+      IF TranslateMode = TranslateMode::Translate THEN BEGIN
+        TgtCaption.SetCaption(TranslationText);
+        TgtCaption.Status := TgtCaption.Status::"ID-based  AutoTrans";
+      END;
+
+      TgtCaption."Probability%" := 100;
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE AutoTranslate@1100525017(TranslateMode@1100525002 : 'Translate,Calc. Probability,Calc. Prob. Consistency';VAR TgtCaption@1100525000 : Record 77812;TTProject@1100525001 : Record 77810);
+    VAR
+      TranslationBuffer@1100525003 : TEMPORARY Record 77812;
+      Translation@1100525004 : Record 77812;
+    BEGIN
+      IF NOT TgtCaption.FINDSET(TRUE) THEN
+        EXIT;
+
+      MaxCounter := TgtCaption.COUNT;
+      OpenWindow(ProcessingLinesLbl,MaxCounter);
+
+      TgtCaption.SETRANGE("Project Code",TTProject.Code);
+      TgtCaption.SETRANGE("Language Filter",TTProject."Source Language ID");
+      REPEAT
+        Counter := Counter + 1;
+        UpdateWindow;
+        CASE TRUE OF
+          FindExactMatch(TranslateMode, TgtCaption, TTProject),
+          FindMatch(TranslateMode, TgtCaption, TTProject, TRUE), //same object
+          FindMatch(TranslateMode, TgtCaption, TTProject, FALSE): //all objects
+            BEGIN
+              TgtCaption.UpdateProperties;
+              TgtCaption.MODIFY(TRUE);
+            END;
+          ELSE BEGIN
+            TgtCaption."Probability%" := 0;
+            TgtCaption.MODIFY;
+          END;
+        END;
+      UNTIL TgtCaption.NEXT = 0;
+      CloseWindow;
+    END;
+
+    PROCEDURE GetPossibleTranslNAVProj@4(SearchCaption@1100525000 : Code[100];SourceCaption1@1210190000 : Text[250];TTALProject@1100525002 : Record 77810;NAVProject@1000 : Record 77782;VAR TTCaptionResultSet@1100525001 : Record 77786);
+    VAR
+      TTCaption@1100525004 : Record 77786;
+    BEGIN
+      IF NOT TTCaptionResultSet.ISTEMPORARY THEN
+        EXIT;
+
+      IF SearchCaption = '' THEN
+        EXIT;
+
+      TTCaption.SETRANGE("Project Code",NAVProject.Code);
+      TTCaption.SETRANGE("Language ID", TTALProject."Source Language ID");
+      TTCaption.SETRANGE("Search Caption", SearchCaption);
+      TTCaption.SETRANGE("Language Filter", TTALProject."Target Language ID");
+      TTCaption.SETRANGE(Caption1, SourceCaption1);
+
+      IF NOT TTCaption.FINDSET THEN
+        EXIT;
+
+      TTCaptionResultSet."Language ID" := NAVProject."Target Language ID";
+      TTCaptionResultSet."Project Code" := NAVProject.Code;
+      REPEAT
+        TTCaption.CALCFIELDS("Alt. Caption1");
+        TTCaptionResultSet.SETFILTER(Caption1, '%1', TTCaption."Alt. Caption1");
+        IF TTCaptionResultSet.FINDFIRST THEN BEGIN
+          TTCaptionResultSet."No. of Occurrences" := TTCaptionResultSet."No. of Occurrences" + 1;
+          TTCaptionResultSet.MODIFY;
+        END ELSE BEGIN
+          TTCaptionResultSet."Object ID" := TTCaption."Object ID";
+          TTCaptionResultSet.Caption1 := TTCaption."Alt. Caption1";
+          TTCaptionResultSet."No. of Occurrences" := 1;
+          TTCaptionResultSet."Entry No." := TTCaption."Entry No.";
+          TTCaptionResultSet.INSERT;
+        END;
+      UNTIL TTCaption.NEXT = 0;
+
+      TTCaptionResultSet.SETRANGE(Caption1);
+      TTCaptionResultSet.SETCURRENTKEY("No. of Occurrences");
+      TTCaptionResultSet.ASCENDING(FALSE);
+    END;
+
+    PROCEDURE GetPossibleTranslOtherProj@1100525005(TTTargetALCaption@1100525000 : Record 77812;TTALProject@1100525001 : Record 77810;TTOtherALProject@1100525002 : Record 77810;VAR TTALCaptionResultSet@1100525003 : Record 77812;WithinObject@1100525004 : Boolean);
+    VAR
+      TTALCaption@1100525005 : Record 77812;
+      Counter@1100525006 : Integer;
+    BEGIN
+      IF NOT TTALCaptionResultSet.ISTEMPORARY THEN
+        EXIT;
+
+      IF TTTargetALCaption."Alt. Search Caption" = '' THEN
+        EXIT;
+
+      TTALCaption.SETRANGE("Project Code",TTOtherALProject.Code);
+      TTALCaption.SETRANGE("Language ID",TTALProject."Source Language ID");
+      TTALCaption.SETRANGE("Search Caption",TTTargetALCaption."Alt. Search Caption");
+      TTALCaption.SETRANGE("Language Filter",TTALProject."Target Language ID");
+      TTALCaption.SETRANGE(Caption1,TTTargetALCaption."Alt. Caption1");
+
+      IF WithinObject THEN BEGIN
+        TTALCaption.SETRANGE("Object Type",TTTargetALCaption."Object Type");
+        TTALCaption.SETRANGE("Object No.",TTTargetALCaption."Object No.");
+      END;
+
+      IF NOT TTALCaption.FINDSET THEN
+        EXIT;
+
+      TTALCaptionResultSet."Language ID" := TTOtherALProject."Target Language ID";
+      TTALCaptionResultSet."Project Code" := TTOtherALProject.Code;
+
+      REPEAT
+        Counter += 1;
+        TTALCaption.CALCFIELDS("Alt. Caption1");
+        TTALCaptionResultSet.SETFILTER(Caption1, '%1', TTALCaption."Alt. Caption1");
+        IF TTALCaptionResultSet.FINDFIRST THEN BEGIN
+          TTALCaptionResultSet."No. of Occurrences" := TTALCaptionResultSet."No. of Occurrences" + 1;
+          TTALCaptionResultSet.MODIFY;
+        END ELSE BEGIN
+          TTALCaptionResultSet."Object No." := TTALCaption."Object No.";
+          TTALCaptionResultSet.Caption1 := TTALCaption."Alt. Caption1";
+          TTALCaptionResultSet."No. of Occurrences" := 1;
+          TTALCaptionResultSet."Entry No." := Counter;
+          TTALCaptionResultSet.INSERT;
+        END;
+      UNTIL TTALCaption.NEXT = 0;
+
+      TTALCaptionResultSet.SETRANGE(Caption1);
+      TTALCaptionResultSet.SETCURRENTKEY("No. of Occurrences");
+      TTALCaptionResultSet.ASCENDING(FALSE);
+    END;
+
+    PROCEDURE MarkUniqueEntries@1100525004(VAR TTCaption@1100525000 : Record 77812;TTProject@1100525001 : Record 77810);
+    VAR
+      TempCaption@1100525002 : TEMPORARY Record 77812;
+    BEGIN
+      IF NOT TTCaption.FINDSET(TRUE) THEN
+        EXIT;
+      SetTagExpression('~%');
+
+      MaxCounter := TTCaption.COUNT;
+      OpenWindow(ProcessingLinesLbl,MaxCounter);
+
+      TTCaption.SETRANGE("Language Filter",TTProject."Source Language ID");
+      REPEAT
+        Counter := Counter + 1;
+        UpdateWindow;
+        TTCaption.CALCFIELDS(TTCaption."Alt. Caption1");
+        TempCaption.SETFILTER(Caption1,'%1',TTCaption."Alt. Caption1");
+        IF NOT TempCaption.FINDFIRST THEN BEGIN
+          TempCaption."Object No." := TTCaption."Object No.";
+          TempCaption.Caption1 := TTCaption."Alt. Caption1";
+          TempCaption."Entry No." := Counter;
+          TempCaption.INSERT;
+          TTCaption.Tag2 := CalculateTag(TTCaption.Tag2);
+          TTCaption.MODIFY;
+        END;
+      UNTIL TTCaption.NEXT = 0;
+      CloseWindow;
+    END;
+
+    PROCEDURE TagOptionStringDifferences@1100525012(VAR TTCaption@1100525000 : Record 77812;TTProject@1100525001 : Record 77810);
+    VAR
+      TempTranslation@1100525003 : TEMPORARY Record 77812;
+      Translation@1100525004 : Record 77812;
+      SrcNoOfOptions@1100525005 : Integer;
+      TgtNoOfOptions@1100525006 : Integer;
+    BEGIN
+      TTCaption.SETRANGE("Value Type",TTCaption."Value Type"::Property);
+      TTCaption.SETRANGE("Value ID",'62802879');
+
+      IF NOT TTCaption.FINDSET(TRUE) THEN
+        EXIT;
+      SetTagExpression('!%');
+
+      MaxCounter := TTCaption.COUNT;
+      OpenWindow(ProcessingLinesLbl,MaxCounter);
+      TTCaption.SETRANGE("Project Code", TTProject.Code);
+      TTCaption.SETRANGE("Language Filter", TTProject."Source Language ID");
+      REPEAT
+        Counter := Counter + 1;
+        UpdateWindow;
+        SrcNoOfOptions := CountChar(',',TTCaption.GetCaption);
+        TgtNoOfOptions := CountChar(',',TTCaption.GetAltCaption);
+        IF (SrcNoOfOptions <> TgtNoOfOptions) THEN BEGIN
+          TTCaption.Tag2 := CalculateTag(TTCaption.Tag2);
+          TTCaption.MODIFY;
+        END ELSE
+          IF NOT TagOptionStringSameFieldsFilled(TTCaption.GetCaption,TTCaption.GetAltCaption,SrcNoOfOptions) THEN BEGIN
+            TTCaption.Tag2 := CalculateTag(TTCaption.Tag2);
+            TTCaption.MODIFY;
+          END ELSE
+            IF TTCaption.Tag2 <> '' THEN BEGIN
+              TTCaption.Tag2 := DELCHR(TTCaption.Tag2,'=','!');
+              TTCaption.MODIFY;
+            END;
+      UNTIL TTCaption.NEXT = 0;
+      CloseWindow;
+    END;
+
+    PROCEDURE TagOptionStringDuplicates@1100525015(VAR TTCaption@1100525000 : Record 77812);
+    VAR
+      TempTranslation@1100525003 : TEMPORARY Record 77786;
+      Translation@1100525004 : Record 77786;
+      SourceCaption@1100525007 : Text[1024];
+      Dummy@1100525008 : Text[1024];
+      SrcNoOfOptions@1100525005 : Integer;
+      TgtNoOfOptions@1100525006 : Integer;
+    BEGIN
+      TTCaption.SETRANGE("Value Type",TTCaption."Value Type"::Property);
+      TTCaption.SETRANGE("Value ID",'62802879');
+
+      IF NOT TTCaption.FINDSET(TRUE) THEN
+        EXIT;
+      SetTagExpression(')%');
+
+      MaxCounter := TTCaption.COUNT;
+      OpenWindow(ProcessingLinesLbl,MaxCounter);
+
+      REPEAT
+        Counter := Counter + 1;
+        UpdateWindow;
+        IF DuplicateOptionsFound(',',TTCaption.GetCaption) THEN BEGIN
+          TTCaption.Tag2 := CalculateTag(TTCaption.Tag2);
+          TTCaption.MODIFY;
+        END ELSE BEGIN
+          IF TTCaption.Tag2 <> '' THEN BEGIN
+            TTCaption.Tag2 := DELCHR(TTCaption.Tag2,'=',')');
+            TTCaption.MODIFY;
+          END;
+        END;
+      UNTIL TTCaption.NEXT = 0;
+      CloseWindow;
+    END;
+
+    PROCEDURE SetTagExpression@1100525009(TagExpression2@1100525000 : Code[10]);
+    VAR
+      Pos@1100525001 : Integer;
+    BEGIN
+      IF NOT CONFIRM(TagExpQst,TRUE,TagExpression2) THEN
+        ERROR('');
+
+      PrefixTag := TagExpression2;
+      PostfixTag := '';
+      UseCurrentTag := FALSE;
+
+      Pos := STRPOS(TagExpression2,'%');
+      IF Pos <> 0 THEN BEGIN
+        UseCurrentTag := TRUE;
+        PrefixTag := COPYSTR(TagExpression2,1,Pos - 1);
+        IF  (Pos < STRLEN(TagExpression2)) THEN
+          PostfixTag := COPYSTR(TagExpression2,Pos + 1,STRLEN(TagExpression2) - Pos);
+      END;
+    END;
+
+    PROCEDURE TagOptionStringSameFieldsFilled@1100525011(Caption@1001 : Text[1024];AltCaption@1000 : Text[1024];NoOfOptions@1003 : Integer) : Boolean;
+    VAR
+      CounterOptions@1002 : Integer;
+      OptionCaption@1004 : Text[1024];
+      OptionAltCaption@1005 : Text[1024];
+      PosCaption@1006 : Integer;
+      LengthCaption@1007 : Integer;
+      PosAltCaption@1008 : Integer;
+      LengthAltCaption@1009 : Integer;
+      Result@1010 : Boolean;
+    BEGIN
+      IF NoOfOptions = 0 THEN
+        EXIT(TRUE);
+
+      REPEAT
+        CounterOptions := CounterOptions + 1;
+        PosCaption := STRPOS(Caption,',');
+        PosAltCaption := STRPOS(AltCaption,',');
+        LengthCaption := PosCaption - 1;
+        LengthAltCaption := PosAltCaption - 1;
+        OptionCaption := COPYSTR(Caption,1,LengthCaption);
+        OptionAltCaption := COPYSTR(AltCaption,1,LengthAltCaption);
+        IF (OptionCaption <> '') AND (OptionAltCaption <> '') THEN
+          Result := TRUE
+        ELSE BEGIN
+          IF (OptionCaption = '') AND (OptionAltCaption = '') THEN
+            Result := TRUE
+          ELSE BEGIN
+            Result := FALSE;
+            CounterOptions := NoOfOptions;
+          END;
+        END;
+        Caption := DELSTR(Caption,1,LengthCaption+1);
+        AltCaption := DELSTR(AltCaption,1,LengthAltCaption+1);
+      UNTIL CounterOptions = NoOfOptions;
+
+      EXIT(Result);
+    END;
+
+    LOCAL PROCEDURE CheckDifferentSourceCaption@6(SourceCaption@1000 : Record 77812;CompareCaption@1001 : Record 77812) : Boolean;
+    BEGIN
+      IF ((SourceCaption.Caption1 <> CompareCaption.Caption1) OR
+         (SourceCaption.Caption2 <> CompareCaption.Caption2) OR
+         (SourceCaption.Caption3 <> CompareCaption.Caption3) OR
+         (SourceCaption.Caption4 <> CompareCaption.Caption4) OR
+         (SourceCaption.Caption5 <> CompareCaption.Caption5)) THEN
+         EXIT(TRUE);
+    END;
+
+    PROCEDURE TagChangedSourceCaption@5(VAR TTCaption@1100525000 : Record 77812;TTProject@1003 : Record 77810;CompareProject@1000 : Record 77810);
+    VAR
+      CompareCaption@1001 : Record 77812;
+      SourceCaption@1002 : Record 77812;
+    BEGIN
+      IF NOT TTCaption.FINDSET(TRUE) THEN
+        EXIT;
+      SetTagExpression('#%');
+
+      REPEAT
+         //TTCaption are captions of target language. We want compare captions of source language. Should alway exist.
+         SourceCaption.GET(TTProject.Code,TTProject."Source Language ID",TTCaption."Object No.");
+         IF CompareCaption.GET(CompareProject.Code,CompareProject."Source Language ID",TTCaption."Object No.") THEN BEGIN
+            IF CheckDifferentSourceCaption(SourceCaption,CompareCaption) THEN
+               TTCaption.Tag2 := CalculateTag(TTCaption.Tag2);
+               TTCaption.MODIFY;
+         END;
+      UNTIL TTCaption.NEXT = 0;
+    END;
+
+    PROCEDURE DuplicateOptionsFound@1100525013(Char2@1100525000 : Text[1];Text2@1100525001 : Text[1024]) : Boolean;
+    VAR
+      TempTTObject@1100525005 : TEMPORARY Record 77785;
+      Pos@1100525004 : Integer;
+      i@1100525003 : Integer;
+      EndLoop@1100525002 : Boolean;
+    BEGIN
+      WHILE TRUE DO BEGIN
+        Text2 := DELCHR(Text2,'<',Char2);
+
+        Pos := STRPOS(Text2,Char2);
+
+        IF (Pos = 0) THEN BEGIN
+          TempTTObject.ID := Text2;
+          EXIT(NOT TempTTObject.INSERT);
+        END;
+
+        TempTTObject.ID := COPYSTR(Text2,1,Pos - 1);
+        IF NOT TempTTObject.INSERT THEN
+          EXIT(TRUE);
+
+        Text2 := COPYSTR(Text2,Pos);
+      END;
+    END;
+
+    PROCEDURE CopyCaptionToAltCaption@1100525018(VAR TTCaption@1100525000 : Record 77812;TTProject@1100525001 : Record 77810);
+    VAR
+      SourceCaption@1100525004 : Record 77812;
+    BEGIN
+      IF NOT TTCaption.FINDSET(TRUE) THEN
+        EXIT;
+
+      MaxCounter := TTCaption.COUNT;
+      OpenWindow(ProcessingLinesLbl,MaxCounter);
+      REPEAT
+        Counter := Counter + 1;
+        UpdateWindow;
+        IF SourceCaption.GET(TTCaption."Project Code",TTProject."Source Language ID",TTCaption."Object No.") THEN BEGIN
+          SourceCaption.SetCaption(TTCaption.GetCaption);
+          SourceCaption."Search Caption" := TTCaption."Search Caption";
+          SourceCaption.Status := SourceCaption.Status::Generated;
+          SourceCaption.UpdateProperties;
+          SourceCaption.MODIFY(TRUE);
+          END
+        ELSE BEGIN
+          SourceCaption := TTCaption;
+          SourceCaption."Language ID" := TTProject."Source Language ID";
+          SourceCaption.Status := SourceCaption.Status::Generated;
+          SourceCaption.UpdateProperties;
+          SourceCaption."Entry No." := GetNextCaptionEntryNo;
+          SourceCaption.INSERT(TRUE);
+        END;
+      UNTIL TTCaption.NEXT = 0;
+      CloseWindow;
+    END;
+
+    PROCEDURE CopyAltCaptionToCaption@1100525014(VAR TTCaption@1100525000 : Record 77812;TTProject@1100525001 : Record 77810);
+    VAR
+      SourceCaption@1100525004 : Record 77812;
+      OverwriteValue@1100525002 : Boolean;
+    BEGIN
+      IF NOT TTCaption.FINDSET(TRUE) THEN
+        EXIT;
+
+      OverwriteValue := CONFIRM(OverwriteNonEmptyQst);
+
+      MaxCounter := TTCaption.COUNT;
+      OpenWindow(ProcessingLinesLbl,MaxCounter);
+      REPEAT
+        Counter := Counter + 1;
+        UpdateWindow;
+        IF (TTCaption.GetCaption = '') OR OverwriteValue THEN BEGIN
+          TTCaption.SetCaption(TTCaption.GetAltCaption);
+          TTCaption.Status := SourceCaption.Status::Generated;
+          TTCaption.UpdateProperties;
+          TTCaption.MODIFY(TRUE);
+        END;
+      UNTIL TTCaption.NEXT = 0;
+      Window.CLOSE;
+    END;
+
+    PROCEDURE CountChar@1100525006(Char2@1100525000 : Text[1];Text2@1100525001 : Text[1024]) : Integer;
+    VAR
+      Pos@1100525004 : Integer;
+      i@1100525003 : Integer;
+      EndLoop@1100525002 : Boolean;
+    BEGIN
+      WHILE TRUE DO BEGIN
+        Pos := STRPOS(Text2,Char2);
+        IF (Pos = 0) THEN
+          EXIT(i);
+        i := i + 1;
+        IF (Pos >= STRLEN(Text2)) THEN
+          EXIT(i);
+        Text2 := COPYSTR(Text2,Pos + 1);
+      END;
+    END;
+
+    PROCEDURE CalculateTag@1100525010(VAR TagExpression2@1100525000 : Code[10]) : Code[10];
+    VAR
+      NewTag@1100525001 : Text[30];
+    BEGIN
+      NewTag := PrefixTag;
+
+      IF UseCurrentTag THEN
+        NewTag := NewTag + TagExpression2 + PostfixTag;
+
+      EXIT(COPYSTR(NewTag,1,MAXSTRLEN(TagExpression2)));
+    END;
+
+    LOCAL PROCEDURE OpenWindow@1100525001(LineLbl@1100525000 : Text;MaxCounter2@1100525001 : Integer);
+    BEGIN
+      Window.OPEN(LineOfLbl + LineLbl);
+      Counter := 0;
+      Window.UPDATE(2,MaxCounter2);
+      WindowLastUpdated := TIME;
+    END;
+
+    LOCAL PROCEDURE CloseWindow@1100525002();
+    BEGIN
+      Window.CLOSE;
+    END;
+
+    LOCAL PROCEDURE UpdateWindow@1100525003();
+    BEGIN
+      IF TIME - WindowLastUpdated > 300 THEN BEGIN
+        Window.UPDATE(1, Counter);
+        Window.UPDATE(3,ROUND(Counter / MaxCounter * 10000,1));
+        WindowLastUpdated := TIME;
+      END;
+    END;
+
+    LOCAL PROCEDURE GetNextCaptionEntryNo@1100525008() NextNo : Integer;
+    VAR
+      TTCaption2@1100525000 : Record 77812;
+    BEGIN
+      TTCaption2.SETCURRENTKEY("Entry No.");
+      IF TTCaption2.FINDLAST THEN
+        NextNo := TTCaption2."Entry No." + 1
+      ELSE
+        NextNo := 1;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

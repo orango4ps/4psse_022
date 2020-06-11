@@ -1,0 +1,345 @@
+OBJECT Codeunit 5355 CRM Notes Synch Job
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.00;
+  }
+  PROPERTIES
+  {
+    TableNo=472;
+    OnRun=BEGIN
+            UpdateOrders(GetLastLogEntryNo);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ConnectionNotEnabledErr@1001 : TextConst '@@@="%1 = CRM product name";ENU=The %1 connection is not enabled.;NOR=%1-tilkoblingen er ikke aktivert.;SVE=%1-anslutningen har inte aktiverats.';
+      OrderNotesUpdatedMsg@1000 : TextConst 'ENU=The notes on coupled sales orders have been synchronized.;NOR=Merknadene p† koblede salgsordrer er synkronisert.';
+      CRMProductName@1002 : Codeunit 5344;
+
+    LOCAL PROCEDURE UpdateOrders@1(JobLogEntryNo@1011 : Integer);
+    VAR
+      CRMConnectionSetup@1004 : Record 5330;
+      ConnectionName@1006 : Text;
+    BEGIN
+      CRMConnectionSetup.GET;
+      IF NOT CRMConnectionSetup."Is Enabled" THEN
+        ERROR(ConnectionNotEnabledErr,CRMProductName.FULL);
+
+      ConnectionName := FORMAT(CREATEGUID);
+      CRMConnectionSetup.RegisterConnectionWithName(ConnectionName);
+      SETDEFAULTTABLECONNECTION(
+        TABLECONNECTIONTYPE::CRM,CRMConnectionSetup.GetDefaultCRMConnection(ConnectionName));
+
+      UpdateSalesOrderNotes(JobLogEntryNo);
+
+      CRMConnectionSetup.UnregisterConnectionWithName(ConnectionName);
+    END;
+
+    LOCAL PROCEDURE UpdateSalesOrderNotes@12(JobLogEntryNo@1000 : Integer);
+    VAR
+      CRMAnnotationCoupling@1005 : Record 5392;
+      IntegrationTableSynch@1002 : Codeunit 5335;
+      SynchActionType@1001 : 'None,Insert,Modify,ForceModify,IgnoreUnchanged,Fail,Skip,Delete';
+      InsertCounter@1003 : Integer;
+      ModifyCounter@1004 : Integer;
+      CreatedAfterDateTime@1006 : DateTime;
+      ModifiedAfterDateTime@1007 : DateTime;
+    BEGIN
+      IntegrationTableSynch.BeginIntegrationSynchJobLoging(
+        TABLECONNECTIONTYPE::CRM,CODEUNIT::"CRM Notes Synch Job",JobLogEntryNo,DATABASE::"Sales Header");
+
+      CRMAnnotationCoupling.SETCURRENTKEY("CRM Created On");
+      IF CRMAnnotationCoupling.FINDLAST THEN
+        CreatedAfterDateTime := CRMAnnotationCoupling."CRM Created On";
+      CRMAnnotationCoupling.SETCURRENTKEY("CRM Modified On");
+      IF CRMAnnotationCoupling.FINDLAST THEN
+        ModifiedAfterDateTime := CRMAnnotationCoupling."CRM Modified On";
+
+      InsertCounter := CreateAnnotationsForCreatedNotes;
+      InsertCounter += CreateNotesForCreatedAnnotations(CreatedAfterDateTime);
+      ModifyCounter += ModifyNotesForModifiedAnnotations(ModifiedAfterDateTime);
+
+      IntegrationTableSynch.UpdateSynchJobCounters(SynchActionType::Insert,InsertCounter);
+      IntegrationTableSynch.UpdateSynchJobCounters(SynchActionType::Modify,ModifyCounter);
+      IntegrationTableSynch.EndIntegrationSynchJobWithMsg(GetOrderNotesUpdateFinalMessage);
+    END;
+
+    [EventSubscriber(Table,472,OnFindingIfJobNeedsToBeRun)]
+    LOCAL PROCEDURE OnFindingIfJobNeedsToBeRun@65(VAR Sender@1000 : Record 472;VAR Result@1001 : Boolean);
+    VAR
+      CRMConnectionSetup@1002 : Record 5330;
+      CRMAnnotationBuffer@1003 : Record 5391;
+    BEGIN
+      IF Sender."Object Type to Run" <> Sender."Object Type to Run"::Codeunit THEN
+        EXIT;
+
+      IF Sender."Object ID to Run" <> CODEUNIT::"CRM Notes Synch Job" THEN
+        EXIT;
+
+      IF NOT CRMConnectionSetup.GET THEN
+        EXIT;
+
+      IF NOT CRMConnectionSetup."Is Enabled" THEN
+        EXIT;
+
+      CRMAnnotationBuffer.SETRANGE("Related Table ID",DATABASE::"Sales Header");
+      Result := NOT CRMAnnotationBuffer.ISEMPTY;
+    END;
+
+    LOCAL PROCEDURE CreateCRMAnnotation@29(CRMSalesorder@1000 : Record 5353;RecordLinkRecId@1002 : RecordID);
+    VAR
+      CRMAnnotation@1003 : Record 5385;
+      RecordLink@1001 : Record 2000000068;
+      CRMAnnotationCoupling@1010 : Record 5392;
+      TypeHelper@1007 : Codeunit 10;
+      CRMAnnotationRecRef@1009 : RecordRef;
+      RecordLinkRecRef@1004 : RecordRef;
+      NoteFieldRef@1005 : FieldRef;
+      NoteTextFieldRef@1008 : FieldRef;
+      AnnotationText@1006 : Text;
+    BEGIN
+      RecordLink.GET(RecordLinkRecId);
+      RecordLinkRecRef.GETTABLE(RecordLink);
+      NoteFieldRef := RecordLinkRecRef.FIELD(RecordLink.FIELDNO(Note));
+      AnnotationText := TypeHelper.ReadTextBlobWithTextEncoding(NoteFieldRef,TEXTENCODING::UTF8);
+
+      CRMAnnotation.AnnotationId := CREATEGUID;
+      CRMAnnotation.ObjectTypeCode := CRMAnnotation.ObjectTypeCode::salesorder;
+      CRMAnnotation.ObjectId := CRMSalesorder.SalesOrderId;
+      CRMAnnotation.IsDocument := FALSE;
+      CRMAnnotation.Subject := RecordLink.Description;
+      CRMAnnotationRecRef.GETTABLE(CRMAnnotation);
+      NoteTextFieldRef := CRMAnnotationRecRef.FIELD(CRMAnnotation.FIELDNO(NoteText));
+      TypeHelper.WriteBlobWithEncoding(NoteTextFieldRef,AnnotationText,TEXTENCODING::UTF16);
+      CRMAnnotationRecRef.SETTABLE(CRMAnnotation);
+      CRMAnnotation.INSERT;
+
+      CRMAnnotation.GET(CRMAnnotation.AnnotationId);
+      CRMAnnotationCoupling.CoupleRecordLinkToCRMAnnotation(RecordLink,CRMAnnotation);
+    END;
+
+    [External]
+    PROCEDURE GetOrderNotesUpdateFinalMessage@23() : Text;
+    BEGIN
+      EXIT(OrderNotesUpdatedMsg);
+    END;
+
+    LOCAL PROCEDURE FindCoupledCRMSalesOrder@33(VAR CRMSalesorder@1000 : Record 5353;SalesHeader@1001 : Record 36) : Boolean;
+    VAR
+      CRMIntegrationRecord@1003 : Record 5331;
+      CRMIntegrationManagement@1002 : Codeunit 5330;
+    BEGIN
+      IF NOT CRMIntegrationManagement.IsCRMIntegrationEnabled THEN
+        EXIT(FALSE);
+
+      IF NOT CRMIntegrationRecord.FindIDFromRecordID(SalesHeader.RECORDID,CRMSalesorder.SalesOrderId) THEN
+        EXIT(FALSE);
+
+      IF NOT CRMSalesorder.FIND THEN
+        EXIT(FALSE);
+
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE CreateAnnotationsForCreatedNotes@15() CreatedAnnotations : Integer;
+    VAR
+      CRMAnnotationBuffer@1000 : Record 5391;
+      TempCRMAnnotationBuffer@1001 : TEMPORARY Record 5391;
+    BEGIN
+      CRMAnnotationBuffer.SETRANGE("Related Table ID",DATABASE::"Sales Header");
+      IF NOT CRMAnnotationBuffer.FINDSET THEN
+        EXIT;
+
+      REPEAT
+        TempCRMAnnotationBuffer.TRANSFERFIELDS(CRMAnnotationBuffer);
+        TempCRMAnnotationBuffer.INSERT;
+      UNTIL CRMAnnotationBuffer.NEXT = 0;
+
+      IF TempCRMAnnotationBuffer.FINDSET THEN
+        REPEAT
+          CreatedAnnotations += ProcessCRMAnnotationBufferEntry(TempCRMAnnotationBuffer);
+        UNTIL TempCRMAnnotationBuffer.NEXT = 0;
+    END;
+
+    PROCEDURE CreateNotesForCreatedAnnotations@4(CreatedAfterDateTime@1001 : DateTime) CreatedNotes : Integer;
+    VAR
+      CRMAnnotation@1000 : Record 5385;
+    BEGIN
+      CRMAnnotation.SETRANGE(ObjectTypeCode,CRMAnnotation.ObjectTypeCode::salesorder);
+      IF CreatedAfterDateTime <> 0DT THEN
+        CRMAnnotation.SETFILTER(CreatedOn,STRSUBSTNO('>%1',CreatedAfterDateTime));
+      IF CRMAnnotation.FINDSET THEN
+        REPEAT
+          CreatedNotes += CreateAndCoupleNote(CRMAnnotation);
+        UNTIL CRMAnnotation.NEXT = 0;
+    END;
+
+    PROCEDURE ModifyNotesForModifiedAnnotations@9(ModifiedAfterDateTime@1001 : DateTime) ModifiedNotes : Integer;
+    VAR
+      CRMAnnotation@1000 : Record 5385;
+    BEGIN
+      CRMAnnotation.SETRANGE(ObjectTypeCode,CRMAnnotation.ObjectTypeCode::salesorder);
+      IF ModifiedAfterDateTime <> 0DT THEN
+        CRMAnnotation.SETFILTER(ModifiedOn,STRSUBSTNO('>%1',ModifiedAfterDateTime));
+      IF CRMAnnotation.FINDSET THEN
+        REPEAT
+          ModifiedNotes += ModifyNote(CRMAnnotation);
+        UNTIL CRMAnnotation.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreateAndCoupleNote@6(CRMAnnotation@1000 : Record 5385) : Integer;
+    VAR
+      RecordLink@1006 : Record 2000000068;
+      SalesHeader@1004 : Record 36;
+      CRMAnnotationCoupling@1003 : Record 5392;
+      CRMIntegrationRecord@1001 : Record 5331;
+      CRMSalesOrderToSalesOrder@1005 : Codeunit 5343;
+      SalesHeaderRecordID@1002 : RecordID;
+    BEGIN
+      IF NOT CRMIntegrationRecord.FindRecordIDFromID(CRMAnnotation.ObjectId,DATABASE::"Sales Header",SalesHeaderRecordID) THEN
+        EXIT(0);
+
+      IF NOT SalesHeader.GET(SalesHeaderRecordID) THEN
+        EXIT(0);
+
+      IF SalesHeader."Document Type" <> SalesHeader."Document Type"::Order THEN
+        EXIT(0);
+
+      IF CRMAnnotationCoupling.FindByCRMId(CRMAnnotation.AnnotationId) THEN
+        EXIT(0);
+
+      CRMSalesOrderToSalesOrder.CreateNote(SalesHeader,CRMAnnotation,RecordLink);
+      CRMAnnotationCoupling.CoupleRecordLinkToCRMAnnotation(RecordLink,CRMAnnotation);
+      EXIT(1);
+    END;
+
+    LOCAL PROCEDURE ModifyNote@10(CRMAnnotation@1000 : Record 5385) : Integer;
+    VAR
+      RecordLink@1006 : Record 2000000068;
+      CRMAnnotationCoupling@1003 : Record 5392;
+      CRMIntegrationRecord@1001 : Record 5331;
+      TypeHelper@1009 : Codeunit 10;
+      RecordRef@1007 : RecordRef;
+      FieldRef@1008 : FieldRef;
+      SalesHeaderRecordID@1002 : RecordID;
+      AnnotationText@1010 : Text;
+    BEGIN
+      IF NOT CRMIntegrationRecord.FindRecordIDFromID(CRMAnnotation.ObjectId,DATABASE::"Sales Header",SalesHeaderRecordID) THEN
+        EXIT(0);
+
+      IF NOT CRMAnnotationCoupling.FindByCRMId(CRMAnnotation.AnnotationId) THEN
+        EXIT(0);
+
+      IF NOT RecordLink.GET(CRMAnnotationCoupling."Record Link Record ID") THEN
+        EXIT(0);
+
+      RecordRef.GETTABLE(CRMAnnotation);
+      FieldRef := RecordRef.FIELD(CRMAnnotation.FIELDNO(NoteText));
+      AnnotationText := TypeHelper.ReadTextBlobWithTextEncoding(FieldRef,TEXTENCODING::UTF16);
+      IF AnnotationText <> TypeHelper.ReadRecordLinkNote(RecordLink) THEN BEGIN
+        TypeHelper.WriteRecordLinkNote(RecordLink,AnnotationText);
+        RecordLink.MODIFY(TRUE);
+        CRMAnnotationCoupling."CRM Modified On" := CRMAnnotation.ModifiedOn;
+        CRMAnnotationCoupling."Last Synch. DateTime" := CURRENTDATETIME;
+        CRMAnnotationCoupling.MODIFY;
+        EXIT(1);
+      END;
+
+      EXIT(0);
+    END;
+
+    LOCAL PROCEDURE ProcessCRMAnnotationBufferEntry@17(VAR TempCRMAnnotationBuffer@1000 : TEMPORARY Record 5391) : Integer;
+    VAR
+      CRMSalesorder@1001 : Record 5353;
+      SalesHeader@1002 : Record 36;
+    BEGIN
+      IF TempCRMAnnotationBuffer."Related Table ID" <> DATABASE::"Sales Header" THEN
+        EXIT(0);
+
+      IF NOT SalesHeader.GET(TempCRMAnnotationBuffer."Related Record ID") THEN BEGIN
+        DeleteCRMAnnotationBufferEntry(TempCRMAnnotationBuffer);
+        EXIT(0);
+      END;
+
+      IF SalesHeader."Document Type" <> SalesHeader."Document Type"::Order THEN
+        EXIT(0);
+
+      IF NOT FindCoupledCRMSalesOrder(CRMSalesorder,SalesHeader) THEN BEGIN
+        DeleteCRMAnnotationBufferEntry(TempCRMAnnotationBuffer);
+        EXIT(0);
+      END;
+
+      IF TempCRMAnnotationBuffer."Change Type" <> TempCRMAnnotationBuffer."Change Type"::Created THEN BEGIN
+        DeleteCRMAnnotationBufferEntry(TempCRMAnnotationBuffer);
+        EXIT(0);
+      END;
+
+      CreateCRMAnnotation(CRMSalesorder,TempCRMAnnotationBuffer."Record ID");
+      DeleteCRMAnnotationBufferEntry(TempCRMAnnotationBuffer);
+      EXIT(1);
+    END;
+
+    LOCAL PROCEDURE DeleteCRMAnnotationBufferEntry@18(VAR TempCRMAnnotationBuffer@1000 : TEMPORARY Record 5391);
+    VAR
+      CRMAnnotationBuffer@1001 : Record 5391;
+    BEGIN
+      IF CRMAnnotationBuffer.GET(TempCRMAnnotationBuffer.ID) THEN
+        CRMAnnotationBuffer.DELETE;
+    END;
+
+    [EventSubscriber(Table,2000000068,OnAfterInsertEvent)]
+    LOCAL PROCEDURE CreateCRMAnnotationBufferOnAfterInsertRecordLink@2(VAR Rec@1000 : Record 2000000068;RunTrigger@1001 : Boolean);
+    VAR
+      SalesHeader@1002 : Record 36;
+      CRMConnectionSetup@1003 : Record 5330;
+      CRMIntegrationRecord@1004 : Record 5331;
+      CRMAnnotationBuffer@1006 : Record 5391;
+      DestinationCRMID@1005 : GUID;
+    BEGIN
+      IF NOT RunTrigger THEN
+        EXIT;
+
+      IF Rec.Type <> Rec.Type::Note THEN
+        EXIT;
+
+      IF NOT SalesHeader.GET(Rec."Record ID") THEN
+        EXIT;
+
+      IF NOT (SalesHeader."Document Type" = SalesHeader."Document Type"::Order) THEN
+        EXIT;
+
+      IF NOT CRMConnectionSetup.GET THEN
+        EXIT;
+
+      IF NOT CRMConnectionSetup."Is Enabled" THEN
+        EXIT;
+
+      // we only synch notes that are made on sales orders that are coupled to CRM Salesorder
+      IF NOT CRMIntegrationRecord.FindIDFromRecordID(SalesHeader.RECORDID,DestinationCRMID) THEN
+        EXIT;
+
+      CreateCRMAnnotationBufferEntry(Rec,DATABASE::"Sales Header",CRMAnnotationBuffer."Change Type"::Created);
+    END;
+
+    LOCAL PROCEDURE CreateCRMAnnotationBufferEntry@3(RecordLink@1000 : Record 2000000068;RelatedTableID@1003 : Integer;ChangeType@1001 : Option);
+    VAR
+      CRMAnnotationBuffer@1002 : Record 5391;
+    BEGIN
+      CRMAnnotationBuffer."Record ID" := RecordLink.RECORDID;
+      CRMAnnotationBuffer."Related Record ID" := RecordLink."Record ID";
+      CRMAnnotationBuffer."Related Table ID" := RelatedTableID;
+      CRMAnnotationBuffer."Change Type" := ChangeType;
+      CRMAnnotationBuffer."Change DateTime" := CURRENTDATETIME;
+      CRMAnnotationBuffer.INSERT(TRUE);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

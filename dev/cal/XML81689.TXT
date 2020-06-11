@@ -1,0 +1,507 @@
+OBJECT XMLport 81689 Import Interim wage cost
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PSSE,AssNo502;
+  }
+  PROPERTIES
+  {
+    Direction=Import;
+    Encoding=ISO-8859-2;
+    TextEncoding=WINDOWS;
+    OnInitXMLport=BEGIN
+                    postIt:= TRUE;
+                  END;
+
+    OnPreXMLport=BEGIN
+                   JobsSetup.GET;
+                   //>>190813
+                   IF tempHALine.ISTEMPORARY THEN
+                     tempHALine.DELETEALL(FALSE);
+                   //<<190813
+                 END;
+
+    OnPostXMLport=VAR
+                    HAHead@1100285100 : Record 11012038;
+                    HALine@1100285102 : Record 11012039;
+                    HCLine@1100285103 : Record 11020437;
+                    HoursPostBatch@1100285104 : Codeunit 11012005;
+                  BEGIN
+                    postItSelect := postIt; //save value from request page
+
+                    IF postIt THEN
+                      IF tempHAHead.FINDSET(FALSE) THEN REPEAT
+                        // postIt:= JobsSetup."Auto Post Hours Cons.";
+                        postIt:= postItSelect; //TRUE;  //is now set in OnInitXMLport
+
+                        HAHead.GET(tempHAHead.Year,tempHAHead.Week,tempHAHead."Employee No.");
+                        IF postIt THEN
+                          postIt := HAHead.Status = HAHead.Status::Released;
+
+                        //have no consent lines
+                      //  IF postIt THEN
+                      //    postIt := HAHead.Consented;
+                        IF postIt THEN BEGIN
+                          HCLine.SETRANGE(Year,HAHead.Year);
+                          HCLine.SETRANGE(Week,HAHead.Week);
+                          HCLine.SETRANGE(Employee,HAHead."Employee No.");
+                          HCLine.SETRANGE(LineType,HCLine.LineType::Normal);
+                          HCLine.SETRANGE(Consent,FALSE);                              //<--161221
+                          postIt := HCLine.ISEMPTY;
+                        END;
+
+                        //post if it do not have any lines in them with a wage component of type "hours" AND amount = 0
+                        IF postIt THEN BEGIN
+                          HALine.SETRANGE(Year,HAHead.Year);
+                          HALine.SETRANGE(Week,HAHead.Week);
+                          HALine.SETRANGE("Employee No.",HAHead."Employee No.");
+                          HALine.SETRANGE("Amount (LCY)", 0);
+                          HALine.SETRANGE(Type,HALine.Type::Project);
+                          IF HALine.FINDSET(FALSE) THEN REPEAT
+                            HALine.CALCFIELDS("Component Type");
+                            postIt := NOT (HALine."Component Type" = HALine."Component Type"::Hours);
+                          UNTIL (HALine.NEXT=0) OR (NOT postIt);
+                        END;
+
+                        IF postIt THEN BEGIN
+                          HoursPostBatch.SetPostOptions(FALSE,TRUE);
+                          HoursPostBatch.SetHideDialogs(TRUE);
+                          HoursPostBatch.RUN(HAHead);
+                        END;
+                      UNTIL tempHAHead.NEXT=0;
+
+                    MESSAGE( STRSUBSTNO('%1 lines from file and %2 hourlines updated',importedLines,updatedLines) );
+                  END;
+
+    Format=Variable Text;
+    FieldSeparator=[;];
+  }
+  ELEMENTS
+  {
+    { [{A373FD85-9F73-4450-86A5-131B80F301E8}];  ;Root                ;Element ;Text     }
+
+    { [{0C6A5A0A-3522-499C-AD63-BFD175B029E5}];1 ;Integer             ;Element ;Table   ;
+                                                  SourceTable=Table2000000026;
+                                                  SourceTableView=SORTING(Field1);
+                                                  Temporary=Yes;
+                                                  AutoSave=No;
+                                                  AutoUpdate=No;
+                                                  AutoReplace=No;
+                                                  Import::OnBeforeInsertRecord=VAR
+                                                                                 Employee@1100285100 : Record 5200;
+                                                                                 WageComponent@1100285101 : Record 11012014;
+                                                                                 PersonnecWageComponents@1100285102 : Record 81640;
+                                                                                 HALine@1100285103 : Record 11012039;
+                                                                                 LineQty@1100285104 : Decimal;
+                                                                                 HAHead@1100285105 : Record 11012038;
+                                                                                 Job@1100285106 : Record 11072003;
+                                                                                 TotLine@1100285107 : Decimal;
+                                                                               BEGIN
+                                                                                 importedLines += 1;
+                                                                                 IF NOT EVALUATE(yymmdd,wageDate) THEN BEGIN
+                                                                                   wageDate := COPYSTR(wageDate,5)+COPYSTR(wageDate,3,2)+COPYSTR(wageDate,1,2);
+                                                                                   EVALUATE(yymmdd,wageDate);
+                                                                                 END;
+                                                                                 wk := DATE2DWY(yymmdd,2);
+                                                                                 yy := DATE2DWY(yymmdd,3);
+
+                                                                                 EVALUATE(lineNoi,lineNo);
+                                                                                 EVALUATE(wageRated,wageRate);
+                                                                                 IF NOT EVALUATE(wageAmtd,wageAmt) THEN
+                                                                                   wageAmt := '';
+
+                                                                                 IF dept = '0' THEN
+                                                                                   dept := '';
+
+                                                                                 Employee.SETCURRENTKEY("Salary No.");
+                                                                                 Employee.SETRANGE("Salary No.",salaryNo);
+                                                                                 Employee."No." := '';  //clear No. if not found on next line
+                                                                                 Employee.FINDFIRST;
+
+                                                                                 //>>170124
+                                                                                 IF NOT HAHead.GET(yy,wk,Employee."No.") THEN BEGIN
+                                                                                   ClearTempVars;
+                                                                                   currXMLport.SKIP;
+                                                                                 END;
+                                                                                 //<<170124
+
+                                                                                 //>>RFC256
+                                                                                 TotLine := 0;
+                                                                                 IF NOT EVALUATE(TotLine,f06) THEN;
+                                                                                 IF (wageAmtd <> 0) AND (TotLine<>0) THEN
+                                                                                   wageRated := wageAmtd / TotLine;
+                                                                                 //<<RFC256
+
+                                                                                 //>>161218
+                                                                                 IF NOT tempHAHead.GET(yy,wk,Employee."No.") THEN BEGIN
+                                                                                   tempHAHead.Year := yy;
+                                                                                   tempHAHead.Week := wk;
+                                                                                   tempHAHead."Employee No." := Employee."No.";
+                                                                                   tempHAHead.INSERT(FALSE);
+                                                                                 END;
+                                                                                 //<<161218
+
+                                                                                 //170127
+                                                                                 ClearPrevRebooking(HAHead);
+
+                                                                                 //>>AssNo502a
+                                                                                 IF PersonnecWageComponents.GET(wageComp) THEN
+                                                                                   IF (PersonnecWageComponents."Line type"=PersonnecWageComponents."Line type"::Mapping) AND (PersonnecWageComponents."Code Cost"<>'') THEN //190813
+                                                                                     BEGIN
+                                                                                       CreateHALine(Employee,TRUE);
+                                                                                       ClearTempVars;
+                                                                                     END;
+                                                                                 //<<AssNo502a
+
+                                                                                 IF HALine.GET(yy,wk,Employee."No.",lineNoi) THEN BEGIN
+                                                                                 //>>190813
+                                                                                   IF NOT tempHALine.GET(yy,wk,Employee."No.",lineNoi) THEN
+                                                                                     tempHALine.Year := 0;
+                                                                                 //<<190813
+                                                                                   calcLine(HALine,tempHALine); //190812
+                                                                                   HALine.MODIFY;
+
+                                                                                 //>>190813
+                                                                                   tempHALine.INIT;
+                                                                                   tempHALine.Year := 0;
+                                                                                   IF NOT tempHALine.GET(yy,wk,Employee."No.",lineNoi) THEN BEGIN
+                                                                                     tempHALine.INIT;
+                                                                                     tempHALine.TRANSFERFIELDS(HALine);
+                                                                                     tempHALine.INSERT(FALSE);
+                                                                                   END;
+                                                                                 //<<190813
+
+                                                                                   updatedLines += 1;
+                                                                                 END
+                                                                                 ELSE
+                                                                                 IF lineNoi = 0 THEN BEGIN
+                                                                                   CreateHALine(Employee,FALSE);
+                                                                                 END;
+
+                                                                                 ClearTempVars;
+                                                                               END;
+                                                                                }
+
+    { [{B2B112FE-A9A7-47A0-8CB5-9BFBC1174BC6}];2 ;f01                 ;Element ;Text     }
+
+    { [{933BA892-1D86-494F-AB32-0513EAE703FC}];2 ;salaryNo            ;Element ;Text     }
+
+    { [{8C07D8F0-7ACC-475B-9532-1B79DD932952}];2 ;wageComp            ;Element ;Text     }
+
+    { [{0E71992E-F5E7-4CC5-A0B4-38EEDBE4AED1}];2 ;projNo              ;Element ;Text     }
+
+    { [{7A33CB0E-8D57-4805-A27E-512BAEBE2204}];2 ;dept                ;Element ;Text     }
+
+    { [{18876D4A-CDED-4435-8F58-C1011060FF03}];2 ;f06                 ;Element ;Text     }
+
+    { [{79423450-11DD-486B-A240-A64D5A4DFF99}];2 ;wageDate            ;Element ;Text     }
+
+    { [{857EBBC6-DDFB-4DC6-A38D-F1647F182ED2}];2 ;f08                 ;Element ;Text     }
+
+    { [{C480A661-A62A-44F4-9D3D-FFBE8F1FB421}];2 ;elem                ;Element ;Text     }
+
+    { [{5DEC8295-2D7E-4646-8B3D-EE70FE5B6477}];2 ;extContract         ;Element ;Text     }
+
+    { [{CD5CA0D8-8B38-4A01-A1E7-F95CC11FA9DA}];2 ;costObj             ;Element ;Text     }
+
+    { [{B48B4989-D84B-4FFE-A92B-BAC891D54831}];2 ;lineNo              ;Element ;Text     }
+
+    { [{90EA0693-07C8-4412-84E5-B6D7E7CA5D38}];2 ;wageRate            ;Element ;Text     }
+
+    { [{DE7919F8-2966-4503-818E-ABE66C3D3ACF}];2 ;wageAmt             ;Element ;Text     }
+
+  }
+  EVENTS
+  {
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+    }
+    CONTROLS
+    {
+      { 1100285100;;Container;
+                  Name=options;
+                  ContainerType=ContentArea }
+
+      { 1100285101;1;Field  ;
+                  CaptionML=[ENU=Do you want to post after import?;
+                             NOR=nsker du † bokf›re etter import?];
+                  SourceExpr=postIt }
+
+    }
+  }
+  CODE
+  {
+    VAR
+      lineNoi@1100285106 : Integer;
+      wageRated@1100285100 : Decimal;
+      wageAmtd@1100285101 : Decimal;
+      dw@1100285102 : Integer;
+      wk@1100285103 : Integer;
+      yy@1100285104 : Integer;
+      yymmdd@1100285105 : Date;
+      importedLines@1100285107 : Integer;
+      updatedLines@1100285108 : Integer;
+      tempHAHead@1100285109 : TEMPORARY Record 11012038;
+      JobsSetup@1100285110 : Record 315;
+      postIt@1100285111 : Boolean;
+      tempHAHeadCleared@1100285112 : TEMPORARY Record 11012038;
+      postItSelect@1100285113 : Boolean;
+      tempHALine@1100285114 : TEMPORARY Record 11012039;
+
+    PROCEDURE ClearTempVars@1100285103();
+    BEGIN
+      f01 := '';
+      salaryNo := '';
+      //f03 := '';
+      wageComp := '';
+
+      //f04 := '';
+      projNo := '';
+
+      //f05 := '';
+      dept := '';
+
+      f06 := '';
+      wageDate := '';
+      f08 := '';
+
+      //f09 := '';
+      elem:= '';
+
+      //f10 := '';
+      extContract := '';
+
+      //f11 := '';
+      costObj := '';
+
+      lineNo := '';
+      wageRate := '';
+      wageAmt := '';
+
+      lineNoi := 0;
+      wageRated := 0;
+      wageAmtd := 0;
+    END;
+
+    PROCEDURE CreateHALine@1100285100(Employee@1100285101 : Record 5200;replaceWageComponent@1100285106 : Boolean);
+    VAR
+      HALine@1100285108 : Record 11012039;
+      WageComponent@1100285100 : Record 11012014;
+      UpdateAction@1100285102 : 'Insert,Modify,Delete,Rename';
+      wageDateD@1100285103 : Date;
+      TotLine@1100285104 : Decimal;
+      AmountLCY@1100285105 : Decimal;
+      PersonnecWageComponents@1100285107 : Record 81640;
+      HAHead@1100285109 : Record 11012038;
+      currStatusHead@1100285110 : 'Open,,Released';
+      LineQty@1100285111 : Decimal;
+    BEGIN
+      //>>AssNo502a
+      IF wageDate = '' THEN
+        EXIT;
+      //moved below code to own function
+      //<<AssNo502a
+
+      HALine.RESET;
+      HALine.SETRANGE(HALine.Year,yy);
+      HALine.SETRANGE(Week,wk);
+      HALine.SETRANGE("Employee No.", Employee."No.");
+      IF HALine.FINDLAST THEN
+        lineNoi := HALine."Line No.";
+      CLEAR(HALine);
+      HALine.Year := yy;
+      HALine.Week := wk;
+      HALine.VALIDATE("Employee No.",Employee."No.");
+      HALine."Line No." := lineNoi + 10000;
+
+      HALine.INSERT(FALSE);
+      HALine.InitRecord;
+      HALine.FillDocNoPostingDate(TRUE);
+      HALine.UpdateCostControlStatus(UpdateAction::Insert);
+      HALine.UpdateServHoursGanttChart(UpdateAction::Insert);
+      HALine.CalcOverheadSurcharge;
+      HALine.UpdatePreregistration;
+      HALine.UpdateActualDateOnTheLine;
+      HALine.MODIFY(FALSE);
+
+      HAHead.GET(HALine.Year,HALine.Week,HALine."Employee No.");
+      currStatusHead := HAHead.Status;
+      IF HAHead.Status <> HAHead.Status::Open THEN BEGIN
+        HAHead.Status := HAHead.Status::Open;
+        HAHead.MODIFY(FALSE);
+      END;
+
+      HALine.Type := HALine.Type::Indirect;
+      IF projNo<>'' THEN
+        HALine.Type := HALine.Type::Project;
+      HALine.VALIDATE(Type);
+      IF projNo <> '' THEN
+        HALine.VALIDATE("Project No.",projNo);
+      IF (dept <> '') AND (dept <> HALine."Department Code") THEN
+        HALine.VALIDATE("Department Code",dept);
+      IF (elem <> '') AND (elem <> HALine.Element) THEN
+        HALine.VALIDATE(Element,elem);
+      IF (extContract <> '') AND (extContract <> HALine."Extension Contract") THEN
+        HALine.VALIDATE("Extension Contract",extContract);
+      IF (costObj <> '') AND (costObj <> HALine."Cost Object") THEN
+        HALine.VALIDATE("Cost Object",costObj);
+
+      IF wageDate <> '' THEN
+        IF EVALUATE(wageDateD,wageDate) THEN
+          HALine.VALIDATE("Actual date of line",wageDateD);
+
+      //f06, f08
+      IF NOT EVALUATE(TotLine,f06) THEN
+        TotLine := 0;
+      IF NOT EVALUATE(AmountLCY,f08) THEN
+        AmountLCY := 0;
+      IF wageComp <> '' THEN BEGIN
+        WageComponent.GET(wageComp);
+        HALine.VALIDATE("Wage Component",wageComp);//190812
+      //>>AssNo502a
+        IF replaceWageComponent AND PersonnecWageComponents.GET(WageComponent.Code) THEN BEGIN
+          IF (PersonnecWageComponents."Code Cost" <> '') AND (PersonnecWageComponents."Line type"=0) THEN BEGIN  //"Line type"::Mapping  //190812
+            HALine.VALIDATE("Wage Component",PersonnecWageComponents."Code Cost");
+            WageComponent.GET(PersonnecWageComponents."Code Cost");
+          END;
+        END;
+      //<<AssNo502a
+        IF WageComponent."Component Type" IN [WageComponent."Component Type"::Hours,WageComponent."Component Type"::"Expense hours",WageComponent."Component Type"::Addition] THEN BEGIN
+          //"Total Line" := Monday + Tuesday + Wednesday + Thursday + Friday + Saturday + Sunday;
+          CASE DATE2DWY(wageDateD,1) OF
+            1: HALine.Monday := TotLine;
+            2: HALine.Tuesday := TotLine;
+            3: HALine.Wednesday := TotLine;
+            4: HALine.Thursday := TotLine;
+            5: HALine.Friday := TotLine;
+            6: HALine.Saturday := TotLine;
+            7: HALine.Sunday := TotLine;
+          END;
+          HALine.TotalHours;
+        END;
+        IF WageComponent."Component Type" IN [WageComponent."Component Type"::Days,WageComponent."Component Type"::Expenses] THEN
+          HALine.VALIDATE(Quantity,TotLine);
+        IF WageComponent."Component Type" IN [WageComponent."Component Type"::Expenses,WageComponent."Component Type"::"Expense hours"] THEN
+          HALine.VALIDATE("Amount (LCY)",AmountLCY);
+      END;
+      //>>190813
+      IF NOT tempHALine.GET(yy,wk,Employee."No.",HALine."Line No.") THEN
+        tempHALine.Year := 0;
+      //<<190813
+      calcLine(HALine,tempHALine); //190812
+      HALine.MODIFY;
+
+      HAHead.GET(HALine.Year,HALine.Week,HALine."Employee No.");
+      IF currStatusHead <> HAHead.Status THEN BEGIN
+        HAHead.Status := currStatusHead;
+        HAHead.MODIFY(FALSE);
+      END;
+
+      //>>190813
+      tempHALine.INIT;
+      tempHALine.Year := 0;
+      IF NOT tempHALine.GET(yy,wk,Employee."No.",HALine."Line No.") THEN BEGIN
+        tempHALine.INIT;
+        tempHALine.TRANSFERFIELDS(HALine);
+        tempHALine.INSERT(FALSE);
+      END;
+      //<<190813
+    END;
+
+    LOCAL PROCEDURE calcLine@1100285110(VAR HALine@1100285100 : Record 11012039;HALineAppendTo@1100285102 : Record 11012039);
+    VAR
+      LineQty@1100285101 : Decimal;
+    BEGIN
+      //>>190813
+      HALineAppendTo.Amount := 0;
+      IF (HALineAppendTo.Year <> 0) AND
+          (HALine.Year = HALineAppendTo.Year) AND (HALine.Week = HALineAppendTo.Week) AND
+          (HALine."Employee No." = HALineAppendTo."Employee No.") AND (HALine."Line No." = HALineAppendTo."Line No.")
+        THEN
+          HALineAppendTo.GET(HALineAppendTo.Year,HALineAppendTo.Week,HALineAppendTo."Employee No.",HALineAppendTo."Line No.");
+      wageAmtd += HALineAppendTo.Amount;
+      //<<190813
+
+      //190812
+      HALine.CALCFIELDS("Component Type");
+      HALine."Unit Cost" := wageRated;
+      HALine."Unit Cost (LCY)" := wageRated;
+      LineQty := HALine."Total Line" + HALine.Quantity;
+      IF (HALine.Quantity = 0) AND (wageRated<>0) THEN
+        HALine.Quantity := wageAmtd / wageRated;
+      IF wageAmt <> '' THEN
+        HALine.VALIDATE(Amount,wageAmtd);
+      IF HALine."Unit Cost" <> 0 THEN
+        HALine.Quantity := HALine.Amount / HALine."Unit Cost";   //needs to be updated so we dont loose any unit cost
+      IF LineQty <> HALine.Quantity THEN BEGIN
+        HALine.Quantity := LineQty;
+        IF HALine.Quantity = 0 THEN
+          HALine.Quantity := 1;
+        HALine."Unit Cost" := HALine.Amount / HALine.Quantity;
+        HALine.VALIDATE(Amount);
+        HALine.VALIDATE(Quantity,HALine.Quantity-HALine."Total Line");
+      END;
+      HALine.CalcAmountToLCY(FALSE,FALSE);
+      IF NOT ((HALine."Component Type" IN [HALine."Component Type"::Expenses,HALine."Component Type"::"Expense hours"]) AND (HALine."Wage Component" <>'')) THEN
+        HALine.Quantity := 0;
+
+      IF HALineAppendTo.Year<>0 THEN BEGIN
+        HALineAppendTo.Amount := HALine.Amount;
+        HALineAppendTo.MODIFY(FALSE);
+      END;
+    END;
+
+    PROCEDURE ClearPrevRebooking@1100285101(HAHead@1100285100 : Record 11012038);
+    VAR
+      HALine2@1100285101 : Record 11012039;
+      HALine3@1100285102 : Record 11012039;
+      PersonnecWageComponents@1100285103 : Record 81640;
+    BEGIN
+      //170127
+      IF tempHAHeadCleared.GET(HAHead.Year,HAHead.Week,HAHead."Employee No.") THEN
+        EXIT;
+
+      HALine2.SETRANGE(Year, HAHead.Year);
+      HALine2.SETRANGE(Week, HAHead.Week);
+      HALine2.SETRANGE("Employee No.", HAHead."Employee No.");
+      HALine2.SETFILTER("Wage Component",'X*');
+      IF HALine2.FINDSET(FALSE) THEN
+      REPEAT
+        PersonnecWageComponents.SETRANGE("Code Cost",HALine2."Wage Component");
+        IF NOT PersonnecWageComponents.ISEMPTY THEN BEGIN
+          HALine3.GET(HALine2.Year,HALine2.Week,HALine2."Employee No.",HALine2."Line No.");
+          HALine3.DeleteSurcharge;
+          HALine3.DeleteLineComments;
+          HALine3.DELETE(FALSE);
+        END;
+      UNTIL HALine2.NEXT=0;
+
+      tempHAHeadCleared.INIT;
+      tempHAHeadCleared.Year := HAHead.Year;
+      tempHAHeadCleared.Week := HAHead.Week;
+      tempHAHeadCleared."Employee No." := HAHead."Employee No.";
+      tempHAHeadCleared.INSERT;
+    END;
+
+    BEGIN
+    {
+      161025 ITERO.DL RFC-186 AssNo502 new XMLport
+      161214 ITERO.DL AssNo502a add custom wage components
+      161218 ITERO.DL Autopost
+      170118 ITERO.DL made AutoPost optional and silent
+                      added LCY handling
+      170124 ITERO.DL Skip if head doesnt exists, import-file is cumulative
+      170127 ITERO.DL clear rebookings before importing new data, wage component = X*
+      190117 ORANGO.DL RFC256 calculate unitcost if quantity and amount has values
+      190812 ORANGO.DL RFC226 combine calculations to common function
+      190813 ORANGO.DL RFC226 combine costs if added to exportfile
+    }
+    END.
+  }
+}
+

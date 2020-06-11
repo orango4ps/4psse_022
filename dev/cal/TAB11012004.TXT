@@ -1,0 +1,2489 @@
+OBJECT Table 11012004 Extension Contract
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00,4PSSE;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData 11012001=rimd;
+    DataCaptionFields=Project No.,Contract No.,Description;
+    OnInsert=VAR
+               SummarySheetLineRec@1100485000 : Record 11012064;
+               ProjectPrincipal@1100527650 : Record 11012005;
+             BEGIN
+               TESTFIELD("Contract No.");
+
+               "Input by" := USERID;
+               "Input Date" := TODAY;
+               "Version Date" := WORKDATE;
+               JobSetUp.GET;
+               ProjRec.GET("Project No.");
+               "Main Project No." := ProjRec."Main Project";
+               Revision := ProjRec.Revision;
+               "Revision Rule" := ProjRec."Revision Rule";
+               "Reference Date Revision" := 0D ;
+
+               "Contract Type" := ProjRec."Contract Type";
+               "Department Code" := ProjRec."Global Dimension 1 Code";
+
+               IF ProjRec."Summary Sheet Contract" <> '' THEN BEGIN
+                 SummarySheetLineRec.CopyTemplate2(ProjRec."Summary Sheet Contract", "Project No.", "Contract No.", '', '', '', '', '', '');
+                 SummarySheetLineRec.SETRANGE("Project No.", "Project No.");
+                 SummarySheetLineRec.SETRANGE("Contract No.", "Contract No.");
+                 SummarySheetLineRec.SETFILTER("Plot No.", '%1', '');
+                 SummarySheetLineRec.SETFILTER(Option, '%1', '');
+                 IF SummarySheetLineRec.FIND('-') THEN BEGIN
+                   SummarySheetLineRec.ReCalcSummaryLines('');
+                   SummarySheetLineRec.UpdateBudgetLines(TRUE, '');
+                 END;
+               END;
+
+               ProjectSiteMgt.LogExtensionContract(1, Rec);
+
+               "Installment Scheme" := JobSetUp."Ext. Contract Install. Scheme";
+               IF ProjectPrincipal.GET("Project No.", Principal) THEN
+                 IF ProjectPrincipal."Ext. Contract Install. Scheme" <> '' THEN
+                   "Installment Scheme" := ProjectPrincipal."Ext. Contract Install. Scheme";
+               "Last Date Modified" := TODAY; // 4PSHM 140131
+               "Time Last Modified" := TIME;  // 4PSHM 140131
+
+               //<<ITERO.PR
+               VALIDATE(Status,JobSetUp."Default Extension Status");
+               //>>ITERO.PR
+             END;
+
+    OnModify=BEGIN
+               "Modified by" := USERID;
+               "Last Date Modified" := TODAY;
+               "Time Last Modified" := TIME; // 4PSHM 140131
+
+               IF "Version Date" <> xRec."Version Date" THEN
+                 UpdateBudgetVersionDate;
+
+               IF (Status <> xRec.Status) OR ("Treat like Order" <> xRec."Treat like Order") THEN BEGIN
+                 BudgetRec.RESET;
+                 BudgetRec.SETRANGE("Project No.","Project No.");
+                 BudgetRec.SETRANGE("Extension Contract","Contract No.");
+                 IF BudgetRec.FINDSET(TRUE, FALSE) THEN
+                   REPEAT
+                     IF (Status < Status::Order) AND "Treat like Order" THEN
+                       BudgetRec."Extension Contract Status" := BudgetRec."Extension Contract Status"::Order
+                     ELSE
+                       BudgetRec."Extension Contract Status" := Status + 1;
+                     BudgetRec.MODIFY;
+                   UNTIL BudgetRec.NEXT = 0;
+               END;
+
+               IF "Contract Serial No." = '' THEN BEGIN
+                 JobSetUp.GET;
+                 IF JobSetUp."Extension Contract Nos." <> '' THEN
+                   "Contract Serial No." := NoSeriesMgt.GetNextNo(JobSetUp."Extension Contract Nos.",0D,TRUE);
+               END;
+
+               ProjectSiteMgt.LogExtensionContract(2, Rec);
+             END;
+
+    OnDelete=VAR
+               ProjInstalmRec@1210190001 : Record 11012018;
+               TenderParagraphByPrincipal@1100525000 : Record 11012470;
+               JobLedgerEntry@1100525001 : Record 11072005;
+             BEGIN
+               IF "Contract No." <> '' THEN BEGIN  // There could be records with contract empty, then only curr record may/mus be delete (so not data on project level!)
+                 IF NOT DeleteCompleteProject THEN
+                   TESTFIELD("Extension Fixed", FALSE);
+
+                 IF NOT DeleteCompleteProject THEN BEGIN
+                   JobLedgerEntry.RESET;
+                   JobLedgerEntry.SETCURRENTKEY("Job No.", "Extension Contract");
+                   JobLedgerEntry.SETRANGE("Job No.", "Project No.");
+                   JobLedgerEntry.SETRANGE("Extension Contract", "Contract No.");
+                   IF JobLedgerEntry.FINDFIRST THEN
+                     ERROR(Text011);
+                 END;
+
+                 ProjInstalmRec.SETRANGE("Project No.","Project No.");
+                 ProjInstalmRec.SETRANGE("Extension Contract","Contract No.");
+                 IF ProjInstalmRec.FINDSET THEN BEGIN
+                   IF ProjRec.GET("Project No.") THEN
+                     IF ProjRec."Project Status" < ProjRec."Project Status"::Finished THEN
+                       IF CONFIRM(Text008, FALSE) = FALSE THEN
+                         ERROR(Text006);
+                   IF NOT DeleteCompleteProject THEN BEGIN
+                     REPEAT
+                       ProjInstalmRec.CALCFIELDS("Invoiced Price (LCY)", "Invoice in Process (LCY)");
+                       IF ProjInstalmRec."Invoiced Price (LCY)" + ProjInstalmRec."Invoice in Process (LCY)" <> 0 THEN
+                         ERROR(Text007);
+                     UNTIL ProjInstalmRec.NEXT = 0;
+                   END;
+                 END;
+
+                 BudgetSummarysheetRec.RESET;
+                 BudgetSummarysheetRec.SETRANGE("Project No.","Project No.");
+                 BudgetSummarysheetRec.SETRANGE("Contract No.","Contract No.");
+                 BudgetSummarysheetRec.DELETEALL;
+
+                 TenderParagraphByPrincipal.SETRANGE("Project No.","Project No.");
+                 TenderParagraphByPrincipal.SETRANGE("Contract No.", "Contract No.");
+                 TenderParagraphByPrincipal.DELETEALL;
+
+                 DELETE;
+                 BudgetRec.RESET;
+                 BudgetRec.SETRANGE("Project No.","Project No.");
+                 BudgetRec.SETRANGE(Option,'');
+                 BudgetRec.SETRANGE("Extension Contract","Contract No.");
+                 BudgetRec.DELETEALL(TRUE);  //update maintable cause of sql-problem
+                 INSERT;
+
+                 ProjectSiteMgt.LogExtensionContract(3, Rec);
+
+                 StoreDeletedData('D');
+               END;
+             END;
+
+    OnRename=BEGIN
+               IF "Project No." <> xRec."Project No." THEN
+                 ERROR(Text000);
+
+               "Modified by" := USERID;
+               "Last Date Modified" := TODAY;
+             END;
+
+    CaptionML=[ENU=Extension Contract;
+               NOR=ETA;
+               SVE=éTA];
+    LookupPageID=Page11012014;
+    DrillDownPageID=Page11012014;
+  }
+  FIELDS
+  {
+    { 10  ;   ;Project No.         ;Code20        ;TableRelation=Job.No.;
+                                                   OnValidate=BEGIN
+                                                                IF "Project No." <> '' THEN BEGIN
+                                                                  ProjRec.GET("Project No.");
+                                                                  CheckProjStatus;
+                                                                END;
+                                                                CALCFIELDS("Project Description");
+                                                              END;
+
+                                                   CaptionML=[ENU=Project No.;
+                                                              NOR=Prosjektnr;
+                                                              SVE=Projektnr];
+                                                   NotBlank=Yes }
+    { 20  ;   ;Contract No.        ;Code10        ;OnValidate=VAR
+                                                                lvextno@1100285500 : Integer;
+                                                              BEGIN
+                                                                //>>141229 SYM045
+                                                                IF SymbrioSetup.GET THEN
+                                                                  IF SymbrioSetup."Path Project éTA" <> '' THEN BEGIN
+                                                                    IF STRLEN("Contract No.") <> 4 THEN
+                                                                     ERROR(Text011b);
+                                                                //<<141229 SYM045
+                                                                //>>150108 SYM045
+                                                                    IF NOT EVALUATE(lvextno,"Contract No.") THEN
+                                                                     ERROR(Text012b);
+                                                                  END;
+                                                                //<<150108 SYM045
+                                                              END;
+
+                                                   CaptionML=[ENU=Contract No.;
+                                                              NOR=Kontraktsnr;
+                                                              SVE=Kontraktsnr];
+                                                   NotBlank=Yes }
+    { 30  ;   ;Description         ;Text50        ;CaptionML=[ENU=Description;
+                                                              NOR=Beskrivelse;
+                                                              SVE=Beskrivning] }
+    { 40  ;   ;Input by            ;Code50        ;TableRelation=User."User Name";
+                                                   ValidateTableRelation=No;
+                                                   TestTableRelation=No;
+                                                   CaptionML=[ENU=Input by;
+                                                              NOR=Input av;
+                                                              SVE=Inmatat av];
+                                                   Editable=No }
+    { 50  ;   ;Input Date          ;Date          ;CaptionML=[ENU=Input Date;
+                                                              NOR=Input Dato;
+                                                              SVE=Inmatat den];
+                                                   Editable=No }
+    { 60  ;   ;Status              ;Option        ;OnValidate=VAR
+                                                                lvSalesLineRec@1210190000 : Record 37;
+                                                                lvSalesInvLineRec@1210190001 : Record 113;
+                                                                lvSalesCrMemLineRec@1100525000 : Record 115;
+                                                                lvInvoicePresent@1100525001 : Boolean;
+                                                                lvCrMemoPresent@1100525004 : Boolean;
+                                                                lvAmtInvoice@1100525002 : Decimal;
+                                                                lvAmtCrMemo@1100525003 : Decimal;
+                                                              BEGIN
+                                                                IF Status = xRec.Status THEN
+                                                                  EXIT;
+
+                                                                IF (Status = Status::Expired) OR
+                                                                   ((xRec.Status >= xRec.Status::"Invoicing Allowed") AND (Status < Status::"Invoicing Allowed")) THEN BEGIN
+                                                                  lvSalesLineRec.SETCURRENTKEY("Document Type","Job No.","Extension Contract");
+                                                                  lvSalesLineRec.SETRANGE("Document Type",lvSalesLineRec."Document Type"::Invoice,lvSalesLineRec."Document Type"::"Credit Memo");
+                                                                  lvSalesLineRec.SETRANGE("Job No.","Project No.");
+                                                                  lvSalesLineRec.SETRANGE("Extension Contract","Contract No.");
+                                                                  IF lvSalesLineRec.FINDFIRST THEN
+                                                                    ERROR(Text003,"Project No.","Contract No.");
+
+                                                                  lvSalesInvLineRec.SETCURRENTKEY("Job No.","Extension Contract");
+                                                                  lvSalesInvLineRec.SETRANGE("Job No.","Project No.");
+                                                                  lvSalesInvLineRec.SETRANGE("Extension Contract","Contract No.");
+                                                                  lvInvoicePresent := lvSalesInvLineRec.FINDFIRST;
+
+                                                                  lvSalesCrMemLineRec.SETCURRENTKEY("Job No.");
+                                                                  lvSalesCrMemLineRec.SETRANGE("Job No.","Project No.");
+                                                                  lvSalesCrMemLineRec.SETRANGE("Extension Contract","Contract No.");
+                                                                  lvCrMemoPresent := lvSalesCrMemLineRec.FINDFIRST;
+
+                                                                  IF lvInvoicePresent OR lvCrMemoPresent THEN BEGIN
+                                                                    IF NOT (lvInvoicePresent AND lvCrMemoPresent) THEN
+                                                                      ERROR(Text004,"Project No.","Contract No.")
+                                                                    ELSE BEGIN
+                                                                      lvAmtInvoice := 0;
+                                                                      lvAmtCrMemo  := 0;
+                                                                      REPEAT
+                                                                        lvAmtInvoice := lvAmtInvoice + lvSalesInvLineRec."Amount Including VAT";
+                                                                      UNTIL lvSalesInvLineRec.NEXT = 0;
+                                                                      REPEAT
+                                                                        lvAmtCrMemo := lvAmtCrMemo + lvSalesCrMemLineRec."Amount Including VAT";
+                                                                      UNTIL lvSalesCrMemLineRec.NEXT = 0;
+                                                                      IF lvAmtInvoice <> lvAmtCrMemo THEN
+                                                                        ERROR(Text004,"Project No.","Contract No.");
+                                                                    END;
+                                                                  END;
+                                                                END;
+
+                                                                CheckProjStatus();
+                                                                CheckSwitchSummary;
+
+                                                                IF Status >= Status::Order THEN BEGIN
+                                                                  "Treat like Order" := FALSE;
+                                                                  "Include in Expectation" := FALSE;
+                                                                END;
+                                                                CalcExpectedContractAmount;
+                                                              END;
+
+                                                   CaptionML=[ENU=Status;
+                                                              NOR=Status;
+                                                              SVE=Status];
+                                                   OptionCaptionML=[ENU=Applied,Offered,Order,Invoicing Allowed,Expired;
+                                                                    NOR=Anvendt,Tilbudt,Ordre,Fakturering Tillatt,UtgÜtt;
+                                                                    SVE=TillÑmpad,Anbudsgiven,Order,Fakturering tillÜten,UtgÜngen];
+                                                   OptionString=Applied,Offered,Order,Invoicing Allowed,Expired }
+    { 65  ;   ;Department Code     ;Code20        ;TableRelation="Dimension Value".Code WHERE (Global Dimension No.=CONST(1));
+                                                   CaptionML=[ENU=Global Dimension 1 Code;
+                                                              NOR=Avdelingskode;
+                                                              SVE=Mottagande avdelningskod];
+                                                   Editable=No;
+                                                   CaptionClass='1,1,1' }
+    { 70  ;   ;Contract Amount (LCY);Decimal      ;OnValidate=VAR
+                                                                CurrencyDate@1100525001 : Date;
+                                                                CurrencyExchangeRateRec@1100525000 : Record 330;
+                                                                Currency2@1100528200 : Record 4;
+                                                              BEGIN
+                                                                IF ("Contract Amount (LCY)" <> xRec."Contract Amount (LCY)") AND "Installments Generated" THEN
+                                                                  MESSAGE(Text001);
+
+                                                                Currency2.InitRoundingPrecision;
+                                                                IF "Contract Currency Code" <> '' THEN BEGIN
+                                                                  CurrencyDate := GetCurrencyDate;
+                                                                  "Contract Amount" :=
+                                                                  ROUND(
+                                                                    CurrencyExchangeRateRec.ExchangeAmtLCYToFCY(
+                                                                      1, "Project No.", CurrencyDate, "Contract Currency Code", "Contract Amount (LCY)",
+                                                                      CurrencyExchangeRateRec.ExchangeRate(1, "Project No.", CurrencyDate, "Contract Currency Code",TRUE),TRUE),
+                                                                      Currency2."Amount Rounding Precision");
+                                                                END ELSE BEGIN
+                                                                  "Contract Amount" := ROUND("Contract Amount (LCY)",Currency2."Amount Rounding Precision");
+                                                                END;
+
+                                                                CalcExpectedContractAmount;
+                                                              END;
+
+                                                   CaptionML=[ENU=Contract Amount (LCY);
+                                                              NOR=Kontraktsbelõp (NOK);
+                                                              SVE=Kontraktsbelopp (BVA) inkl. éTA];
+                                                   AutoFormatType=1 }
+    { 71  ;   ;Contract Amount     ;Decimal       ;OnValidate=VAR
+                                                                CurrencyDate@1100525000 : Date;
+                                                                CurrencyExchangeRateRec@1100525001 : Record 330;
+                                                                Currency2@1100528200 : Record 4;
+                                                                ProjectInstallment@1100525006 : Record 11012018;
+                                                                TotalContractInvoiced@1100525005 : Decimal;
+                                                                TotalContractInvoicedLCY@1100525004 : Decimal;
+                                                                ContractAmountRemaining@1100525003 : Decimal;
+                                                                ContractAmountRemainingLCY@1100525002 : Decimal;
+                                                              BEGIN
+                                                                IF ("Contract Amount" <> xRec."Contract Amount") AND "Installments Generated" THEN
+                                                                  MESSAGE(Text001);
+
+                                                                Currency2.InitRoundingPrecision;
+                                                                IF "Contract Currency Code" <> '' THEN BEGIN
+                                                                  CurrencyDate := GetCurrencyDate;
+                                                                  TotalContractInvoiced :=0;
+                                                                  TotalContractInvoicedLCY := 0;
+
+                                                                  ProjectInstallment.SETRANGE("Project No.", "Project No.");
+                                                                  ProjectInstallment.SETRANGE(Principal, Principal);
+                                                                  ProjectInstallment.SETRANGE("Extension Contract", "Contract No.");
+                                                                  ProjectInstallment.SETRANGE("Advance Payment", FALSE);
+                                                                  IF ProjectInstallment.FINDSET THEN BEGIN
+                                                                    REPEAT
+                                                                      ProjectInstallment.CALCFIELDS("Invoice in Process","Invoice in Process (LCY)","Invoiced Price","Invoiced Price (LCY)");
+                                                                      IF (ProjectInstallment."Invoice in Process" <> 0) OR (ProjectInstallment."Invoiced Price" <> 0) THEN BEGIN
+                                                                        TotalContractInvoiced := TotalContractInvoiced + ProjectInstallment."Invoice in Process" +
+                                                                        ProjectInstallment."Invoiced Price";
+                                                                        TotalContractInvoicedLCY := TotalContractInvoicedLCY + ProjectInstallment."Invoice in Process (LCY)" +
+                                                                        ProjectInstallment."Invoiced Price (LCY)";
+                                                                      END;
+                                                                    UNTIL ProjectInstallment.NEXT = 0;
+                                                                  END;
+
+                                                                  ContractAmountRemaining := "Contract Amount" - TotalContractInvoiced;
+                                                                  ContractAmountRemainingLCY :=
+                                                                    ROUND(
+                                                                      CurrencyExchangeRateRec.ExchangeAmtFCYToLCY(
+                                                                        1, "Project No.", CurrencyDate, "Contract Currency Code", ContractAmountRemaining,
+                                                                        CurrencyExchangeRateRec.ExchangeRate(1, "Project No.", CurrencyDate, "Contract Currency Code",TRUE),TRUE),
+                                                                      Currency2."Amount Rounding Precision");
+
+                                                                  "Contract Amount (LCY)" := ContractAmountRemainingLCY + TotalContractInvoicedLCY;
+                                                                END ELSE BEGIN
+                                                                  "Contract Amount (LCY)" := ROUND("Contract Amount",Currency2."Amount Rounding Precision");
+                                                                END;
+
+                                                                CalcExpectedContractAmount;
+                                                              END;
+
+                                                   CaptionML=[ENU=Contract Amount;
+                                                              NOR=Kontraktsbelõp;
+                                                              SVE=Kontraktsbelopp];
+                                                   AutoFormatType=1 }
+    { 72  ;   ;Contract Currency Code;Code10      ;TableRelation=Currency;
+                                                   OnValidate=BEGIN
+                                                                VALIDATE("Contract Amount");
+                                                              END;
+
+                                                   CaptionML=[ENU=Contract Currency Code;
+                                                              NOR=Kontraktsvalutakode;
+                                                              SVE=Kontraktsvalutakod] }
+    { 80  ;   ;Offered Amount      ;Decimal       ;OnValidate=BEGIN
+                                                                CheckProjStatus();
+
+                                                                CalcExpectedContractAmount;
+                                                              END;
+
+                                                   CaptionML=[ENU=Offered Amount;
+                                                              NOR=Tilbudt belõp;
+                                                              SVE=Anbudsbelopp];
+                                                   AutoFormatType=1 }
+    { 90  ;   ;Offering Date       ;Date          ;CaptionML=[ENU=Offering Date;
+                                                              NOR=Tilbudsdato;
+                                                              SVE=Anbudsdatum] }
+    { 95  ;   ;Due Date            ;Date          ;CaptionML=[ENU=Due Date;
+                                                              NOR=Forfallsdato;
+                                                              SVE=Fîrfallodatum] }
+    { 100 ;   ;Contract Date       ;Date          ;OnValidate=BEGIN
+                                                                IF "Contract Date" <> 0D THEN
+                                                                  VALIDATE("Version Date", "Contract Date");
+                                                              END;
+
+                                                   CaptionML=[ENU=Contract Date;
+                                                              NOR=Kontraktsdato;
+                                                              SVE=Kontraktdatum] }
+    { 105 ;   ;Generate Installments;Boolean      ;CaptionML=[ENU=Generate Installments;
+                                                              NOR=Generer avdrag;
+                                                              SVE=Generera avbetalningar] }
+    { 110 ;   ;Installment Scheme  ;Code10        ;TableRelation="Installment Scheme".Code WHERE (Type=CONST(Project));
+                                                   CaptionML=[ENU=Installment Scheme;
+                                                              NOR=Betalingsplan;
+                                                              SVE=Betalplan] }
+    { 120 ;   ;Text                ;Text250       ;CaptionML=[ENU=Text;
+                                                              NOR=Tekst;
+                                                              SVE=BenÑmning] }
+    { 130 ;   ;Installments Generated;Boolean     ;InitValue=No;
+                                                   CaptionML=[ENU=Installments Generated;
+                                                              NOR=Genererte avdrag;
+                                                              SVE=Genererade avbetalningar];
+                                                   Editable=No }
+    { 140 ;   ;Generation Date     ;Date          ;CaptionML=[ENU=Generation Date;
+                                                              NOR=Genereringsdato;
+                                                              SVE=Genererandedatum];
+                                                   Editable=No }
+    { 150 ;   ;Principal           ;Code20        ;TableRelation="Project Principal".Principal WHERE (Project No.=FIELD(Project No.));
+                                                   OnValidate=VAR
+                                                                ProjectPrincipal@1100485000 : Record 11012005;
+                                                              BEGIN
+                                                                JobSetUp.GET;
+                                                                "Installment Scheme" := JobSetUp."Ext. Contract Install. Scheme";
+
+                                                                IF (Principal <> xRec.Principal) AND (Principal <> '') THEN BEGIN
+                                                                  AddPrincipalToTenderParagraphs;
+                                                                  IF ProjectPrincipal.GET("Project No.", Principal) THEN BEGIN
+                                                                    IF ProjectPrincipal."Ext. Contract Install. Scheme" <> '' THEN
+                                                                      "Installment Scheme" := ProjectPrincipal."Ext. Contract Install. Scheme";
+                                                                    "Principal Contact" := ProjectPrincipal."Contact Person No.";
+                                                                    "Installm.Motivation Method" := ProjectPrincipal."Installm.Motivation Method";
+                                                                    "Number of Points" := ProjectPrincipal."Number of Points";
+                                                                    JobSetUp.GET;
+                                                                    IF JobSetUp."Fill Ext.Contr. Inv.Text Prin." THEN BEGIN
+                                                                      "Invoice Text" := ProjectPrincipal."Invoice Text Installments";
+                                                                      "Invoice Text Cost Plus" := ProjectPrincipal."Invoice Text Cost Plus";
+                                                                    END;
+                                                                    IF ProjectPrincipal."VAT Prod. Posting Group" <> '' THEN
+                                                                      "VAT Prod. Posting Group" := ProjectPrincipal."VAT Prod. Posting Group";
+                                                                    VALIDATE("Contract Currency Code", ProjectPrincipal."Currency Code");
+                                                                    "Summary Cost (RAW)" := "Summary Cost (RAW)"::"Percentage (Order)";
+                                                                    "Apply Perc. (ContractorFee)" := TRUE;
+                                                                    IF ProjectPrincipal."Contractor Fee" <> 0 THEN
+                                                                      "Percentage (ContractorFee)" := ProjectPrincipal."Contractor Fee"
+                                                                    ELSE
+                                                                      "Percentage (ContractorFee)" := ProjectPrincipal."Act. Raise % Settlement Price";
+                                                                    "Surcharge % Labor" := ProjectPrincipal."Surcharge % Labor";
+                                                                    "Surcharge % Material" := ProjectPrincipal."Surcharge % Material";
+                                                                    "Surcharge % Subcontr." := ProjectPrincipal."Surcharge % Subcontr.";
+                                                                    "Surcharge % Plant" := ProjectPrincipal."Surcharge % Plant";
+                                                                    "Surcharge % Sundry" := ProjectPrincipal."Surcharge % Sundry";
+                                                                  END;
+                                                                END;
+                                                                IF CurrFieldNo > 0 THEN
+                                                                  CALCFIELDS("Principal Name");
+                                                              END;
+
+                                                   CaptionML=[ENU=Principal;
+                                                              NOR=Oppdragsgiver;
+                                                              SVE=Uppdragsgivare] }
+    { 155 ;   ;Principal Contact   ;Code20        ;OnValidate=VAR
+                                                                Cont@1100525000 : Record 5050;
+                                                              BEGIN
+                                                                IF CurrFieldNo > 0 THEN
+                                                                  CALCFIELDS("Principal Contact Name");
+
+                                                                IF "Principal Contact" <> '' THEN BEGIN
+                                                                  Cont.GET("Principal Contact");
+                                                                  Cont.TESTFIELD(Type, Cont.Type::Person);
+                                                                  Cont.TESTFIELD(Blocked, FALSE);
+                                                                END;
+                                                              END;
+
+                                                   OnLookup=VAR
+                                                              Cont@1100485000 : Record 5050;
+                                                              ContBusinessRelation@1100485001 : Record 5054;
+                                                            BEGIN
+                                                              Cont.SETFILTER("Company No.", '<>''''');
+                                                              IF Principal <> '' THEN BEGIN
+                                                                ContBusinessRelation.SETCURRENTKEY("Link to Table", "No.");
+                                                                ContBusinessRelation.SETRANGE("Link to Table", ContBusinessRelation."Link to Table"::Customer);
+                                                                ContBusinessRelation.SETRANGE("No.", Principal);
+                                                                IF ContBusinessRelation.FINDFIRST THEN
+                                                                  Cont.SETRANGE("Company No.", ContBusinessRelation."Contact No.");
+                                                              END;
+
+                                                              IF "Principal Contact" <> '' THEN
+                                                                IF Cont.GET("Principal Contact") THEN;
+
+                                                              IF PAGE.RUNMODAL(0,Cont) = ACTION::LookupOK THEN
+                                                                VALIDATE("Principal Contact", Cont."No.");
+                                                            END;
+
+                                                   CaptionML=[ENU=Principal Contact;
+                                                              NOR=Oppdragsgivers kontakt;
+                                                              SVE=Referens] }
+    { 156 ;   ;Principal Contact Name;Text100     ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup(Contact.Name WHERE (No.=FIELD(Principal Contact)));
+                                                   CaptionML=[ENU=Principal Contact Name;
+                                                              NOR=Oppdragsgivers kontaktnavn;
+                                                              SVE=Uppdragsgivarens kontaktnamn];
+                                                   Editable=No }
+    { 160 ;   ;Project Description ;Text100       ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup(Job.Description WHERE (No.=FIELD(Project No.)));
+                                                   CaptionML=[ENU=Project Description;
+                                                              NOR=Prosjektbeskrivelse;
+                                                              SVE=Projektbeskrivning];
+                                                   Editable=No }
+    { 170 ;   ;Installment Scheme Description;Text30;
+                                                   FieldClass=FlowField;
+                                                   CalcFormula=Lookup("Installment Scheme".Description WHERE (Code=FIELD(Installment Scheme)));
+                                                   CaptionML=[ENU=Installment Scheme Description;
+                                                              NOR=Beskrivelse av Betalingsplan;
+                                                              SVE=Beskrivning av avbetalningsplan];
+                                                   Editable=No }
+    { 180 ;   ;Principal Name      ;Text100       ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup(Customer.Name WHERE (No.=FIELD(Principal)));
+                                                   CaptionML=[ENU=Principal Name;
+                                                              NOR=Oppdragsgivers navn;
+                                                              SVE=Uppdragsgivarens namn];
+                                                   Editable=No }
+    { 190 ;   ;Version Date        ;Date          ;CaptionML=[ENU=Version Date;
+                                                              NOR=Versjonsdato;
+                                                              SVE=Versionsdatum] }
+    { 200 ;   ;Modified by         ;Code50        ;TableRelation=User."User Name";
+                                                   ValidateTableRelation=No;
+                                                   TestTableRelation=No;
+                                                   CaptionML=[ENU=Modified by;
+                                                              NOR=Endret av;
+                                                              SVE=éndrad av];
+                                                   Editable=No }
+    { 210 ;   ;Last Date Modified  ;Date          ;CaptionML=[ENU=Last Date Modified;
+                                                              NOR=Endret den;
+                                                              SVE=Uppdateringsdatum];
+                                                   Editable=No }
+    { 220 ;   ;Hours               ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Budget Line".Hours WHERE (Project No.=FIELD(Project No.),
+                                                                                              Extension Contract=FIELD(Contract No.)));
+                                                   CaptionML=[ENU=Hours;
+                                                              NOR="Timer ";
+                                                              SVE=Timmar];
+                                                   Editable=No }
+    { 230 ;   ;Labor               ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Budget Line"."Amount (LCY)" WHERE (Project No.=FIELD(Project No.),
+                                                                                                       Extension Contract=FIELD(Contract No.),
+                                                                                                       Cost Type=CONST(Labor)));
+                                                   CaptionML=[ENU=Labor;
+                                                              NOR=Arbeidskraft;
+                                                              SVE=Arbetskraft];
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 240 ;   ;Material            ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Budget Line"."Amount (LCY)" WHERE (Project No.=FIELD(Project No.),
+                                                                                                       Extension Contract=FIELD(Contract No.),
+                                                                                                       Cost Type=CONST(Material)));
+                                                   CaptionML=[ENU=Material;
+                                                              NOR=Materialee;
+                                                              SVE=Material];
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 250 ;   ;Subcontracting      ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Budget Line"."Amount (LCY)" WHERE (Project No.=FIELD(Project No.),
+                                                                                                       Extension Contract=FIELD(Contract No.),
+                                                                                                       Cost Type=CONST(Subcontracting)));
+                                                   CaptionML=[ENU=Subcontracting;
+                                                              NOR=Underentrepenõr;
+                                                              SVE=Underentreprenad];
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 260 ;   ;Plant               ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Budget Line"."Amount (LCY)" WHERE (Project No.=FIELD(Project No.),
+                                                                                                       Extension Contract=FIELD(Contract No.),
+                                                                                                       Cost Type=CONST(Plant)));
+                                                   CaptionML=[ENU=Plant;
+                                                              NOR=Maskin;
+                                                              SVE=Maskin];
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 270 ;   ;Sundry              ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Budget Line"."Amount (LCY)" WHERE (Project No.=FIELD(Project No.),
+                                                                                                       Extension Contract=FIELD(Contract No.),
+                                                                                                       Cost Type=CONST(Sundry)));
+                                                   CaptionML=[ENU=Sundry;
+                                                              NOR=Diverse;
+                                                              SVE=Diverse];
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 280 ;   ;Total               ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Budget Line"."Amount (LCY)" WHERE (Project No.=FIELD(Project No.),
+                                                                                                       Extension Contract=FIELD(Contract No.)));
+                                                   CaptionML=[ENU=Total;
+                                                              NOR=Totalt;
+                                                              SVE=Totalt];
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 290 ;   ;Finished            ;Boolean       ;CaptionML=[ENU=Finished;
+                                                              NOR=Ferdig;
+                                                              SVE=Avslutad] }
+    { 300 ;   ;Contract Serial No. ;Code10        ;CaptionML=[ENU=Contract Serial No.;
+                                                              NOR=Kontraktserienr;
+                                                              SVE=Kontraktserienr];
+                                                   Editable=No }
+    { 310 ;   ;Settlement Method   ;Option        ;CaptionML=[ENU=Settlement Method;
+                                                              NOR=Oppgjõrsmetode;
+                                                              SVE=AvrÑkningsmetod];
+                                                   OptionCaptionML=[ENU=Fixed Price,Cost Plus;
+                                                                    NOR=Fast pris,Lõpende;
+                                                                    SVE=Fast pris,Lîpande];
+                                                   OptionString=Fixed Price,Cost Plus }
+    { 320 ;   ;Your Reference      ;Text50        ;CaptionML=[ENU=Your Reference;
+                                                              NOR=Deres referanse;
+                                                              SVE=Er referens] }
+    { 330 ;   ;Invoice Text        ;Text250       ;CaptionML=[ENU=Invoice Text Installments;
+                                                              NOR=Fakturatekst, avdrag;
+                                                              SVE=Fakturatext, avbetalningar] }
+    { 340 ;   ;Budget Fixed        ;Boolean       ;OnValidate=BEGIN
+                                                                IF "Budget Fixed" <> xRec."Budget Fixed" THEN
+                                                                  CheckAccessExtContractFixed(FIELDCAPTION("Budget Fixed"));
+
+                                                                IF (NOT "Budget Fixed") AND "Extension Fixed" THEN
+                                                                  TESTFIELD("Extension Fixed", FALSE);
+                                                              END;
+
+                                                   CaptionML=[ENU=Budget Fixed;
+                                                              NOR=Budsjett fast;
+                                                              SVE=Budget fast] }
+    { 341 ;   ;Extension Fixed     ;Boolean       ;OnValidate=BEGIN
+                                                                IF "Extension Fixed" <> xRec."Extension Fixed" THEN
+                                                                  CheckAccessExtContractFixed(FIELDCAPTION("Extension Fixed"));
+
+                                                                IF "Extension Fixed" THEN BEGIN
+                                                                  IF NOT "Budget Fixed" THEN
+                                                                    VALIDATE("Budget Fixed", TRUE);
+                                                                END;
+                                                              END;
+
+                                                   CaptionML=[ENU=Extension Fixed;
+                                                              NOR=Fast ETA;
+                                                              SVE=Fast éTA] }
+    { 400 ;   ;Budget              ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Budget Line"."Amount (LCY)" WHERE (Project No.=FIELD(Project No.),
+                                                                                                       Extension Contract=FIELD(Contract No.),
+                                                                                                       Version Date=FIELD(Cumulation Filter),
+                                                                                                       Extension Contract Status=FILTER(Not Applicable|(>=Order&<Expired))));
+                                                   CaptionML=[ENU=Budget;
+                                                              NOR=Budsjett;
+                                                              SVE=Budget];
+                                                   Editable=No }
+    { 420 ;   ;Budget Hours        ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Budget Line".Hours WHERE (Project No.=FIELD(Project No.),
+                                                                                              Extension Contract=FIELD(Contract No.),
+                                                                                              Version Date=FIELD(Cumulation Filter),
+                                                                                              Extension Contract Status=FILTER(Not Applicable|(>=Order&<Expired)),
+                                                                                              Cost Type=CONST(Labor)));
+                                                   CaptionML=[ENU=Budget Hours;
+                                                              NOR=Budsjett (Timer);
+                                                              SVE=Budget (timmar)];
+                                                   Editable=No }
+    { 421 ;   ;Budget Hours Plant  ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Budget Line".Hours WHERE (Project No.=FIELD(Project No.),
+                                                                                              Extension Contract=FIELD(Contract No.),
+                                                                                              Version Date=FIELD(Cumulation Filter),
+                                                                                              Extension Contract Status=FILTER(Not Applicable|(>=Order&<Expired)),
+                                                                                              Cost Type=CONST(Plant)));
+                                                   CaptionML=ENU=Budget Hours Plant;
+                                                   Editable=No }
+    { 430 ;   ;Revenues            ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=-Sum("Job Ledger Entry"."Total Price (LCY)" WHERE (Job No.=FIELD(Project No.),
+                                                                                                                  Extension Contract=FIELD(Contract No.),
+                                                                                                                  Entry Type=CONST(Sale),
+                                                                                                                  Posting Date=FIELD(Cumulation Filter),
+                                                                                                                  Advance Payment=CONST(No)));
+                                                   CaptionML=[ENU=Revenues;
+                                                              NOR=Inntekter;
+                                                              SVE=IntÑkter];
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 440 ;   ;Revenues Period     ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=-Sum("Job Ledger Entry"."Total Price (LCY)" WHERE (Job No.=FIELD(Project No.),
+                                                                                                                  Extension Contract=FIELD(Contract No.),
+                                                                                                                  Entry Type=CONST(Sale),
+                                                                                                                  Posting Date=FIELD(Period Filter),
+                                                                                                                  Advance Payment=CONST(No)));
+                                                   CaptionML=[ENU=Revenues Period;
+                                                              NOR=Inntektsperiod;
+                                                              SVE=IntÑktsperiod];
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 450 ;   ;Open Ovh. Surch. (Inventory);Decimal;
+                                                   FieldClass=FlowField;
+                                                   CalcFormula=Sum("Item Journal Surcharge"."Overhead Surcharge Project" WHERE (Job No.=FIELD(Project No.),
+                                                                                                                                Extension Contract=FIELD(Contract No.),
+                                                                                                                                Posting Date=FIELD(Cumulation Filter)));
+                                                   CaptionML=[ENU=Open Ovh. Surch. (Inventory);
+                                                              NOR=èpen overheadkost (lager);
+                                                              SVE=ôppen overheadkostnad (lager)];
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 460 ;   ;Open Ovh. Surch. Firm (Purch.);Decimal;
+                                                   FieldClass=FlowField;
+                                                   CalcFormula=Sum("Purchase Order Control Line"."Overhead Surcharge Firm" WHERE (Project No.=FIELD(Project No.),
+                                                                                                                                  Extension Contract=FIELD(Contract No.),
+                                                                                                                                  Date=FIELD(Cumulation Filter)));
+                                                   CaptionML=[ENU=Open Ovh. Surch. Firm Commitments (Purchase);
+                                                              NOR=èpen overheadkost, faste Forpliktelser (Innkjõp);
+                                                              SVE=ôppen overheadkostnad, fasta Ütaganden (inkîp)];
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 465 ;   ;Open Ovh. Surch. Soft (Purch.);Decimal;
+                                                   FieldClass=FlowField;
+                                                   CalcFormula=Sum("Purchase Order Control Line"."Overhead Surcharge Soft" WHERE (Project No.=FIELD(Project No.),
+                                                                                                                                  Extension Contract=FIELD(Contract No.),
+                                                                                                                                  Date=FIELD(Cumulation Filter)));
+                                                   CaptionML=[ENU=Open Ovh. Surch. Soft Commitments (Purchase);
+                                                              NOR=èpen overheadkost, lõpende engasjementer (Innkjõp);
+                                                              SVE=ôppen overheadkostnad, lîpande Ütaganden (inkîp)];
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 470 ;   ;Actual Costs        ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Job Ledger Entry"."Total Cost (LCY)" WHERE (Job No.=FIELD(Project No.),
+                                                                                                                Extension Contract=FIELD(Contract No.),
+                                                                                                                Entry Type=CONST(Usage),
+                                                                                                                Posting Date=FIELD(Cumulation Filter)));
+                                                   CaptionML=[ENU=Actual Costs;
+                                                              NOR=Faktiske koster;
+                                                              SVE=Verkliga kostnader];
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 480 ;   ;Actual Hours        ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Job Ledger Entry".Quantity WHERE (Job No.=FIELD(Project No.),
+                                                                                                      Cost Type=CONST(Labor),
+                                                                                                      Extension Contract=FIELD(Contract No.),
+                                                                                                      Entry Type=CONST(Usage),
+                                                                                                      Posting Date=FIELD(Cumulation Filter),
+                                                                                                      Component Type (Wage Comp.)=FIELD(Wage Component Type Filter)));
+                                                   CaptionML=[ENU=Actual Hours;
+                                                              NOR=Reelle timer;
+                                                              SVE=Verkliga timmar];
+                                                   Editable=No }
+    { 490 ;   ;Actuals Period      ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Job Ledger Entry"."Total Cost (LCY)" WHERE (Job No.=FIELD(Project No.),
+                                                                                                                Extension Contract=FIELD(Contract No.),
+                                                                                                                Entry Type=CONST(Usage),
+                                                                                                                Posting Date=FIELD(Period Filter)));
+                                                   CaptionML=[ENU=Actuals Period;
+                                                              NOR=Faktiske verdier, periode;
+                                                              SVE=Faktiska vÑrden, period];
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 500 ;   ;Actual Hours Period ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Job Ledger Entry".Quantity WHERE (Job No.=FIELD(Project No.),
+                                                                                                      Cost Type=CONST(Labor),
+                                                                                                      Extension Contract=FIELD(Contract No.),
+                                                                                                      Entry Type=CONST(Usage),
+                                                                                                      Posting Date=FIELD(Period Filter),
+                                                                                                      Component Type (Wage Comp.)=FIELD(Wage Component Type Filter)));
+                                                   CaptionML=[ENU=Actual Hours Period;
+                                                              NOR=Faktisk Timeperiode;
+                                                              SVE=Verklig timperiod];
+                                                   Editable=No }
+    { 510 ;   ;Purchase Budget     ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Budget Line"."Amount (LCY)" WHERE (Project No.=FIELD(Project No.),
+                                                                                                       Purchase Action Status=FILTER(>=Approved),
+                                                                                                       Extension Contract=FIELD(Contract No.),
+                                                                                                       Purch. Action Approval Date=FIELD(Cumulation Filter)));
+                                                   CaptionML=[ENU=Purchase Budget;
+                                                              NOR=Innkjõpsbudsjett;
+                                                              SVE=Inkîpsbudget];
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 520 ;   ;Purchase            ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Purchase Line"."Amount (LCY)" WHERE (Document Type=CONST(Order),
+                                                                                                         Job No.=FIELD(Project No.),
+                                                                                                         Extension Contract=FIELD(Contract No.),
+                                                                                                         Order Date=FIELD(Cumulation Filter)));
+                                                   CaptionML=[ENU=Purchase;
+                                                              NOR=Kjõp;
+                                                              SVE=Inkîp];
+                                                   Editable=No }
+    { 525 ;   ;Purchase Period     ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Purchase Line"."Amount (LCY)" WHERE (Document Type=CONST(Order),
+                                                                                                         Job No.=FIELD(Project No.),
+                                                                                                         Extension Contract=FIELD(Contract No.),
+                                                                                                         Order Date=FIELD(Period Filter)));
+                                                   CaptionML=[ENU=Purchase Period;
+                                                              NOR=Innkjõpsperiode;
+                                                              SVE=Inkîpsperiod];
+                                                   Editable=No }
+    { 530 ;   ;Open (Purchase)     ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Purchase Order Control Line"."Outstanding Amount" WHERE (Project No.=FIELD(Project No.),
+                                                                                                                             Extension Contract=FIELD(Contract No.),
+                                                                                                                             Date=FIELD(Cumulation Filter)));
+                                                   CaptionML=[ENU=Open (Purchase);
+                                                              NOR=èpne innkjõp;
+                                                              SVE=ôppna inkîp];
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 540 ;   ;Received/Not Invoiced;Decimal      ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Purchase Order Control Line"."Amt. Rcd. Not Invoiced" WHERE (Project No.=FIELD(Project No.),
+                                                                                                                                 Extension Contract=FIELD(Contract No.),
+                                                                                                                                 Date=FIELD(Cumulation Filter)));
+                                                   CaptionML=[ENU=Received/Not Invoiced;
+                                                              NOR=Mottatt/ikke fakturert;
+                                                              SVE=Mottaget/inte fakturerat];
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 550 ;   ;Risc Coverage       ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Purchase Line"."Risc Coverage Amount (LCY)" WHERE (Document Type=CONST(Order),
+                                                                                                                       Job No.=FIELD(Project No.),
+                                                                                                                       Extension Contract=FIELD(Contract No.),
+                                                                                                                       Order Date=FIELD(Cumulation Filter)));
+                                                   CaptionML=[ENU=Risc Coverage;
+                                                              NOR=Riskdekning;
+                                                              SVE=RisktÑckning];
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 560 ;   ;Risc Coverage Withdraw;Decimal     ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Purchase Line"."Release Risc Coverage (LCY)" WHERE (Document Type=CONST(Order),
+                                                                                                                        Job No.=FIELD(Project No.),
+                                                                                                                        Extension Contract=FIELD(Contract No.),
+                                                                                                                        Order Date=FIELD(Cumulation Filter)));
+                                                   CaptionML=[ENU=Risc Coverage Withdraw;
+                                                              NOR=Riskdekning Uttak?;
+                                                              SVE=RisktÑckningsuttag];
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 570 ;   ;Open (Inventory)    ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Item Journal Line".Amount WHERE (Job No.=FIELD(Project No.),
+                                                                                                     Extension Contract=FIELD(Contract No.),
+                                                                                                     Posting Date=FIELD(Cumulation Filter)));
+                                                   CaptionML=[ENU=Open (Inventory);
+                                                              NOR=èpne (lager);
+                                                              SVE=ôppna (lager)];
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 580 ;   ;Open Amount (Hours) ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Hour Accounting Line"."Amount (LCY)" WHERE (Project No.=FIELD(Project No.),
+                                                                                                                Extension Contract=FIELD(Contract No.),
+                                                                                                                Posting Date=FIELD(Cumulation Filter),
+                                                                                                                Component Type=FIELD(Wage Component Type Filter)));
+                                                   CaptionML=[ENU=Open Amount (Hours);
+                                                              NOR=èpne belõp (Timer);
+                                                              SVE=ôppna belopp (timmar)];
+                                                   Description=ime155;
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 590 ;   ;Open Ovh. Surch. (Hours);Decimal   ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Hour Accounting Surcharge"."Overhead Surcharge Project" WHERE (Project No.=FIELD(Project No.),
+                                                                                                                                   Extension Contract=FIELD(Contract No.),
+                                                                                                                                   Posting Date=FIELD(Cumulation Filter),
+                                                                                                                                   Component Type=FIELD(Wage Component Type Filter)));
+                                                   CaptionML=[ENU=Open Ovh. Surch. (Hours);
+                                                              NOR=èpen tilleggsgebyr for overhead (Timer);
+                                                              SVE=ôppen overheadkostnad (timmar)];
+                                                   Description=ime155;
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 600 ;   ;Open Hours          ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Hour Accounting Line"."Total Line" WHERE (Project No.=FIELD(Project No.),
+                                                                                                              Extension Contract=FIELD(Contract No.),
+                                                                                                              Posting Date=FIELD(Cumulation Filter),
+                                                                                                              Component Type=FIELD(Wage Component Type Filter)));
+                                                   CaptionML=[ENU=Open Hours;
+                                                              NOR=èpne timer;
+                                                              SVE=ôppna timmar];
+                                                   Description=ime155;
+                                                   Editable=No }
+    { 610 ;   ;Received/Not Inv. Hours;Decimal    ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Purchase Order Control Line"."Hours Rcd. Not Invoiced" WHERE (Project No.=FIELD(Project No.),
+                                                                                                                                  Extension Contract=FIELD(Contract No.),
+                                                                                                                                  Date=FIELD(Cumulation Filter)));
+                                                   CaptionML=[ENU=Received/Not Inv. Hours;
+                                                              NOR=Mottatte/ikke fakturerte timer;
+                                                              SVE=Mottaget/inte fakt. Timmar];
+                                                   Editable=No }
+    { 700 ;   ;Period Filter       ;Date          ;FieldClass=FlowFilter;
+                                                   CaptionML=[ENU=Period Filter;
+                                                              NOR=Periodefilter;
+                                                              SVE=Periodfilter] }
+    { 710 ;   ;Cumulation Filter   ;Date          ;FieldClass=FlowFilter;
+                                                   CaptionML=[ENU=Cumulation Filter;
+                                                              NOR=Akkumuleringsfilter;
+                                                              SVE=Ackumuleringsfilter] }
+    { 720 ;   ;Progress Filter     ;Date          ;FieldClass=FlowFilter;
+                                                   CaptionML=[ENU=Progress Date;
+                                                              NOR=Fremdriftsdato;
+                                                              SVE=Fîrloppsdatum] }
+    { 730 ;   ;PrevProgressFilter  ;Date          ;FieldClass=FlowFilter;
+                                                   CaptionML=[ENU=Previous Progress Date;
+                                                              NOR=Dato for forrige Fremdrift;
+                                                              SVE=Datum fîr fîregÜende fîrlopp] }
+    { 740 ;   ;Specific WKA Percentages;Boolean   ;OnValidate=BEGIN
+                                                                IF NOT "Specific WKA Percentages" THEN BEGIN
+                                                                  "% Labor" := 0;
+                                                                  "% to B Account":= 0;
+                                                                END;
+                                                              END;
+
+                                                   CaptionML=[ENU=Specific WKA Percentages;
+                                                              NOR=Spesifike WKA-Prosentsatser;
+                                                              SVE=Specifika WKA-procentsatser] }
+    { 750 ;   ;% Labor             ;Decimal       ;CaptionML=[ENU=% Labor;
+                                                              NOR=% arbeidskraft;
+                                                              SVE=Procent, arbetskraft];
+                                                   MinValue=0;
+                                                   MaxValue=100;
+                                                   AutoFormatType=1 }
+    { 760 ;   ;% to B Account      ;Decimal       ;CaptionML=[ENU=% to B Account;
+                                                              NOR=% til B-konto;
+                                                              SVE=Procent till B-konto];
+                                                   MinValue=0;
+                                                   MaxValue=100 }
+    { 770 ;   ;Contract Type       ;Option        ;OnValidate=BEGIN
+                                                                IF "Contract Type" = "Contract Type"::Maincontracting THEN BEGIN
+                                                                  "Specific WKA Percentages" := FALSE;
+                                                                   "% Labor" := 0;
+                                                                   "% to B Account" := 0;
+                                                                END;
+                                                              END;
+
+                                                   CaptionML=[ENU=Contract Type;
+                                                              NOR=Kontraktstype;
+                                                              SVE=Kontraktstyp];
+                                                   OptionCaptionML=[ENU=Maincontracting,Subcontracting;
+                                                                    NOR=Hovedkontrakt,Underentrepenõr;
+                                                                    SVE=Huvudkontrakt,underentreprenad];
+                                                   OptionString=Maincontracting,Subcontracting }
+    { 780 ;   ;Main Project No.    ;Code20        ;TableRelation=Job;
+                                                   CaptionML=[ENU=Main Project No.;
+                                                              NOR=Hovedprosjektnr.;
+                                                              SVE=Huvudprojektnr] }
+    { 800 ;   ;Installm.Motivation Method;Option  ;OnValidate=BEGIN
+                                                                ProjRec.GET("Project No.");
+                                                                IF ProjRec.RAW THEN BEGIN
+                                                                  IF "Installm.Motivation Method" IN ["Installm.Motivation Method"::Points, "Installm.Motivation Method"::Percentages] THEN
+                                                                    FIELDERROR("Installm.Motivation Method", STRSUBSTNO(Text010,"Installm.Motivation Method",ProjRec.FIELDCAPTION(RAW)));
+                                                                END;
+
+                                                                IF "Installm.Motivation Method" <> xRec."Installm.Motivation Method" THEN BEGIN
+                                                                  CASE "Installm.Motivation Method" OF
+                                                                    "Installm.Motivation Method"::Percentages:
+                                                                      "Number of Points" := 100;
+                                                                    ELSE
+                                                                      "Number of Points" := 0;
+                                                                  END;
+                                                                END;
+                                                              END;
+
+                                                   CaptionML=[ENU=Installm.Motivation Method;
+                                                              SVE=Metod fîr avbetalningsmotivation];
+                                                   OptionCaptionML=[ENU=" ,Points,Percentages,Element Quantity";
+                                                                    NOR=" ,Poeng,Prosent,Elementantall";
+                                                                    SVE=" ,PoÑng,Procent,Elementantal"];
+                                                   OptionString=[ ,Points,Percentages,Element Quantity];
+                                                   Description=Should be equal to options of table 11012005 (field 320) }
+    { 810 ;   ;Number of Points    ;Decimal       ;CaptionML=[ENU=Number of Points;
+                                                              NOR=Antall poeng;
+                                                              SVE=Antal poÑng] }
+    { 820 ;   ;Invoice Installm.Motivation as;Option;
+                                                   OnValidate=BEGIN
+                                                                IF "Invoice Installm.Motivation as" <> xRec."Invoice Installm.Motivation as" THEN BEGIN
+                                                                  IF "Invoice Installm.Motivation as" <> "Invoice Installm.Motivation as"::"Fixed Installment Amounts" THEN BEGIN
+                                                                    "Fixed Installment Amount (LCY)" := 0;
+                                                                    "Fixed Installment Amount (FCY)" := 0;
+                                                                  END;
+                                                                END;
+                                                              END;
+
+                                                   CaptionML=[ENU=Invoice Installm.Motivation as;
+                                                              SVE=Betalplansfaktura. Motivation som];
+                                                   OptionCaptionML=[ENU=Installment per Motivation,Fixed Installment Amounts;
+                                                                    SVE=Betalplan per motivation,fasta avbetalningsbelopp];
+                                                   OptionString=Installment per Motivation,Fixed Installment Amounts }
+    { 830 ;   ;Fixed Installment Amount (LCY);Decimal;
+                                                   OnValidate=BEGIN
+                                                                IF NOT SkipValidateFCY THEN
+                                                                  "Fixed Installment Amount (FCY)" := ProjectCurrencyExchangeRate.ExchangeAmtLCYToFCY("Fixed Installment Amount (LCY)", FALSE, FALSE, "Contract Currency Code", "Project No.", Principal, "Contract Date");
+                                                              END;
+
+                                                   CaptionML=[ENU=Fixed Installment Amount (LCY);
+                                                              SVE=Fast avbetalningsbelopp (BVA)] }
+    { 831 ;   ;Fixed Installment Amount (FCY);Decimal;
+                                                   OnValidate=BEGIN
+                                                                SetSkipValidateFCY(TRUE);
+                                                                VALIDATE("Fixed Installment Amount (LCY)", ProjectCurrencyExchangeRate.ExchangeAmtFCYToLCY("Fixed Installment Amount (FCY)", FALSE, FALSE, "Contract Currency Code", "Project No.", Principal, "Contract Date"));
+                                                              END;
+
+                                                   CaptionML=[ENU=Fixed Installment Amount;
+                                                              NOR=Fast avdragsbelõp;
+                                                              SVE=Fast avbetalningsbelopp] }
+    { 870 ;   ;Revision            ;Boolean       ;CaptionML=[ENU=Revision;
+                                                              NOR=Revisjon;
+                                                              SVE=Revidering] }
+    { 871 ;   ;Revision Rule       ;Code20        ;TableRelation="Revision Rule";
+                                                   CaptionML=[ENU=Revision Rule Formula;
+                                                              NOR=Formel for Revisjonsregel;
+                                                              SVE=Formel fîr revideringsregel] }
+    { 872 ;   ;Reference Date Revision;Date       ;CaptionML=[ENU=Reference Date Revision;
+                                                              NOR="Referansedato for Revisjon ";
+                                                              SVE=Revideringsreferensdatum] }
+    { 880 ;   ;Estimated Amount    ;Decimal       ;OnValidate=BEGIN
+                                                                CalcExpectedContractAmount;
+                                                              END;
+
+                                                   CaptionML=[ENU=Estimated Amount;
+                                                              NOR=Kalkulert belõp;
+                                                              SVE=Kalkylerat belopp] }
+    { 890 ;   ;Estimate Date       ;Date          ;CaptionML=[ENU=Estimate Date;
+                                                              NOR=Kalkyledato;
+                                                              SVE=Kalkyldatum] }
+    { 900 ;   ;Comment             ;Boolean       ;FieldClass=FlowField;
+                                                   CalcFormula=Exist("Comment Line Extended" WHERE (Table1 Name=CONST(Job),
+                                                                                                    Table1 No.=FIELD(Project No.),
+                                                                                                    Table2 Name=CONST(Extension Contract),
+                                                                                                    Table2 No.=FIELD(Contract No.)));
+                                                   CaptionML=[ENU=Comment;
+                                                              NOR=Kommentar;
+                                                              SVE=Kommentar];
+                                                   Editable=No }
+    { 910 ;   ;Treat like Order    ;Boolean       ;OnValidate=BEGIN
+                                                                IF "Treat like Order" THEN
+                                                                  "Include in Expectation" := FALSE;
+
+                                                                CalcExpectedContractAmount;
+                                                              END;
+
+                                                   CaptionML=[ENU=Treat like Order;
+                                                              NOR=Behandle som ordre;
+                                                              SVE=Behandla som order] }
+    { 920 ;   ;Include in Expectation;Boolean     ;CaptionML=[ENU=Include in Expectation;
+                                                              NOR=Inkluder i Forventning;
+                                                              SVE=Inklusive fîrvÑntade] }
+    { 930 ;   ;Expected Contract Amount;Decimal   ;OnValidate=BEGIN
+                                                                TESTFIELD("Extension Fixed", FALSE);
+                                                                IF NOT (Status IN [Status::Applied, Status::Offered]) THEN
+                                                                  ERROR(Text012, FIELDCAPTION(Status), Status::Applied, Status::Offered);
+                                                              END;
+
+                                                   CaptionML=[ENU=Expected Contract Amount;
+                                                              NOR=Forventet Kontraktsbelõp;
+                                                              SVE=FîrvÑntat kontraktsbelopp];
+                                                   AutoFormatType=1 }
+    { 935 ;   ;Expected Order Date ;Date          ;CaptionML=[ENU=Expected Order Date;
+                                                              NOR=Forventet ordredato;
+                                                              SVE=FîrvÑntat orderdatum] }
+    { 940 ;   ;VAT Prod. Posting Group;Code20     ;TableRelation="VAT Product Posting Group";
+                                                   CaptionML=[ENU=VAT Prod. Posting Group;
+                                                              NOR=Moms produktbokfõringsmal;
+                                                              SVE=Moms produktbokfîringsmall] }
+    { 950 ;   ;Extra Throughput (Days);Decimal    ;CaptionML=[ENU=Extra Throughput (Days);
+                                                              NOR=Ekstra Gjennomstrõmming (Dager);
+                                                              SVE=Extra genomflîde (dagar)];
+                                                   DecimalPlaces=1:1 }
+    { 1010;   ;Invoice Text Cost Plus;Text250     ;CaptionML=[ENU=Invoice Text Cost Plus;
+                                                              NOR=Fakturatekst, selvkost;
+                                                              SVE=Fakturatext, sjÑlvkostnad] }
+    { 1020;   ;Claim Status        ;Option        ;OnValidate=BEGIN
+                                                                CASE "Claim Status" OF
+                                                                  "Claim Status"::Identified:
+                                                                    VALIDATE(Status,Status::Applied);
+                                                                  "Claim Status"::Notified,"Claim Status"::Submitted:
+                                                                    VALIDATE(Status,Status::Offered);
+                                                                  "Claim Status"::Final:
+                                                                    VALIDATE(Status,Status::"Invoicing Allowed");
+                                                                  "Claim Status"::Cancelled:
+                                                                    VALIDATE(Status,Status::Expired);
+                                                                END;
+                                                              END;
+
+                                                   CaptionML=ENU=Claim Status;
+                                                   OptionCaptionML=ENU=Identified,Notified,Submitted,Final,Cancelled;
+                                                   OptionString=Identified,Notified,Submitted,Final,Cancelled }
+    { 1030;   ;Notification Date   ;Date          ;CaptionML=[ENU=Notification Date;
+                                                              NOR=Varslingsdato;
+                                                              SVE=Meddelandedatum] }
+    { 1040;   ;Related Planning Activity;Code30   ;TableRelation="Project Planning Activity".No. WHERE (Project No.=FIELD(Project No.));
+                                                   CaptionML=ENU=Related Planning Activity }
+    { 1050;   ;Dispute Adjudication Board;Text30  ;CaptionML=ENU=Dispute Adjudication Board }
+    { 1051;   ;Dispute Adj. Board Number;Text30   ;CaptionML=ENU=Dispute Adjudication Board Number }
+    { 1060;   ;Identification Date ;Date          ;CaptionML=ENU=Identification Date }
+    { 1061;   ;Submission Date     ;Date          ;CaptionML=ENU=Submission Date }
+    { 1070;   ;Final Date          ;Date          ;CaptionML=ENU=Final Date }
+    { 1080;   ;Cancelled Date      ;Date          ;CaptionML=ENU=Cancelled Date }
+    { 1090;   ;Claim               ;Boolean       ;CaptionML=ENU=Claim }
+    { 1091;   ;Source              ;Option        ;CaptionML=[ENU=Source;
+                                                              NOR=Source;
+                                                              SVE=KÑlla];
+                                                   OptionCaptionML=ENU=External,Internal;
+                                                   OptionString=External,Internal }
+    { 1095;   ;Currency Code       ;Code10        ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup("Project Principal"."Currency Code" WHERE (Project No.=FIELD(Project No.),
+                                                                                                                 Principal=FIELD(Principal)));
+                                                   TableRelation=Currency;
+                                                   OnValidate=BEGIN
+                                                                VALIDATE("Contract Amount");
+                                                              END;
+
+                                                   CaptionML=[ENU=Currency Code;
+                                                              NOR=Valutakode;
+                                                              SVE=Valutakod];
+                                                   Editable=No }
+    { 1100;   ;Applied Amount      ;Decimal       ;OnValidate=BEGIN
+                                                                VALIDATE("Offered Amount", "Applied Amount");
+                                                              END;
+
+                                                   CaptionML=[ENU=Applied Amount;
+                                                              NOR=Anvendt belõp;
+                                                              SVE=Kopplat belopp] }
+    { 1110;   ;Probability Code    ;Code20        ;TableRelation="Extension Probability";
+                                                   OnValidate=VAR
+                                                                ExtensionProbability@1100528800 : Record 11229340;
+                                                              BEGIN
+                                                                IF ExtensionProbability.GET("Probability Code") THEN
+                                                                  IF ExtensionProbability.Percentage <> 0 THEN
+                                                                    VALIDATE("Probability %", ExtensionProbability.Percentage);
+                                                              END;
+
+                                                   CaptionML=ENU=Probability Code }
+    { 1120;   ;Probability %       ;Decimal       ;CaptionML=[ENU=Probability %;
+                                                              NOR=Sannsynlighets-%;
+                                                              SVE=Sannolikhet %];
+                                                   MaxValue=100 }
+    { 1130;   ;Agreed Amount       ;Decimal       ;OnValidate=BEGIN
+                                                                VALIDATE("Contract Amount", "Agreed Amount");
+                                                              END;
+
+                                                   CaptionML=[ENU=Agreed Amount;
+                                                              NOR=Avtalt belõp;
+                                                              SVE=Avtalat belopp] }
+    { 1140;   ;Remarks             ;Text250       ;CaptionML=[ENU=Remarks;
+                                                              NOR=Merknader;
+                                                              SVE=AnmÑrkningar] }
+    { 1150;   ;Surcharge % Labor   ;Decimal       ;CaptionML=[ENU=Surcharge % Labor;
+                                                              NOR=Tilleggsgebyrsprosent, arbeidskraft;
+                                                              SVE=TillÑggsavgiftsprocent, arbetskraft] }
+    { 1160;   ;Surcharge % Material;Decimal       ;CaptionML=[ENU=Surcharge % Material;
+                                                              NOR=Tilleggsgebyrsprosent, Materiale;
+                                                              SVE=TillÑggsavgiftsprocent, material] }
+    { 1170;   ;Surcharge % Subcontr.;Decimal      ;CaptionML=[ENU=Surcharge % Subcontracting;
+                                                              NOR=Tilleggsgebyrsprosent, underentrepenõr;
+                                                              SVE=TillÑggsavgiftsprocent, underentreprenad] }
+    { 1180;   ;Surcharge % Plant   ;Decimal       ;CaptionML=[ENU=Surcharge % Plant;
+                                                              NOR=Tilleggsgebyrsprosent, maskin;
+                                                              SVE=TillÑggsavgiftsprocent, Maskin] }
+    { 1190;   ;Surcharge % Sundry  ;Decimal       ;CaptionML=[ENU=Surcharge % Sundry;
+                                                              NOR=PÜslagssatser, diverse;
+                                                              SVE=TillÑggsavgiftsprocent, diverse] }
+    { 1200;   ;Summary Cost (RAW)  ;Option        ;CaptionML=ENU=Summary Cost (RAW);
+                                                   OptionCaptionML=ENU=Amount,Percentage (Order),Percentage (Detail);
+                                                   OptionString=Amount,Percentage (Order),Percentage (Detail) }
+    { 1205;   ;Percentage (Discount);Decimal      ;OnValidate=BEGIN
+                                                                CheckElementExists(FIELDNO("Percentage (Surcharge)"));
+                                                              END;
+
+                                                   CaptionML=ENU=Percentage (Discount);
+                                                   DecimalPlaces=0:5;
+                                                   BlankZero=Yes }
+    { 1210;   ;Percentage (Surcharge);Decimal     ;OnValidate=BEGIN
+                                                                CheckElementExists(FIELDNO("Percentage (Surcharge)"));
+                                                              END;
+
+                                                   CaptionML=[ENU=Percentage (Surcharge);
+                                                              NOR=Prosent (Tilleggsgebyr);
+                                                              SVE=Procent (tillÑggsavgift)];
+                                                   DecimalPlaces=0:5;
+                                                   BlankZero=Yes }
+    { 1211;   ;Percentage (Profit/Risk);Decimal   ;OnValidate=BEGIN
+                                                                CheckElementExists(FIELDNO("Percentage (Profit/Risk)"));
+                                                              END;
+
+                                                   CaptionML=[ENU=Percentage (Profit/Risk);
+                                                              NOR=Prosent (Fortjeneste/risk);
+                                                              SVE=Procent (vinst/risk)];
+                                                   DecimalPlaces=0:5;
+                                                   BlankZero=Yes }
+    { 1212;   ;Percentage (ExecutionCost);Decimal ;OnValidate=BEGIN
+                                                                CheckElementExists(FIELDNO("Percentage (ExecutionCost)"));
+                                                              END;
+
+                                                   CaptionML=ENU=Percentage (Execution Cost);
+                                                   DecimalPlaces=0:5;
+                                                   BlankZero=Yes }
+    { 1213;   ;Percentage (ContractorFee);Decimal ;OnValidate=BEGIN
+                                                                CheckElementExists(FIELDNO("Percentage (ContractorFee)"));
+                                                              END;
+
+                                                   CaptionML=ENU=Percentage (Contractor Fee);
+                                                   DecimalPlaces=0:5;
+                                                   BlankZero=Yes }
+    { 1220;   ;Apply Perc. (Discount);Boolean     ;CaptionML=ENU=Apply Percentage (Discount) }
+    { 1230;   ;Apply Perc. (Surcharge);Boolean    ;CaptionML=ENU=Apply Percentage (Surcharge) }
+    { 1231;   ;Apply Perc. (Profit/Risk);Boolean  ;CaptionML=ENU=Apply Percentage (Profit/Risk) }
+    { 1232;   ;Apply Perc. (ExecutionCost);Boolean;CaptionML=ENU=Apply Percentage (Execution Cost) }
+    { 1233;   ;Apply Perc. (ContractorFee);Boolean;CaptionML=ENU=Apply Percentage (Contractor Fee) }
+    { 1250;   ;Tender Paragraph Scheme;Code10     ;TableRelation="Tender Paragraph Scheme.";
+                                                   DataClassification=ToBeClassified;
+                                                   CaptionML=[ENU=Tender Paragraph Scheme;
+                                                              SVE=Anbudsstyckeschema] }
+    { 1251;   ;Quantity (Tender Paragraph);Decimal;DataClassification=ToBeClassified;
+                                                   CaptionML=[ENU=Quantity (Tender Paragraph);
+                                                              SVE=Antal (anbudsstycke)];
+                                                   DecimalPlaces=0:5;
+                                                   BlankZero=Yes }
+    { 1252;   ;Unit of Measure (Tender Par);Code10;TableRelation="Unit of Measure";
+                                                   DataClassification=ToBeClassified;
+                                                   CaptionML=[ENU=Unit of Measure (Tender Paragraph);
+                                                              SVE=Enhet (anbudsstycke)] }
+    { 1300;   ;Created from Source Type;Option    ;CaptionML=ENU=Created from Source Type;
+                                                   OptionCaptionML=ENU=Risk Line,Opportunity Line;
+                                                   OptionString=Risk Line,Opportunity Line;
+                                                   Editable=No }
+    { 1310;   ;Created from Schedule Date;Date    ;TableRelation="Risk Opportunity Schedule".Date WHERE (Source=CONST(Project),
+                                                                                                         Source Code=FIELD(Project No.));
+                                                   CaptionML=ENU=Created from Schedule Date;
+                                                   Editable=No }
+    { 1320;   ;Created from Line No.;Integer      ;TableRelation=IF (Created from Source Type=CONST(Risk Line)) "Risk Line"."Line No." WHERE (Source=CONST(Project),
+                                                                                                                                              Source Code=FIELD(Project No.),
+                                                                                                                                              Schedule Date=FIELD(Created from Schedule Date))
+                                                                                                                                              ELSE IF (Created from Source Type=CONST(Opportunity Line)) "Opportunity Line"."Line No." WHERE (Source=CONST(Project),
+                                                                                                                                                                                                                                              Source Code=FIELD(Project No.),
+                                                                                                                                                                                                                                              Schedule Date=FIELD(Created from Schedule Date));
+                                                   CaptionML=ENU=Created from Line No.;
+                                                   Editable=No }
+    { 1330;   ;Actual Costs Period ;Decimal       ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Job Ledger Entry"."Total Cost (LCY)" WHERE (Job No.=FIELD(Project No.),
+                                                                                                                Extension Contract=FIELD(Contract No.),
+                                                                                                                Entry Type=CONST(Usage),
+                                                                                                                Posting Date=FIELD(Period Filter)));
+                                                   CaptionML=[ENU=Actual Costs Period;
+                                                              SVE=Verklig kostnad period];
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 1340;   ;Received/Not Invoiced Period;Decimal;
+                                                   FieldClass=FlowField;
+                                                   CalcFormula=Sum("Purchase Order Control Line"."Amt. Rcd. Not Invoiced" WHERE (Project No.=FIELD(Project No.),
+                                                                                                                                 Extension Contract=FIELD(Contract No.),
+                                                                                                                                 Date=FIELD(Period Filter)));
+                                                   CaptionML=ENU=Received/Not Invoiced Period;
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 1350;   ;Open (Purchase) Period;Decimal     ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Purchase Order Control Line"."Outstanding Amount" WHERE (Project No.=FIELD(Project No.),
+                                                                                                                             Extension Contract=FIELD(Contract No.),
+                                                                                                                             Date=FIELD(Period Filter)));
+                                                   CaptionML=ENU=Open (Purchase) Period;
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 1360;   ;Open (Inventory) Period;Decimal    ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Item Journal Line".Amount WHERE (Job No.=FIELD(Project No.),
+                                                                                                     Extension Contract=FIELD(Contract No.),
+                                                                                                     Posting Date=FIELD(Period Filter)));
+                                                   CaptionML=ENU=Open (Inventory) Period;
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 1370;   ;Open Ovh. Srch. Firm (P.) Per.;Decimal;
+                                                   FieldClass=FlowField;
+                                                   CalcFormula=Sum("Purchase Order Control Line"."Overhead Surcharge Firm" WHERE (Project No.=FIELD(Project No.),
+                                                                                                                                  Extension Contract=FIELD(Contract No.),
+                                                                                                                                  Date=FIELD(Period Filter)));
+                                                   CaptionML=ENU=Open Ovh. Surch. Firm Commitments (Purchase) Period;
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 1380;   ;Open Ovh. Srch. Soft (P.) Per.;Decimal;
+                                                   FieldClass=FlowField;
+                                                   CalcFormula=Sum("Purchase Order Control Line"."Overhead Surcharge Soft" WHERE (Project No.=FIELD(Project No.),
+                                                                                                                                  Extension Contract=FIELD(Contract No.),
+                                                                                                                                  Date=FIELD(Period Filter)));
+                                                   CaptionML=ENU=Open Ovh. Surch. Soft Commitments (Purchase) Period;
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 1390;   ;Open Ovh. Srch. (Hours) Period;Decimal;
+                                                   FieldClass=FlowField;
+                                                   CalcFormula=Sum("Hour Accounting Surcharge"."Overhead Surcharge Project" WHERE (Project No.=FIELD(Project No.),
+                                                                                                                                   Extension Contract=FIELD(Contract No.),
+                                                                                                                                   Posting Date=FIELD(Period Filter)));
+                                                   CaptionML=ENU=Open Ovh. Surch. (Hours) Period;
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 1400;   ;Open Ovh. Srch. (Inv.) Period;Decimal;
+                                                   FieldClass=FlowField;
+                                                   CalcFormula=Sum("Item Journal Surcharge"."Overhead Surcharge Project" WHERE (Job No.=FIELD(Project No.),
+                                                                                                                                Extension Contract=FIELD(Contract No.),
+                                                                                                                                Posting Date=FIELD(Period Filter)));
+                                                   CaptionML=ENU=Open Ovh. Surch. (Inventory) Period;
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 1410;   ;Open Amount (Hours) Period;Decimal ;FieldClass=FlowField;
+                                                   CalcFormula=Sum("Hour Accounting Line"."Amount (LCY)" WHERE (Project No.=FIELD(Project No.),
+                                                                                                                Extension Contract=FIELD(Contract No.),
+                                                                                                                Posting Date=FIELD(Period Filter)));
+                                                   CaptionML=ENU=Open Amount (Hours) Period;
+                                                   Editable=No;
+                                                   AutoFormatType=1 }
+    { 1420;   ;Target Amount       ;Decimal       ;CaptionML=ENU=Target Amount }
+    { 11127975;;Export to Symbrio  ;Boolean       ;CaptionML=SVE=Exportera till Symbrio }
+    { 11128155;;Wage Component Type Filter;Option ;FieldClass=FlowFilter;
+                                                   CaptionML=SVE=Lînearttyp, filter;
+                                                   OptionCaptionML=SVE=Timmar,Dagar,Utgifter,Kostnadstimmar,TillÑgg;
+                                                   OptionString=Hours,Days,Expenses,Expense hours,Addition;
+                                                   Description=IME155 }
+    { 11128230;;Method Last Installment;Option    ;OnValidate=BEGIN
+                                                                // SESB.I022 KD 17.07.2013 >>
+                                                                IF "Method Last Installment" <> xRec."Method Last Installment" THEN
+                                                                  IF "Method Last Installment" = "Method Last Installment"::" " THEN BEGIN
+                                                                    "Withheld Perc. Final Installm." := 0;
+                                                                    "Withheld Perc. Contract Amount" := 0;
+                                                                  END;
+                                                                // SESB.I022 KD 17.07.2013 <<
+                                                              END;
+
+                                                   CaptionML=[ENU=Method Last Installment;
+                                                              NOR=Fakturametode;
+                                                              SVE=Slutfakturametod];
+                                                   OptionCaptionML=[ENU=" ,Depot,Guarantee,Final Installment";
+                                                                    NOR=" ,Depot,Garanti,Sluttfaktura";
+                                                                    SVE=" ,DepÜ,Garanti,Slutfaktura"];
+                                                   OptionString=[ ,Depot,Guarantee,Final Installment];
+                                                   Description=SESB.I022 }
+    { 11128231;;Withheld Perc. Final Installm.;Decimal;
+                                                   CaptionML=[ENU=Withheld Perc. Final Installment;
+                                                              NOR=Tilbakeholdt Prosent Sluttfaktura;
+                                                              SVE=InnehÜllet % slutfaktura];
+                                                   MinValue=0;
+                                                   MaxValue=100;
+                                                   Description=SESB.I022 }
+    { 11128232;;Withheld Perc. Contract Amount;Decimal;
+                                                   CaptionML=[ENU=Withheld Perc. Contract Amount;
+                                                              NOR=Tilbakeholdt Prosent Kontraktsbelõp;
+                                                              SVE=InnehÜllet % kontaktsbeloppp];
+                                                   MinValue=0;
+                                                   MaxValue=100;
+                                                   Description=SESB.I022 }
+    { 11128233;;Time Last Modified ;Time          ;CaptionML=[ENU=Time Last Modified;
+                                                              NOR=Tidspunkt for sist endring;
+                                                              SVE=Tid senast Ñndrad] }
+    { 11128234;;Extension Category ;Code10        ;TableRelation="Extension Category"."Extension Category";
+                                                   CaptionML=[ENU=Extension Category;
+                                                              SVE=éTA-kategori] }
+    { 11128235;;Internal Reference ;Code20        ;CaptionML=[ENU=Internal Reference;
+                                                              SVE=Intern referens] }
+    { 11128236;;E-Mail Status      ;Option        ;OnValidate=VAR
+                                                                LText01@111280000 : TextConst 'ENU=Do you want to put the reports in the E-mail queue?;SVE=Vill du lÑgga rapporterna i e-postkîn?';
+                                                                EmailQueueManagement@111280003 : Codeunit 11128122;
+                                                                RecRef@111280002 : RecordRef;
+                                                                I@111280001 : Integer;
+                                                              BEGIN
+                                                                // 190303 ORANGO.LP
+                                                                IF GUIALLOWED THEN BEGIN
+                                                                  IF CONFIRM(LText01, FALSE) THEN BEGIN
+                                                                //    IF Reports.FINDSET THEN
+                                                                //    REPEAT
+                                                                //      IF Reports."E-mail" <> '' THEN BEGIN
+                                                                //        RecRef.GETTABLE(Reports);
+                                                                //        EmailQueueManagement.InsertQueueEntry(RecRef, TRUE);
+                                                                //      END;
+                                                                //    UNTIL Reports.NEXT = 0;
+                                                                  END;
+
+                                                                END ELSE BEGIN
+                                                                END;
+                                                              END;
+
+                                                   DataClassification=ToBeClassified;
+                                                   CaptionML=[ENU=E-Mail Status;
+                                                              SVE=E-poststatus];
+                                                   OptionCaptionML=[ENU=Not Sent,Ready to Send,Sent;
+                                                                    SVE=Ej skickat,Klar att skickas,Skickat];
+                                                   OptionString=Not Sent,Ready to Send,Sent }
+    { 11128237;;Project Manager    ;Code20        ;TableRelation=Employee;
+                                                   DataClassification=ToBeClassified;
+                                                   CaptionML=[ENU=Project Manager;
+                                                              NOR=Prosjektleder;
+                                                              SVE=Platschef] }
+    { 11128238;;Name Project Manager;Text100      ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup(Employee."Full Name" WHERE (No.=FIELD(Project Manager)));
+                                                   CaptionML=[ENU=Name Project Manager;
+                                                              NOR=Prosjektlederens navn;
+                                                              SVE=Platschef namn];
+                                                   Editable=No }
+    { 11128239;;Salesperson Code   ;Code20        ;TableRelation=Salesperson/Purchaser;
+                                                   OnValidate=BEGIN
+                                                                //**4PS
+                                                                //IF CurrFieldNo <> 0 THEN
+                                                                 // CALCFIELDS("Salesperson Name");
+                                                              END;
+
+                                                   DataClassification=ToBeClassified;
+                                                   CaptionML=[ENU=Salesperson Code;
+                                                              NOR=Selgerkode;
+                                                              SVE=SÑljarkod] }
+    { 11128240;;Salesperson Name   ;Text50        ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup(Salesperson/Purchaser.Name WHERE (Code=FIELD(Salesperson Code)));
+                                                   CaptionML=[ENU=Salesperson Name;
+                                                              NOR=Navn pÜ selger;
+                                                              SVE=SÑljarnamn];
+                                                   Editable=No }
+  }
+  KEYS
+  {
+    {    ;Project No.,Contract No.                ;Clustered=Yes }
+    {    ;Project No.,Principal,Status,Version Date;
+                                                   SumIndexFields=Contract Amount (LCY),Offered Amount }
+    {    ;Contract Serial No.                      }
+    {    ;Main Project No.,Project No.,Status,Treat like Order,Version Date;
+                                                   SumIndexFields=Contract Amount (LCY),Offered Amount,Expected Contract Amount }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+    VAR
+      Text000@11012004 : TextConst 'ENU=Modify Project not Allowed;NOR=Det er ikke tillatt Ü endre prosjektet;SVE=Det inte tillÜtet att Ñndra projektet';
+      Text001@11012005 : TextConst 'ENU=Project Installments generated. Change them manually.;NOR=Prosjektavdrag er Generert. Endre dem manuelt.;SVE=Projektavbetalningar har genererats. éndra dem manuellt.';
+      BudgetRec@11012000 : Record 11012001;
+      Text002@1100528500 : TextConst 'ENU="Default %1 can not be determined, first free nuber (%2) is longer than max. field lenght (%3) "';
+      Text003@1210190000 : TextConst 'ENU=Status not allowed, there are sales invoices (or credit memos) present for Project %1, Extension %2.;NOR=Ikke tillatt status, det finnes Salgsfakturaer (eller kreditnotaer) for prosjektet %1, ETA %2.;SVE=Ej tillÜten status, det finns sÑljfakturor (eller kreditnotor) fîr projektet %1, éTA %2.';
+      Text004@1210190001 : TextConst 'ENU=Status not allowed, there are posted sales invoices (or credit memos) present for Project %1, Extension %2.;NOR=Ikke tillatt status, det finnes bokfõrte salgsfakturaer (eller kreditnotaer) for prosjektet %1, ETA %2.;SVE=Ej tillÜten status, det finns bokfîrda sÑljfakturor (eller kreditnotor) fîr projektet %1, éTA %2.';
+      JobSetUp@1210190002 : Record 315;
+      ProjRec@1210190006 : Record 11072003;
+      BudgetSummarysheetRec@1210190010 : Record 11012064;
+      NoSeriesMgt@1210190003 : Codeunit 396;
+      Text006@1210190009 : TextConst 'ENU=Process stopped;NOR=Prosessen har stoppet;SVE=Processen har stannat';
+      Text007@1210190008 : TextConst 'ENU="Installments already invoiced; Process stopped";NOR="Betalingsplaner er allerede fakturert; Prosess stoppet.";SVE=Betalplaner har redan fakturerats. Processen har stoppats';
+      Text008@1210190007 : TextConst 'ENU="Installments present; continue ?";NOR=Betalingsplaner finnes, fortsette?;SVE=Betalplaner finns, fortsÑtta?';
+      Text009@1100485000 : TextConst 'ENU=You have no permission to change %1;NOR=Du mangler tillatelse til Ü endre %1;SVE=Du saknar behîrighet att Ñndra %1';
+      Text010@1100485001 : TextConst 'ENU=''%1'' not allowed on Project with %2;NOR=%1'' er ikke tillatt for prosjekt med %2;SVE=''%1'' Ñr inte tillÜtet fîr projekt med %2';
+      DPA_Management@1100000999 : Codeunit 11012783;
+      DeleteCompleteProject@1210190004 : Boolean;
+      ProjectSiteMgt@1100528300 : Codeunit 11012282;
+      Text011@1100525000 : TextConst 'ENU="Project Ledger Entries present; Process stopped"';
+      TmpEst@1100528000 : TEMPORARY Record 11012151;
+      TmpSubEst@1100528001 : TEMPORARY Record 11072074;
+      "*** 4PSSE *"@1100285502 : Integer;
+      SymbrioSetup@1100285503 : Record 11127975;
+      Text011b@1100285504 : TextConst 'ENU=Extension Contract number can only contain 4 characters for export to Symbrio.;NOR=Kontraktsnummer kan kun inneholde 4 tegn for eksport til Symbrio.;SVE=Kontraktsnumret fÜr maximalt innehÜlla 4 tecken vid export to Symbrio.';
+      Text012b@1100285505 : TextConst 'ENU=Extension Contract number can only contain numbers for export to Symbrio.;NOR=Kontraktsnummer kan kun inneholde tall for eksport til Symbrio.;SVE=Kontraktsnumret kan bara innehÜlla siffror fîr export till Symbrio.';
+      SkipValidateFCY@1100525002 : Boolean;
+      ProjectCurrencyExchangeRate@1100525003 : Record 11020628;
+      Text099a@1100529900 : TextConst 'ENU=Replace Summary Sheet #1######### by #2#########';
+      Text012@1100529600 : TextConst 'ENU=%1 must be %2 or %3.;NOR=%1 mÜ vëre %2 eller %3.;SVE=%1 mÜste vara %2 eller %3.';
+      Text013@1100527001 : TextConst 'ENU=Project %1, Contract No. %2\More installments available\Which ones to set chargable?';
+      Text014@1100527000 : TextConst 'ENU=None,Only the First, All Installments;NOR=Kun den fõrste,Alle betalingsplaner;SVE=Endast fîrsta,Alla betalplaner';
+      Text11012075@1100528900 : TextConst 'ENU=Add Settlement Sheet ?;NOR=Legge til oppgjõrsskjema?;SVE=LÑgga till avrÑkningsark?';
+      Text021@1100525007 : TextConst 'ENU="Contract amount = 0";NOR="Kontraktsbelõp = 0";SVE="Kontraktsbelopp = 0"';
+      Text022@1100525006 : TextConst 'ENU=Generete Installment needs to be TRUE;NOR=Opprette betalingsplan mÜ vëre SANN;SVE=Skapa betalplan mÜste vara SANN';
+      Text023@1100525005 : TextConst 'ENU=Installment Scheme is empty;NOR=Betalingsplan mangler;SVE=Betalplan saknas';
+      Text024@1100525004 : TextConst 'ENU=for Project %1, Contract No. %2;NOR=for prosjekt %1, Kontraktsnr %2;SVE=fîr Projekt %1, Kontraktsnr %2';
+      FPSLicenseManagement@1100527400 : Codeunit 11229289;
+      InstallmentsSelections@1100528501 : Integer;
+      Text025@1100525008 : TextConst 'ENU=Project %1, Contract No. %2\Cost Object is not filled in on every line';
+      Text026@1100527354 : TextConst 'ENU=Plant Location ''%1'' is already present in Company ''%2'', with %3 ''%4'', %5 ''%6'' and %7 ''%8''.';
+      Text027@1100527353 : TextConst 'ENU=Create a Plant Location of Project ''%1'', %2 ''%3''. %4 is ''%5'', are you sure?';
+      Text028@1100527352 : TextConst 'ENU=Do you want to create a Plant Location of Project ''%1'', %2 ''%3''?';
+      Text029@1100527351 : TextConst 'ENU=Plant Location ''%1'' is created in plant company ''%2''.;SVE=Lagerplats ''%1'' Ñr skapad i Maskinsfîretag ''%2''.';
+      Text030@1100527350 : TextConst 'ENU=Plant Location ''%1'' is created in %2 plant companies.;SVE=Lagerplats ''%1'' Ñr skapad i %2 Maskinsfîretag.';
+
+    PROCEDURE AssistEdit@2(OldContract@1000 : Record 11012004) : Boolean;
+    VAR
+      NewContract@1210190000 : Record 11012004;
+    BEGIN
+      WITH NewContract DO BEGIN
+        NewContract := Rec;
+        JobSetUp.GET;
+        JobSetUp.TESTFIELD("Extension Contract Nos.");
+        IF NoSeriesMgt.SelectSeries(JobSetUp."Extension Contract Nos.",
+          JobSetUp."Extension Contract Nos.",JobSetUp."Extension Contract Nos.") THEN
+        BEGIN
+          JobSetUp.GET;
+          JobSetUp.TESTFIELD("Extension Contract Nos.");
+          NoSeriesMgt.SetSeries("Contract Serial No.");
+          Rec := NewContract;
+          EXIT(TRUE);
+        END;
+      END;
+    END;
+
+    PROCEDURE CalculateAllowed@6(VAR AllowedAmount@11012000 : Decimal;VAR AllowedHours@11012001 : Decimal;VAR PrevAllowedAmount@11012002 : Decimal;VAR PrevAllowedHours@11012003 : Decimal);
+    VAR
+      CostObjCostContrRec@11012004 : Record 11020223;
+      FiltGroup@11012005 : Integer;
+      lAllowAmnt@11012006 : Decimal;
+      lAllowedHours@11012007 : Decimal;
+      lPrecAllowAmnt@11012008 : Decimal;
+      lPrevAllowHours@11012009 : Decimal;
+    BEGIN
+      AllowedAmount := 0;
+      AllowedHours := 0;
+      PrevAllowedAmount := 0;
+      PrevAllowedHours := 0;
+
+      CostObjCostContrRec.RESET;
+      CostObjCostContrRec.SETRANGE("Project No.","Project No.");
+      CostObjCostContrRec.SETRANGE("Extension Contract", "Contract No.");
+      FOR FiltGroup := 0 TO 4 DO BEGIN
+        FILTERGROUP(FiltGroup);
+        CostObjCostContrRec.FILTERGROUP(FiltGroup);
+        CostObjCostContrRec.SETFILTER("Progress Filter",GETFILTER("Progress Filter"));
+        CostObjCostContrRec.SETFILTER("Period Filter",GETFILTER("Period Filter"));
+        CostObjCostContrRec.SETFILTER("Cumulation Filter",GETFILTER("Cumulation Filter"));
+        CostObjCostContrRec.SETFILTER(PrevProgressFilter,GETFILTER(PrevProgressFilter));
+      END;
+      FILTERGROUP(0);
+      CostObjCostContrRec.FILTERGROUP(0);
+
+      IF CostObjCostContrRec.FIND('-') THEN
+        REPEAT
+          CostObjCostContrRec.CalculateAllowed(lAllowAmnt,lAllowedHours,lPrecAllowAmnt,lPrevAllowHours);
+          AllowedAmount += lAllowAmnt;
+          AllowedHours += lAllowedHours;
+          PrevAllowedAmount += lPrecAllowAmnt;
+          PrevAllowedHours += lPrevAllowHours;
+        UNTIL CostObjCostContrRec.NEXT = 0;
+    END;
+
+    PROCEDURE AddPrincipalToTenderParagraphs@1100485000();
+    VAR
+      TenderParagraphByPrincipal@1100485000 : Record 11012470;
+      TenderParagraphByPrincipal2@1100485001 : Record 11012470;
+    BEGIN
+      //because Principal is part of the key, this can take a long time!
+      TenderParagraphByPrincipal.SETFILTER("Project No.","Project No.");
+      TenderParagraphByPrincipal.SETFILTER("Contract No.","Contract No.");
+      TenderParagraphByPrincipal.SETFILTER(Principal,'<>%1',Principal);
+      IF TenderParagraphByPrincipal.FINDSET(TRUE,TRUE) THEN
+        REPEAT
+          TenderParagraphByPrincipal2 := TenderParagraphByPrincipal;
+          TenderParagraphByPrincipal2.RENAME(
+            "Project No.",Principal,"Contract No.",TenderParagraphByPrincipal."No.");
+        UNTIL TenderParagraphByPrincipal.NEXT = 0;
+    END;
+
+    PROCEDURE CheckProjStatus@1100485001();
+    BEGIN
+      JobSetUp.GET;
+      IF ProjRec.GET("Project No.") THEN
+        IF (JobSetUp."Provisions at Closure") THEN
+          ProjRec.CheckProjectStatus(-1)
+        ELSE
+          ProjRec.CheckProjectStatus(0);
+    END;
+
+    PROCEDURE SetDeleteCompleteProject@1210190000();
+    BEGIN
+      DeleteCompleteProject := TRUE;
+    END;
+
+    PROCEDURE UpdateBudgetVersionDate@1210190001();
+    BEGIN
+      BudgetRec.RESET;
+      BudgetRec.SETRANGE("Project No.","Project No.");
+      BudgetRec.SETRANGE(Adjustment,'');
+      BudgetRec.SETRANGE(Option,'');
+      BudgetRec.SETRANGE("Extension Contract","Contract No.");
+      BudgetRec.SETFILTER("Version Date",'<> %1',"Version Date");
+      IF BudgetRec.FINDSET(TRUE, FALSE) THEN
+        REPEAT
+          BudgetRec."Version Date" := "Version Date";
+          BudgetRec.MODIFY;
+        UNTIL BudgetRec.NEXT = 0;
+
+      BudgetSummarysheetRec.RESET;
+      BudgetSummarysheetRec.SETRANGE("Project No.","Project No.");
+      BudgetSummarysheetRec.SETRANGE(Option,'');
+      BudgetSummarysheetRec.SETRANGE("Contract No.","Contract No.");
+      BudgetSummarysheetRec.SETFILTER("Version Date",'<> %1',"Version Date");
+      BudgetSummarysheetRec.MODIFYALL("Version Date","Version Date",TRUE);
+    END;
+
+    PROCEDURE DPA_GetFieldNoDepartmentFilter@1100000993() : Integer;
+    BEGIN
+      //**4PS Generated Code - Do Not Change
+      EXIT(0);
+    END;
+
+    PROCEDURE DPA_GetFiltersFltrGrp@1100000997(FilterGroupNo@1100525000 : Integer) FilterText : Text[250];
+    BEGIN
+      //**4PS Generated Code - Do Not Change
+      FILTERGROUP(FilterGroupNo);
+      FilterText := COPYSTR(GETFILTERS, 1, MAXSTRLEN(FilterText));
+      FILTERGROUP(0);
+    END;
+
+    PROCEDURE DPA_SetFilters@1100000998(Context@1100525000 : Text[30]) : Boolean;
+    VAR
+      RecRef@1100525003 : RecordRef;
+      i@1100525004 : Integer;
+    BEGIN
+      //**4PS Generated Code - Do Not Change
+      IF NOT DPA_IsActive THEN
+        EXIT;
+
+      RecRef.GETTABLE(Rec);
+      DPA_Management.SetDPAFilterFromContext(
+        RecRef,
+        Context,
+        DPA_GetFieldNoDepartmentCode,
+        DPA_GetFieldNoDepartmentFilter );
+
+      FOR i := 10 DOWNTO 0 DO BEGIN
+        RecRef.FILTERGROUP(i);
+        FILTERGROUP(i);
+        SETVIEW(RecRef.GETVIEW(FALSE));
+      END;
+
+      EXIT(DPA_Management.IsHardFilter);
+    END;
+
+    LOCAL PROCEDURE DPA_IsActive@1100000999() : Boolean;
+    VAR
+      DepartmentAuthorizObject@1100526000 : Record 11012466;
+    BEGIN
+      //**4PS Generated Code - Do Not Change
+      IF NOT FPSLicenseManagement.LicenseAndReadPermissionForTable(DepartmentAuthorizObject) THEN
+        EXIT(FALSE);
+
+      IF NOT DPA_Management.AuthorizationActive THEN
+        EXIT(FALSE);
+
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE DPA_FindRecWithDPAFilterAppld@1100000989();
+    BEGIN
+      //**4PS Generated Code - Do Not Change
+      IF NOT DPA_IsActive THEN BEGIN
+        FIND;
+        EXIT;
+      END;
+
+      IF NOT DPA_Management.HasTableHardFilter(11012004) THEN BEGIN
+        FIND;
+        EXIT;
+      END;
+
+      DPA_SetFilters('Table 11012004');
+      IF NOT FIND THEN
+        DPA_Management.RaiseDPAErrorForTable(TABLECAPTION);
+    END;
+
+    PROCEDURE DPA_ChkDepartmentCodeAllowed@1100000990(IsHardFilter@1100526000 : Boolean);
+    VAR
+      DimensionManagement@1100526001 : Codeunit 408;
+    BEGIN
+      //**4PS Generated Code - Do Not Change
+      DimensionManagement.CheckDepartmAuthWithFilterType(
+        DATABASE::"Extension Contract", "Department Code", IsHardFilter);
+    END;
+
+    PROCEDURE DPA_GetFieldNoDepartmentCode@1100000994() : Integer;
+    BEGIN
+      //**4PS Generated Code - Do Not Change
+      EXIT(FIELDNO("Department Code"));
+    END;
+
+    PROCEDURE DPA_SetDefaultDepartment@1100000996();
+    BEGIN
+      //**4PS Generated Code - Do Not Change
+      IF NOT DPA_IsActive THEN
+        EXIT;
+
+      DPA_Management.SetDepartmentCodeUser(TABLENAME, "Department Code");
+    END;
+
+    PROCEDURE EditDocuments@1100528702(ContactNo@1210190003 : Code[20];ContactPersonNo@1210190004 : Code[20];SendMail@1210190002 : Boolean;Recipient@1100528700 : Text[120]);
+    VAR
+      Job@1210190005 : Record 11072003;
+      DocumentTemplate@1210190001 : Record 11012401;
+      DocumentMailing@1210190000 : Codeunit 11012278;
+      RecRef@1100525000 : RecordRef;
+      DocumentLinkRIDs@1100525001 : ARRAY [5] OF RecordID;
+    BEGIN
+      RecRef.GETTABLE(Rec);
+      DocumentLinkRIDs[1] := RecRef.RECORDID;
+
+      IF Job.GET("Project No.") THEN BEGIN
+        RecRef.GETTABLE(Job);
+        DocumentLinkRIDs[2] := RecRef.RECORDID;
+      END;
+
+      DocumentMailing.EditDocuments(
+        STRSUBSTNO('%1', DocumentTemplate.Type::"Extension Contract"), DocumentLinkRIDs,
+        "Department Code", ContactNo, ContactPersonNo, SendMail, Recipient);
+    END;
+
+    PROCEDURE ShowEstimate@1210190012();
+    VAR
+      EstRec@1210190001 : Record 11012151;
+    BEGIN
+      GetEstimate;
+      IF TmpEst.FINDSET THEN BEGIN
+        REPEAT
+          IF EstRec.GET(TmpEst."No.") THEN
+            EstRec.MARK(TRUE);
+        UNTIL TmpEst.NEXT = 0
+      END;
+      EstRec.MARKEDONLY(TRUE);
+
+      PAGE.RUN(0, EstRec);
+    END;
+
+    PROCEDURE GetEstimate@1210190010() : Code[20];
+    VAR
+      EstRec@1210190000 : Record 11012151;
+      SubEstRec@1210190001 : Record 11072074;
+      NumEst@1210190004 : Integer;
+    BEGIN
+      NumEst := 0;
+      IF ("Project No." = '') OR ("Contract No." = '') THEN EXIT('');
+
+      IF FPSLicenseManagement.LicenseAndReadPermissionForTable(EstRec) THEN BEGIN
+        TmpEst.RESET;
+        TmpEst.DELETEALL;
+
+        EstRec.SETCURRENTKEY("Project No.");
+        EstRec.SETRANGE("Project No.", "Project No.");
+        EstRec.SETRANGE("Extension Contract", "Contract No.");
+        IF EstRec.FINDSET THEN BEGIN
+          REPEAT
+            IF NOT TmpEst.GET(EstRec."No.") THEN BEGIN
+              TmpEst."No." := EstRec."No.";
+              TmpEst.INSERT;
+            END;
+          UNTIL EstRec.NEXT = 0;
+        END;
+
+        SubEstRec.SETCURRENTKEY("Project No.");
+        SubEstRec.SETRANGE("Project No.", "Project No.");
+        SubEstRec.SETRANGE("Extension Contract", "Contract No.");
+        IF SubEstRec.FINDSET THEN BEGIN
+          REPEAT
+            IF NOT TmpEst.GET(SubEstRec."Estimate No.") THEN BEGIN
+              TmpEst."No." := SubEstRec."Estimate No.";
+              TmpEst.INSERT;
+            END;
+          UNTIL SubEstRec.NEXT = 0;
+        END;
+        IF TmpEst.FINDFIRST THEN
+          NumEst := TmpEst.COUNT;
+      END;
+
+      IF NumEst = 0 THEN
+        EXIT('');
+
+      IF NumEst = 1 THEN
+        EXIT(TmpEst."No.");
+
+      IF NumEst > 1 THEN
+        EXIT(STRSUBSTNO('[%1]', NumEst));
+    END;
+
+    PROCEDURE ShowSubEstimate@1100525002();
+    VAR
+      SubEstRec@1210190001 : Record 11072074;
+    BEGIN
+      GetSubEstimate;
+      IF TmpSubEst.FINDSET THEN BEGIN
+        REPEAT
+          IF SubEstRec.GET(TmpSubEst."Estimate No.", TmpSubEst."Sub-Estimate No.") THEN
+            SubEstRec.MARK(TRUE);
+        UNTIL TmpSubEst.NEXT = 0
+      END;
+      SubEstRec.MARKEDONLY(TRUE);
+
+      PAGE.RUN(0, SubEstRec);
+    END;
+
+    PROCEDURE GetSubEstimate@1100525000() : Code[20];
+    VAR
+      EstRec@1100525000 : Record 11012151;
+      SubEstRec@1210190001 : Record 11072074;
+      NumSubEst@1210190004 : Integer;
+    BEGIN
+      NumSubEst := 0;
+      IF ("Project No." = '') OR ("Contract No." = '') THEN EXIT('');
+
+      IF FPSLicenseManagement.LicenseAndReadPermissionForTable(EstRec) THEN BEGIN
+        TmpSubEst.RESET;
+        TmpSubEst.DELETEALL;
+
+        SubEstRec.SETCURRENTKEY("Project No.");
+        SubEstRec.SETRANGE("Project No.", "Project No.");
+        SubEstRec.SETRANGE("Extension Contract", "Contract No.");
+        IF SubEstRec.FINDSET THEN BEGIN
+          REPEAT
+            IF NOT TmpSubEst.GET(SubEstRec."Estimate No.", SubEstRec."Sub-Estimate No.") THEN BEGIN
+              TmpSubEst."Estimate No." := SubEstRec."Estimate No.";
+              TmpSubEst."Sub-Estimate No." := SubEstRec."Sub-Estimate No.";
+              TmpSubEst.INSERT;
+            END;
+          UNTIL SubEstRec.NEXT = 0;
+        END;
+        IF TmpSubEst.FINDFIRST THEN
+          NumSubEst := TmpSubEst.COUNT;
+      END;
+
+      IF NumSubEst = 0 THEN
+        EXIT('');
+
+      IF NumSubEst = 1 THEN
+        EXIT(TmpSubEst."Sub-Estimate No.");
+
+      IF NumSubEst > 1 THEN
+        EXIT(STRSUBSTNO('[%1]', NumSubEst));
+    END;
+
+    LOCAL PROCEDURE CheckSwitchSummary@1100525001();
+    VAR
+      SummarySheetLine@1100525000 : Record 11012064;
+      StatusDialog@1100529900 : Dialog;
+    BEGIN
+      ProjRec.GET("Project No.");
+      IF ProjRec."Summary Sheet Contract 2" = '' THEN
+        EXIT;
+      IF ((Status = Status::Order) OR (Status = Status::"Invoicing Allowed")) AND
+         ((xRec.Status = Status::Applied) OR (xRec.Status = Status::Offered)) THEN BEGIN
+        IF ProjRec."Summary Sheet Contract 2" <> '' THEN BEGIN
+          StatusDialog.OPEN(Text099a);
+          StatusDialog.UPDATE(1, ProjRec."Summary Sheet Contract");
+          StatusDialog.UPDATE(2, ProjRec."Summary Sheet Contract 2");
+          SummarySheetLine.SETRANGE("Project No.", "Project No.");
+          SummarySheetLine.SETRANGE("Contract No.", "Contract No.");
+          SummarySheetLine.SETFILTER("Plot No.", '%1', '');
+          SummarySheetLine.SETFILTER(Option, '%1', '');
+          SummarySheetLine.DELETEALL;
+          SummarySheetLine.CopyTemplate2(ProjRec."Summary Sheet Contract 2", "Project No.", "Contract No.", '', '', '', '', '', '');
+          IF SummarySheetLine.FIND('-') THEN BEGIN
+            SummarySheetLine.ReCalcSummaryLines('');
+            SummarySheetLine.UpdateBudgetLines(TRUE, '');
+          END;
+          StatusDialog.CLOSE;
+        END;
+      END;
+      IF ((Status = Status::Applied) OR (Status = Status::Offered)) AND
+         ((xRec.Status = Status::Order) OR (xRec.Status = Status::"Invoicing Allowed")) THEN BEGIN
+        IF (ProjRec."Summary Sheet Contract" <> '') THEN BEGIN
+          StatusDialog.OPEN(Text099a);
+          StatusDialog.UPDATE(1, ProjRec."Summary Sheet Contract 2");
+          StatusDialog.UPDATE(2, ProjRec."Summary Sheet Contract");
+          SummarySheetLine.SETRANGE("Project No.", "Project No.");
+          SummarySheetLine.SETRANGE("Contract No.", "Contract No.");
+          SummarySheetLine.SETFILTER("Plot No.", '%1', '');
+          SummarySheetLine.SETFILTER(Option, '%1', '');
+          SummarySheetLine.DELETEALL;
+          SummarySheetLine.CopyTemplate2(ProjRec."Summary Sheet Contract", "Project No.", "Contract No.", '', '', '', '', '', '');
+          IF SummarySheetLine.FIND('-') THEN BEGIN
+            SummarySheetLine.ReCalcSummaryLines('');
+            SummarySheetLine.UpdateBudgetLines(TRUE, '');
+          END;
+          StatusDialog.CLOSE;
+        END;
+      END;
+    END;
+
+    PROCEDURE SetSkipValidateFCY@1100528603(ISkipValidateFCY@1100528600 : Boolean);
+    BEGIN
+      SkipValidateFCY := ISkipValidateFCY;
+    END;
+
+    LOCAL PROCEDURE GetCurrencyDate@1100525006() CurrencyDate : Date;
+    BEGIN
+      CurrencyDate := "Contract Date";
+      IF (CurrencyDate = 0D) THEN
+        CurrencyDate := TODAY;
+      EXIT(CurrencyDate);
+    END;
+
+    LOCAL PROCEDURE CalcExpectedContractAmount@1100529600();
+    BEGIN
+      "Expected Contract Amount" := 0;
+
+      CASE Status OF
+        Status::Applied:
+          IF "Treat like Order" THEN
+            "Expected Contract Amount" := "Estimated Amount";
+        Status::Offered:
+          IF "Treat like Order" THEN
+            "Expected Contract Amount" := "Offered Amount";
+        Status::Order, Status::"Invoicing Allowed":
+          "Expected Contract Amount" := "Contract Amount (LCY)";
+      END;
+    END;
+
+    PROCEDURE GetDefaultContract@1100529701();
+    VAR
+      ResultIncr@1100525000 : Text;
+      ExtensionContract@1100529702 : Record 11012004;
+      ExtensionContract2@1100529701 : Record 11012004;
+      ProjectPrincipal@1100529700 : Record 11012005;
+    BEGIN
+      IF "Project No." <> '' THEN BEGIN
+        ExtensionContract.SETRANGE("Project No.","Project No.");
+        IF ExtensionContract.FINDLAST THEN BEGIN
+          ResultIncr := INCSTR(ExtensionContract."Contract No.");
+          IF STRLEN(ResultIncr) = 0 THEN BEGIN
+            ResultIncr := ExtensionContract."Contract No." + '1';
+          END;
+          IF STRLEN(ResultIncr) > MAXSTRLEN("Contract No.") THEN BEGIN
+            "Contract No." := '';
+            MESSAGE(Text002, FIELDCAPTION("Contract No."), ResultIncr, MAXSTRLEN("Contract No."));
+          END ELSE BEGIN
+            "Contract No." := ResultIncr;
+            IF ExtensionContract2.GET("Project No.", "Contract No.") THEN BEGIN
+              "Contract No." := '';
+              IF ExtensionContract.FINDSET THEN
+                REPEAT
+                  IF ExtensionContract."Contract No." > "Contract No." THEN
+                    "Contract No." := ExtensionContract."Contract No.";
+                UNTIL ExtensionContract.NEXT = 0;
+              ResultIncr := INCSTR(ExtensionContract."Contract No.");
+              IF STRLEN(ResultIncr) > MAXSTRLEN("Contract No.") THEN BEGIN
+                "Contract No." := '';
+                MESSAGE(Text002, FIELDCAPTION("Contract No."), ResultIncr, MAXSTRLEN("Contract No."));
+              END ELSE BEGIN
+                "Contract No." := ResultIncr;
+                IF ExtensionContract2.GET("Project No.", "Contract No.") THEN
+                  "Contract No." := '';
+              END;
+            END;
+          END;
+        END ELSE
+          //>>IME273
+          IF SymbrioSetup.GET THEN
+           "Contract No." := '0001'
+          //<<IME273
+          ELSE
+          "Contract No." := '001'; //Use 001 in stead of 1 for SQL.
+
+        ProjectPrincipal.RESET;
+        ProjectPrincipal.SETRANGE("Project No.", "Project No.");
+        IF ProjectPrincipal.COUNT = 1 THEN BEGIN
+          ProjectPrincipal.FINDFIRST;
+          //This will reset the xRec.Principal for a New Record
+          IF (xRec.Principal <> '') AND (Rec.Principal = '')  THEN BEGIN
+            VALIDATE(Principal);
+            xRec.Principal := '';
+          END;
+          VALIDATE(Principal, ProjectPrincipal.Principal);
+        END;
+      END;
+    END;
+
+    PROCEDURE CreateExtensionContract@1100529700(ProjectNo@1100529704 : Code[20];CreatedFrom@1100529703 : Option;ScheduleDate@1100529702 : Date;LineNo@1100529701 : Integer;Descr@1100529700 : Text);
+    VAR
+      ExtensionContract@1100529705 : Record 11012004;
+    BEGIN
+      ExtensionContract."Contract No." := '';
+      ExtensionContract.VALIDATE("Project No.", ProjectNo);
+      ExtensionContract."Created from Source Type" := CreatedFrom;
+      ExtensionContract."Created from Schedule Date" := ScheduleDate;
+      ExtensionContract."Created from Line No." := LineNo;
+      ExtensionContract.Description := COPYSTR(Descr, 1, MAXSTRLEN(ExtensionContract.Description));
+      ExtensionContract.GetDefaultContract;
+      ExtensionContract.INSERT(TRUE);
+      COMMIT;
+
+      PAGE.RUNMODAL(PAGE::"Extension Contract", ExtensionContract);
+    END;
+
+    PROCEDURE CheckElementExists@1100525012(FieldNo@1100525000 : Integer);
+    VAR
+      TenderParagraphbyPrincipal@1100525002 : Record 11012470;
+    BEGIN
+      CASE FieldNo OF
+        Rec.FIELDNO("Percentage (Discount)"):
+          TenderParagraphbyPrincipal.CheckElementExists(TenderParagraphbyPrincipal.FIELDNO("Percentage (Discount)"), "Project No.", Principal, "Contract No.");
+        Rec.FIELDNO("Percentage (Surcharge)"):
+          TenderParagraphbyPrincipal.CheckElementExists(TenderParagraphbyPrincipal.FIELDNO("Percentage (Surcharge)"), "Project No.", Principal, "Contract No.");
+        Rec.FIELDNO("Percentage (Profit/Risk)"):
+          TenderParagraphbyPrincipal.CheckElementExists(TenderParagraphbyPrincipal.FIELDNO("Percentage (Profit/Risk)"), "Project No.", Principal, "Contract No.");
+        Rec.FIELDNO("Percentage (ExecutionCost)"):
+          TenderParagraphbyPrincipal.CheckElementExists(TenderParagraphbyPrincipal.FIELDNO("Percentage (ExecutionCost)"), "Project No.", Principal, "Contract No.");
+        Rec.FIELDNO("Percentage (ContractorFee)"):
+          TenderParagraphbyPrincipal.CheckElementExists(TenderParagraphbyPrincipal.FIELDNO("Percentage (ContractorFee)"), "Project No.", Principal, "Contract No.");
+      END;
+    END;
+
+    PROCEDURE ActivateSettlementSheet@1100528900();
+    VAR
+      Job@1100528902 : Record 11072003;
+      SettlementSheet@1100528900 : Record 11012021;
+      Counter@1100528901 : Integer;
+    BEGIN
+      TESTFIELD(Principal);
+
+      SettlementSheet.RESET;
+      SettlementSheet.SETRANGE("Project No.", "Project No.");
+      SettlementSheet.SETRANGE(Principal, Principal);
+      Counter := SettlementSheet.COUNT;
+      IF Counter > 0 THEN BEGIN
+        PAGE.RUNMODAL(PAGE::"Settlement Sheet List", SettlementSheet);
+      END ELSE BEGIN
+        IF Counter = 0 THEN BEGIN
+          IF CONFIRM(Text11012075,TRUE) THEN BEGIN
+            Job.GET("Project No.");
+            Job.InsertSettlementSheet(Principal);
+            COMMIT;
+            IF SettlementSheet.FINDFIRST THEN
+              PAGE.RUNMODAL(PAGE::"Settlement Sheet List", SettlementSheet);
+          END;
+        END;
+      END;
+    END;
+
+    PROCEDURE MultiReleaseExtension@1100528000(VAR ExtensionContract@1100525000 : Record 11012004);
+    VAR
+      ReleaseExtensionContract@1100528010 : Page 11125023;
+      bmultipleRec@1100528004 : Boolean;
+    BEGIN
+      IF ExtensionContract.FINDSET THEN BEGIN
+        IF ExtensionContract.COUNT > 1 THEN
+          bmultipleRec := TRUE
+        ELSE
+          bmultipleRec := FALSE;
+        REPEAT
+          ExtensionContract.BeforeReleaseExtensionContract;
+          IF MultiReleaseExtensionAllowed(ExtensionContract) THEN BEGIN
+            CheckCostObject(ExtensionContract."Project No.", ExtensionContract."Contract No.");
+            CLEAR(ReleaseExtensionContract);
+            ReleaseExtensionContract.InitExtensionContract(ExtensionContract);
+            IF bmultipleRec THEN BEGIN
+              ReleaseExtensionContract.MultiProcessExtensionContract;
+              SetInstallmentsSelections(4);
+            END ELSE BEGIN
+              ReleaseExtensionContract.RUNMODAL;
+              SetInstallmentsSelections(ReleaseExtensionContract.GetInstallmentsSelections);
+            END;
+            MultiSetInstallmentsChargable(ExtensionContract);
+            COMMIT;
+          END;
+        UNTIL ExtensionContract.NEXT = 0;
+      END;
+      ExtensionContract.MARKEDONLY(FALSE);
+    END;
+
+    PROCEDURE MultiCreateInvoice@1100528001(VAR ExtensionContract@1100525000 : Record 11012004);
+    VAR
+      Job@1100528002 : Record 11072003;
+      ExecuteBln@1100528001 : Boolean;
+      ProjInst@1100528000 : Record 11012018;
+      lText001@1100528005 : TextConst 'ENU=Settlement Method is not "Fixed Price" for Project %1, Contract No. %2\Invoice will not be created;NOR=Oppgjõrsmetode er ikke "Fast pris" for prosjekt %1, Kontraktsnr. %2\Faktura vil ikke opprettes;SVE=AvrÑkningsmetod Ñr inte "Fast pris" fîr Projekt %1, Kontraktsnr %2\Faktura kommer inte att skapas';
+      lText002@1100528004 : TextConst 'ENU=Extension status is not "Invoicing Allowed" for Project %1, Contract No. %2\Invoice will not be created;NOR=ETA status er ikke "Fakturering tillatt" for prosjekt %1, Kontraktsnr. %2\Faktura vil ikke opprettes;SVE=éTA status Ñr inte "Fakturing tillÜten" fîr Projekt %1, Kontraktsnr %2\Faktura kommer inte att skapas';
+      lText003@1100528003 : TextConst 'ENU=Installments of Extension are not "Chargeable" for Project %1, Contract No. %2\Invoice will not be created;NOR=Betalingsplan for ETA er ikke satt til "belastbar" for prosjekt %1, Kontraktsnr %2\Faktura vil ikke opprettes;SVE=Betalplan fîr éTA Ñr inte satt till "Faktureringsbar" fîr Projekt %1, Kontraktsnr %2\Faktura kommer inte att skapas';
+      NumJob@1100528006 : Integer;
+    BEGIN
+      IF ExtensionContract.FINDSET THEN BEGIN
+        REPEAT
+          ExecuteBln := TRUE;
+          IF ExtensionContract."Settlement Method" <> ExtensionContract."Settlement Method"::"Fixed Price" THEN BEGIN
+            MESSAGE(lText001,ExtensionContract."Project No.",ExtensionContract."Contract No.");
+            ExecuteBln := FALSE;
+          END;
+          IF ExtensionContract.Status <> ExtensionContract.Status::"Invoicing Allowed" THEN BEGIN
+            MESSAGE(lText002,ExtensionContract."Project No.",ExtensionContract."Contract No.");
+            ExecuteBln := FALSE;
+          END;
+          ProjInst.RESET;
+          ProjInst.SETRANGE("Project No.",ExtensionContract."Project No.");
+          ProjInst.SETRANGE("Extension Contract",ExtensionContract."Contract No.");
+          ProjInst.SETRANGE(Chargeable,TRUE);
+          IF NOT ProjInst.FINDFIRST THEN BEGIN
+            MESSAGE(lText003,ExtensionContract."Project No.",ExtensionContract."Contract No.");
+            ExecuteBln := FALSE;
+          END;
+          IF ExecuteBln THEN BEGIN
+            Job.GET(ExtensionContract."Project No.");
+            Job.MARK(TRUE);
+            NumJob := NumJob + 1;
+          END;
+       UNTIL ExtensionContract.NEXT = 0;
+      END;
+      IF NumJob <> 0 THEN BEGIN
+        Job.MARKEDONLY(TRUE);
+        Job.CreateInvoicesFromProject(Job);
+        Job.MARKEDONLY(FALSE);
+      END;
+      ExtensionContract.MARKEDONLY(FALSE);
+    END;
+
+    PROCEDURE SetInstallmentsChargable@1100527000();
+    VAR
+      ProjectInstallment@1100527004 : Record 11012018;
+    BEGIN
+      IF "Settlement Method" <> "Settlement Method"::"Fixed Price" THEN
+        EXIT;
+      ProjectInstallment.SETRANGE("Project No.", "Project No.");
+      ProjectInstallment.SETRANGE("Extension Contract", "Contract No.");
+      ProjectInstallment.SETRANGE(Chargeable, FALSE);
+      IF ProjectInstallment.ISEMPTY THEN
+        EXIT;
+      IF InstallmentsSelections = 4 THEN
+        InstallmentsSelections := STRMENU(Text014, 1, STRSUBSTNO(Text013, "Project No.", "Contract No."));
+      CASE InstallmentsSelections OF
+        0,1:
+          EXIT;
+        2:
+          BEGIN
+            ProjectInstallment.FINDFIRST;
+            ProjectInstallment.Chargeable := TRUE;
+            ProjectInstallment.MODIFY;
+          END;
+        3:
+          ProjectInstallment.MODIFYALL(Chargeable, TRUE);
+      END;
+    END;
+
+    PROCEDURE ReleaseExtensionAllowed@1100527001() ReleaseAllowed : Boolean;
+    VAR
+      ErrorMsg@1100527001 : Text[200];
+    BEGIN
+      IF Status = Status::Expired THEN
+        EXIT(FALSE);
+
+      ReleaseAllowed := TRUE;
+
+      IF "Settlement Method" = "Settlement Method"::"Fixed Price" THEN
+        IF ("Installment Scheme" = '') OR (NOT "Generate Installments") OR ("Contract Amount" = 0) THEN BEGIN
+          ErrorMsg := '';
+          IF "Contract Amount" = 0 THEN
+            ErrorMsg := Text021;
+          IF NOT "Generate Installments" THEN BEGIN
+            IF ErrorMsg = '' THEN
+              ErrorMsg := Text022
+            ELSE
+              ErrorMsg += '\' + Text022;
+          END;
+          IF "Installment Scheme" = '' THEN BEGIN
+            IF ErrorMsg = '' THEN
+              ErrorMsg := Text023
+            ELSE
+              ErrorMsg += '\' + Text023;
+          END;
+          ErrorMsg += '\' + Text024;
+          MESSAGE(ErrorMsg, "Project No.", "Contract No.");
+          ReleaseAllowed := FALSE;
+        END;
+
+      TESTFIELD("Extension Fixed", FALSE);
+    END;
+
+    PROCEDURE SetInstallmentsSelections@1100528500(LocInstallmentsSelections@1100528500 : Integer);
+    BEGIN
+      InstallmentsSelections := LocInstallmentsSelections;
+    END;
+
+    PROCEDURE MultiReleaseExtensionAllowed@1100525003(ExtensionContract@1100525000 : Record 11012004) ReleaseAllowed : Boolean;
+    VAR
+      ErrorMsg@1100527001 : Text[200];
+    BEGIN
+      IF ExtensionContract.Status = Status::Expired THEN
+        EXIT(FALSE);
+
+      ReleaseAllowed := TRUE;
+
+      IF ExtensionContract."Settlement Method" = "Settlement Method"::"Fixed Price" THEN
+        IF (ExtensionContract."Installment Scheme" = '') OR (NOT ExtensionContract."Generate Installments") OR (ExtensionContract."Contract Amount" = 0) THEN BEGIN
+          ErrorMsg := '';
+          IF ExtensionContract."Contract Amount" = 0 THEN
+            ErrorMsg := Text021;
+          IF NOT ExtensionContract."Generate Installments" THEN BEGIN
+            IF ErrorMsg = '' THEN
+              ErrorMsg := Text022
+            ELSE
+              ErrorMsg += '\' + Text022;
+          END;
+          IF ExtensionContract."Installment Scheme" = '' THEN BEGIN
+            IF ErrorMsg = '' THEN
+              ErrorMsg := Text023
+            ELSE
+              ErrorMsg += '\' + Text023;
+          END;
+          ErrorMsg += '\' + Text024;
+          MESSAGE(ErrorMsg, ExtensionContract."Project No.", ExtensionContract."Contract No.");
+          ReleaseAllowed := FALSE;
+        END;
+
+      ExtensionContract.TESTFIELD("Extension Fixed", FALSE);
+    END;
+
+    PROCEDURE MultiSetInstallmentsChargable@1100525010(ExtensionContract@1100525000 : Record 11012004);
+    VAR
+      ProjectInstallment@1100527004 : Record 11012018;
+    BEGIN
+      IF ExtensionContract."Settlement Method" <> "Settlement Method"::"Fixed Price" THEN
+        EXIT;
+      ProjectInstallment.SETRANGE("Project No.", ExtensionContract."Project No.");
+      ProjectInstallment.SETRANGE("Extension Contract", ExtensionContract."Contract No.");
+      ProjectInstallment.SETRANGE(Chargeable, FALSE);
+      IF ProjectInstallment.ISEMPTY THEN
+        EXIT;
+      IF InstallmentsSelections = 4 THEN
+        InstallmentsSelections := STRMENU(Text014, 1, STRSUBSTNO(Text013, ExtensionContract."Project No.", ExtensionContract."Contract No."));
+      CASE InstallmentsSelections OF
+        0,1:
+          EXIT;
+        2:
+          BEGIN
+            ProjectInstallment.FINDFIRST;
+            ProjectInstallment.Chargeable := TRUE;
+            ProjectInstallment.MODIFY;
+          END;
+        3:
+          ProjectInstallment.MODIFYALL(Chargeable, TRUE);
+      END;
+    END;
+
+    PROCEDURE CheckCostObject@1100525004(LocProjectNo@1100525001 : Code[20];LocContractNo@1100525002 : Code[10]);
+    VAR
+      LocBudgetLine@1100525000 : Record 11012001;
+    BEGIN
+      LocBudgetLine.SETRANGE("Project No.", LocProjectNo);
+      LocBudgetLine.SETRANGE("Extension Contract", LocContractNo);
+      LocBudgetLine.SETRANGE(Adjustment, '');
+      LocBudgetLine.SETRANGE("Cost Object", '');
+      LocBudgetLine.SETFILTER("Amount (LCY)", '<>%1', 0);
+      IF NOT LocBudgetLine.ISEMPTY THEN
+        MESSAGE(Text025, LocProjectNo, LocContractNo);
+    END;
+
+    PROCEDURE RunCreatePlantLocation@1100525018(ExtensionContract@1100485002 : Record 11012004);
+    VAR
+      PlantMgtCompany@1100525005 : Record 11020586;
+      TmpPlantMgtCompany@1100525002 : TEMPORARY Record 11020586;
+      PlantMgtCompanyList@1100525001 : Page 11124918;
+      CopyProjLocAddresses@1100525009 : Boolean;
+      NoOfPlantCompanies@1100525000 : Integer;
+      NoCreated@1100525004 : Integer;
+      PlantLocCode@1100485000 : Code[20];
+      Job@1100528500 : Record 11072003;
+    BEGIN
+      Job.GET("Project No.");
+
+      IF NOT ConfirmPlantLocationChange(Text027, Text028) THEN
+        EXIT;
+
+      IF Job.ConfirmCopyProjectLocationAddr THEN
+        CopyProjLocAddresses := TRUE;
+
+      NoCreated := 0;
+      PlantMgtCompany."Plant Company" := PlantMgtCompany.GetPlantCompany(TRUE, NoOfPlantCompanies, '');
+      IF NoOfPlantCompanies = 1 THEN BEGIN
+        PlantLocCode := CreatePlantLocation(ExtensionContract, PlantMgtCompany."Plant Company", CopyProjLocAddresses);
+        IF PlantLocCode <> '' THEN
+         NoCreated := 1;
+      END ELSE BEGIN
+        PlantMgtCompany.RESET;
+        PlantMgtCompanyList.SetMultiCreate();
+        PlantMgtCompanyList.SETRECORD(PlantMgtCompany);
+        PlantMgtCompanyList.LOOKUPMODE(TRUE);
+        IF PlantMgtCompanyList.RUNMODAL = ACTION::LookupOK THEN BEGIN
+          IF NOT PlantMgtCompanyList.GetMarkedRecords(TmpPlantMgtCompany) THEN BEGIN
+            PlantMgtCompanyList.GETRECORD(PlantMgtCompany);
+            PlantLocCode := CreatePlantLocation(ExtensionContract, PlantMgtCompany."Plant Company", CopyProjLocAddresses);
+            IF PlantLocCode <> '' THEN
+              NoCreated := 1;
+          END ELSE BEGIN
+            TmpPlantMgtCompany.FINDSET;
+            REPEAT
+              PlantLocCode := CreatePlantLocation(ExtensionContract, TmpPlantMgtCompany."Plant Company", CopyProjLocAddresses);
+              IF PlantLocCode <> '' THEN BEGIN
+                NoCreated := NoCreated + 1;
+                PlantMgtCompany."Plant Company" := TmpPlantMgtCompany."Plant Company";
+              END;
+            UNTIL TmpPlantMgtCompany. NEXT = 0;
+          END;
+        END;
+      END;
+
+      IF NoCreated > 0 THEN BEGIN
+        IF NoCreated = 1 THEN
+          MESSAGE(Text029, PlantLocCode, PlantMgtCompany."Plant Company")
+        ELSE
+          MESSAGE(Text030, PlantLocCode, NoCreated);
+      END;
+    END;
+
+    PROCEDURE CreatePlantLocation@1100485007(IExtensionContract@1100485000 : Record 11012004;IPlantCompany@1100485010 : Text[30];ICopyProjLocAddresses@1100525000 : Boolean) : Code[20];
+    VAR
+      JobsSetup@1100485005 : Record 315;
+      PlantSetup@1100485004 : Record 11012550;
+      CompanyData@1100485006 : Record 11020674;
+      Customer@1100485003 : Record 18;
+      PlantLocation@1100485001 : Record 11012554;
+      PlantLocation2@1100485002 : Record 11012554;
+    BEGIN
+      WITH IExtensionContract DO BEGIN
+        TESTFIELD("Contract No.");
+        TESTFIELD("Project No.");
+
+        IF NOT CompanyData.GET(COMPANYNAME) THEN
+          CompanyData."Company Name" := COMPANYNAME;
+
+        JobsSetup.GET;
+        JobsSetup.TESTFIELD("Build Pl. Loc. Code Ext. from");
+
+        IF (CompanyData."Company No." = '') AND
+           (JobsSetup."Build Pl. Loc. Code Ext. from" = JobsSetup."Build Pl. Loc. Code Ext. from"::CompNoProjNoExtContractNo)
+        THEN
+          CompanyData.TESTFIELD("Company No.");
+
+        PlantLocation.CHANGECOMPANY(IPlantCompany);
+        PlantLocation.INIT;
+        PlantLocation.InitRecord;
+        CASE JobsSetup."Build Pl. Loc. Code Ext. from" OF
+          JobsSetup."Build Pl. Loc. Code Ext. from"::ProjNoExtContractNo:
+            PlantLocation.Code := COPYSTR(("Contract No." + "Project No."),1,20);
+          JobsSetup."Build Pl. Loc. Code Ext. from"::CompNoProjNoExtContractNo:
+            PlantLocation.Code := COPYSTR((CompanyData."Company No." + "Contract No." + "Project No."),1,20);
+          ELSE
+            PlantLocation.Code := '';
+        END;
+
+        PlantLocation.TESTFIELD(Code);
+
+        PlantLocation2.CHANGECOMPANY(IPlantCompany);
+        IF PlantLocation2.GET(PlantLocation.Code) THEN
+          ERROR(Text026, PlantLocation.Code, IPlantCompany, PlantLocation2.FIELDCAPTION("Project No."), PlantLocation2."Project No.",
+                PlantLocation2.FIELDCAPTION("Extension Contract"), PlantLocation2."Extension Contract", PlantLocation2.FIELDCAPTION("Company Name"), PlantLocation2."Company Name");
+
+        PlantLocation."Creation Date" := TODAY;
+        PlantLocation.Depot :=  FALSE;
+
+        PlantSetup.CHANGECOMPANY(IPlantCompany);
+        PlantSetup.GET;
+
+        IF IPlantCompany <> COMPANYNAME THEN BEGIN
+          PlantLocation."Company Name" := COMPANYNAME;
+          IF CompanyData."Customer No." <> '' THEN BEGIN
+            Customer.CHANGECOMPANY(IPlantCompany);
+            IF NOT Customer.GET(CompanyData."Customer No.") THEN
+              Customer.INIT;
+            PlantLocation."Customer No." := CompanyData."Customer No.";
+            PlantLocation."VAT Bus. Posting Group" := Customer."VAT Bus. Posting Group";
+            PlantLocation."Gen. Bus. Posting Group" := PlantSetup."Default Gen. Bus.Posting Group";
+            IF PlantSetup."Def. Loc. Bus. P.Grp of Cust." THEN
+              PlantLocation."Gen. Bus. Posting Group" := Customer."Gen. Bus. Posting Group";
+          END;
+        END;
+        IF PlantLocation."Customer No." = '' THEN BEGIN
+          PlantLocation."Gen. Bus. Posting Group" := PlantSetup."Default Gen. Bus.Posting Group";
+          PlantLocation."VAT Bus. Posting Group" := PlantSetup."Default VAT Bus.Posting Group";
+        END;
+
+        PlantLocation.CopyInfoFromProject("Project No.");
+        PlantLocation."Extension Contract" := "Contract No.";
+        PlantLocation.NormalizePostCodeHouseNo;
+        PlantLocation.FillDefaultFromDepotPlantNeed;
+        PlantLocation.INSERT;
+
+        IF ICopyProjLocAddresses THEN
+          PlantLocation.CopyProjLocsToPlantLocAddress(IPlantCompany);
+
+        EXIT(PlantLocation.Code);
+      END;
+    END;
+
+    PROCEDURE ConfirmPlantLocationChange@1100527005(Message1@1100527000 : Text;Message2@1100527001 : Text) : Boolean;
+    VAR
+      Job@1100528500 : Record 11072003;
+    BEGIN
+      Job.GET("Project No.");
+      CASE TRUE OF
+        Job."Project Status" < Job."Project Status"::Production:
+          IF CONFIRM(Message1, TRUE, Job."No.", FIELDCAPTION("Contract No."), "Contract No.", Job.FIELDCAPTION("Project Status"), Job."Project Status") THEN
+            EXIT(TRUE);
+        Job."Project Status" = Job."Project Status"::Production:
+          IF CONFIRM(Message2, TRUE, Job."No.", FIELDCAPTION("Contract No."), "Contract No.") THEN
+            EXIT(TRUE);
+        Job."Project Status" > Job."Project Status"::Production:
+          Job.FIELDERROR("Project Status");
+      END;
+    END;
+
+    LOCAL PROCEDURE StoreDeletedData@1100528703(Mode@1100528000 : Code[10]);
+    VAR
+      InstallationManagement@1100528700 : Codeunit 11012268;
+      DeletedDataMgtApps@1100528701 : Codeunit 11012440;
+    BEGIN
+      IF NOT InstallationManagement.LicensePermissionForCodeUnit(CODEUNIT::"Deleted Data Mgt (Apps)") THEN
+        EXIT;
+
+      IF (Mode = 'D') THEN
+        DeletedDataMgtApps.StoreDeletedExtensionContract(Rec);
+
+      IF (Mode = 'R') THEN
+        IF (xRec."Contract No." = '') THEN
+          DeletedDataMgtApps.StoreDeletedExtensionContract(Rec)
+        ELSE
+          DeletedDataMgtApps.StoreDeletedExtensionContract(xRec);
+    END;
+
+    PROCEDURE GetDSCommentLines@1100525025(IProjectNo@1100525000 : Code[20];IContractNo@1100527400 : Code[20];VAR OCommentLineExtended@1100525001 : Record 11020314);
+    BEGIN
+      OCommentLineExtended.RESET;
+      OCommentLineExtended.FILTERGROUP(4);
+      OCommentLineExtended.SETRANGE("Table1 Name", OCommentLineExtended."Table1 Name"::Job);
+      OCommentLineExtended.SETRANGE("Table1 No.", IProjectNo);
+      OCommentLineExtended.SETRANGE("Table2 Name", OCommentLineExtended."Table2 Name"::"Extension Contract");
+      OCommentLineExtended.SETRANGE("Table2 No.", IContractNo);
+      OCommentLineExtended.FILTERGROUP(0);
+    END;
+
+    PROCEDURE GetNoOfCommentLines@1100525023(IProjectNo@1100525000 : Code[20];IContractNo@1100527400 : Code[20]) : Integer;
+    VAR
+      CommentLineExtended@1100527401 : Record 11020314;
+    BEGIN
+      IF (IProjectNo = '') OR (IContractNo = '') THEN
+        EXIT(0);
+
+      GetDSCommentLines(IProjectNo, IContractNo, CommentLineExtended);
+      EXIT(CommentLineExtended.COUNT);
+    END;
+
+    PROCEDURE ShowCommentLines@1100525024(IProjectNo@1100525000 : Code[20];IContractNo@1100527400 : Code[20]);
+    VAR
+      CommentLineExtended@1100527401 : Record 11020314;
+    BEGIN
+      GetDSCommentLines(IProjectNo, IContractNo, CommentLineExtended);
+      PAGE.RUNMODAL(PAGE::"Comment Sheet Ext.", CommentLineExtended);
+    END;
+
+    PROCEDURE GetContractorFee@1100528901() : Decimal;
+    BEGIN
+      IF "Apply Perc. (ContractorFee)" THEN
+        EXIT("Percentage (ContractorFee)");
+
+      EXIT(0);
+    END;
+
+    LOCAL PROCEDURE CheckAccessExtContractFixed@1100527650(FieldCaption@1100527651 : Text);
+    VAR
+      UserSetup@1100527650 : Record 91;
+    BEGIN
+      IF UserSetup.GET(USERID) AND UserSetup."No Access Ext. Contract Fixed" THEN
+        ERROR(Text009, FieldCaption);
+    END;
+
+    PROCEDURE GenerateTenderParagraphs@1100528902();
+    VAR
+      TenderParagraphbyPrincipal@1100525001 : Record 11012470;
+    BEGIN
+      TenderParagraphbyPrincipal.GenerateTenderParagraphsByScheme("Project No.", Principal, "Contract No.");
+    END;
+
+    PROCEDURE BeforeReleaseExtensionContract@1100527550();
+    BEGIN
+      IF ProjRec.GET("Project No.") THEN
+        IF ProjRec."Settlement Method" = ProjRec."Settlement Method"::"Fixed Price" THEN BEGIN
+          IF "Contract Amount" = 0 THEN
+            VALIDATE("Contract Amount", "Offered Amount");
+          "Generate Installments" := TRUE;
+        END;
+      IF "Installment Scheme" = '' THEN BEGIN
+        JobSetUp.GET;
+        "Installment Scheme" := JobSetUp."Ext. Contract Install. Scheme";
+      END;
+    END;
+
+    BEGIN
+    {
+      4PS 14-06-16 UKR-C24997 KD: Use extensions to record claims (BI033) - Added fields "Claim Status", "Notification date", "Related planning activity", "Dispute adjudication board", "Dispute adj. board number",
+                                                                            "Identification date", "Final date", "Cancelled date", Claim
+
+      SESB.I022 Final Instalment
+         KD 17.07.2013 Field 11128230 "Method Last Instalment" added
+         KD 17.07.2013 Field 11128231 "Withheld Perc. Final Instalm." added
+         KD 17.07.2013 Field 11128232 "Withheld Perc. Contract Amount" added
+
+      #SYMB1#
+      130610 JOSVSTO Call CU to export éTA-project OnModify.
+
+      130917 ITERO.DJ Added new Field, Export to Symbrio as Boolean, and set to TRUE OnInsert
+
+      140131 ITERO.MH 4PSHM New field "Time Last Modified" and with triggers on onInsert() and onModify()
+      140213 ITERO.LP IME104 Adjustment when exporting to Symbrio.
+      140630 ITERO.DL IME156 Symbrio NAS taking 5 minutes to process
+      140815 ITERO.DL IME155 exclude "Component Type"::'expense hours' from "Open Amount (Hours)", "Open Ovh. Surch. (Hours)", "Open Hours"
+      141229 ITERO.WG SYM045 Added check on Contract No does not exceed 4 karakters
+      150108 ITERO.WG SYM045 Added check if Contract No only has numbers
+      150204 ITERO.MH SYM036 Added project status criteria of extension contract export
+      150218 ITERO.MH SYM036 Changed criteria for export to Symbrio - added deletion entry
+      151218 ITERO.PR OnInsert, Status from Job Setup
+      151112 ITERO.DL RFC014-2 timingerrors, use JobStatus at modified-time instead of current
+      160314 ITERO.SB RAD-201 New fields, "Extension Category" and "Internal Reference"
+      190110 ORANGO.PR RFC226 Added optionvalue to "Wage Component Type Filter" - Addition
+      190131 ORANGO.SB RFC-226 Added Wage Component Type Filter to field Actual Hours and Actual Hours Period
+      190903 ORANGO.LP CER 30 New field "E-Mail Status"
+    }
+    END.
+  }
+}
+

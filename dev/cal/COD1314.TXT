@@ -1,0 +1,259 @@
+OBJECT Codeunit 1314 Purch. Doc. From Sales Doc.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.04;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      CreatePurchInvOptionQst@1001 : TextConst 'ENU=All Lines,Selected Lines;NOR=Alle linjer,Valgte linjer;SVE=Alla rader, valda rader';
+      CreatePurchInvInstructionTxt@1000 : TextConst 'ENU=A purchase invoice will be created. Select which sales invoice lines to use.;NOR=Det vil bli opprettet en kj›psfaktura. Velg hvilke salgsfakturalinjer som skal brukes.;SVE=Det kommer att skapas en ink”psfaktura. V„lj vilka f”rs„ljningsfakturarader som ska anv„ndas.';
+      SelectVentorTxt@1002 : TextConst 'ENU=Select a vendor to buy from.;NOR=Velg en leverand›r som det skal kj›pes fra.;SVE=V„lj en leverant”r att k”pa fr†n.';
+      TypeNotSupportedErr@1003 : TextConst '@@@=Line or Document type;ENU=Type %1 is not supported.;NOR=Typen %1 st›ttes ikke.;SVE=Typen %1 st”ds inte.';
+      NoPurchaseOrdersCreatedErr@1004 : TextConst 'ENU=No purchase orders are created.;NOR=Ingen kj›psordrer ble opprettet.';
+
+    [External]
+    PROCEDURE CreatePurchaseInvoice@2(SalesHeader@1000 : Record 36;VAR SelectedSalesLine@1001 : Record 37);
+    VAR
+      Vendor@1008 : Record 23;
+      PurchaseHeader@1007 : Record 38;
+      SalesLine@1005 : Record 37;
+      OptionNumber@1002 : Integer;
+    BEGIN
+      OptionNumber := DIALOG.STRMENU(CreatePurchInvOptionQst,1,CreatePurchInvInstructionTxt);
+
+      IF OptionNumber = 0 THEN
+        EXIT;
+
+      CASE OptionNumber OF
+        0:
+          EXIT;
+        1:
+          BEGIN
+            SalesLine.SETRANGE("Document Type",SalesHeader."Document Type");
+            SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+          END;
+        2:
+          SalesLine.COPY(SelectedSalesLine);
+      END;
+
+      IF SelectVendor(Vendor,SalesLine) THEN BEGIN
+        OnBeforeCreatePurchaseInvoice(SalesHeader,SalesLine);
+        CreatePurchaseHeader(PurchaseHeader,SalesHeader,Vendor);
+        CopySalesLinesToPurchaseLines(PurchaseHeader,SalesLine);
+        PAGE.RUN(PAGE::"Purchase Invoice",PurchaseHeader);
+      END;
+    END;
+
+    [External]
+    PROCEDURE CreatePurchaseOrder@6(SalesHeader@1000 : Record 36);
+    VAR
+      TempManufacturingUserTemplate@1002 : TEMPORARY Record 5525;
+      RequisitionLine@1003 : Record 246;
+      PurchaseHeader@1004 : Record 38;
+      TempDocumentEntry@1006 : TEMPORARY Record 265;
+      MakeSupplyOrdersYesNo@1005 : Codeunit 5521;
+      OrderPlanningMgt@1007 : Codeunit 5522;
+      PurchOrderFromSalesOrder@1008 : Page 1328;
+      NoFilter@1001 : Text;
+    BEGIN
+      TempManufacturingUserTemplate.INIT;
+      TempManufacturingUserTemplate."User ID" := USERID;
+      TempManufacturingUserTemplate."Make Orders" := TempManufacturingUserTemplate."Make Orders"::"The Active Order";
+      TempManufacturingUserTemplate."Create Purchase Order" :=
+        TempManufacturingUserTemplate."Create Purchase Order"::"Make Purch. Orders";
+      TempManufacturingUserTemplate."Create Production Order" := TempManufacturingUserTemplate."Create Production Order"::" ";
+      TempManufacturingUserTemplate."Create Transfer Order" := TempManufacturingUserTemplate."Create Transfer Order"::" ";
+      TempManufacturingUserTemplate."Create Assembly Order" := TempManufacturingUserTemplate."Create Assembly Order"::" ";
+      TempManufacturingUserTemplate.INSERT;
+
+      PurchOrderFromSalesOrder.LOOKUPMODE(TRUE);
+      PurchOrderFromSalesOrder.SetSalesOrderNo(SalesHeader."No.");
+      IF PurchOrderFromSalesOrder.RUNMODAL <> ACTION::LookupOK THEN BEGIN
+        OrderPlanningMgt.PrepareRequisitionRecord(RequisitionLine);
+        EXIT;
+      END;
+
+      PurchOrderFromSalesOrder.GETRECORD(RequisitionLine);
+      RequisitionLine.SETRANGE("Demand Order No.",SalesHeader."No.");
+      RequisitionLine.SETRANGE("Demand Subtype",SalesHeader."Document Type"::Order);
+      RequisitionLine.SETRANGE(Level);
+      RequisitionLine.SETFILTER(Quantity,'>%1',0);
+      IF NOT RequisitionLine.ISEMPTY THEN BEGIN
+        MakeSupplyOrdersYesNo.SetManufUserTemplate(TempManufacturingUserTemplate);
+        MakeSupplyOrdersYesNo.SetBlockForm;
+
+        MakeSupplyOrdersYesNo.SetCreatedDocumentBuffer(TempDocumentEntry);
+        MakeSupplyOrdersYesNo.RUN(RequisitionLine);
+      END;
+
+      TempDocumentEntry.SETRANGE("Table ID",DATABASE::"Purchase Header");
+      IF TempDocumentEntry.FINDSET THEN
+        REPEAT
+          IF PurchaseHeader.GET(TempDocumentEntry."Document Type",TempDocumentEntry."Document No.") THEN
+            BuildFilter(NoFilter,PurchaseHeader."No.");
+        UNTIL TempDocumentEntry.NEXT = 0;
+
+      IF NoFilter = '' THEN
+        ERROR(NoPurchaseOrdersCreatedErr);
+
+      PurchaseHeader.SETFILTER("No.",NoFilter);
+      PurchaseHeader.SETRANGE("Document Type",PurchaseHeader."Document Type"::Order);
+
+      CASE PurchaseHeader.COUNT OF
+        0:
+          ERROR(NoPurchaseOrdersCreatedErr);
+        1:
+          PAGE.RUN(PAGE::"Purchase Order",PurchaseHeader);
+        ELSE
+          PAGE.RUN(PAGE::"Purchase Order List",PurchaseHeader);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseHeader@5(VAR PurchaseHeader@1002 : Record 38;SalesHeader@1000 : Record 36;Vendor@1001 : Record 23);
+    BEGIN
+      PurchaseHeader.INIT;
+
+      IF SalesHeader."Document Type" IN [SalesHeader."Document Type"::Invoice,SalesHeader."Document Type"::Order] THEN
+        PurchaseHeader.VALIDATE("Document Type",PurchaseHeader."Document Type"::Invoice)
+      ELSE
+        ERROR(TypeNotSupportedErr,FORMAT(SalesHeader."Document Type"));
+
+      OnBeforeInitRecord(PurchaseHeader,SalesHeader,Vendor);
+      PurchaseHeader.InitRecord;
+      PurchaseHeader.VALIDATE("Buy-from Vendor No.",Vendor."No.");
+      OnCreatePurchaseHeaderOnBeforeInsert(PurchaseHeader,SalesHeader,Vendor);
+      PurchaseHeader.INSERT(TRUE);
+    END;
+
+    LOCAL PROCEDURE CopySalesLinesToPurchaseLines@7(PurchaseHeader@1001 : Record 38;VAR SalesLine@1002 : Record 37);
+    VAR
+      PurchaseLine@1000 : Record 39;
+      PurchaseLineNo@1003 : Integer;
+      IsHandled@1004 : Boolean;
+    BEGIN
+      PurchaseLineNo := 0;
+      IF SalesLine.FIND('-') THEN
+        REPEAT
+          CLEAR(PurchaseLine);
+          PurchaseLine.INIT;
+          PurchaseLine."Document No." := PurchaseHeader."No.";
+          PurchaseLine."Document Type" := PurchaseHeader."Document Type";
+
+          PurchaseLineNo := PurchaseLineNo + 10000;
+          PurchaseLine."Line No." := PurchaseLineNo;
+
+          CASE SalesLine.Type OF
+            SalesLine.Type::" ":
+              PurchaseLine.Type := PurchaseLine.Type::" ";
+            SalesLine.Type::Item:
+              PurchaseLine.Type := PurchaseLine.Type::Item;
+            ELSE BEGIN
+              IsHandled := FALSE;
+              OnCopySalesLinesToPurchaseLinesOnLineTypeValidate(PurchaseLine,SalesLine,IsHandled);
+              IF NOT IsHandled THEN
+                ERROR(TypeNotSupportedErr,FORMAT(SalesLine.Type));
+            END
+          END;
+
+          PurchaseLine.VALIDATE("No.",SalesLine."No.");
+          PurchaseLine.Description := SalesLine.Description;
+
+          IF PurchaseLine."No." <> '' THEN BEGIN
+            PurchaseLine.VALIDATE("Buy-from Vendor No.",PurchaseHeader."Buy-from Vendor No.");
+            PurchaseLine.VALIDATE("Pay-to Vendor No.",PurchaseHeader."Pay-to Vendor No.");
+            PurchaseLine.VALIDATE(Quantity,SalesLine.Quantity);
+            PurchaseLine.VALIDATE("Unit of Measure Code",SalesLine."Unit of Measure Code");
+          END;
+
+          OnCopySalesLinesToPurchaseLinesOnBeforeInsert(PurchaseLine,SalesLine);
+          PurchaseLine.INSERT(TRUE);
+        UNTIL SalesLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE SelectVendor@1(VAR Vendor@1000 : Record 23;VAR SelectedSalesLine@1001 : Record 37) : Boolean;
+    VAR
+      SalesLine@1005 : Record 37;
+      Item@1007 : Record 27;
+      VendorList@1003 : Page 27;
+      VendorNo@1008 : Code[20];
+      DefaultVendorFound@1006 : Boolean;
+    BEGIN
+      SalesLine.COPY(SelectedSalesLine);
+
+      SalesLine.SETRANGE(Type,SalesLine.Type::Item);
+      SalesLine.SETFILTER("No.",'<>%1','');
+      IF SalesLine.FINDSET THEN BEGIN
+        Item.GET(SalesLine."No.");
+        VendorNo := Item."Vendor No.";
+        DefaultVendorFound := (VendorNo <> '');
+
+        WHILE DefaultVendorFound AND (SalesLine.NEXT <> 0) DO BEGIN
+          Item.GET(SalesLine."No.");
+          DefaultVendorFound := (VendorNo = Item."Vendor No.");
+        END;
+
+        IF DefaultVendorFound THEN BEGIN
+          Vendor.GET(VendorNo);
+          EXIT(TRUE);
+        END;
+      END;
+
+      VendorList.LOOKUPMODE(TRUE);
+      VendorList.CAPTION(SelectVentorTxt);
+      IF VendorList.RUNMODAL = ACTION::LookupOK THEN BEGIN
+        VendorList.GETRECORD(Vendor);
+        EXIT(TRUE);
+      END;
+
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE BuildFilter@3(VAR InitialFilter@1000 : Text;NewValue@1001 : Text);
+    BEGIN
+      IF STRPOS(InitialFilter,NewValue) = 0 THEN BEGIN
+        IF STRLEN(InitialFilter) > 0 THEN
+          InitialFilter += '|';
+        InitialFilter += NewValue;
+      END;
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeCreatePurchaseInvoice@4(VAR SalesHeader@1000 : Record 36;VAR SalesLine@1001 : Record 37);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeInitRecord@9(VAR PurchaseHeader@1000 : Record 38;SalesHeader@1001 : Record 36;Vendor@1002 : Record 23);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnCopySalesLinesToPurchaseLinesOnBeforeInsert@13(VAR PurchaseLine@1001 : Record 39;SalesLine@1000 : Record 37);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnCopySalesLinesToPurchaseLinesOnLineTypeValidate@11(VAR PurchaseLine@1001 : Record 39;SalesLine@1000 : Record 37;VAR IsHandled@1002 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnCreatePurchaseHeaderOnBeforeInsert@8(VAR PurchaseHeader@1002 : Record 38;SalesHeader@1001 : Record 36;Vendor@1000 : Record 23);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+
