@@ -1,0 +1,493 @@
+OBJECT Codeunit 11012597 Create Service Orders - Plant
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    TableNo=11012823;
+    OnRun=VAR
+            ServiceOrder@1100529000 : Record 11012823;
+            ServiceOrderNo@1100529001 : Code[20];
+          BEGIN
+            // Called from Web Service (create from Plant Company in Service Company)
+            ServiceOrder.COPY(Rec);
+            ServiceOrderNo := '';
+            TmpGenericTable.RESET;
+            TmpGenericTable.DELETEALL;
+            IF NOT ServiceOrder."Remote Control" THEN  // Flowfield used for indication 'Only Add Maint Scheme On SO'
+              ServiceOrderNo := InsertServiceOrder(ServiceOrder, SortCodeWebService)
+            ELSE BEGIN
+              InsertServiceOrderMaintenanceScheme(SortCodeWebService, ServiceOrder, ServiceOrder."Plant Company");
+              ServiceOrderNo := ServiceOrder."No.";
+            END;
+            Rec."No." := ServiceOrderNo;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      PlantSetup@1100529000 : Record 11012550;
+      TmpGenericTable@1100529001 : TEMPORARY Record 11020579;
+      TmpSOPlantMaintenanceScheme@1100529002 : TEMPORARY Record 11072210;
+
+    PROCEDURE SetSelectionMaintenanceSchemesFromWS@1100529007(MaintSchemeCodes@1100529000 : Text);
+    VAR
+      PosNo@1100529001 : Integer;
+      MaintenanceScheme@1100529002 : Code[20];
+    BEGIN
+      TmpSOPlantMaintenanceScheme.RESET;
+      TmpSOPlantMaintenanceScheme.DELETEALL;
+      PosNo := STRPOS(MaintSchemeCodes, ';');
+      IF PosNo > 0 THEN BEGIN
+        REPEAT
+          IF PosNo > 1 THEN BEGIN
+            MaintenanceScheme := COPYSTR(MaintSchemeCodes, 1, PosNo-1);
+            IF NOT TmpSOPlantMaintenanceScheme.GET(SortCodeWebService, MaintenanceScheme) THEN BEGIN
+              TmpSOPlantMaintenanceScheme."Service Order No." := SortCodeWebService;
+              TmpSOPlantMaintenanceScheme."Maintenance Scheme" := MaintenanceScheme;
+              TmpSOPlantMaintenanceScheme.INSERT;
+            END;
+          END;
+          MaintSchemeCodes := COPYSTR(MaintSchemeCodes, PosNo+1);
+          PosNo := STRPOS(MaintSchemeCodes, ';')
+        UNTIL PosNo = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE SortCodeWebService@1100529009() : Code[20];
+    BEGIN
+      EXIT('TMP-WS01');
+    END;
+
+    PROCEDURE CreateServiceOrders_Direct@1100529000(VAR PlantServiceOrder2@1100529005 : Record 11072211);
+    VAR
+      PlantServiceOrder@1100529007 : Record 11072211;
+      ServiceOrder@1100529001 : Record 11012823;
+      ServiceOrderNo@1100529000 : Code[20];
+    BEGIN
+      PlantSetup.GET;
+      PlantSetup.TESTFIELD("Service Company");
+
+      PlantServiceOrder.COPY(PlantServiceOrder2);
+      PlantServiceOrder.SETCURRENTKEY("Source Type","Plant Order","Plant Type","Plant No.","Source Line No.","Line No.");
+      PlantServiceOrder.FILTERGROUP(11);
+      PlantServiceOrder.SETRANGE(Processed, FALSE);
+      PlantServiceOrder.FILTERGROUP(0);
+      IF PlantServiceOrder.FINDSET THEN BEGIN
+        REPEAT
+          CheckPlantServiceOrderLine(PlantServiceOrder);
+        UNTIL PlantServiceOrder.NEXT = 0;
+      END;
+      IF PlantServiceOrder.FINDSET(TRUE,FALSE) THEN BEGIN
+        REPEAT
+          ServiceOrderNo := '';
+          CLEAR(ServiceOrder);
+          DeleteGlobalTmpTables;
+          PlantServiceOrder.CalcPlantFields;
+          IF PlantServiceOrder."New Service Order" THEN BEGIN
+            FillPlantServiceOrderTmpTable(PlantServiceOrder);
+            TransferGenericTmpTable2ServiceOrder(
+              TmpGenericTable, PlantServiceOrder."No. Series (SO)", ServiceOrder."Source Type"::Direct, ServiceOrder);
+            IF (PlantServiceOrder."Service Company" = '') OR (PlantServiceOrder."Service Company" = COMPANYNAME) THEN
+              ServiceOrderNo := InsertServiceOrder(ServiceOrder, TmpGenericTable."Key Code1")
+            ELSE
+              ServiceOrderNo := InsertServiceOrderViaWebservice(ServiceOrder, PlantServiceOrder."Service Company", TmpGenericTable."Key Code1", FALSE);
+          END ELSE BEGIN
+            ServiceOrderNo := FindPlantServiceOrderNo(PlantServiceOrder);
+            IF PlantServiceOrder."Service Company" <> '' THEN
+              ServiceOrder.CHANGECOMPANY(PlantServiceOrder."Service Company");
+            ServiceOrder.GET(ServiceOrderNo);
+            ServiceOrder.TESTFIELD("No.");
+            InsertTmpSOPlantMaintenanceScheme(ServiceOrderNo, PlantServiceOrder."Maintenance Scheme");
+            IF (PlantServiceOrder."Service Company" = '') OR (PlantServiceOrder."Service Company" = COMPANYNAME) THEN
+              InsertServiceOrderMaintenanceScheme(ServiceOrderNo, ServiceOrder, COMPANYNAME)
+            ELSE
+              InsertServiceOrderViaWebservice(ServiceOrder, PlantServiceOrder."Service Company", ServiceOrderNo, TRUE);
+          END;
+          PlantServiceOrder."Service Order No." := ServiceOrderNo;
+          PlantServiceOrder.Processed := TRUE;
+          PlantServiceOrder."Process Date" := CURRENTDATETIME;
+          PlantServiceOrder."Processed By" := USERID;
+          PlantServiceOrder.MODIFY;
+          COMMIT;  // Important if SO is created in another company (via webservice)
+        UNTIL PlantServiceOrder.NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE CreateServiceOrders_MaintenanceProposal@1100529001(VAR SelectedPlantMaintProposalLine@1100529000 : Record 11126148;ServiceCompany@1100529008 : Text;SourceTypeSO@1100529010 : Option;NoSeriesCode@1100529009 : Code[10];FixedPlanDate@1100529007 : Date;UseWorkDateWithPlanDateInPast@1100529006 : Boolean;ResourceType@1100529015 : Option;ResourceNo@1100529014 : Code[20];ServiceOrderDescription@1100529011 : Text[50];OrderKind@1100529013 : Code[10];OrderType@1100529012 : Code[10]);
+    VAR
+      PlantMaintProposalLine@1100529001 : Record 11126148;
+      ServiceOrder@1100529002 : Record 11012823;
+      SortCode@1100529004 : Code[20];
+      ServiceOrderNo@1100529003 : Code[20];
+    BEGIN
+      PlantMaintProposalLine.COPY(SelectedPlantMaintProposalLine);
+      PlantMaintProposalLine.SETCURRENTKEY("Maintenance Proposal No.","Line No.");
+      PlantMaintProposalLine.FILTERGROUP(11);
+      PlantMaintProposalLine.SETRANGE("Service Order No.", '');
+      PlantMaintProposalLine.SETRANGE(Cancelled, FALSE);
+      PlantMaintProposalLine.SETRANGE("Blocked (Plant No.)", FALSE);
+      PlantMaintProposalLine.SETRANGE("Blocked (Plant Type)", FALSE);
+      PlantMaintProposalLine.FILTERGROUP(0);
+      IF PlantMaintProposalLine.FINDSET THEN BEGIN
+        DeleteGlobalTmpTables;
+        SortCode := 'TMP0000001';
+        REPEAT
+          PlantMaintProposalLine.TESTFIELD("Service Company", ServiceCompany);
+          InsertMaintProposalSortingTable(PlantMaintProposalLine,
+            FixedPlanDate, UseWorkDateWithPlanDateInPast,
+            ResourceType, ResourceNo, ServiceOrderDescription, OrderKind, OrderType,
+            SortCode);
+        UNTIL PlantMaintProposalLine.NEXT = 0;
+        TmpGenericTable.RESET;
+        IF TmpGenericTable.FINDSET THEN BEGIN
+          SortCode := '';
+          REPEAT
+            IF TmpGenericTable."Key Code1" <> SortCode THEN BEGIN
+              IF SortCode <> '' THEN
+                COMMIT;  // Important if SO is created in another company (via webservice)
+              TransferGenericTmpTable2ServiceOrder(TmpGenericTable, NoSeriesCode, SourceTypeSO, ServiceOrder);
+              IF (ServiceCompany = '') OR (ServiceCompany = COMPANYNAME) THEN
+                ServiceOrderNo := InsertServiceOrder(ServiceOrder, TmpGenericTable."Key Code1")
+              ELSE
+                ServiceOrderNo := InsertServiceOrderViaWebservice(ServiceOrder, ServiceCompany, TmpGenericTable."Key Code1", FALSE);
+              SortCode := TmpGenericTable."Key Code1";
+            END;
+            IF PlantMaintProposalLine.GET(TmpGenericTable."Key Code2", TmpGenericTable.Int1) THEN BEGIN
+              PlantMaintProposalLine."Service Order No." := ServiceOrderNo;
+              PlantMaintProposalLine.MODIFY(FALSE);
+            END;
+          UNTIL TmpGenericTable.NEXT = 0;
+          IF SortCode <> '' THEN
+            COMMIT;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE DeleteGlobalTmpTables@1100529008();
+    BEGIN
+      TmpGenericTable.RESET;
+      TmpGenericTable.DELETEALL;
+      TmpSOPlantMaintenanceScheme.RESET;
+      TmpSOPlantMaintenanceScheme.DELETEALL;
+    END;
+
+    LOCAL PROCEDURE CheckPlantServiceOrderLine@1100529002(PlantServiceOrder@1100529000 : Record 11072211);
+    VAR
+      PlantOrderLine@1100529002 : Record 11012557;
+      PlantMaintenanceScheme@1100529003 : Record 11072677;
+      ServiceSourceTypeSetup@1100529001 : Record 11071726;
+    BEGIN
+      IF PlantServiceOrder."Source Type" = PlantServiceOrder."Source Type"::PlantOrderLine THEN BEGIN
+        PlantOrderLine.GET(PlantServiceOrder."Plant Order", PlantServiceOrder."Source Line No.");
+        PlantOrderLine.TESTFIELD(Type, PlantOrderLine.Type::Plant);
+        PlantOrderLine.TESTFIELD("Plant Type");
+        PlantOrderLine.CALCFIELDS(Bulk);
+        IF PlantOrderLine."No." = '0' THEN
+          PlantOrderLine."No." := '';
+        IF NOT PlantOrderLine.Bulk THEN
+          PlantOrderLine.TESTFIELD("No.");
+      END;
+      PlantServiceOrder.CheckLine;
+      IF PlantSetup."Service Company" = COMPANYNAME THEN
+        PlantServiceOrder.TESTFIELD("Service Company", '')
+      ELSE
+        PlantServiceOrder.TESTFIELD("Service Company", PlantSetup."Service Company");
+      PlantServiceOrder.CalcPlantFields;
+      IF PlantServiceOrder."Maintenance Scheme" <> '' THEN
+        PlantMaintenanceScheme.GET(PlantServiceOrder."Plant Type (PO)", PlantServiceOrder."Plant No. (PO)", PlantServiceOrder."Maintenance Scheme");
+      IF PlantServiceOrder."New Service Order" THEN BEGIN
+        PlantServiceOrder.TESTFIELD(Description);
+        PlantServiceOrder.TESTFIELD("Cost Component");
+        PlantServiceOrder.TESTFIELD("Starting Date (SO)");
+        IF PlantServiceOrder."Starting Date (SO)" < TODAY THEN
+          PlantServiceOrder.FIELDERROR("Starting Date (SO)");
+        IF PlantServiceOrder."No. Series (SO)" = '' THEN BEGIN
+          IF PlantServiceOrder."Service Company" <> '' THEN
+            ServiceSourceTypeSetup.CHANGECOMPANY(PlantServiceOrder."Service Company");
+          ServiceSourceTypeSetup.GET(ServiceSourceTypeSetup."Source Type"::Direct);
+          ServiceSourceTypeSetup.TESTFIELD("No. Series");
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE FindPlantServiceOrderNo@1100528801(PlantServiceOrder@1100529000 : Record 11072211) : Code[20];
+    VAR
+      PlantServiceOrder2@1100528800 : Record 11072211;
+    BEGIN
+      PlantServiceOrder2.SETRANGE("Source Type", PlantServiceOrder."Source Type");
+      PlantServiceOrder2.SETRANGE("Plant Order", PlantServiceOrder."Plant Order");
+      PlantServiceOrder2.SETRANGE("Plant Type", PlantServiceOrder."Plant Type");
+      PlantServiceOrder2.SETRANGE("Plant No.", PlantServiceOrder."Plant No.");
+      PlantServiceOrder2.SETRANGE("Source Line No.", PlantServiceOrder."Source Line No.");
+      PlantServiceOrder2.SETFILTER("Line No.", '<%1', PlantServiceOrder."Line No.");
+      PlantServiceOrder2.SETRANGE("New Service Order", TRUE);
+      IF PlantServiceOrder2.FINDLAST THEN BEGIN
+        PlantServiceOrder2.TESTFIELD("Service Order No.");
+        EXIT(PlantServiceOrder2."Service Order No.");
+      END;
+      EXIT('');
+    END;
+
+    LOCAL PROCEDURE FillPlantServiceOrderTmpTable@1100528800(PlantServiceOrder@1100529001 : Record 11072211);
+    BEGIN
+      TmpGenericTable.INIT;
+      TmpGenericTable."Key Code1" := 'TMP1';
+      TmpGenericTable.Code1 := PlantServiceOrder."Plant Location (SO)";
+      TmpGenericTable.Code2 := PlantServiceOrder."Plant Type (PO)";
+      TmpGenericTable.Code3 := PlantServiceOrder."Plant No. (PO)";
+      TmpGenericTable.Code4 := PlantServiceOrder."Order Kind";
+      TmpGenericTable.Code5 := PlantServiceOrder."Order Type";
+      TmpGenericTable.Code6 := PlantServiceOrder."Cost Component";
+      TmpGenericTable.Code7 := '';  // No 'Resource No.' in PlantServiceOrder
+      TmpGenericTable.Date1 := PlantServiceOrder."Starting Date (SO)";
+      TmpGenericTable.Date2 := 0D;
+      TmpGenericTable.Time1 := 0T;
+      TmpGenericTable.Time2 := 0T;
+      TmpGenericTable.Text1 := PlantServiceOrder.Description;
+      TmpGenericTable.Text2 := PlantServiceOrder."Description 2";
+      TmpGenericTable.INSERT;
+      InsertTmpSOPlantMaintenanceScheme(TmpGenericTable."Key Code1", PlantServiceOrder."Maintenance Scheme");
+    END;
+
+    LOCAL PROCEDURE InsertMaintProposalSortingTable@1100529005(PlantMaintProposalLine@1100529001 : Record 11126148;FixedPlanDate@1100529003 : Date;UseWorkDateWithPlanDateInPast@1100529002 : Boolean;ResourceType@1100529015 : Option;ResourceNo@1100529014 : Code[20];ServiceOrderDescription@1100529013 : Text[50];OrderKind@1100529012 : Code[10];OrderType@1100529011 : Code[10];VAR NextSortCode@1100529005 : Code[20]);
+    VAR
+      SortCode@1100529004 : Code[20];
+    BEGIN
+      IF UseWorkDateWithPlanDateInPast AND
+        ((PlantMaintProposalLine."Starting Date Maintenance" < WORKDATE) OR ((FixedPlanDate <> 0D) AND (FixedPlanDate < WORKDATE)))
+      THEN
+        FixedPlanDate := WORKDATE;
+      IF FixedPlanDate <> 0D THEN BEGIN
+        PlantMaintProposalLine."Starting Date Maintenance" := FixedPlanDate;
+        PlantMaintProposalLine."Ending Date Maintenance" := FixedPlanDate;
+        PlantMaintProposalLine."Starting Time Maintenance" := 0T;
+        PlantMaintProposalLine."Ending Time Maintenance" := 0T;
+      END;
+      IF PlantMaintProposalLine."Resource No." = '' THEN BEGIN
+        PlantMaintProposalLine."Resource Type" := ResourceType;
+        PlantMaintProposalLine."Resource No." := ResourceNo;
+      END;
+      IF PlantMaintProposalLine."Service Order Description" = '' THEN
+        PlantMaintProposalLine."Service Order Description" := ServiceOrderDescription;
+      IF PlantMaintProposalLine."Order Kind" = '' THEN
+        PlantMaintProposalLine."Order Kind" := OrderKind;
+      IF PlantMaintProposalLine."Order Type" = '' THEN
+        PlantMaintProposalLine."Order Type" := OrderType;
+
+      TmpGenericTable.RESET;
+      TmpGenericTable.SETRANGE(Code2, PlantMaintProposalLine."Plant Type");
+      TmpGenericTable.SETRANGE(Code3, PlantMaintProposalLine."Plant No.");
+      TmpGenericTable.SETRANGE(Code4, PlantMaintProposalLine."Order Kind");
+      TmpGenericTable.SETRANGE(Code5, PlantMaintProposalLine."Order Type");
+      TmpGenericTable.SETRANGE(Code6, PlantMaintProposalLine."Cost Component");
+      TmpGenericTable.SETRANGE(Code7, PlantMaintProposalLine."Resource No.");
+      TmpGenericTable.SETRANGE(Date1, PlantMaintProposalLine."Starting Date Maintenance");
+      TmpGenericTable.SETRANGE(Date2, PlantMaintProposalLine."Ending Date Maintenance");
+      TmpGenericTable.SETRANGE(Time1, PlantMaintProposalLine."Starting Time Maintenance");
+      TmpGenericTable.SETRANGE(Time2, PlantMaintProposalLine."Ending Time Maintenance");
+      TmpGenericTable.SETRANGE(Text1, PlantMaintProposalLine."Service Order Description");
+      IF TmpGenericTable.FINDFIRST THEN
+        SortCode := TmpGenericTable."Key Code1"
+      ELSE BEGIN
+        SortCode := NextSortCode;
+        NextSortCode := INCSTR(NextSortCode);
+      END;
+      TmpGenericTable.INIT;
+      TmpGenericTable."Key Code1" := SortCode;  // Same Sort Code on same SO
+      TmpGenericTable."Key Code2" := PlantMaintProposalLine."Maintenance Proposal No.";
+      TmpGenericTable."Key Code3" := FORMAT(PlantMaintProposalLine."Line No.");
+      TmpGenericTable.Int1 := PlantMaintProposalLine."Line No.";
+      TmpGenericTable.Int2 := PlantMaintProposalLine."Resource Type";
+      TmpGenericTable.Code1 := '';  // No 'Plant Location' on proposal
+      TmpGenericTable.Code2 := PlantMaintProposalLine."Plant Type";
+      TmpGenericTable.Code3 := PlantMaintProposalLine."Plant No.";
+      TmpGenericTable.Code4 := PlantMaintProposalLine."Order Kind";
+      TmpGenericTable.Code5 := PlantMaintProposalLine."Order Type";
+      TmpGenericTable.Code6 := PlantMaintProposalLine."Cost Component";
+      TmpGenericTable.Code7 := PlantMaintProposalLine."Resource No.";
+      TmpGenericTable.Date1 := PlantMaintProposalLine."Starting Date Maintenance";
+      TmpGenericTable.Date2 := PlantMaintProposalLine."Ending Date Maintenance";
+      TmpGenericTable.Time1 := PlantMaintProposalLine."Starting Time Maintenance";
+      TmpGenericTable.Time2 := PlantMaintProposalLine."Ending Time Maintenance";
+      TmpGenericTable.Text1 := PlantMaintProposalLine."Service Order Description";
+      TmpGenericTable.Text2 := '';  // No 'Description 2' on proposal
+      TmpGenericTable.INSERT;
+      InsertTmpSOPlantMaintenanceScheme(SortCode, PlantMaintProposalLine."Maintenance Scheme");
+    END;
+
+    LOCAL PROCEDURE InsertTmpSOPlantMaintenanceScheme@1100529018(OrderNoTmpMaintScheme@1100529000 : Code[20];MaintenanceScheme@1100529001 : Code[20]);
+    BEGIN
+      IF MaintenanceScheme = '' THEN
+        EXIT;
+      IF NOT TmpSOPlantMaintenanceScheme.GET(OrderNoTmpMaintScheme, MaintenanceScheme) THEN BEGIN
+        TmpSOPlantMaintenanceScheme."Service Order No." := OrderNoTmpMaintScheme;
+        TmpSOPlantMaintenanceScheme."Maintenance Scheme" := MaintenanceScheme;
+        TmpSOPlantMaintenanceScheme.INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE TransferGenericTmpTable2ServiceOrder@1100529011(TmpGenericTable@1100529000 : TEMPORARY Record 11020579;NoSeriesCode@1100529004 : Code[10];SourceTypeSO@1100529003 : Option;VAR ServiceOrder@1100529001 : Record 11012823);
+    VAR
+      PlantMaintProposalLine@1100529002 : Record 11126148;
+    BEGIN
+      ServiceOrder.INIT;
+      ServiceOrder."No." := '';
+      ServiceOrder."No. Series" := NoSeriesCode;
+      ServiceOrder."Source Type" := SourceTypeSO;
+      ServiceOrder."Starting Date" := TmpGenericTable.Date1;
+      ServiceOrder."Starting Time" := TmpGenericTable.Time1;
+      ServiceOrder."Ending Date" := TmpGenericTable.Date2;
+      ServiceOrder."Ending Time" := TmpGenericTable.Time2;
+      ServiceOrder."Plant Company" := COMPANYNAME;
+      ServiceOrder."Plant Location" := TmpGenericTable.Code1;
+      ServiceOrder."Plant Type" := TmpGenericTable.Code2;
+      ServiceOrder."Plant Number" := TmpGenericTable.Code3;
+      ServiceOrder."Order Kind" := TmpGenericTable.Code4;
+      ServiceOrder."Order Type" := TmpGenericTable.Code5;
+      ServiceOrder."Cost Component Plant" := TmpGenericTable.Code6;
+      IF TmpGenericTable.Code7 <> '' THEN BEGIN
+        PlantMaintProposalLine."Resource Type" := TmpGenericTable.Int2;
+        IF PlantMaintProposalLine."Resource Type" = PlantMaintProposalLine."Resource Type"::Employee THEN
+          ServiceOrder."Employee No." := TmpGenericTable.Code7;
+        IF PlantMaintProposalLine."Resource Type" = PlantMaintProposalLine."Resource Type"::Subcontractor THEN
+          ServiceOrder.Subcontractor := TmpGenericTable.Code7;
+      END;
+      ServiceOrder.Description := TmpGenericTable.Text1;
+      ServiceOrder."Description 2" := TmpGenericTable.Text2;
+    END;
+
+    LOCAL PROCEDURE InsertServiceOrder@1100529006(NewServiceOrder@1100529000 : Record 11012823;OrderNoTmpMaintScheme@1100529001 : Code[20]) : Code[20];
+    VAR
+      ServiceOrder@1100528801 : Record 11012823;
+      NoSeriesMgt@1100528804 : Codeunit 396;
+    BEGIN
+      ServiceOrder.INIT;
+      IF NewServiceOrder."No. Series" <> '' THEN BEGIN
+        ServiceOrder.VALIDATE("No. Series", NewServiceOrder."No. Series");
+        NoSeriesMgt.InitSeries(ServiceOrder."No. Series",'',0D,ServiceOrder."No.",ServiceOrder."No. Series");
+      END;
+      ServiceOrder.VALIDATE("Source Type", NewServiceOrder."Source Type");
+      ServiceOrder.INSERT(TRUE);
+      ServiceOrder.TESTFIELD("No.");
+      ServiceOrder.VALIDATE("Starting Date", NewServiceOrder."Starting Date");
+      IF NewServiceOrder."Starting Time" <> 0T THEN
+        ServiceOrder.VALIDATE("Starting Time", NewServiceOrder."Starting Time");
+      IF NewServiceOrder."Ending Date" <> 0D THEN
+        ServiceOrder.VALIDATE("Ending Date", NewServiceOrder."Ending Date");
+      IF NewServiceOrder."Ending Time" <> 0T THEN
+        ServiceOrder.VALIDATE("Ending Time", NewServiceOrder."Ending Time");
+      IF (NewServiceOrder."Plant Company" = COMPANYNAME) THEN
+        ServiceOrder."Plant Company" := ''
+      ELSE
+        ServiceOrder."Plant Company" := NewServiceOrder."Plant Company";
+      IF NewServiceOrder."Plant Location" <> '' THEN
+        ServiceOrder.VALIDATE("Plant Location", NewServiceOrder."Plant Location");
+      ServiceOrder.VALIDATE("Plant Type", NewServiceOrder."Plant Type");
+      ServiceOrder.VALIDATE("Plant Number", NewServiceOrder."Plant Number");
+      IF NewServiceOrder."Order Kind" <> '' THEN
+        ServiceOrder.VALIDATE("Order Kind", NewServiceOrder."Order Kind");
+      IF NewServiceOrder."Order Type" <> '' THEN
+        ServiceOrder.VALIDATE("Order Type", NewServiceOrder."Order Type");
+      IF NewServiceOrder."Cost Component Plant" <> '' THEN
+        ServiceOrder."Cost Component Plant" := NewServiceOrder."Cost Component Plant";
+      IF NewServiceOrder."Employee No." <> '' THEN
+        ServiceOrder.VALIDATE("Employee No.", NewServiceOrder."Employee No.");
+      IF NewServiceOrder.Subcontractor <> '' THEN
+        ServiceOrder.VALIDATE(Subcontractor, NewServiceOrder.Subcontractor);
+      IF NewServiceOrder.Description <> '' THEN BEGIN
+        ServiceOrder.VALIDATE(Description, NewServiceOrder.Description);
+        ServiceOrder.VALIDATE("Description 2", NewServiceOrder."Description 2");
+      END;
+      ServiceOrder.MODIFY(TRUE);
+      InsertServiceOrderMaintenanceScheme(OrderNoTmpMaintScheme, ServiceOrder, ServiceOrder."Plant Company");
+      ServiceOrder.UpdateSOHours;
+      ServiceOrder.UpdateWorkOrder(FALSE);
+      EXIT(ServiceOrder."No.");
+    END;
+
+    LOCAL PROCEDURE InsertServiceOrderViaWebservice@1100529010(ServiceOrder@1100529000 : Record 11012823;ServiceCompany@1100529002 : Text;OrderNoTmpMaintScheme@1100529001 : Code[20];OnlyAddMaintSchemeOnSO@1100529005 : Boolean) : Code[20];
+    VAR
+      PlantServiceMaintWSRequest@1100529004 : Codeunit 11012598;
+      MaintSchemeCodes@1100529003 : Text;
+    BEGIN
+      TmpSOPlantMaintenanceScheme.RESET;
+      TmpSOPlantMaintenanceScheme.SETRANGE("Service Order No.", OrderNoTmpMaintScheme);
+      IF TmpSOPlantMaintenanceScheme.FINDSET THEN BEGIN
+        REPEAT
+          MaintSchemeCodes := MaintSchemeCodes + TmpSOPlantMaintenanceScheme."Maintenance Scheme" + ';';
+        UNTIL TmpSOPlantMaintenanceScheme.NEXT = 0;
+      END;
+      IF NOT OnlyAddMaintSchemeOnSO THEN BEGIN
+        ServiceOrder."Plant Company" := COMPANYNAME;
+        ServiceOrder."No." := PlantServiceMaintWSRequest.InsertServiceOrder(ServiceCompany, ServiceOrder, MaintSchemeCodes);
+      END ELSE BEGIN
+        IF MaintSchemeCodes = '' THEN
+          EXIT;
+        PlantServiceMaintWSRequest.InsertServiceOrderPlantMaintScheme(ServiceCompany, ServiceOrder."No.", MaintSchemeCodes);
+      END;
+      EXIT(ServiceOrder."No.");
+    END;
+
+    LOCAL PROCEDURE InsertServiceOrderMaintenanceScheme@1100529003(OrderNoTmpMaintScheme@1100529000 : Code[20];ServiceOrder@1100529002 : Record 11012823;PlantCompany@1100529003 : Text);
+    VAR
+      SOPlantMaintenanceScheme@1100529001 : Record 11072210;
+    BEGIN
+      TmpSOPlantMaintenanceScheme.RESET;
+      TmpSOPlantMaintenanceScheme.SETRANGE("Service Order No.", OrderNoTmpMaintScheme);
+      IF TmpSOPlantMaintenanceScheme.FINDSET THEN BEGIN
+        REPEAT
+          IF NOT SOPlantMaintenanceScheme.GET(ServiceOrder."No.", TmpSOPlantMaintenanceScheme."Maintenance Scheme") THEN BEGIN
+            SOPlantMaintenanceScheme.INIT;
+            SOPlantMaintenanceScheme."Service Order No." := ServiceOrder."No.";
+            SOPlantMaintenanceScheme."Maintenance Scheme" := TmpSOPlantMaintenanceScheme."Maintenance Scheme";
+            SOPlantMaintenanceScheme.INSERT(TRUE);  //With 'TRUE', then also SO-budget lines and SO-inspection lines will be added
+          END;
+          InsertMaintSchemePlantPartsOnServiceorder(ServiceOrder, TmpSOPlantMaintenanceScheme."Maintenance Scheme", PlantCompany);
+        UNTIL TmpSOPlantMaintenanceScheme.NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE InsertMaintSchemePlantPartsOnServiceorder@1100529004(ServiceOrder@1100529002 : Record 11012823;MaintenanceScheme@1100529003 : Code[20];PlantCompany@1100529000 : Text);
+    VAR
+      PlantMaintSchemePlantPart@1100529001 : Record 11126145;
+      ServiceOrderPlantPart@1100529004 : Record 11072320;
+      ServiceOrderPlantPart2@1100529005 : Record 11072320;
+    BEGIN
+      IF (PlantCompany <> '') AND (PlantCompany <> COMPANYNAME) THEN
+        PlantMaintSchemePlantPart.CHANGECOMPANY(PlantCompany);
+      PlantMaintSchemePlantPart.SETRANGE("Plant Type", ServiceOrder."Plant Type");
+      PlantMaintSchemePlantPart.SETRANGE("Plant No.", ServiceOrder."Plant Number");
+      PlantMaintSchemePlantPart.SETRANGE("Maintenance Scheme", MaintenanceScheme);
+      PlantMaintSchemePlantPart.SETFILTER("Plant Part", '<>%1', '');
+      IF PlantMaintSchemePlantPart.FINDSET THEN BEGIN
+        REPEAT
+          ServiceOrderPlantPart2.SETRANGE("Service Order No.", ServiceOrder."No.");
+          ServiceOrderPlantPart2.SETRANGE("Maintenance Scheme", MaintenanceScheme);
+          ServiceOrderPlantPart2.SETRANGE("Plant Part", PlantMaintSchemePlantPart."Plant Part");
+          IF ServiceOrderPlantPart2.ISEMPTY THEN BEGIN
+            ServiceOrderPlantPart2.RESET;
+            ServiceOrderPlantPart2.SETRANGE("Service Order No.", ServiceOrder."No.");
+            IF NOT ServiceOrderPlantPart2.FINDLAST THEN
+              ServiceOrderPlantPart2."Line No." := 0;
+            ServiceOrderPlantPart.INIT;
+            ServiceOrderPlantPart."Service Order No." := ServiceOrder."No.";
+            ServiceOrderPlantPart."Line No." := ServiceOrderPlantPart2."Line No." + 10000;
+            ServiceOrderPlantPart."Maintenance Scheme" := MaintenanceScheme;
+            ServiceOrderPlantPart."Plant Part" := PlantMaintSchemePlantPart."Plant Part";
+            ServiceOrderPlantPart.INSERT(TRUE);
+          END;
+        UNTIL PlantMaintSchemePlantPart.NEXT = 0;
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

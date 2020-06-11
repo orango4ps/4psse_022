@@ -1,0 +1,496 @@
+OBJECT Codeunit 11012591 Plant E-mail Mgt.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ExitOrder@1100409007 : Record 11012559;
+      MailTemplate@1100528300 : Record 11229450;
+      PlantOrder@1100409008 : Record 11012556;
+      PlantLocation@1100525001 : Record 11012554;
+      TransportOrder@1100409002 : Record 11020505;
+      TransportRide@1100529400 : Record 11020517;
+      TmpReportSelections1@1100409009 : TEMPORARY Record 77;
+      TmpReportSelections2@1100409004 : TEMPORARY Record 77;
+      MailTemplateManagement@1100528301 : Codeunit 11012622;
+      MailDocsOrder@1100409011 : Boolean;
+      MailDocsOrderLine@1100409010 : Boolean;
+      WarningNoEmail@1100525000 : Boolean;
+      Text001@1100529300 : TextConst 'DEU=Keine E-Mail versendet: keine E-Mail-Adresse gefunden, %1 ''%2'' - ''%3'';ENU=No e-mail sent: No e-mailaddress found, %1 ''%2'' - ''%3'';NLD=Geen e-mail verzonden: Geen e-mailadres gevonden, %1 ''%2'' - ''%3''';
+
+    PROCEDURE InitEmailProcess@1100409001(TableNo@1100409000 : Integer;UseDefaultReportSelection@1100409003 : Boolean;MailDocsOrder1@1100409006 : Boolean;MailDocsOrderLine1@1100409005 : Boolean;ReportSel@1100409009 : Integer;WarningNoEmail1@1100529300 : Boolean);
+    VAR
+      DocPrint@1100409004 : Codeunit 229;
+      UsageReportSel@1100409002 : Option;
+    BEGIN
+      MailDocsOrder := MailDocsOrder1;
+      MailDocsOrderLine := MailDocsOrderLine1;
+      WarningNoEmail := WarningNoEmail1;
+
+      CASE TableNo OF
+        DATABASE::"Exit Order":
+          UsageReportSel := 1558;
+        DATABASE::"Plant Order":
+          UsageReportSel := 1555;  // Dispatch Note
+        DATABASE::"Plant Transport Order":
+          UsageReportSel := 1551;
+        DATABASE::"Plant Transport Ride": //DP01220
+          UsageReportSel := 1554;
+      END;
+
+      IF ReportSel > 0 THEN BEGIN
+        IF NOT ((TableNo = DATABASE::"Plant Order") AND (ReportSel = 2)) THEN BEGIN
+          CASE UseDefaultReportSelection OF
+            TRUE:
+              GetDefaultReportSelection(UsageReportSel, TmpReportSelections1);
+            FALSE:
+              DocPrint.GetReportSelectionForEmailAttachmentUsage(UsageReportSel, '', TRUE, TmpReportSelections1);
+          END;
+        END;
+        IF (TableNo = DATABASE::"Plant Order") AND ((ReportSel >= 2)) THEN BEGIN
+          UsageReportSel := 1556;  // Removal Dispatch Note
+          CASE UseDefaultReportSelection OF
+            TRUE:
+              GetDefaultReportSelection(UsageReportSel, TmpReportSelections2);
+            FALSE:
+              DocPrint.GetReportSelectionForEmailAttachmentUsage(UsageReportSel, '', TRUE, TmpReportSelections2);
+          END;
+        END;
+      END;
+    END;
+
+    PROCEDURE EmailExitOrder@1100409000(ExitOrder1@1100409000 : Record 11012559);
+    VAR
+      OrderCont@1100409001 : Record 11012536;
+    BEGIN
+      ExitOrder.COPY(ExitOrder1);
+      ExitOrder.SETRANGE("No.", ExitOrder."No.");
+      EmailOrder(DATABASE::"Exit Order", OrderCont.Type::ExitOrder, ExitOrder."No.", ExitOrder.Location, '');
+    END;
+
+    PROCEDURE EmailPlantOrder@1100409020(PlantOrder1@1100409000 : Record 11012556);
+    VAR
+      OrderCont@1100409001 : Record 11012536;
+      ExtraEmail@1100525001 : Text;
+    BEGIN
+      PlantOrder.COPY(PlantOrder1);
+      PlantOrder.SETRANGE("No.", PlantOrder."No.");
+      ExtraEmail := PlantOrder.RequestedByEmail();
+      CASE PlantOrder.Type OF
+        PlantOrder.Type::Arrival:
+          EmailOrder(DATABASE::"Plant Order", OrderCont.Type::"PO To", PlantOrder."No.", PlantOrder."To Location", ExtraEmail);
+        PlantOrder.Type::Removal:
+          EmailOrder(DATABASE::"Plant Order", OrderCont.Type::"PO From", PlantOrder."No.", PlantOrder."From Location", ExtraEmail);
+        PlantOrder.Type::"Other Transfers":
+          BEGIN
+            EmailOrder(DATABASE::"Plant Order", OrderCont.Type::"PO To", PlantOrder."No.", PlantOrder."To Location", '');
+            EmailOrder(DATABASE::"Plant Order", OrderCont.Type::"PO From", PlantOrder."No.", PlantOrder."From Location", '');
+          END;
+      END;
+    END;
+
+    PROCEDURE EmailPlantOrderToShipping@1100529001(PlantOrder1@1100409000 : Record 11012556);
+    VAR
+      ExtraEmail@1100525001 : Text;
+    BEGIN
+      PlantOrder.COPY(PlantOrder1);
+      PlantOrder.SETRANGE("No.", PlantOrder."No.");
+      ExtraEmail := PlantOrder.EmailShippingAgent(FALSE);
+      EmailOrder(DATABASE::"Plant Order", -1, PlantOrder."No.", '', ExtraEmail);
+    END;
+
+    PROCEDURE EmailPlantOrderOnStatusChange@1100409008(PlantOrder1@1100409000 : Record 11012556);
+    VAR
+      PlantLoc@1100409001 : Record 11012554;
+      PlantLocation1@1100409002 : Code[20];
+      PlantLocation2@1100409003 : Code[20];
+    BEGIN
+      PlantOrder.COPY(PlantOrder1);
+      PlantOrder.SETRANGE("No.", PlantOrder."No.");
+      CASE PlantOrder.Type OF
+        PlantOrder.Type::Arrival:
+          PlantLocation1 := PlantOrder."To Location";
+        PlantOrder.Type::Removal:
+          PlantLocation1 := PlantOrder."From Location";
+        PlantOrder.Type::"Other Transfers":
+          BEGIN
+            PlantLocation1 := PlantOrder."To Location";
+            PlantLocation2 := PlantOrder."From Location";
+          END;
+      END;
+      IF PlantLocation1 <> '' THEN BEGIN
+        IF PlantLoc.GET(PlantLocation1) THEN BEGIN
+          IF PlantLoc."E-Mail Status PO Modified" <> '' THEN
+            MailHandler((11012556*10) + 1, PlantOrder."No.", PlantLoc."E-Mail Status PO Modified");
+        END;
+      END;
+      IF PlantLocation2 <> '' THEN BEGIN
+        IF PlantLoc.GET(PlantLocation2) THEN BEGIN
+          IF PlantLoc."E-Mail Status PO Modified" <> '' THEN
+            MailHandler((11012556*10) + 1, PlantOrder."No.", PlantLoc."E-Mail Status PO Modified");
+        END;
+      END;
+    END;
+
+    PROCEDURE EmailTransportOrder@1100409011(TransportOrder1@1100409000 : Record 11020505);
+    VAR
+      OrderCont@1100409001 : Record 11012536;
+    BEGIN
+      TransportOrder.COPY(TransportOrder1);
+      TransportOrder.SETRANGE("No.", TransportOrder."No.");
+      CASE TransportOrder.Type OF
+        TransportOrder.Type::Arrival:
+          EmailOrder(DATABASE::"Plant Transport Order", OrderCont.Type::"TO To", TransportOrder."No.", TransportOrder."To Location", '');
+        TransportOrder.Type::Removal:
+          EmailOrder(DATABASE::"Plant Transport Order", OrderCont.Type::"TO From", TransportOrder."No.", TransportOrder."From Location", '');
+        TransportOrder.Type::"Other Transfers":
+          BEGIN
+            EmailOrder(DATABASE::"Plant Transport Order", OrderCont.Type::"TO To", TransportOrder."No.", TransportOrder."To Location", '');
+            EmailOrder(DATABASE::"Plant Transport Order", OrderCont.Type::"TO From", TransportOrder."No.", TransportOrder."From Location", '');
+          END;
+      END;
+    END;
+
+    PROCEDURE EmailTransportRide@1100529403(TransportRide1@1100409000 : Record 11020517);
+    VAR
+      OrderCont@1100409001 : Record 11012536;
+    BEGIN
+      //DP01220
+      TransportRide.COPY(TransportRide1);
+      TransportRide.SETRANGE("No.", TransportRide."No.");
+      EmailOrder(DATABASE::"Plant Transport Ride", OrderCont.Type::"TO To", TransportRide."No.", '', '');
+    END;
+
+    LOCAL PROCEDURE EmailOrder@1100409004(TableNo@1100409006 : Integer;OrderType@1100409000 : Option;OrderNo@1100409002 : Code[20];PlantLocation@1100409001 : Code[20];ExtraEmail@1100525000 : Text);
+    VAR
+      OrderCont@1100409005 : Record 11012536;
+      PlantLoc@1100409003 : Record 11012554;
+      Counter@1100409007 : Integer;
+    BEGIN
+      OrderCont.SETRANGE(Type, OrderType);
+      OrderCont.SETRANGE("Order No.", OrderNo);
+      IF OrderCont.FINDSET THEN BEGIN
+        REPEAT
+          IF OrderCont.ReceiveEmail() THEN BEGIN
+            MailHandler(TableNo, OrderNo, OrderCont."E-Mail");
+            IF OrderCont."E-Mail" = ExtraEmail THEN
+              ExtraEmail := '';
+            Counter := Counter + 1;
+          END;
+        UNTIL OrderCont.NEXT = 0;
+      END;
+      IF (PlantLocation <> '') AND (Counter = 0) THEN BEGIN  // Only if not already email to a Order Contact
+        IF PlantLoc.GET(PlantLocation) THEN BEGIN
+          IF PlantLoc."E-Mail" <> '' THEN BEGIN
+            MailHandler(TableNo, OrderNo, PlantLoc."E-Mail");
+            IF PlantLoc."E-Mail" = ExtraEmail THEN
+              ExtraEmail := '';
+            Counter := Counter + 1;
+          END;
+        END;
+      END;
+      IF ExtraEmail <> '' THEN BEGIN
+        MailHandler(TableNo, OrderNo, ExtraEmail);
+        Counter := Counter + 1;
+      END;
+
+      //DP01220.sn
+      IF (Counter = 0) AND (TableNo = DATABASE::"Plant Transport Ride") THEN BEGIN
+        MailHandler(TableNo, OrderNo, ExtraEmail);
+        Counter := Counter + 1;
+      END;
+      //DP01220.en
+
+      IF (Counter = 0) AND WarningNoEmail AND GUIALLOWED THEN BEGIN
+        OrderCont.Type := OrderType;
+        //IF CONFIRM(Text001, TRUE, OrderCont.Type, OrderNo, PlantLocation) THEN; // Message does work, not shown on screen/disappears (NAV platform bug?)
+        MESSAGE(Text001, OrderCont.Type, OrderNo, PlantLocation); // Now message works again
+      END;
+    END;
+
+    LOCAL PROCEDURE MailHandler@1100409005(TableNo@1100409000 : Integer;OrderNo@1100409005 : Code[20];Email@1100409001 : Text[100]);
+    VAR
+      Customer@1100525000 : Record 18;
+      TmpReportSelections@1100409006 : TEMPORARY Record 77;
+      TempEmailAttachment@1100528402 : TEMPORARY Record 11229294;
+      ReportSelections@1100528400 : Record 77;
+      MailTemplateNo@1100528300 : Integer;
+      LanguageCode@1100525001 : Code[10];
+    BEGIN
+      IF NOT ((TableNo = DATABASE::"Plant Order") AND (PlantOrder.Type = PlantOrder.Type::Removal)) THEN BEGIN
+        IF TmpReportSelections1.FINDFIRST THEN BEGIN
+          REPEAT
+            TmpReportSelections := TmpReportSelections1;
+            TmpReportSelections.INSERT;
+          UNTIL TmpReportSelections1.NEXT = 0;
+        END;
+      END ELSE BEGIN
+        IF TmpReportSelections2.FINDFIRST THEN BEGIN
+          REPEAT
+            TmpReportSelections := TmpReportSelections2;
+            TmpReportSelections.INSERT;
+          UNTIL TmpReportSelections2.NEXT = 0;
+        END;
+      END;
+      IF TmpReportSelections.FINDSET THEN BEGIN
+        REPEAT
+          CASE TableNo OF
+            DATABASE::"Exit Order": BEGIN
+              MailTemplateNo := 33;
+              ReportSelections.SaveAnyRecordReportAsPdf(ExitOrder, MailTemplateNo, ExitOrder."Department Code",
+                TmpReportSelections."Report ID", TRUE, FALSE, ExitOrder."No.", ExitOrder.TABLECAPTION, TempEmailAttachment);
+            END;
+            DATABASE::"Plant Order": BEGIN
+              MailTemplateNo := 34;
+              ReportSelections.SaveAnyRecordReportAsPdf(PlantOrder, MailTemplateNo, PlantOrder."Department Code",
+                TmpReportSelections."Report ID", TRUE, FALSE, PlantOrder."No.", PlantOrder.TABLECAPTION, TempEmailAttachment);
+            END;
+            DATABASE::"Plant Transport Order": BEGIN
+              MailTemplateNo := 32;
+              ReportSelections.SaveAnyRecordReportAsPdf(TransportOrder, MailTemplateNo, TransportOrder."Department Code",
+                TmpReportSelections."Report ID", TRUE, FALSE, TransportOrder."No.", TransportOrder.TABLECAPTION, TempEmailAttachment);
+            END;
+            DATABASE::"Plant Transport Ride": BEGIN //DP01220
+              MailTemplateNo := 121;
+              ReportSelections.SaveAnyRecordReportAsPdf(TransportRide, MailTemplateNo, TransportRide."Department Code",
+                TmpReportSelections."Report ID", TRUE, FALSE, TransportRide."No.", TransportRide.TABLECAPTION, TempEmailAttachment);
+            END;
+          END;
+        UNTIL TmpReportSelections.NEXT = 0;
+      END;
+
+      CASE TableNo OF
+        DATABASE::"Exit Order":
+          AddDocAttachmentsExitOrder(OrderNo, TempEmailAttachment);
+        DATABASE::"Plant Order":
+          AddDocAttachmentsPlantOrder(OrderNo, TempEmailAttachment);
+        DATABASE::"Plant Transport Order":
+          AddDocAttachmentsTransportOrder(OrderNo, TempEmailAttachment);
+        DATABASE::"Plant Transport Ride": //DP01220
+          AddDocAttachmentsTransportRide(OrderNo, TempEmailAttachment);
+      END;
+
+      CASE TableNo OF
+        DATABASE::"Exit Order":
+          BEGIN
+            IF ExitOrder.GET(OrderNo) THEN
+              IF Customer.GET(ExitOrder."Customer No.") THEN
+                LanguageCode := Customer."Language Code";
+            ReportSelections.AddStandardAttachments(TempEmailAttachment, MailTemplateNo, ExitOrder."Department Code", LanguageCode);
+          END;
+        DATABASE::"Plant Order":
+          BEGIN
+            IF PlantOrder.GET(OrderNo) THEN
+              IF PlantLocation.GET(PlantOrder."To Location") THEN
+                IF Customer.GET(PlantLocation."Customer No.") THEN
+                  LanguageCode := Customer."Language Code";
+
+            ReportSelections.AddStandardAttachments(TempEmailAttachment, MailTemplateNo, PlantOrder."Department Code", LanguageCode);
+          END;
+        DATABASE::"Plant Transport Order":
+          BEGIN
+            IF TransportOrder.GET(OrderNo) THEN
+              IF PlantLocation.GET(TransportOrder."To Location") THEN
+                IF Customer.GET(PlantLocation."Customer No.") THEN
+                  LanguageCode := Customer."Language Code";
+
+            ReportSelections.AddStandardAttachments(TempEmailAttachment, MailTemplateNo, TransportOrder."Department Code", LanguageCode);
+          END;
+        DATABASE::"Plant Transport Ride": //DP01220
+          ReportSelections.AddStandardAttachments(TempEmailAttachment, MailTemplateNo, TransportRide."Department Code", '');
+      END;
+
+      COMMIT;
+      CASE TableNo OF
+        DATABASE::"Exit Order":
+          EmailFileFromPlantExitOrder(ExitOrder, TempEmailAttachment, '', '', Email, FALSE);
+        DATABASE::"Plant Order":
+          EmailFileFromPlantOrder(PlantOrder, TempEmailAttachment, '', '', Email, TRUE);
+        (11012556*10) + 1:  // PO - Status Change
+          EmailFileFromPlantOrderStatusChange(PlantOrder, TempEmailAttachment, '', '', Email, FALSE);
+        DATABASE::"Plant Transport Order":
+          EmailFileFromPlantTransportOrder(TransportOrder, TempEmailAttachment, '', '', Email, FALSE);
+        DATABASE::"Plant Transport Ride": //DP01220
+          EmailFileFromPlantTransportRide(TransportRide, TempEmailAttachment, '', '', Email, Email = '');
+      END;
+    END;
+
+    PROCEDURE GetDefaultReportSelection@1100525018(UsageReport@1100525000 : Integer;VAR TmpReportSelections@1100525001 : TEMPORARY Record 77);
+    VAR
+      DocumentPrint@1100528400 : Codeunit 229;
+    BEGIN
+      DocumentPrint.GetDefaultReportSelectionForEmailAttachmentUsage(UsageReport, TmpReportSelections);
+    END;
+
+    PROCEDURE AddDocAttachmentsExitOrder@1100409002(OrderNo@1100409002 : Code[20];VAR TempEmailAttachment@1100528400 : TEMPORARY Record 11229294);
+    VAR
+      DocumentRelation@1100529601 : Record 11012407;
+      DocumentProperties@1100529602 : Record 11012746;
+    BEGIN
+      //DP00183
+      DocumentProperties.GetDocumentsFromDocumentRelations(DocumentProperties, DocumentRelation."Document Type"::"Plant Exit Order", OrderNo, TRUE);
+      AddDocAttachments(TempEmailAttachment, DocumentProperties);
+    END;
+
+    PROCEDURE AddDocAttachmentsPlantOrder@1100409006(OrderNo@1100409002 : Code[20];VAR TempEmailAttachment@1100528400 : TEMPORARY Record 11229294);
+    VAR
+      DocumentRelation@1100529600 : Record 11012407;
+      DocumentProperties@1100529601 : Record 11012746;
+    BEGIN
+      //DP00183
+      DocumentProperties.GetDocumentsFromDocumentRelations(DocumentProperties, DocumentRelation."Document Type"::"Plant Order", OrderNo, TRUE);
+      AddDocAttachments(TempEmailAttachment, DocumentProperties);
+    END;
+
+    PROCEDURE AddDocAttachmentsTransportOrder@1100409007(OrderNo@1100409002 : Code[20];VAR TempEmailAttachment@1100528400 : TEMPORARY Record 11229294);
+    VAR
+      DocumentRelation@1100529602 : Record 11012407;
+      DocumentProperties@1100529601 : Record 11012746;
+    BEGIN
+      DocumentProperties.GetDocumentsFromDocumentRelations(DocumentProperties, DocumentRelation."Document Type"::"Plant Transport Order", OrderNo, TRUE);
+      AddDocAttachments(TempEmailAttachment, DocumentProperties);
+    END;
+
+    PROCEDURE AddDocAttachmentsTransportRide@1100529406(OrderNo@1100409002 : Code[20];VAR TempEmailAttachment@1100528400 : TEMPORARY Record 11229294);
+    VAR
+      DocumentRelation@1100529602 : Record 11012407;
+      DocumentProperties@1100529601 : Record 11012746;
+    BEGIN
+      //DP01220
+      DocumentProperties.GetDocumentsFromDocumentRelations(DocumentProperties, DocumentRelation."Document Type"::"Plant Transport Ride", OrderNo, TRUE);
+      AddDocAttachments(TempEmailAttachment, DocumentProperties);
+    END;
+
+    PROCEDURE AddDocAttachments@1100529000(VAR TempEmailAttachment@1100528400 : TEMPORARY Record 11229294;VAR DocumentProperties@1100529600 : Record 11012746);
+    VAR
+      ReportSelections@1100525000 : Record 77;
+    BEGIN
+      //DP000183
+      DocumentProperties.MARKEDONLY(TRUE);
+      ReportSelections.AddRelatedDocuments(TempEmailAttachment, DocumentProperties, FALSE, FALSE);
+    END;
+
+    PROCEDURE EmailFileFromPlantExitOrder@1100528406(VAR ExitOrder@1000 : Record 11012559;VAR TempEmailAttachment@1100525000 : TEMPORARY Record 11229294;SendEmailToNo@1100528404 : Code[20];SendEmailToName@1100528403 : Text[100];SendTo@1100528401 : Text[250];ShowEmailDialog@1100528402 : Boolean);
+    VAR
+      DocumentMailing@1100525001 : Codeunit 260;
+      MailTemplateNo@1100528300 : Integer;
+      Subject2@1100528301 : Text;
+    BEGIN
+      //**4PS
+      MailTemplateNo := 33;
+      MailTemplateManagement.GetMailTemplate(MailTemplate, MailTemplateNo, '');
+      DocumentMailing.SetTempEmailAttachments(TempEmailAttachment);
+      IF TempEmailAttachment.FINDFIRST THEN;
+      IF (MailTemplate."Use Mail Template Subject Text") THEN
+        Subject2 := MailTemplateManagement.GetLayoutTextSubstitutedSubjectOnly(MailTemplateNo, '', ExitOrder)
+      ELSE
+        Subject2 := STRSUBSTNO('%1 %2', ExitOrder.TABLECAPTION, ExitOrder."No.");
+      DocumentMailing.EmailFile4PS(TempEmailAttachment."Attachment Server File Path", '', '', ExitOrder."No.",
+        SendTo, MailTemplateNo, ExitOrder."Department Code", '', ExitOrder,
+        Subject2,
+        ExitOrder.TABLECAPTION, NOT ShowEmailDialog);
+    END;
+
+    PROCEDURE EmailFileFromPlantOrder@1100528413(VAR PlantOrder@1000 : Record 11012556;VAR TempEmailAttachment@1100525004 : TEMPORARY Record 11229294;SendEmailToNo@1100528404 : Code[20];SendEmailToName@1100528403 : Text[100];SendTo@1100528401 : Text[250];ShowEmailDialog@1100528402 : Boolean);
+    VAR
+      DocumentMailing@1100525000 : Codeunit 260;
+      MailTemplateNo@1100528300 : Integer;
+      Subject2@1100528301 : Text;
+    BEGIN
+      //**4PS
+      MailTemplateNo := 34;
+      MailTemplateManagement.GetMailTemplate(MailTemplate, MailTemplateNo, '');
+      DocumentMailing.SetTempEmailAttachments(TempEmailAttachment);
+      IF TempEmailAttachment.FINDFIRST THEN;
+      IF (MailTemplate."Use Mail Template Subject Text") THEN
+        Subject2 := MailTemplateManagement.GetLayoutTextSubstitutedSubjectOnly(MailTemplateNo, '', PlantOrder)
+      ELSE
+        Subject2 := STRSUBSTNO('%1 %2', PlantOrder.TABLECAPTION, PlantOrder."No.");
+      DocumentMailing.EmailFile4PS(TempEmailAttachment."Attachment Server File Path", '', '', PlantOrder."No.",
+        SendTo, MailTemplateNo, PlantOrder."Department Code", '', PlantOrder,
+        Subject2,
+        PlantOrder.TABLECAPTION, NOT ShowEmailDialog);
+    END;
+
+    PROCEDURE EmailFileFromPlantOrderStatusChange@1100528414(VAR PlantOrder@1000 : Record 11012556;VAR TempEmailAttachment@1100525000 : TEMPORARY Record 11229294;SendEmailToNo@1100528404 : Code[20];SendEmailToName@1100528403 : Text[100];SendTo@1100528401 : Text[250];ShowEmailDialog@1100528402 : Boolean);
+    VAR
+      DocumentMailing@1100525001 : Codeunit 260;
+      MailTemplateNo@1100528300 : Integer;
+      Subject2@1100528301 : Text;
+    BEGIN
+      //**4PS
+      MailTemplateNo := 31;
+      MailTemplateManagement.GetMailTemplate(MailTemplate, MailTemplateNo, '');
+      DocumentMailing.SetTempEmailAttachments(TempEmailAttachment);
+      IF TempEmailAttachment.FINDFIRST THEN;
+      IF (MailTemplate."Use Mail Template Subject Text") THEN
+        Subject2 := MailTemplateManagement.GetLayoutTextSubstitutedSubjectOnly(MailTemplateNo, '', PlantOrder)
+      ELSE
+        Subject2 := STRSUBSTNO('%1 %2 %3', PlantOrder.TABLECAPTION, PlantOrder."No.", FORMAT(PlantOrder.Status));
+      DocumentMailing.EmailFile4PS(TempEmailAttachment."Attachment Server File Path", '', '', PlantOrder."No.",
+        SendTo, MailTemplateNo, PlantOrder."Department Code", '', PlantOrder,
+        Subject2,
+        PlantOrder.TABLECAPTION, NOT ShowEmailDialog);
+    END;
+
+    PROCEDURE EmailFileFromPlantTransportOrder@1100528416(VAR PlantTransportOrder@1000 : Record 11020505;VAR TempEmailAttachment@1100525000 : TEMPORARY Record 11229294;SendEmailToNo@1100528404 : Code[20];SendEmailToName@1100528403 : Text[100];SendTo@1100528401 : Text[250];ShowEmailDialog@1100528402 : Boolean);
+    VAR
+      DocumentMailing@1100525001 : Codeunit 260;
+      MailTemplateNo@1100528300 : Integer;
+      Subject2@1100528301 : Text;
+    BEGIN
+      //**4PS
+      MailTemplateNo := 32;
+      MailTemplateManagement.GetMailTemplate(MailTemplate, MailTemplateNo, '');
+      DocumentMailing.SetTempEmailAttachments(TempEmailAttachment);
+      IF TempEmailAttachment.FINDFIRST THEN;
+      IF (MailTemplate."Use Mail Template Subject Text") THEN
+        Subject2 := MailTemplateManagement.GetLayoutTextSubstitutedSubjectOnly(MailTemplateNo, '', PlantTransportOrder)
+      ELSE
+        Subject2 := STRSUBSTNO('%1 %2', PlantTransportOrder.TABLECAPTION, PlantTransportOrder."No.");
+      DocumentMailing.EmailFile4PS(TempEmailAttachment."Attachment Server File Path", '', '', PlantTransportOrder."No.",
+        SendTo, MailTemplateNo, PlantTransportOrder."Department Code", '', PlantTransportOrder,
+        Subject2,
+        PlantTransportOrder.TABLECAPTION, NOT ShowEmailDialog);
+    END;
+
+    PROCEDURE EmailFileFromPlantTransportRide@1100529400(VAR PlantTransportRide@1000 : Record 11020517;VAR TempEmailAttachment@1100525000 : TEMPORARY Record 11229294;SendEmailToNo@1100528404 : Code[20];SendEmailToName@1100528403 : Text[100];SendTo@1100528401 : Text[250];ShowEmailDialog@1100528402 : Boolean);
+    VAR
+      DocumentMailing@1100525001 : Codeunit 260;
+      MailTemplateNo@1100528300 : Integer;
+      Subject2@1100528301 : Text;
+    BEGIN
+      //**4PS
+      MailTemplateNo := 121;
+      MailTemplateManagement.GetMailTemplate(MailTemplate, MailTemplateNo, '');
+      DocumentMailing.SetTempEmailAttachments(TempEmailAttachment);
+      IF TempEmailAttachment.FINDFIRST THEN;
+      IF (MailTemplate."Use Mail Template Subject Text") THEN
+        Subject2 := MailTemplateManagement.GetLayoutTextSubstitutedSubjectOnly(MailTemplateNo, '', PlantTransportRide)
+      ELSE
+        Subject2 := STRSUBSTNO('%1 %2', PlantTransportRide.TABLECAPTION, PlantTransportRide."No.");
+      DocumentMailing.EmailFile4PS(TempEmailAttachment."Attachment Server File Path", '', '', PlantTransportRide."No.",
+        SendTo, MailTemplateNo, PlantTransportRide."Department Code", '', PlantTransportRide,
+        Subject2,
+        PlantTransportRide.TABLECAPTION, NOT ShowEmailDialog);
+    END;
+
+    BEGIN
+    {
+      Code of Plant E-mail reports R11012611/612/618 (Email TO/EO/PO) is moved to this codeunit
+    }
+    END.
+  }
+}
+

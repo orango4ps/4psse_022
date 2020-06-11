@@ -1,0 +1,888 @@
+OBJECT Codeunit 11012390 Parse CUF XML-Document
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Proj@1210190001 : Record 11072003;
+      XMLDOMMgt@1100485001 : Codeunit 11020220;
+      Text001@1100525010 : TextConst 'DEU=Kostenart %1 stimmt nicht Åberein mit KostentrÑger %2;ENU=Cost type %1 does not match Cost Object %2;NLD=Kostensoort %1 komt niet overeen met kostendrager %2;NOR=Kostnadstype %1 matcher ikke kostnadsobjekt %2;SVE=Kostnadstypen %1 matchar inte kostnadsobjektet %2';
+      XMLFormat@1100525011 : Codeunit 11020221;
+      AdjustmentCde@1100525007 : Code[10];
+      ExtensionCde@1100525006 : Code[10];
+      HouseModelCde@1100525005 : Code[20];
+      MainGroupCde@1100525004 : Code[20];
+      GroupCde@1100525003 : Code[20];
+      SubGroupCde@1100525002 : Code[20];
+      OptionCde@1100525001 : Code[20];
+      ProjectCde@1100525000 : Code[20];
+      PlotCde@1100525008 : Code[20];
+      NewBudgetLineNo@1100525009 : Integer;
+      Text012@1100529402 : TextConst 'DEU=Kein Element in Zeile vorhanden (Element ist obligatorisch);ENU=No ELement present (Element is mandatory);NLD=Geen element op regel aanwezig (element is verplicht);NOR=Element mangler (element er obligatorisk);SVE=Det finns inget element (element Ñr obligatoriskt)';
+      Text013@1210190000 : TextConst 'DEU=KostentrÑger %1 ist gesperrt worden;ENU=Cost Object %1 is blocked;NLD=Kostendrager %1 is geblokkeerd;NOR=Kostrnadsobjekt %1 er blokkert;SVE=Kostnadsobjekt %1 Ñr blockerad';
+      Text999@1100525012 : TextConst 'DEU=%1 %2 nicht vorhanden;ENU=%1 %2 not present;NLD=%1 %2 niet aanwezig;NOR=%1 %2 finnes ikke;SVE=%1 %2 finns inte';
+      CostObject@1100525014 : ARRAY [99] OF Code[20];
+      FoundNode@1100525016 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      ElementOptout@1100529403 : Boolean;
+      ElementCde@1100529400 : Code[20];
+      ExternalElement@1100529409 : Code[20];
+      ExternalTenderParagraph@1100529401 : Code[20];
+      CodingSystemElement@1100529408 : Code[20];
+      CodingSystemTenderParagraph@1100529407 : Code[20];
+      CodingSystemLocation@1100525015 : Code[20];
+      ExternalLocation@1100525017 : Code[20];
+      CodingSystemCostObject@1100528900 : Code[20];
+      SettlementQuantityCde@1100525020 : Code[20];
+      FromSettlementQuantity@1100525019 : Boolean;
+      SettlementQuantityRec@1100525018 : Record 11072243;
+      SettlementQuantityBudgetRec@1100525013 : Record 11072244;
+      SumSheet@1100525021 : Record 11012064;
+      ApplyCode@1100528500 : ' ,CostObject,Element,Location,TenderParagraph';
+      ExternalCode@1100528501 : Code[20];
+      TmpProjectElement@1100528901 : TEMPORARY Record 11012010;
+
+    PROCEDURE ProcessFile@1100485001(VAR ITempBlob@1100528500 : TEMPORARY Record 99008535);
+    VAR
+      XMLDoc@1100485000 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+    BEGIN
+      XMLDoc := XMLDoc.XmlDocument;
+      //XMLDOMMgt.LoadXMLFromClientFile(XMLDoc, IFileName, TRUE);
+      XMLDOMMgt.LoadXMLFromBlob(XMLDoc, ITempBlob, TRUE);
+      ParseMessage(XMLDoc);
+    END;
+
+    PROCEDURE ParseMessage@1100485000(XMLDocIn@1100525001 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument") : Boolean;
+    VAR
+      RootNode@1100485007 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      LineNodeList@1100525003 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      LineNode@1100525002 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      I@1100525000 : Integer;
+    BEGIN
+      RootNode := XMLDocIn.DocumentElement;
+
+      //check if used sort codes (= coding systems) exists
+      XMLDOMMgt.FindNodes(RootNode,'SORTEERCODES',LineNodeList);
+      IF NOT ISNULL(LineNodeList) THEN
+        FOR I := 0 TO (LineNodeList.Count - 1) DO BEGIN
+          LineNode := LineNodeList.Item(I);
+          CheckCodingSystem(LineNode);
+        END;
+
+      //process budget lines
+      XMLDOMMgt.FindNodes(RootNode,'BEGROTING/BEGROTINGSREGEL',LineNodeList);
+      IF NOT ISNULL(LineNodeList) THEN
+        FOR I := 0 TO (LineNodeList.Count - 1) DO BEGIN
+          LineNode := LineNodeList.Item(I);
+          ProcessBEGROTINGSREGEL(LineNode);
+        END;
+
+      //process bundles
+      XMLDOMMgt.FindNodes(RootNode,'BEGROTING/BUNDELING',LineNodeList);
+      IF NOT ISNULL(LineNodeList) THEN
+        FOR I := 0 TO (LineNodeList.Count - 1) DO BEGIN
+          LineNode := LineNodeList.Item(I);
+          ProcessBUNDELING(LineNode);
+        END;
+
+      //C043480.sn
+      SumSheet."Project No." := ProjectCde;
+      SumSheet."Contract No." := ExtensionCde;
+      SumSheet."Plot No." := PlotCde;
+      SumSheet."House Model" := HouseModelCde;
+      SumSheet."Main Group" := MainGroupCde;
+      SumSheet.Group := GroupCde;
+      SumSheet."Sub Group" := SubGroupCde;
+      SumSheet.Option := OptionCde;
+      SumSheet."Settlement Quantity Code" := SettlementQuantityCde;
+      IF OptionCde <> '' THEN BEGIN
+        SumSheet.ReCalcOptionSummaryLines();
+        SumSheet.UpdateOptBudgetLines();
+      END ELSE BEGIN
+        IF SettlementQuantityCde <> '' THEN BEGIN
+          SumSheet.ReCalcSettlQuanSummaryLines();
+          SumSheet.UpdateSettlQuanBudgLines();
+        END ELSE BEGIN
+          SumSheet.ReCalcSummaryLines(AdjustmentCde);
+          SumSheet.UpdateBudgetLines(TRUE,AdjustmentCde);
+        END;
+      END;
+
+      CheckUpdateOption();
+      CheckUpdateSettlQuantity();
+      //C043480.en
+    END;
+
+    PROCEDURE ProcessBUNDELING@1100525000(LineNode@1100525001 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode");
+    VAR
+      AttribValue@1100525000 : Text[1024];
+      LineNodeList@1100525003 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      LineNode2@1100525002 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      I@1100525004 : Integer;
+    BEGIN
+      AttribValue := XMLDOMMgt.GetAttributeValue(LineNode,'CODE');
+
+      XMLDOMMgt.FindNodes(LineNode,'BEGROTINGSREGEL',LineNodeList);
+      IF NOT ISNULL(LineNodeList) THEN BEGIN
+        FOR I := 0 TO (LineNodeList.Count - 1) DO BEGIN
+          LineNode2 := LineNodeList.Item(I);
+          ProcessBEGROTINGSREGEL(LineNode2);
+        END;
+      END;
+
+      XMLDOMMgt.FindNodes(LineNode,'BUNDELING',LineNodeList);
+      IF NOT ISNULL(LineNodeList) THEN BEGIN
+        FOR I := 0 TO (LineNodeList.Count - 1) DO BEGIN
+          LineNode2 := LineNodeList.Item(I);
+          ProcessBUNDELING(LineNode2);
+        END;
+      END;
+    END;
+
+    PROCEDURE ProcessBEGROTINGSREGEL@1100525001(LineNode@1100525000 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode");
+    VAR
+      BudgetLine@1100525002 : Record 11012001;
+      Norm@1100525003 : Decimal;
+      Rate@1100525004 : Decimal;
+      MaterialPrice@1100525005 : Decimal;
+      PlantPrice@1100525006 : Decimal;
+      SubcontractingPrice@1100525007 : Decimal;
+      SundryPrice@1100525001 : Decimal;
+    BEGIN
+      InitBudgetLine(BudgetLine,LineNode);
+
+      //C025479.sn
+      XMLFormat.EvaluateDecimal(XMLDOMMgt.GetAttributeValue(LineNode,'UUR_NORM'),Norm);
+      XMLFormat.EvaluateDecimal(XMLDOMMgt.GetAttributeValue(LineNode,'UUR_TARIEF'),Rate);
+      XMLFormat.EvaluateDecimal(XMLDOMMgt.GetAttributeValue(LineNode,'MATERIAALPRIJS'),MaterialPrice);
+      XMLFormat.EvaluateDecimal(XMLDOMMgt.GetAttributeValue(LineNode,'MATERIEELPRIJS'),PlantPrice);
+      XMLFormat.EvaluateDecimal(XMLDOMMgt.GetAttributeValue(LineNode,'ONDERAANNEMINGSPRIJS'),SubcontractingPrice);
+      XMLFormat.EvaluateDecimal(XMLDOMMgt.GetAttributeValue(LineNode,'OVERIGE_KOSTEN'),SundryPrice);
+      //C042315.sn
+      ExternalCode := COPYSTR(XMLDOMMgt.GetAttributeValue(LineNode,'CODE'),1,20);
+      FillCostTypeByPrice(BudgetLine,Rate,MaterialPrice,SubcontractingPrice,PlantPrice,SundryPrice);
+      //C042315.en
+      GetCostObjectPerCostType(BudgetLine,LineNode);
+      DetermineElement(BudgetLine,LineNode);  //db, 10-10-16
+      //C025479.en
+
+      //create labor budget line
+      IF Norm <> 0 THEN BEGIN
+        BudgetLine."Cost Type" := BudgetLine."Cost Type"::Labor;
+        BudgetLine."Cost Object" := CostObject[1];  //C025479
+        FillCostObject(LineNode,BudgetLine);
+        CreateBudgetLine(BudgetLine,Norm,Rate,0);
+      END;
+
+      //create material budget line
+      IF MaterialPrice <> 0 THEN BEGIN
+        BudgetLine."Cost Type" := BudgetLine."Cost Type"::Material;
+        BudgetLine."Cost Object" := CostObject[2];  //C025479
+        FillCostObject(LineNode,BudgetLine);
+        CreateBudgetLine(BudgetLine,0,0,MaterialPrice);
+      END;
+
+      //create plant budget line
+      IF PlantPrice <> 0 THEN BEGIN
+        BudgetLine."Cost Type" := BudgetLine."Cost Type"::Plant;
+        BudgetLine."Cost Object" := CostObject[4];  //C025479
+        FillCostObject(LineNode,BudgetLine);
+        CreateBudgetLine(BudgetLine,0,0,PlantPrice);
+      END;
+
+      //create subcontracting budget line
+      IF SubcontractingPrice <> 0 THEN BEGIN
+        BudgetLine."Cost Type" := BudgetLine."Cost Type"::Subcontracting;
+        BudgetLine."Cost Object" := CostObject[3];  //C025479
+        FillCostObject(LineNode,BudgetLine);
+        CreateBudgetLine(BudgetLine,0,0,SubcontractingPrice);
+      END;
+
+      //create sundry budget line
+      IF SundryPrice <> 0 THEN BEGIN
+        BudgetLine."Cost Type" := BudgetLine."Cost Type"::Sundry;
+        BudgetLine."Cost Object" := CostObject[5];  //C025479
+        FillCostObject(LineNode,BudgetLine);
+        CreateBudgetLine(BudgetLine,0,0,SundryPrice);
+      END;
+
+      //create empty budget line
+      IF (Norm = 0) AND (MaterialPrice = 0) AND (SubcontractingPrice = 0) AND (PlantPrice = 0) AND (SundryPrice = 0) THEN
+        CreateBudgetLine(BudgetLine,0,0,0);
+    END;
+
+    PROCEDURE CheckCodingSystem@1100525003(LineNode@1100525000 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode");
+    VAR
+      CodingSystem@1100525002 : Record 11012088;
+      CodingSystemCode@1100525001 : Code[10];
+      CodingSystemDesc@1100525003 : Text[50];
+      I@1100528900 : Integer;
+      LineNodeList@1100528901 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+    BEGIN
+      CodingSystemCode := COPYSTR(XMLDOMMgt.GetAttributeValue(LineNode,'SORTERING'),1,10);
+      CodingSystemDesc := COPYSTR(XMLDOMMgt.GetAttributeValue(LineNode,'FUNCTIE'),1,50);
+      IF NOT CodingSystem.GET(CodingSystemCode) THEN
+        StoreMessage(CodingSystemDesc,STRSUBSTNO(Text999,CodingSystem.FIELDCAPTION("Coding System"),CodingSystemCode));
+
+      //C063977.sn
+      IF CodingSystemCode <> CodingSystemElement THEN EXIT;
+      XMLDOMMgt.FindNodes(LineNode,'SORTEERCODE_REGEL',LineNodeList);
+      IF NOT ISNULL(LineNodeList) THEN BEGIN
+        WHILE (I < LineNodeList.Count) DO BEGIN
+          FoundNode := LineNodeList.Item(I);
+          WITH TmpProjectElement DO BEGIN
+            INIT;
+            "Project No." := ProjectCde;
+            VALIDATE(Element, COPYSTR(XMLDOMMgt.GetAttributeValue(FoundNode,'CODE'), 1, MAXSTRLEN(TmpProjectElement.Element)));
+            Description := COPYSTR(XMLDOMMgt.GetAttributeValue(FoundNode,'OMSCHRIJVING'), 1, MAXSTRLEN(TmpProjectElement.Description));
+            IF NOT INSERT THEN;
+          END;
+          I := I + 1;
+        END;
+      END;
+      //C063977.en
+    END;
+
+    PROCEDURE InitBudgetLine@1100525002(VAR BudgetLine@1100525000 : Record 11012001;LineNode@1100525002 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode");
+    VAR
+      OptionRec@1100525001 : Record 11012502;
+      UnitRec@1100525004 : Record 204;
+      AdjustmentFactor@1100528900 : Decimal;
+    BEGIN
+      WITH BudgetLine DO BEGIN
+        INIT;
+        "Line No." := NewBudgetLineNo;
+        "Project No." := ProjectCde;
+        FillMainProject;
+        "Extension Contract" := ExtensionCde;
+        Adjustment := AdjustmentCde;
+        Option := OptionCde;
+        "Settlement Quantity Code" := SettlementQuantityCde;  //C043480
+        "Time Quantity" := 1;
+        CLEAR("Option Line Type");
+        "Department Code" := Proj."Global Dimension 1 Code";  //*31927
+        "Currency Code" := Proj."Currency Code";  //db, 10-10-16 (DP00886)
+
+        GetVersionDate;
+        UpdateExtContractStatus;
+
+        IF Option <> '' THEN BEGIN
+          "Extension Contract Status" := "Extension Contract Status"::Expired;
+          OptionRec.SETRANGE("Project No.","Project No.");
+          OptionRec.SETRANGE("Plot No.","Plot No.");
+          OptionRec.SETRANGE("House Model",HouseModelCde);
+          OptionRec.SETRANGE("Main Group",MainGroupCde);
+          OptionRec.SETRANGE(Group,GroupCde);
+          OptionRec.SETRANGE("Sub Group",SubGroupCde);
+          OptionRec.SETRANGE(Option,Option);
+          IF OptionRec.FINDFIRST THEN
+            "Version Date" := OptionRec."Version Date";
+        END;
+
+        //C043480.sn
+          IF "Settlement Quantity Code" <> '' THEN BEGIN
+          "Extension Contract Status" := "Extension Contract Status"::Expired;
+          SettlementQuantityRec.SETRANGE("Project No.","Project No.");
+          SettlementQuantityRec.SETRANGE("House Model",HouseModelCde);
+          SettlementQuantityRec.SETRANGE(Code, "Settlement Quantity Code");
+          IF SettlementQuantityRec.FINDFIRST THEN
+            "Version Date" := SettlementQuantityRec."Version Date";
+        END;
+        //C043480.en
+
+        Description := COPYSTR(XMLDOMMgt.GetAttributeValue(LineNode,'OMSCHRIJVING'),1,MAXSTRLEN(Description));
+        "Unit of Measure" := COPYSTR(XMLDOMMgt.GetAttributeValue(LineNode,'HOEVEELHEID_EENHEID'),1,MAXSTRLEN("Unit of Measure"));
+        IF "Unit of Measure" <> '' THEN
+          IF NOT UnitRec.GET("Unit of Measure") THEN
+            StoreMessage(Description,STRSUBSTNO(Text999,FIELDCAPTION("Unit of Measure"),"Unit of Measure"));
+        GetDefaultPurchAction;
+        "Cost Type" := "Cost Type"::Sundry;
+        XMLFormat.EvaluateDecimal(XMLDOMMgt.GetAttributeValue(LineNode,'HOEVEELHEID'),Quantity);
+        //C063977.sn
+          XMLFormat.EvaluateDecimal(XMLDOMMgt.GetAttributeValue(LineNode,'HOEVEELHEID_FACTOR'),AdjustmentFactor);
+        IF AdjustmentFactor <> 0 THEN
+          Quantity := Quantity * AdjustmentFactor;
+        //C063977.en
+      END;
+    END;
+
+    LOCAL PROCEDURE DetermineElement@1100529400(VAR BudgetLine@1100529400 : Record 11012001;LineNode@1100529401 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode");
+    VAR
+      ProjectElement@1100529402 : Record 11012010;
+      ProjRec@1100529403 : Record 11072003;
+    BEGIN
+      //db, 10-10-16
+      WITH BudgetLine DO BEGIN
+        IF ExternalElement <> '' THEN  //C042315
+          Element := FillElement(ExternalElement);
+
+        IF ExternalTenderParagraph <> '' THEN  //C042315
+          VALIDATE("Tender Paragraph", ExternalTenderParagraph);
+
+        IF ExternalLocation <> '' THEN  //C042315
+          VALIDATE("Location Code (CUF)", ExternalLocation);
+
+        IF (Element = '') AND (ElementOptout = FALSE) THEN
+          Element := ElementCde;
+
+        IF NOT ProjectElement.GET(ProjectCde,Element) THEN
+          Element := '';
+        IF Element = '' THEN BEGIN
+          IF NOT ProjRec.GET(ProjectCde) THEN ProjRec.INIT;  //C043639
+          IF ProjRec."Posting Element Mandatory" THEN
+            StoreMessage(Description,Text012);
+        END;
+        IF Element <> '' THEN VALIDATE(Element);  //fill chapter,paragraph
+      END;
+    END;
+
+    PROCEDURE FillElement@1210190003(iElement@1210190000 : Code[20]) oElement : Code[10];
+    VAR
+      pos1@1210190001 : Integer;
+      ChapterCde@1210190005 : Code[20];
+      ParGraphCde@1210190006 : Code[20];
+      LevelInt@1210190007 : Integer;
+      ProjectElement@1100529401 : Record 11012010;
+      FormatManagement@1100529400 : Codeunit 11012022;
+      sp1@1100528900 : Integer;
+      sp2@1100528901 : Integer;
+    BEGIN
+      //db, 10-10-16: conform trad-xml (codeunit 11012391)
+      IF ElementOptout THEN
+        EXIT('');
+
+      IF iElement <> '' THEN BEGIN
+        pos1 := STRPOS(iElement, '.');
+        IF (pos1 = 2) OR ((pos1 = 0) AND (STRLEN(iElement) = 1)) THEN
+          iElement := '0' + iElement;
+        FormatManagement.FormatElemExtended(2,iElement,ChapterCde,ParGraphCde,LevelInt);
+        //C063045.sn
+        FormatManagement.CheckFormat(2,sp1,sp2);
+        IF (sp1 = 0) AND (LevelInt = 1) THEN LevelInt := LevelInt + 1;
+        IF (sp2 = 0) AND (LevelInt = 2) THEN LevelInt := LevelInt + 1;
+        //C063045.en
+        oElement := iElement;
+        CASE LevelInt OF
+          1:BEGIN
+              IF NOT ProjectElement.GET(ProjectCde,ChapterCde) THEN
+                InsertElement(ChapterCde);
+            END;
+          2:BEGIN
+              IF NOT ProjectElement.GET(ProjectCde,ChapterCde) THEN
+                InsertElement(ChapterCde);
+              IF NOT ProjectElement.GET(ProjectCde,ParGraphCde) THEN
+                InsertElement(ParGraphCde);
+            END;
+          3:BEGIN
+              IF NOT ProjectElement.GET(ProjectCde,ChapterCde) THEN
+                InsertElement(ChapterCde);
+              IF NOT ProjectElement.GET(ProjectCde,ParGraphCde) THEN
+                InsertElement(ParGraphCde);
+              IF NOT ProjectElement.GET(ProjectCde,oElement) THEN
+                InsertElement(oElement);
+             END;
+        END;
+      END;
+      EXIT(oElement);
+    END;
+
+    PROCEDURE InsertElement@1210190012(ElementCde@1210190000 : Code[20]);
+    VAR
+      ProjectElement@1100529400 : Record 11012010;
+      BaseElement@1100529401 : Record 11012060;
+    BEGIN
+      //db, 10-10-16: conform trad-xml (codeunit 11012391)
+      IF ElementCde = '' THEN EXIT;  //C063045
+      IF ProjectCde <> '' THEN BEGIN
+        ProjectElement.INIT;  //C063977
+        ProjectElement.VALIDATE("Project No.", ProjectCde);
+        ProjectElement.VALIDATE(Element, ElementCde);
+        IF TmpProjectElement.GET(ProjectCde, ElementCde) THEN
+          ProjectElement.Description := TmpProjectElement.Description  //C063977
+        ELSE
+          IF BaseElement.GET(ElementCde) THEN
+            ProjectElement.Description := COPYSTR(BaseElement.Description, 1, MAXSTRLEN(ProjectElement.Description));
+        ProjectElement.Quantity := 1;
+        ProjectElement.INSERT;
+      END;
+    END;
+
+    PROCEDURE FillCostObject@1100525008(LineNode@1100525001 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";VAR BudgetLine@1100525000 : Record 11012001);
+    VAR
+      CodingSystem@1100525002 : Record 11012088;
+      CodingSystemText@1100525003 : Text[1024];
+      CodingSystemCode@1100525010 : Code[20];
+      LineNodeList@1100525005 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      Found@1100525004 : Boolean;
+      DimensionValue@1100525007 : Record 349;
+      DimMgt@1100525006 : Codeunit 408;
+      SameType@1100525008 : Boolean;
+      I@1100525009 : Integer;
+    BEGIN
+      IF (BudgetLine."Cost Object" = '') THEN BEGIN  //C025479
+        XMLDOMMgt.FindNodes(LineNode,'SORTEERCODE',LineNodeList);
+        IF NOT ISNULL(LineNodeList) THEN BEGIN
+          WHILE (I < LineNodeList.Count) AND (NOT Found) DO BEGIN
+            FoundNode := LineNodeList.Item(I);
+            CodingSystemText := XMLDOMMgt.GetAttributeValue(FoundNode,'SORTERING');
+            CodingSystemCode := COPYSTR(CodingSystemText, 1, 10);  //C043298
+            IF (CodingSystemCode = CodingSystemCostObject) THEN BEGIN  //DP01702
+              IF CodingSystem.GET(CodingSystemCode) THEN  //C043298
+                IF (CodingSystem."Cost Type" = BudgetLine."Cost Type" + 1) OR
+                   (CodingSystem."Cost Type" = CodingSystem."Cost Type"::" ") THEN //C-028508
+                BEGIN
+                  BudgetLine."Cost Object" := COPYSTR(XMLDOMMgt.GetAttributeValue(FoundNode,'WAARDE'),1,MAXSTRLEN(BudgetLine."Cost Object"));
+                  Found := TRUE;
+                END;
+            END;
+            I := I + 1;
+          END;
+        END;
+      END;
+
+      IF BudgetLine."Cost Object" = '' THEN
+        CheckAdmiSubstituteCostObject(BudgetLine."Cost Object", BudgetLine."Cost Type");  //DP01702: get absence value
+
+      DimMgt.GetDimValueRec(2,BudgetLine."Cost Object",DimensionValue,FALSE,'');
+      CASE BudgetLine."Cost Type" OF
+        BudgetLine."Cost Type"::Labor: SameType := DimensionValue."Cost Type" = DimensionValue."Cost Type"::Labor;
+        BudgetLine."Cost Type"::Material: SameType := DimensionValue."Cost Type" = DimensionValue."Cost Type"::Material;
+        BudgetLine."Cost Type"::Subcontracting: SameType := DimensionValue."Cost Type" = DimensionValue."Cost Type"::Subcontracting;
+        BudgetLine."Cost Type"::Plant: SameType := DimensionValue."Cost Type" = DimensionValue."Cost Type"::Plant;
+        BudgetLine."Cost Type"::Sundry: SameType := DimensionValue."Cost Type" = DimensionValue."Cost Type"::Sundry;
+      END;
+      IF (DimensionValue.Code <> '') AND (NOT SameType) THEN
+        StoreMessage(BudgetLine.Description,STRSUBSTNO(Text001,DimensionValue."Cost Type",DimensionValue.Code));
+      IF (DimensionValue.Code <> '') AND DimensionValue.Blocked THEN  //C-026977
+        StoreMessage(BudgetLine.Description, STRSUBSTNO(Text013,BudgetLine."Cost Object"));
+      IF DimensionValue.Code = '' THEN
+        StoreMessage(BudgetLine.Description,STRSUBSTNO(Text999,BudgetLine.FIELDCAPTION("Cost Object"),BudgetLine."Cost Object"));
+    END;
+
+    PROCEDURE GetCostObjectPerCostType@1100525004(VAR BudgetLine@1100528500 : Record 11012001;LineNode@1100525001 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode");
+    VAR
+      CodingSystem@1100525002 : Record 11012088;
+      CodingSystemText@1100525003 : Text[1024];
+      CodingSystemCode@1100525010 : Code[20];
+      LineNodeList@1100525005 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      I@1100525009 : Integer;
+      SkipCheckCostObject@1100529400 : Boolean;
+      CostTypeText@1100528900 : Text[50];
+      CostObjectText@1100525004 : Text[50];
+    BEGIN
+      //db, 30-10-15: C025479
+      CLEAR(CostObject);
+      CLEAR(ExternalElement);
+      CLEAR(ExternalTenderParagraph);
+      CLEAR(ExternalLocation);
+      //C042315.sn
+      CASE ApplyCode OF
+        ApplyCode::CostObject: CostObject[BudgetLine."Cost Type"] := ExternalCode;
+        ApplyCode::Element: ExternalElement := ExternalCode;
+        ApplyCode::Location: ExternalLocation := ExternalCode;
+        ApplyCode::TenderParagraph: ExternalTenderParagraph := ExternalCode;
+      END;
+      //C042315.en
+      XMLDOMMgt.FindNodes(LineNode,'SORTEERCODE',LineNodeList);
+      IF NOT ISNULL(LineNodeList) THEN BEGIN
+        WHILE (I < LineNodeList.Count) DO BEGIN
+          FoundNode := LineNodeList.Item(I);
+          CodingSystemText := XMLDOMMgt.GetAttributeValue(FoundNode,'SORTERING');
+          CodingSystemCode := COPYSTR(CodingSystemText, 1, 10);  //C043298
+          SkipCheckCostObject := FALSE;
+          IF CodingSystemCode = CodingSystemElement THEN BEGIN  //C043298
+            SkipCheckCostObject := TRUE;
+            ExternalElement := COPYSTR(XMLDOMMgt.GetAttributeValue(FoundNode,'WAARDE'),1,MAXSTRLEN(BudgetLine.Element));
+            IF (ApplyCode = ApplyCode::Element) AND (ExternalCode <> '') THEN
+              ExternalElement := ExternalCode;  //C042315
+          END;
+          IF CodingSystemCode = CodingSystemTenderParagraph THEN BEGIN  //C043298
+            SkipCheckCostObject := TRUE;
+            ExternalTenderParagraph := COPYSTR(XMLDOMMgt.GetAttributeValue(FoundNode,'WAARDE'),1,MAXSTRLEN(BudgetLine."Tender Paragraph"));
+            IF (ApplyCode = ApplyCode::TenderParagraph) AND (ExternalCode <> '') THEN
+              ExternalTenderParagraph := ExternalCode;  //C042315
+          END;
+          IF CodingSystemCode = CodingSystemLocation THEN BEGIN  //C043298
+            SkipCheckCostObject := TRUE;
+            ExternalLocation := COPYSTR(XMLDOMMgt.GetAttributeValue(FoundNode,'WAARDE'),1,MAXSTRLEN(BudgetLine."Location Code (CUF)"));
+            IF (ApplyCode = ApplyCode::Location) AND (ExternalCode <> '') THEN
+              ExternalLocation := ExternalCode;  //C042315
+          END;
+          IF CodingSystem.GET(CodingSystemCode) THEN BEGIN  //C043298
+            IF (CodingSystem."Cost Type" <> 0) THEN BEGIN  //C026829.n
+              IF NOT SkipCheckCostObject THEN BEGIN
+                CostObjectText := COPYSTR(XMLDOMMgt.GetAttributeValue(FoundNode,'WAARDE'),1,MAXSTRLEN(BudgetLine."Cost Object"));
+                IF CostObjectText <> '' THEN
+                  CostObject[CodingSystem."Cost Type"] := CostObjectText;
+                IF (ApplyCode = ApplyCode::CostObject) AND (ExternalCode <> '') THEN
+                  CostObject[CodingSystem."Cost Type"] := ExternalCode;  //C042315
+              END;
+            END;
+          END;
+          I := I + 1;
+        END;
+      END;
+
+      //C033199.sn
+      XMLDOMMgt.FindNodes(LineNode,'MAMO_REGEL',LineNodeList);
+      IF NOT ISNULL(LineNodeList) THEN BEGIN
+        WHILE (I < LineNodeList.Count) DO BEGIN
+          FoundNode := LineNodeList.Item(I);
+          CostTypeText := XMLDOMMgt.GetAttributeValue(FoundNode,'KOSTENSOORT');
+          CostTypeText := UPPERCASE(CostTypeText);  //db, 21-11-17
+          CASE CostTypeText OF
+            'LOON': CodingSystem."Cost Type" := CodingSystem."Cost Type"::Labor;
+            'MATERIAAL': CodingSystem."Cost Type" := CodingSystem."Cost Type"::Material;
+            'ONDERAANNEMING': CodingSystem."Cost Type" := CodingSystem."Cost Type"::Subcontracting;
+            'MATERIEEL': CodingSystem."Cost Type" := CodingSystem."Cost Type"::Plant;
+            'OVERIG': CodingSystem."Cost Type" := CodingSystem."Cost Type"::Sundry;
+          ELSE
+            CodingSystem."Cost Type" := CodingSystem."Cost Type"::" ";
+          END;
+          IF NOT SkipCheckCostObject THEN BEGIN
+            CostObjectText := COPYSTR(XMLDOMMgt.GetAttributeValue(FoundNode,'CODE'),1,MAXSTRLEN(BudgetLine."Cost Object"));
+            IF CostObjectText <> '' THEN
+              CostObject[CodingSystem."Cost Type"] := CostObjectText;
+          END;
+          I := I + 1;
+        END;
+      END;
+      //C033199.en
+    END;
+
+    PROCEDURE CreateBudgetLine@1100525007(VAR BudgetLine@1100525000 : Record 11012001;INorm@1100525001 : Decimal;IRate@1100525002 : Decimal;IPrice@1100525003 : Decimal);
+    VAR
+      ProjectCurrencyExchangeRate@1100529400 : Record 11020628;
+    BEGIN
+      WITH BudgetLine DO BEGIN
+        "Line No." := NewBudgetLineNo;
+        Norm := INorm;
+        IF Norm <> 0 THEN
+          "Production Rate" := 1 / Norm
+        ELSE
+          "Production Rate" := 0;
+        "Rate (LCY)" := IRate;
+        "Price (LCY)" := IPrice;
+        "Amount (LCY)" := 0;
+        //db.sn, 10-10-16 (DP00886)
+        IF "Currency Code" = '' THEN BEGIN
+          "Rate (FCY)" := "Rate (LCY)";
+          "Price (FCY)" := "Price (LCY)";
+        END ELSE BEGIN
+          "Rate (FCY)" := ProjectCurrencyExchangeRate.ExchangeAmtLCYToFCY("Rate (LCY)", FALSE, TRUE, "Currency Code", "Project No.", '', 0D);
+          "Price (FCY)" := ProjectCurrencyExchangeRate.ExchangeAmtLCYToFCY("Price (LCY)", FALSE, TRUE, "Currency Code", "Project No.", '', 0D);
+        END;
+        //db.en, 10-10-16 (DP00886)
+        "Cost Component" := DefaultCostComponent("Cost Object","Project No.");
+        FillDefaultFscType();  //DP00129
+        CalcTotals;
+        IF (OptionCde = '') AND (SettlementQuantityCde = '') THEN BEGIN  //C043480
+          INSERT;
+          UpdateCostControlStatus(0);  // 0=Action::Insert  //33988.n
+          NewBudgetLineNo += 10000;
+        END ELSE BEGIN
+          AssignOptionBudget(BudgetLine);
+        END;
+      END;
+    END;
+
+    PROCEDURE DefaultCostComponent@1100525006(lvCostObject@1100485000 : Code[20];lvProject@1100485001 : Code[20]) lvCostComponent : Code[20];
+    VAR
+      lvDimValRec@1100485002 : Record 349;
+      DimMgt@1100525000 : Codeunit 408;
+    BEGIN
+      lvCostComponent := '';
+      IF lvCostObject <> '' THEN BEGIN
+        DimMgt.GetDimValueRec(2, lvCostObject, lvDimValRec, FALSE, lvProject);
+        IF NOT lvDimValRec.Blocked THEN
+          lvCostComponent := lvDimValRec."Cost Component";
+      END;
+    END;
+
+    PROCEDURE StoreMessage@5(DescTxt@11012000 : Text[100];ErrorMsg@11012001 : Text[80]);
+    VAR
+      ErrorRec@1210190000 : Record 11012051;
+      LineNo@11012002 : Integer;
+    BEGIN
+      WITH ErrorRec DO BEGIN
+        SETRANGE("User ID", USERID);
+        SETRANGE("Source Type", "Source Type"::"Import Budget");
+        IF FINDLAST THEN
+          LineNo := "Line No." + 1
+        ELSE
+          LineNo := 1;
+
+        INIT;
+        "User ID" := USERID;
+        "Source Type" := "Source Type"::"Import Budget";
+        "Line No." := LineNo;
+        "Project No." := Proj."No.";
+        "Error message" := ErrorMsg;
+        Description := DescTxt;
+        INSERT;
+      END;
+    END;
+
+    PROCEDURE SetDefaultsSettlQuantity@1100528203(ISettlementQuantityCde@11012000 : Code[20]);
+    BEGIN
+      //C043480
+      FromSettlementQuantity := TRUE;
+      SettlementQuantityCde := ISettlementQuantityCde;
+    END;
+
+    PROCEDURE AssignSettlQuantityBudget@1100528205(BudgetLine@1100525000 : Record 11012001);
+    VAR
+      LastLino@11012000 : Integer;
+    BEGIN
+      //C043480
+      SettlementQuantityBudgetRec.SETRANGE("Project No.",ProjectCde);
+      SettlementQuantityBudgetRec.SETRANGE("House Model",HouseModelCde);
+      SettlementQuantityBudgetRec.SETRANGE("Settlement Quantity Code", SettlementQuantityCde);
+      IF NOT SettlementQuantityBudgetRec.FINDLAST THEN
+        LastLino := 10000
+      ELSE
+        LastLino := SettlementQuantityBudgetRec."Line No." + 10000;
+
+      SettlementQuantityBudgetRec.INIT;
+      SettlementQuantityBudgetRec."Project No." := BudgetLine."Project No.";
+      SettlementQuantityBudgetRec."House Model" := HouseModelCde;
+      SettlementQuantityBudgetRec."Settlement Quantity Code":= BudgetLine."Settlement Quantity Code";
+      SettlementQuantityBudgetRec."Line No." := LastLino;
+      SettlementQuantityBudgetRec.Element := BudgetLine.Element;
+      SettlementQuantityBudgetRec."Cost Type" := BudgetLine."Cost Type";
+      SettlementQuantityBudgetRec."Cost Object" := BudgetLine."Cost Object";
+      SettlementQuantityBudgetRec.Description := BudgetLine.Description;
+      SettlementQuantityBudgetRec."Cost Component" := BudgetLine."Cost Component";
+      SettlementQuantityBudgetRec.Quantity := BudgetLine.Quantity;
+      SettlementQuantityBudgetRec."Unit of Measure" := BudgetLine."Unit of Measure";
+      SettlementQuantityBudgetRec.Norm := BudgetLine.Norm;
+      SettlementQuantityBudgetRec."Rate Code" := BudgetLine."Rate Code";
+      SettlementQuantityBudgetRec.Rate := BudgetLine."Rate (LCY)";
+      SettlementQuantityBudgetRec.Hours := BudgetLine.Hours;
+      SettlementQuantityBudgetRec.Amount := BudgetLine."Amount (LCY)";
+      SettlementQuantityBudgetRec."Total Amount" := BudgetLine."Total Amount";
+      SettlementQuantityBudgetRec."Total Hours" := BudgetLine."Total Hours";
+      SettlementQuantityBudgetRec.Price := BudgetLine."Price (LCY)";
+      SettlementQuantityBudgetRec."Time Quantity" := BudgetLine."Time Quantity";
+      SettlementQuantityBudgetRec."Unit of Time" := BudgetLine."Unit of Time";
+      SettlementQuantityBudgetRec.Chapter := BudgetLine.Chapter;
+      SettlementQuantityBudgetRec.Paragraph := BudgetLine.Paragraph;
+      SettlementQuantityBudgetRec."Location Code (CUF)" := BudgetLine."Location Code (CUF)";  //C055248
+
+      SettlementQuantityBudgetRec.CheckInsertSummarySheet(FALSE);  //* Must be done before INSERT, because of test 'only when first'.
+      SettlementQuantityBudgetRec.INSERT;
+    END;
+
+    PROCEDURE AssignOptionBudget@3(BudgetLine@1100525000 : Record 11012001);
+    VAR
+      OptionBudget@1100525001 : Record 11012503;
+      EntryNo@11012000 : Integer;
+    BEGIN
+      //C043480.sn
+      IF SettlementQuantityCde <> '' THEN BEGIN
+        AssignSettlQuantityBudget(BudgetLine);
+        EXIT;
+      END;
+      //C043480.en
+
+      WITH OptionBudget DO BEGIN
+        SETRANGE("Project No.",ProjectCde);
+        IF PlotCde <> '' THEN
+          SETRANGE("Plot No.",PlotCde)
+        ELSE
+          SETFILTER("Plot No.",'%1','');
+        SETRANGE("House Model",HouseModelCde);
+        SETRANGE("Main Group",MainGroupCde);
+        SETRANGE(Group,GroupCde);
+        SETRANGE("Sub Group",SubGroupCde);
+        SETRANGE(Option,OptionCde);
+        IF NOT FINDLAST THEN
+          EntryNo := 10000
+        ELSE
+          EntryNo := "Line No." + 10000;
+
+        INIT;
+        "Project No." := BudgetLine."Project No.";
+        "Plot No." := PlotCde;
+        "House Model" := HouseModelCde;
+        "Main Group" := MainGroupCde;
+        Group := GroupCde;
+        "Sub Group" := SubGroupCde;
+        Option := BudgetLine.Option;
+        Element := BudgetLine.Element;
+        "Cost Object" := BudgetLine."Cost Object";
+        "Cost Component" := BudgetLine."Cost Component";
+        Description := BudgetLine.Description;
+        Quantity := BudgetLine.Quantity;
+        "Unit of Measure" := BudgetLine."Unit of Measure";
+        Norm := BudgetLine.Norm;
+        "Rate Code" := BudgetLine."Rate Code";
+        Rate := BudgetLine."Rate (LCY)";
+        Hours := BudgetLine.Hours;
+        Amount := BudgetLine."Amount (LCY)";
+        "Line No." := EntryNo;
+        "Total Amount" := BudgetLine."Total Amount";
+        "Total Hours" := BudgetLine."Total Hours";
+        "Cost Type" := BudgetLine."Cost Type";
+        Price := BudgetLine."Price (LCY)";
+        "Time Quantity" := BudgetLine."Time Quantity";
+        "Unit of Time" := BudgetLine."Unit of Time";
+        Chapter := BudgetLine.Chapter;
+        Paragraph := BudgetLine.Paragraph;
+        "Location Code (CUF)" := BudgetLine."Location Code (CUF)";  //C054894
+
+        CheckInsertSummarySheet(FALSE);  //* Must be done before INSERT, because of test 'only when first'.
+        INSERT;
+      END;
+    END;
+
+    PROCEDURE InitCodeunit@1(iProjectCde@11012000 : Code[20];iAdjustmentCde@11012001 : Code[10];iExtensionCde@11012002 : Code[10];iHouseModelCde@1210190003 : Code[20];iMainGroupCde@1210190002 : Code[20];iGroupCde@1210190001 : Code[20];iSubGroupCde@1210190000 : Code[20];iOptionCde@11012003 : Code[20];iPlotCde@1100485000 : Code[20];iElementOptout@1100529401 : Boolean;iElementCde@1100529400 : Code[20];iCodingSystemElement@1100529402 : Code[20];iCodingSystemTenderParagraph@1100529403 : Code[20];iCodingSystemLocation@1100525001 : Code[20];iCodingSystemCostObject@1100528900 : Code[20];iApplyCode@1100528500 : ' ,CostObject,Element,Location,TenderParagraph');
+    VAR
+      BudgetLine@1100525000 : Record 11012001;
+    BEGIN
+      ProjectCde := iProjectCde;
+      AdjustmentCde := iAdjustmentCde;
+      ExtensionCde := iExtensionCde;
+      HouseModelCde := iHouseModelCde;
+      MainGroupCde := iMainGroupCde;
+      GroupCde := iGroupCde;
+      SubGroupCde := iSubGroupCde;
+      OptionCde := iOptionCde;
+      PlotCde := iPlotCde;
+      //db.sn, 10-10-16
+      ElementOptout := iElementOptout;
+      ElementCde := iElementCde;
+      CodingSystemElement := iCodingSystemElement;
+      CodingSystemTenderParagraph := iCodingSystemTenderParagraph;
+      CodingSystemLocation := iCodingSystemLocation;
+      //db.en, 10-10-16
+      CodingSystemCostObject := iCodingSystemCostObject;  //DP01702
+      ApplyCode := iApplyCode;  //C042315
+
+      IF ProjectCde <> '' THEN  //*31927.n
+        Proj.GET(ProjectCde);   //*31927.n
+
+      BudgetLine.SETRANGE("Project No.",ProjectCde);
+      BudgetLine.SETRANGE("Extension Contract",ExtensionCde);
+      BudgetLine.SETRANGE(Adjustment,AdjustmentCde);
+      BudgetLine.SETRANGE(Option,OptionCde);
+      IF BudgetLine.FINDLAST THEN
+        NewBudgetLineNo := BudgetLine."Line No." + 10000;
+    END;
+
+    PROCEDURE CheckAdmiSubstituteCostObject@1100485002(VAR VarAdmicde@1100485000 : Code[20];VAR CostTypeOpt@1100485001 : Option);
+    VAR
+      AdmiRec@1100525000 : Record 11012390;
+      DimValRec@1100525001 : Record 349;
+    BEGIN
+      //DP01702: copy from codeunit 11012391 (Trad-xml)
+      IF AdmiRec.GET(VarAdmicde) THEN BEGIN
+        IF AdmiRec."Admi Related Cost Type" AND (VarAdmicde <> '') THEN BEGIN
+          IF AdmiRec."Cost Object Labor" <> '' THEN BEGIN
+            CostTypeOpt := DimValRec."Cost Type"::Labor;
+            VarAdmicde := AdmiRec."Cost Object Labor";
+          END;
+          IF AdmiRec."Cost Object Material" <> '' THEN BEGIN
+            CostTypeOpt := DimValRec."Cost Type"::Material;
+            VarAdmicde := AdmiRec."Cost Object Material";
+          END;
+          IF AdmiRec."Cost Object Plant" <> '' THEN BEGIN
+            CostTypeOpt := DimValRec."Cost Type"::Plant;
+            VarAdmicde := AdmiRec."Cost Object Plant";
+          END;
+          IF AdmiRec."Cost Object Subcontracting" <> '' THEN BEGIN
+            CostTypeOpt := DimValRec."Cost Type"::Subcontracting;
+            VarAdmicde := AdmiRec."Cost Object Subcontracting";
+          END;
+          IF AdmiRec."Cost Object Sundry" <> '' THEN BEGIN
+            CostTypeOpt := DimValRec."Cost Type"::Sundry;
+            VarAdmicde := AdmiRec."Cost Object Sundry";
+          END;
+          EXIT;
+        END;
+
+        CASE CostTypeOpt OF
+          DimValRec."Cost Type"::Labor:
+            IF AdmiRec."Cost Object Labor" <> '' THEN
+              VarAdmicde := AdmiRec."Cost Object Labor";
+          DimValRec."Cost Type"::Material:
+            IF AdmiRec."Cost Object Material" <> '' THEN
+              VarAdmicde := AdmiRec."Cost Object Material";
+          DimValRec."Cost Type"::Plant:
+            IF AdmiRec."Cost Object Plant" <> '' THEN
+              VarAdmicde := AdmiRec."Cost Object Plant";
+          DimValRec."Cost Type"::Subcontracting:
+            IF AdmiRec."Cost Object Subcontracting" <> '' THEN
+              VarAdmicde := AdmiRec."Cost Object Subcontracting";
+          DimValRec."Cost Type"::Sundry:
+            IF AdmiRec."Cost Object Sundry" <> '' THEN
+              VarAdmicde := AdmiRec."Cost Object Sundry";
+        END;
+      END;
+    END;
+
+    PROCEDURE CheckUpdateOption@1100528201();
+    VAR
+      lvDummyOptionSurchRec@1100485001 : Record 11012512;
+      lvBuyerMgtCU@1100485000 : Codeunit 11012500;
+    BEGIN
+      //C043480
+      IF OptionCde = '' THEN
+        EXIT;
+
+      lvBuyerMgtCU.BmCalcSurchargesUpdateOption(
+        ProjectCde, PlotCde, HouseModelCde, MainGroupCde, GroupCde, SubGroupCde, OptionCde, FALSE, lvDummyOptionSurchRec);
+    END;
+
+    PROCEDURE CheckUpdateSettlQuantity@1100528200();
+    VAR
+      lvDummySettlementQuantitySurcharge@1100485001 : Record 11072247;
+      lvSettlementQuantityManagement@1100485000 : Codeunit 11071690;
+    BEGIN
+      //C043480
+      IF SettlementQuantityCde = '' THEN
+        EXIT;
+
+      lvSettlementQuantityManagement.MMRCalcSurchargesUpdateSettlQuan(
+        ProjectCde, HouseModelCde, SettlementQuantityCde, FALSE,lvDummySettlementQuantitySurcharge);
+    END;
+
+    LOCAL PROCEDURE FillCostTypeByPrice@1100528500(VAR BudgetLine@1100528500 : Record 11012001;LaborPrice@1100528501 : Decimal;MaterialPrice@1100528502 : Decimal;SubcontractingPrice@1100528503 : Decimal;PlantPrice@1100528504 : Decimal;SundryPrice@1100528505 : Decimal);
+    BEGIN
+      //C042315
+      IF LaborPrice <> 0 THEN
+        BudgetLine."Cost Type" := BudgetLine."Cost Type"::Labor
+      ELSE
+        IF MaterialPrice <> 0 THEN
+          BudgetLine."Cost Type" := BudgetLine."Cost Type"::Material
+        ELSE
+          IF SubcontractingPrice <> 0 THEN
+            BudgetLine."Cost Type" := BudgetLine."Cost Type"::Subcontracting
+          ELSE
+            IF PlantPrice <> 0 THEN
+              BudgetLine."Cost Type" := BudgetLine."Cost Type"::Plant
+            ELSE
+              BudgetLine."Cost Type" := BudgetLine."Cost Type"::Subcontracting;
+    END;
+
+    BEGIN
+    {
+      db, 10-10-16: C032255 + C028543
+      - changes to fill/skip element by CodingSystem
+      db, 16-02-18: C043480
+      - copy functions from codeunit 11012391 (TRAD-XML) for SettlementQuantity
+    }
+    END.
+  }
+}
+

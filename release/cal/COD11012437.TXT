@@ -1,0 +1,296 @@
+OBJECT Codeunit 11012437 SD Worx Cobra Connection Mgt
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+            CODEUNIT.RUN(CODEUNIT::"SD Worx Cobra Get Employees");
+            CODEUNIT.RUN(CODEUNIT::"SD Worx Cobra Get Leave");
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      MissingCredentialsErr@1100528516 : TextConst 'DEU=Die GeheimschlÅssel mÅssen in das %1-Fenster eingegeben werden.;ENU=The secret keys must be filled in the %1 window.;NLD=De geheimsleutels moeten worden ingevuld in het venster %1.';
+      CheckConnectionTxt@1100528501 : TextConst 'DEU=Verbindung prÅfen.;ENU=Check connection.;NLD=Verbinding controleren.;NOR=Kontroller tilkobling.;SVE=Kontrollera anslutning.';
+      ConnectionSuccessMsg@1100528502 : TextConst 'DEU=Der Verbindungstest war erfolgreich. Die Einstellungen sind gÅltig.;ENU=The connection test was successful. The settings are valid.;NLD=De verbindingstest is geslaagd. De instellingen zijn geldig.;NOR=Tilkoblingstesten er fullfõrt. Innstillingene er gyldige.;SVE=Anslutningstestet har utfîrts. InstÑllningarna Ñr giltiga.';
+      ResponseTempBlob@1100528503 : Record 99008535;
+      TempTraceTempBlob@1100528512 : TEMPORARY Record 99008535;
+      Trace@1100528511 : Codeunit 1292;
+      HttpWebRequestMgt@1100528500 : Codeunit 1297;
+      GLBResponseInStream@1100528505 : InStream;
+      GLBHttpStatusCode@1100528508 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpStatusCode";
+      GLBResponseHeaders@1100528507 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Collections.Specialized.NameValueCollection";
+      GLBTraceLogEnabled@1100528504 : Boolean;
+      LoggingConstTxt@1100528509 : TextConst 'DEU=SD Worx Cobra-Austauschservice.;ENU=SD Worx Cobra Exchange Service.;NLD=SD Worx Cobra uitwisselingsservice.';
+      NotEnabledErr@1100528514 : TextConst 'DEU=The SD Worx Cobra-Austauschservice ist nicht aktiv.;ENU=The SD Worx Cobra exchange service is not enabled.;NLD=De SD Worx Cobra uitwisselingsservice is niet ingeschakeld.';
+      SaveToServerFilePath@1100528520 : Text;
+
+    PROCEDURE EnableDebugOutput@1100528509();
+    BEGIN
+      SaveToServerFilePath := 'D:\Temp\IMPORT';
+    END;
+
+    PROCEDURE CheckConnection@1100528507();
+    VAR
+      SDWorxCobraExchSetup@1000 : Record 11012388;
+    BEGIN
+      SDWorxCobraExchSetup.GET;
+      VerifyPrerequisites(TRUE);
+      Initialize(SDWorxCobraExchSetup."Service URL" + '/oauth/token','POST');
+
+      IF NOT ExecuteWebServiceRequest THEN
+        LogActivityFailedAndError(SDWorxCobraExchSetup.RECORDID,CheckConnectionTxt,'');
+
+      LogActivitySucceeded(SDWorxCobraExchSetup.RECORDID,CheckConnectionTxt,ConnectionSuccessMsg);
+
+      IF GUIALLOWED THEN
+        MESSAGE(ConnectionSuccessMsg);
+
+      IF GLBTraceLogEnabled THEN
+        Trace.LogStreamToTempFile(GLBResponseInStream,'checkconnection',TempTraceTempBlob);
+    END;
+
+    PROCEDURE GetAccessToken@1100528526() : Text;
+    VAR
+      HTTPcontent@1100528500 : Text;
+      JsonObject@1100528501 : DotNet "'Newtonsoft.Json, Version=6.0.0.0, Culture=neutral, PublicKeyToken=30ad4fe6b2a6aeed'.Newtonsoft.Json.Linq.JObject";
+    BEGIN
+      CheckConnection;
+      GLBResponseInStream.READTEXT(HTTPcontent);
+      JsonObject := JsonObject.Parse(HTTPcontent);
+      EXIT(FORMAT(JsonObject.GetValue('access_token')));
+    END;
+
+    PROCEDURE VerifyPrerequisites@1100528501(ShowFailure@1000 : Boolean) : Boolean;
+    VAR
+      SDWorxCobraExchSetup@1001 : Record 11012388;
+    BEGIN
+      WITH SDWorxCobraExchSetup DO
+        IF NOT (GET AND HasPassword("Consumer Key") AND HasPassword("Consumer Secret")) THEN
+          IF ShowFailure THEN
+            ERROR(MissingCredentialsErr,TABLECAPTION);
+
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE Initialize@1100528502(URL@1002 : Text;Method@1001 : Text[6]);
+    VAR
+      SDWorxCobraExchSetup@1100528502 : Record 11012388;
+    BEGIN
+      WITH SDWorxCobraExchSetup DO BEGIN
+        GET;
+
+        CLEAR(HttpWebRequestMgt);
+        HttpWebRequestMgt.Initialize(URL);
+        HttpWebRequestMgt.SetMethod(Method);
+        HttpWebRequestMgt.AddHeader('Authorization','Basic ' + GetBase64String(
+          GetPassword("Consumer Key") + ':' + GetPassword("Consumer Secret")));
+        HttpWebRequestMgt.SetContentType('application/x-www-form-urlencoded');
+        HttpWebRequestMgt.AddBodyAsAsciiText('scope=customer&grant_type=client_credentials');
+
+        GLBTraceLogEnabled := "Log Web Requests";
+        HttpWebRequestMgt.SetTraceLogEnabled("Log Web Requests");
+      END;
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE ExecuteWebServiceRequest@1100528504();
+    BEGIN
+      CLEAR(ResponseTempBlob);
+      ResponseTempBlob.INIT;
+      ResponseTempBlob.Blob.CREATEINSTREAM(GLBResponseInStream, TEXTENCODING::UTF8);
+
+      IF NOT GUIALLOWED THEN
+        HttpWebRequestMgt.DisableUI;
+
+      IF NOT HttpWebRequestMgt.GetResponse(GLBResponseInStream,GLBHttpStatusCode,GLBResponseHeaders) THEN
+        HttpWebRequestMgt.ProcessFaultXMLResponse('',GetErrorXPath,GetPrefix,GetApiNamespace);
+    END;
+
+    LOCAL PROCEDURE LogActivitySucceeded@1100528503(RelatedRecordID@1001 : RecordID;ActivityDescription@1002 : Text;ActivityMessage@1003 : Text);
+    VAR
+      ActivityLog@1000 : Record 710;
+    BEGIN
+      ActivityLog.LogActivity(RelatedRecordID,ActivityLog.Status::Success,COPYSTR(LoggingConstTxt,1,30),
+        ActivityDescription,ActivityMessage);
+    END;
+
+    LOCAL PROCEDURE LogActivityFailed@24(RelatedRecordID@1001 : RecordID;ActivityDescription@1002 : Text;ActivityMessage@1003 : Text);
+    VAR
+      ActivityMessageVar@1000 : Text;
+    BEGIN
+      ActivityMessageVar := ActivityMessage;
+      LogActivityFailedCommon(RelatedRecordID,ActivityDescription,ActivityMessageVar);
+    END;
+
+    LOCAL PROCEDURE LogActivityFailedAndError@1100528506(RelatedRecordID@1001 : RecordID;ActivityDescription@1002 : Text;ActivityMessage@1003 : Text);
+    BEGIN
+      LogActivityFailedCommon(RelatedRecordID,ActivityDescription,ActivityMessage);
+      //removed DELCHR to avoid error being cancelled, error should ALWAYS be thrown with or without message. SSIMON
+      ERROR(ActivityMessage);
+    END;
+
+    LOCAL PROCEDURE LogActivityFailedCommon@54(RelatedRecordID@1001 : RecordID;ActivityDescription@1002 : Text;VAR ActivityMessage@1003 : Text);
+    VAR
+      ActivityLog@1000 : Record 710;
+    BEGIN
+      ActivityMessage := GETLASTERRORTEXT + ' ' + ActivityMessage;
+      CLEARLASTERROR;
+
+      ActivityLog.LogActivity(RelatedRecordID,ActivityLog.Status::Failed,COPYSTR(LoggingConstTxt,1,30),
+        ActivityDescription,ActivityMessage);
+
+      IF ActivityMessage = '' THEN
+        ActivityLog.SetDetailedInfoFromStream(GLBResponseInStream);
+
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE GetErrorXPath@48() : Text;
+    BEGIN
+      EXIT(STRSUBSTNO('//%1:Message',GetPrefix));
+    END;
+
+    LOCAL PROCEDURE GetPrefix@45() : Text;
+    BEGIN
+      EXIT('');
+    END;
+
+    LOCAL PROCEDURE GetApiNamespace@13() : Text;
+    BEGIN
+      EXIT('');
+    END;
+
+    LOCAL PROCEDURE GetBase64String@1100528314(StringToEncode@1100528300 : Text) : Text;
+    VAR
+      Convert@1100525002 : DotNet "'mscorlib, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Convert";
+      Encoding@1100525001 : DotNet "'mscorlib, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.Encoding";
+    BEGIN
+      EXIT(Convert.ToBase64String(Encoding.UTF8.GetBytes(StringToEncode)));
+    END;
+
+    PROCEDURE CheckServiceEnabled@6();
+    VAR
+      SDWorxCobraExchSetup@1100528500 : Record 11012388;
+    BEGIN
+      WITH SDWorxCobraExchSetup DO BEGIN
+        GET;
+        IF NOT Enabled THEN
+          ERROR(NotEnabledErr);
+      END;
+    END;
+
+    PROCEDURE GetFullURL@47(PartialURL@1000 : Text) : Text;
+    VAR
+      SDWorxCobraExchSetup@1100528500 : Record 11012388;
+    BEGIN
+      WITH SDWorxCobraExchSetup DO BEGIN
+        GET;
+        TESTFIELD("Service URL");
+        EXIT("Service URL" + '/odata/' + PartialURL);
+      END;
+    END;
+
+    PROCEDURE GetCobraData@1100528531(AccessToken@1100528506 : Text;URL@1100528504 : Text;DataTypeTxt@1100528505 : Text;VAR XMLText@1100528503 : Text) : Boolean;
+    VAR
+      SDWorxCobraExchSetup@1100528500 : Record 11012388;
+      XmlDoc@1100528501 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      XMLBigTxt@1100528502 : BigText;
+      StreamReader@1100525000 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.StreamReader";
+      Encoding@1100525001 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.Encoding";
+    BEGIN
+      SDWorxCobraExchSetup.GET;
+
+      CheckServiceEnabled;
+
+      CLEAR(HttpWebRequestMgt);
+      HttpWebRequestMgt.Initialize(URL);
+      HttpWebRequestMgt.SetMethod('GET');
+      HttpWebRequestMgt.AddHeader('Authorization','Bearer ' + AccessToken);
+      HttpWebRequestMgt.SetReturnType('application/atom+xml');
+      HttpWebRequestMgt.AddHeader('Accept-Charset', 'utf-16');
+
+      IF NOT ExecuteWebServiceRequest THEN BEGIN
+        LogActivityFailed(SDWorxCobraExchSetup.RECORDID,DataTypeTxt,'');
+        EXIT(FALSE);
+      END;
+
+      IF NOT HttpWebRequestMgt.TryLoadXMLResponse(GLBResponseInStream,XmlDoc) THEN BEGIN
+        LogActivityFailed(SDWorxCobraExchSetup.RECORDID,DataTypeTxt,'');
+        EXIT(FALSE);
+      END;
+
+      IF GLBTraceLogEnabled THEN
+        Trace.LogStreamToTempFile(GLBResponseInStream,DataTypeTxt,TempTraceTempBlob);
+
+      LogActivitySucceeded(SDWorxCobraExchSetup.RECORDID,DataTypeTxt,'');
+
+      StreamReader := StreamReader.StreamReader(GLBResponseInStream, Encoding.Unicode);
+      XMLBigTxt.ADDTEXT(StreamReader.ReadToEnd);
+      XMLText := SanitizeDirtyInvalidXML(FORMAT(XMLBigTxt));
+
+      IF SaveToServerFilePath <> '' THEN
+        WriteXMLFile(
+          SaveToServerFilePath + '\' + DataTypeTxt + '.XML',
+          XMLText);
+
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE WriteXMLFile@1100528505(ServerFileDocumentPath@1100528500 : Text;XmlTxt@1100528502 : Text);
+    VAR
+      ServerFileHelper@1100528501 : DotNet "'mscorlib'.System.IO.File";
+    BEGIN
+      ServerFileHelper.WriteAllText(ServerFileDocumentPath,XmlTxt);
+    END;
+
+    PROCEDURE SetNameSpaceManager@1100528508(VAR XmlNamespaceManager@1100528500 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNamespaceManager");
+    VAR
+      GenericWebServiceNamespace@1100528502 : Record 11229383;
+      XmlDocument@1100528501 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+    BEGIN
+      XmlNamespaceManager := XmlNamespaceManager.XmlNamespaceManager(XmlDocument.XmlDocument.NameTable);
+      GenericWebServiceNamespace.SETRANGE("Connector Type", '');
+      IF GenericWebServiceNamespace.FINDSET THEN
+        REPEAT
+          XmlNamespaceManager.AddNamespace(GenericWebServiceNamespace.Prefix, GenericWebServiceNamespace.Namespace);
+        UNTIL GenericWebServiceNamespace.NEXT = 0;
+      GenericWebServiceNamespace.SETRANGE("Connector Type", 'Cobra');
+      IF GenericWebServiceNamespace.FINDSET THEN
+        REPEAT
+          XmlNamespaceManager.AddNamespace(GenericWebServiceNamespace.Prefix, GenericWebServiceNamespace.Namespace);
+        UNTIL GenericWebServiceNamespace.NEXT = 0;
+
+      XmlNamespaceManager.AddNamespace('empty','http://www.w3.org/2005/Atom');
+      XmlNamespaceManager.AddNamespace('d','http://schemas.microsoft.com/ado/2007/08/dataservices');
+      XmlNamespaceManager.AddNamespace('m','http://schemas.microsoft.com/ado/2007/08/dataservices/metadata');
+      XmlNamespaceManager.AddNamespace('georss','http://www.georss.org/georss');
+      XmlNamespaceManager.AddNamespace('gml','http://www.opengis.net/gml');
+    END;
+
+    LOCAL PROCEDURE SanitizeDirtyInvalidXML@1100527600(DirtyInvalidXML@1100527600 : Text) : Text;
+    VAR
+      pattern@1100527601 : Text;
+      regex@1100527602 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.RegularExpressions.Regex";
+    BEGIN
+      pattern := '[\x00-\x08\x0B\x0C\x0E-\x1F]';
+      regex := regex.Regex(pattern);
+      IF DirtyInvalidXML <> '' THEN
+        EXIT(regex.Replace(DirtyInvalidXML, ''));
+    END;
+
+    BEGIN
+    {
+      4PS, DP00969, 16-01-2018, This codeunit is copied from codeunit 1410
+    }
+    END.
+  }
+}
+

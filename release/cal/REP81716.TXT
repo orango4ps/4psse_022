@@ -1,0 +1,295 @@
+OBJECT Report 81716 AssNo505 WIP-calc and loss-ris
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PSSE,AssNo505;
+  }
+  PROPERTIES
+  {
+    ProcessingOnly=Yes;
+    OnInitReport=BEGIN
+                   selectedDate := WORKDATE;
+                   selectedMonthOpt := DATE2DMY(selectedDate,2);
+                   selectedYear := DATE2DMY(selectedDate,3);
+                 END;
+
+    OnPreReport=BEGIN
+                  IF (selectedYear > 2099) OR (selectedYear < 1990) THEN
+                    ERROR('impossible year');
+
+                  selectedDate := CALCDATE('<+1M>',DMY2DATE(1,selectedMonthOpt,selectedYear));
+                  selectedDate := CALCDATE('<-1D>',selectedDate);
+
+
+                  selectedRevDate := CALCDATE('<+1D+1M>',selectedDate);
+                  selectedRevDate := CALCDATE('<-1D>',selectedRevDate);
+                END;
+
+  }
+  DATASET
+  {
+    { 1000000000;;DataItem;                  ;
+               DataItemTable=Table11072003;
+               DataItemTableView=WHERE(Single/Main/Sub Project=FILTER(Main Project|Single),
+                                       Project Status=FILTER(..Administrative Finished));
+               OnAfterGetRecord=VAR
+                                  pct@1100285100 : Decimal;
+                                  partTotRev@1100285101 : Decimal;
+                                  AmntWip@1100285102 : Decimal;
+                                  prognosisFound@1100285103 : Boolean;
+                                  prognFinResult@1100285105 : Decimal;
+                                  JobSub@1000000000 : Record 11072003;
+                                  JobActualCosts@1000000001 : Decimal;
+                                  JobOpenAmountHours@1000000002 : Decimal;
+                                  JobOpenOvhSurchHours@1000000003 : Decimal;
+                                  JobInvoicedPrice@1000000004 : Decimal;
+                                  JobActCosts@1000000005 : Decimal;
+                                BEGIN
+                                  gPrognosis.SETRANGE("Project No.","No.");
+                                  gPrognosis.SETRANGE("Prognosis Date",0D,selectedDate);
+                                  prognosisFound := gPrognosis.FINDLAST;
+
+
+                                  Job.SETFILTER("Wage Component Type Filter",'<>%1',Job."Wage Component Type Filter"::"Expense hours");
+                                  Job.SETRANGE("Cumulation Filter",0D,selectedDate);  //170206
+
+                                  Job.CALCFIELDS("Actual Costs","Open Amount (Hours)","Open Ovh. Surch. (Hours)","Invoiced Price");
+
+                                  JobActualCosts := Job."Actual Costs";
+                                  JobOpenAmountHours := Job."Open Amount (Hours)";
+                                  JobOpenOvhSurchHours := Job."Open Ovh. Surch. (Hours)";
+                                  JobInvoicedPrice := Job."Invoiced Price";
+
+                                  IF Job."Single/Main/Sub Project" = Job."Single/Main/Sub Project"::"Main Project" THEN BEGIN
+                                    JobSub.SETRANGE("Cumulation Filter",0D,selectedDate);  //170207
+                                    JobSub.SETFILTER("No.",'<>%1',Job."No.");
+                                    JobSub.SETRANGE("Main Project",Job."Main Project");
+                                    IF JobSub.FINDSET(FALSE) THEN
+                                    REPEAT
+                                      JobSub.CALCFIELDS("Invoiced Price");
+                                      JobInvoicedPrice += JobSub."Invoiced Price";
+                                    UNTIL JobSub.NEXT=0;
+                                  END;
+
+
+                                  IF (Job."Forecast Level" = Job."Forecast Level"::"Cost Component") THEN BEGIN
+                                    gPrognosis.CALCFIELDS("Prognosis Total Cost CC","Prognosis Total Revenue CC");
+                                    IF prognosisFound THEN
+                                      prognosisFound := gPrognosis."Prognosis Total Cost CC" <> 0;
+                                    prognFinResult := (gPrognosis."Prognosis Total Revenue CC" - gPrognosis."Prognosis Total Cost CC");
+                                  END
+                                  ELSE BEGIN
+                                    gPrognosis.CALCFIELDS("Prognosis Total Cost",gPrognosis."Prognosis Revenue");
+                                    IF prognosisFound THEN
+                                      prognosisFound := gPrognosis."Prognosis Total Cost" <> 0;
+                                    prognFinResult := (gPrognosis."Prognosis Revenue" - gPrognosis."Prognosis Total Cost");
+                                  END;
+
+                                  pct :=0;
+                                  IF prognosisFound THEN
+                                  BEGIN
+                                  //161230
+                                    //JobActCosts := JobActualCosts + JobOpenAmountHours + JobOpenOvhSurchHours;
+                                    JobActCosts := JobActualCosts ;
+                                  //161230
+
+                                    IF (Job."Forecast Level" = Job."Forecast Level"::"Cost Component") THEN
+                                      pct := JobActCosts / gPrognosis."Prognosis Total Cost CC"
+                                    ELSE
+                                      pct := JobActCosts / gPrognosis."Prognosis Total Cost";
+                                  END;
+                                  //>>170202
+                                  //161227
+                                  IF pct > 1 THEN pct := 1;
+                                  //<<
+
+                                  IF (Job."Forecast Level" = Job."Forecast Level"::"Cost Component") THEN
+                                    partTotRev := gPrognosis."Prognosis Total Revenue CC" * pct
+                                  ELSE
+                                    partTotRev := gPrognosis."Prognosis Revenue" * pct;
+
+                                  AmntWip := JobInvoicedPrice - partTotRev;
+
+                                  IF ROUND(AmntWip,0.01) <> 0 THEN
+                                    createGLlines(-AmntWip,AccCredWIP,AccDebWIP,PLAccWIP,
+                                                  'WIP%1-'+FORMAT(selectedDate,0,'<Year4>-<Month,2>'),'WIP Project No. '+Job."No.");
+
+                                  //161227
+                                  IF pct > 1 THEN pct := 1;
+
+                                  //loss-risk
+                                  partTotRev := prognFinResult * ( 1 - pct);
+                                  IF ROUND(prognFinResult,0.01) < 0 THEN
+                                    createGLlines(-partTotRev,PLAccLossRisk,PLAccLossRisk,BalAccLossRisk,
+                                                  'LR%1-'+FORMAT(selectedDate,0,'<Year4>-<Month,2>'),'LR Project No. '+Job."No."
+                                                  );
+                                END;
+
+               ReqFilterFields=No.,Global Dimension 1 Code }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      SaveValues=Yes;
+    }
+    CONTROLS
+    {
+      { 1100285100;;Container;
+                  Name=Options;
+                  ContainerType=ContentArea }
+
+      { 1100285109;1;Field  ;
+                  CaptionML=[ENU=Year;
+                             SVE=èr];
+                  SourceExpr=selectedYear }
+
+      { 1100285101;1;Field  ;
+                  CaptionML=[ENU=Month;
+                             SVE=MÜnad];
+                  SourceExpr=selectedMonthOpt }
+
+      { 1100285102;1;Field  ;
+                  CaptionML=[ENU=Journal template;
+                             SVE=Journalmall];
+                  SourceExpr=gJnlTemplate;
+                  TableRelation="Gen. Journal Template" }
+
+      { 1100285103;1;Field  ;
+                  CaptionML=[ENU=Journal batch;
+                             SVE=Journal];
+                  SourceExpr=gJnlBatch;
+                  TableRelation="Gen. Journal Batch".Name;
+                  OnLookup=VAR
+                             GenJournalBatch@1100285100 : Record 232;
+                           BEGIN
+                             //"Gen. Journal Batch".Name WHERE (Journal Template Name=FILTER(gJnlTemplate))
+                             IF gJnlTemplate <> '' THEN
+                               GenJournalBatch.SETRANGE("Journal Template Name",gJnlTemplate);
+                             IF PAGE.RUNMODAL(0,GenJournalBatch) = ACTION::LookupOK THEN BEGIN
+                               gJnlBatch := GenJournalBatch.Name;
+                               gJnlTemplate := GenJournalBatch."Journal Template Name";
+                             END;
+                           END;
+                            }
+
+      { 1100285104;1;Field  ;
+                  CaptionML=ENU=G/L Account Credit WIP (A balance sheet account);
+                  SourceExpr=AccCredWIP;
+                  TableRelation="G/L Account" WHERE (Direct Posting=CONST(Yes),
+                                                     Income/Balance=CONST(Balance Sheet)) }
+
+      { 1100285105;1;Field  ;
+                  CaptionML=ENU=G/L Account Debit WIP (A balance sheet account);
+                  SourceExpr=AccDebWIP;
+                  TableRelation="G/L Account" WHERE (Direct Posting=CONST(Yes),
+                                                     Income/Balance=CONST(Balance Sheet)) }
+
+      { 1100285106;1;Field  ;
+                  CaptionML=ENU=P&L Account WIP (A result account);
+                  SourceExpr=PLAccWIP;
+                  TableRelation="G/L Account" WHERE (Direct Posting=CONST(Yes),
+                                                     Income/Balance=CONST(Income Statement)) }
+
+      { 1100285107;1;Field  ;
+                  CaptionML=ENU=P&L Account loss-risk (A result account);
+                  SourceExpr=PLAccLossRisk;
+                  TableRelation="G/L Account" WHERE (Direct Posting=CONST(Yes),
+                                                     Income/Balance=CONST(Income Statement)) }
+
+      { 1100285108;1;Field  ;
+                  CaptionML=ENU=Balance Account Loss-risk (A balance sheet account);
+                  SourceExpr=BalAccLossRisk;
+                  TableRelation="G/L Account" WHERE (Direct Posting=CONST(Yes),
+                                                     Income/Balance=CONST(Balance Sheet)) }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      selectedDate@1100285100 : Date;
+      selectedYear@1100285113 : Integer;
+      selectedMonthOpt@1100285101 : ',Jan,Feb,Mar,Apr,May,Jun,Jul,Aug,Sep,Oct,Nov,Dec';
+      selectedRevDate@1100285111 : Date;
+      gPrognosis@1100285102 : Record 11012034;
+      gJnlTemplate@1100285103 : Code[10];
+      gJnlBatch@1100285104 : Code[10];
+      AccCredWIP@1100285105 : Code[20];
+      AccDebWIP@1100285106 : Code[20];
+      PLAccWIP@1100285109 : Code[20];
+      PLAccLossRisk@1100285108 : Code[20];
+      BalAccLossRisk@1100285107 : Code[20];
+      GenJnlLine@1100285110 : Record 81;
+      CurrLineNo@1100285112 : Integer;
+
+    PROCEDURE createGLlines@1100285105(Amnt@1100285101 : Decimal;AccCred@1100285104 : Code[20];AccDeb@1100285103 : Code[20];BalAcc@1100285102 : Code[20];docNo@1100285105 : Code[20];Desc@1100285100 : Text[50]);
+    BEGIN
+      IF ROUND(Amnt,0.01) = 0 THEN
+        EXIT;
+
+      IF CurrLineNo = 0 THEN BEGIN
+        GenJnlLine.SETRANGE("Journal Template Name", gJnlTemplate);
+        GenJnlLine.SETRANGE("Journal Batch Name", gJnlBatch);
+        IF GenJnlLine.FINDLAST THEN
+          CurrLineNo := GenJnlLine."Line No.";
+      END;
+
+      CurrLineNo += 10000;
+      GenJnlLine.INIT;
+      GenJnlLine."Journal Template Name" := gJnlTemplate;
+      GenJnlLine."Journal Batch Name" := gJnlBatch;
+      GenJnlLine."Line No." := CurrLineNo;
+      GenJnlLine.VALIDATE("Posting Date",selectedDate);
+      GenJnlLine."Document No." := STRSUBSTNO(docNo,'');
+      GenJnlLine.VALIDATE("Account Type",GenJnlLine."Account Type"::"G/L Account");
+      IF Amnt > 0 THEN
+        GenJnlLine.VALIDATE("Account No.",AccDeb)
+      ELSE
+        GenJnlLine.VALIDATE("Account No.",AccCred);
+      GenJnlLine.VALIDATE("Bal. Account Type",GenJnlLine."Bal. Account Type"::"G/L Account");
+      GenJnlLine.VALIDATE("Bal. Account No.",BalAcc);
+      GenJnlLine.VALIDATE("Shortcut Dimension 1 Code",Job."Global Dimension 1 Code");
+      GenJnlLine.VALIDATE(Amount,Amnt);
+      GenJnlLine.Description := Desc;
+      GenJnlLine.INSERT;
+
+
+      CurrLineNo += 10000;
+      GenJnlLine.INIT;
+      GenJnlLine."Journal Template Name" := gJnlTemplate;
+      GenJnlLine."Journal Batch Name" := gJnlBatch;
+      GenJnlLine."Line No." := CurrLineNo;
+      GenJnlLine.VALIDATE("Posting Date",selectedRevDate);
+      GenJnlLine."Document No." := STRSUBSTNO(docNo,'-REV');
+      GenJnlLine.VALIDATE("Account Type",GenJnlLine."Account Type"::"G/L Account");
+      GenJnlLine.VALIDATE("Account No.",BalAcc);
+      GenJnlLine.VALIDATE("Bal. Account Type",GenJnlLine."Bal. Account Type"::"G/L Account");
+      IF Amnt > 0 THEN
+        GenJnlLine.VALIDATE("Bal. Account No.",AccDeb)
+      ELSE
+        GenJnlLine.VALIDATE("Bal. Account No.",AccCred);
+      GenJnlLine.VALIDATE("Shortcut Dimension 1 Code",Job."Global Dimension 1 Code");
+      GenJnlLine.VALIDATE(Amount,Amnt);
+      GenJnlLine.Description := Desc;
+      GenJnlLine.INSERT;
+    END;
+
+    BEGIN
+    {
+      RFC-196 AssNo505 - Calculation of WIP and Loss-risk reserve
+      170202 ITERO.DL RFC206, re-enable limit of readyness
+    }
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

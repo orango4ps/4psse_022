@@ -1,0 +1,182 @@
+OBJECT Codeunit 11125356 SMS Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+            SendServiceOrderReminders;
+          END;
+
+  }
+  CODE
+  {
+
+    PROCEDURE SendServiceOrderReminders@1100528700();
+    VAR
+      ServiceSourceTypeSetup@1100528601 : Record 11071726;
+      SCSourceTypeSetup@1100528602 : Record 11071800;
+      CustSourceTypeSetup@1100528609 : Record 11071800;
+      SMSMessageBodyText@1100528702 : Record 11229333;
+      ServiceOrder@1100528703 : Record 11012823;
+      Customer@1100528607 : Record 18;
+      ServiceSetup@1100528604 : Record 11012800;
+      RefDate@1100528705 : Date;
+      BodyText@1100528706 : Text;
+      BodyTextPart@1100528605 : Text;
+      SMSMessageCode@1100528603 : Code[10];
+      MessageId@1100528606 : Integer;
+    BEGIN
+      RefDate := TODAY;
+      ServiceSetup.GET;
+      ServiceSetup.TESTFIELD("SMS Interval");
+      IF ServiceSourceTypeSetup.FINDSET THEN
+        REPEAT
+          ServiceOrder.RESET;
+          ServiceOrder.SETCURRENTKEY("Starting Date", "Starting Time");
+          ServiceOrder.SETRANGE("Source Type", ServiceSourceTypeSetup."Source Type");
+          ServiceOrder.SETRANGE("Starting Date", CALCDATE(ServiceSetup."SMS Interval", RefDate));
+          ServiceOrder.SETFILTER("Mobile Phone No.", '<>%1', '');
+          ServiceOrder.SETRANGE("SMS Reminder Sent", FALSE);
+          ServiceOrder.SETFILTER(Status, '%1|%2', ServiceOrder.Status::Open, ServiceOrder.Status::"In Process");
+          IF ServiceOrder.FINDSET THEN
+            REPEAT
+              IF NOT Customer.GET(ServiceOrder."Customer No.") THEN
+                Customer.INIT;
+              IF NOT SCSourceTypeSetup.GET(SCSourceTypeSetup.Type::Contract, ServiceOrder."Service Contract No.", ServiceOrder."Source Type") THEN
+                SCSourceTypeSetup.INIT;
+              IF NOT CustSourceTypeSetup.GET(CustSourceTypeSetup.Type::Customer, ServiceOrder."Customer No.", ServiceOrder."Source Type") THEN
+                CustSourceTypeSetup.INIT;
+              IF (SCSourceTypeSetup."SMS Reminder" = SCSourceTypeSetup."SMS Reminder"::Yes) OR
+                 ((SCSourceTypeSetup."SMS Reminder" = SCSourceTypeSetup."SMS Reminder"::" ") AND
+                  (CustSourceTypeSetup."SMS Reminder" = CustSourceTypeSetup."SMS Reminder"::Yes))
+              THEN BEGIN
+                IF SCSourceTypeSetup."SMS Message Code" <> '' THEN
+                  SMSMessageCode := SCSourceTypeSetup."SMS Message Code"
+                ELSE
+                  IF CustSourceTypeSetup."SMS Message Code" <> '' THEN
+                    SMSMessageCode := CustSourceTypeSetup."SMS Message Code"
+                  ELSE
+                    SMSMessageCode := ServiceSourceTypeSetup."SMS Message Code";
+                IF SMSMessageCode <> '' THEN BEGIN
+                  BodyText := SMSMessageBodyText.GetBodyText(ServiceOrder, SMSMessageCode, Customer."Language Code", GetLanguageID(Customer."No."));
+                  FOR MessageId := 1 TO ROUND(STRLEN(BodyText) / 160, 1, '>') DO BEGIN
+                    BodyTextPart := COPYSTR(BodyText, (MessageId -1) * 160 +1, 160);
+                    IF BodyTextPart <> '' THEN
+                      IF SMSRequest(ServiceOrder."Mobile Phone No.", BodyTextPart) THEN BEGIN
+                        ServiceOrder."SMS Reminder Sent" := TRUE;
+                        ServiceOrder.MODIFY;
+                      END;
+                  END;
+                END;
+              END;
+            UNTIL ServiceOrder.NEXT = 0;
+        UNTIL ServiceSourceTypeSetup.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE SMSRequest@1100528702(Receiver@1100528707 : Text;BodyText@1100528703 : Text) Result : Boolean;
+    VAR
+      SMSSetup@1100528704 : Record 11229334;
+      HttpWebRequestMgt@1100528702 : Codeunit 1297;
+      ResponseStr@1100528708 : InStream;
+      HttpStatusCode@1100528701 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpStatusCode";
+      ResponseHeaders@1100528700 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Collections.Specialized.NameValueCollection";
+    BEGIN
+      SMSSetup.GET;
+
+      HttpWebRequestMgt.Initialize(SMSSetup.Url);
+      HttpWebRequestMgt.DisableUI;
+      HttpWebRequestMgt.SetMethod('POST');
+
+      CASE SMSSetup."SMS Gateway" OF
+        SMSSetup."SMS Gateway"::Bizzsms:
+          HttpWebRequestMgt.AddBodyAsText(BuildBizzSMSRequestBody(Receiver, BodyText));
+      END;
+
+      HttpWebRequestMgt.CreateInstream(ResponseStr);
+      IF NOT HttpWebRequestMgt.GetResponse(ResponseStr, HttpStatusCode, ResponseHeaders) THEN
+        HttpWebRequestMgt.ProcessFaultResponse('');
+
+      CASE SMSSetup."SMS Gateway" OF
+        SMSSetup."SMS Gateway"::Bizzsms:
+          Result := ProcessBizzSMSResponse(ResponseStr);
+      END;
+    END;
+
+    LOCAL PROCEDURE BuildBizzSMSRequestBody@1100528704(Receiver@1100528708 : Text;BodyText@1100528707 : Text) : Text;
+    VAR
+      SMSSetup@1100528709 : Record 11229334;
+      XMLDocument@1100528705 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      RootNode@1100528704 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      UserNode@1100528710 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      MessagesNode@1100528703 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      SmsNode@1100528702 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      ReceiversNode@1100528701 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      NewNode@1100528700 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      XMLDOMMgt4PS@1100528706 : Codeunit 11020220;
+    BEGIN
+      SMSSetup.GET;
+
+      XMLDocument := XMLDocument.XmlDocument;
+      RootNode := XMLDocument.CreateNode('element', 'smsdata', '');
+      XMLDocument.AppendChild(RootNode);
+
+      XMLDOMMgt4PS.AddElement(RootNode, 'user', '', '', UserNode);
+      XMLDOMMgt4PS.AddElement(RootNode, 'messages', '', '', MessagesNode);
+      XMLDOMMgt4PS.AddElement(MessagesNode, 'sms', '', '', SmsNode);
+      XMLDOMMgt4PS.AddAttribute(SmsNode, 'id', '');
+
+      XMLDOMMgt4PS.AddElement(UserNode, 'username', SMSSetup."User Name", '', NewNode);
+      XMLDOMMgt4PS.AddElement(UserNode, 'password', SMSSetup.Password, '', NewNode);
+
+      XMLDOMMgt4PS.AddElement(SmsNode, 'message', BodyText, '', NewNode);
+      XMLDOMMgt4PS.AddElement(SmsNode, 'timestamp', '0', '', NewNode);
+      XMLDOMMgt4PS.AddElement(SmsNode, 'sender', SMSSetup.Sender, '', NewNode);
+
+      XMLDOMMgt4PS.AddElement(SmsNode, 'receivers', '', '', ReceiversNode);
+      XMLDOMMgt4PS.AddElement(ReceiversNode, 'phonenumber', Receiver, '', NewNode);
+
+      EXIT(XMLDocument.InnerXml);
+    END;
+
+    LOCAL PROCEDURE ProcessBizzSMSResponse@1100528706(ResponseStr@1100528700 : InStream) : Boolean;
+    VAR
+      HttpWebRequestMgt@1100528702 : Codeunit 1297;
+      XMLDOMMgt4PS@1100528705 : Codeunit 11020220;
+      XmlDocument@1100528703 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      t@1100528701 : Text;
+    BEGIN
+      HttpWebRequestMgt.TryLoadXMLResponse(ResponseStr, XmlDocument);
+      t := XMLDOMMgt4PS.FindNodeText(XmlDocument.DocumentElement, './/' + 'successful');
+      EXIT(t = '1');
+    END;
+
+    LOCAL PROCEDURE GetLanguageID@1100528603(ICustomerNo@1100528600 : Code[20]) : Integer;
+    VAR
+      Customer@1100528601 : Record 18;
+      Language@1100528602 : Record 8;
+      CompanyInformation@1100528603 : Record 79;
+    BEGIN
+      IF Customer.GET(ICustomerNo) THEN BEGIN
+        IF Customer."Language Code" <> '' THEN
+          IF Language.GET(Customer."Language Code") THEN
+            EXIT(Language."Windows Language ID");
+        IF Customer."Country/Region Code" <> '' THEN
+          IF Language.GET(Customer."Country/Region Code") THEN
+            EXIT(Language."Windows Language ID");
+      END;
+      IF CompanyInformation.GET THEN
+        IF CompanyInformation."Country/Region Code" <> '' THEN
+          IF Language.GET(CompanyInformation."Country/Region Code") THEN
+            EXIT(Language."Windows Language ID");
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

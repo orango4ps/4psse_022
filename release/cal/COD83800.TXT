@@ -1,0 +1,219 @@
+OBJECT Codeunit 83800 EventSubscriberCUCertego
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text001@1100285101 : TextConst 'ENU=Cannot create project without customer.;SVE=Du kan inte skapa projekt utan kund.';
+      Text002@1100285100 : TextConst 'ENU=Installment Sheet not added.;SVE=Betalplan ej upplagd, v„nligen †tg„rda.';
+
+    [EventSubscriber(Codeunit,11012228,OnAfterTransferEstimateStart)]
+    LOCAL PROCEDURE OnAfterEstimateTransfStart@1100583000(Job@1100285100 : Record 11072003;xJob@1100285101 : Record 11072003);
+    BEGIN
+      //Gap-29
+      Job.VALIDATE("Project Status", Job."Project Status"::Preparation);
+      Job.VALIDATE("Budget Fixed", FALSE);
+      Job.MODIFY(TRUE);
+    END;
+
+    [EventSubscriber(Table,36,OnValidateSellToCustomerNo)]
+    LOCAL PROCEDURE OnValidateSellToCustNo@1101285000(Rec@1101285000 : Record 36;xRec@1101285001 : Record 36);
+    VAR
+      CommentSheet@1101285003 : Page 124;
+      CommentLine@1101285002 : Record 97;
+    BEGIN
+      CommentLine.SETRANGE("Table Name", CommentLine."Table Name"::Customer);
+      CommentLine.SETRANGE("No.", Rec."Sell-to Customer No.");
+
+      IF CommentLine.FINDSET(FALSE) THEN BEGIN
+        CommentSheet.SETTABLEVIEW(CommentLine);
+        CommentSheet.RUN;
+      END;
+    END;
+
+    [EventSubscriber(Table,37,OnValidateItemNo)]
+    LOCAL PROCEDURE OnValidateItemNo@1101285011(VAR Rec@1101285000 : Record 37;VAR xRec@1101285001 : Record 37);
+    VAR
+      CommentSheet@1101285003 : Page 124;
+      CommentLine@1101285002 : Record 97;
+    BEGIN
+      CommentLine.SETRANGE("Table Name", CommentLine."Table Name"::Item);
+      CommentLine.SETRANGE("No.", Rec."Item No.");
+
+      IF CommentLine.FINDSET(FALSE) THEN BEGIN
+        CommentSheet.SETTABLEVIEW(CommentLine);
+        CommentSheet.RUN;
+      END;
+    END;
+
+    [EventSubscriber(Codeunit,414,OnBeforeReleaseSalesDoc)]
+    LOCAL PROCEDURE OnBeforeReleaseSalesDoc@111280000(VAR SalesHeader@1101285000 : Record 36;PreviewMode@1101285001 : Boolean);
+    VAR
+      Customer@1101285004 : Record 18;
+      SESetup@111280000 : Record 11128004;
+    BEGIN
+      IF NOT Customer.GET(SalesHeader."Sell-to Customer No.") THEN
+        EXIT;
+
+      IF  Customer."Chemical Tax" THEN BEGIN
+        SESetup.SETRANGE(Code, 'SURCHARGE1');
+        SESetup.SETRANGE("Line type", SESetup."Line type"::Setup);
+        SESetup.SETRANGE("Value (bool)", TRUE);
+        IF SESetup.FINDFIRST THEN
+          InsertFeeOnPurchLine(SalesHeader, SESetup);
+      END;
+    END;
+
+    LOCAL PROCEDURE InsertFeeOnPurchLine@111280001(SalesHeader@111280000 : Record 36;SESetup@111280001 : Record 11128004);
+    VAR
+      SalesLine@111280002 : Record 37;
+      LastLineNo@111280003 : Integer;
+    BEGIN
+      //InsertFeeOnPurchLine
+      SalesLine.SETRANGE("Document Type", SalesHeader."Document Type");
+      SalesLine.SETRANGE("Document No.", SalesHeader."No.");
+
+      SalesLine.SETRANGE(Description, SESetup."Value (txt)");
+      IF NOT SalesLine.ISEMPTY THEN
+        EXIT;
+
+      SalesLine.SETRANGE(Description);
+      IF SalesLine.FINDLAST THEN BEGIN
+        LastLineNo := SalesLine."Line No.";
+        SalesLine.INIT;
+        SalesLine.Type := SalesLine.Type::"G/L Account";
+        SalesLine.VALIDATE("Document Type", SalesLine."Document Type");
+        SalesLine.VALIDATE("Document No.", SalesLine."Document No.");
+        SalesLine.VALIDATE("Line No.", LastLineNo + 10000);
+        SalesLine.VALIDATE("No.", SESetup."Code 2");
+        SalesLine.Description := SESetup."Value (txt)";
+        SalesLine.VALIDATE("Unit of Measure Code", SESetup.Description);
+        SalesLine.VALIDATE(Quantity, 1);
+        SalesLine.VALIDATE("Unit Price", SESetup."Value (dec)");
+        SalesLine.INSERT;
+      END;
+    END;
+
+    [EventSubscriber(Table,11072003,OnAfterValidateEvent,"Global Dimension 1 Code")]
+    LOCAL PROCEDURE Table11072003_OnValidateGlobalDimensionCode1@1100583001(VAR Rec@111280000 : Record 11072003;VAR xRec@111280001 : Record 11072003;CurrFieldNo@111280002 : Integer);
+    VAR
+      USSetup@1100583000 : Record 91;
+      Text001@1100583001 : TextConst 'DAN=Du har ikke tilladelse til at ‘ndre omkostningscenterkode;ENU=You do not have permission to change cost center code;NOR=Du har ikke tillatelse til † endre kostnadsstedkode;SVE=Du saknar beh”righet att „ndra kostnadsst„llekod';
+      PrefLocation@1100583004 : Record 11020353;
+      Location@1100583005 : Record 14;
+    BEGIN
+      IF USSetup.GET(USERID) THEN BEGIN
+        IF xRec."Global Dimension 1 Code" <> '' THEN BEGIN
+          IF NOT USSetup."Project Authoriz. Active" THEN BEGIN
+            Rec."Global Dimension 1 Code" := xRec."Global Dimension 1 Code";
+            MESSAGE(Text001);
+          END ELSE BEGIN
+            Location.SETRANGE("Global Dimension 1 Code",Rec."Global Dimension 1 Code");
+            IF Location.FINDFIRST THEN BEGIN
+              PrefLocation.SETRANGE(Type,PrefLocation.Type::Job);
+              PrefLocation.SETRANGE("No.",Rec."No.");
+              IF PrefLocation.FIND('-') THEN BEGIN
+                PrefLocation.RENAME(PrefLocation.Type::Job,Rec."No.",Location.Code);
+                PrefLocation."Location Name" := Location.Name;
+                PrefLocation.MODIFY;
+              END ELSE BEGIN
+                PrefLocation.INIT;
+                PrefLocation.Type := PrefLocation.Type::Job;
+                PrefLocation."No." := Rec."No.";
+                PrefLocation.VALIDATE("Location Code",Location.Code);
+                PrefLocation."Location Name" := Location.Name;
+                PrefLocation.INSERT;
+              END;
+            END;
+          END;
+        END ELSE BEGIN
+          Location.SETRANGE("Global Dimension 1 Code",Rec."Global Dimension 1 Code");
+          IF Location.FINDFIRST THEN BEGIN
+            IF NOT PrefLocation.GET(PrefLocation.Type::Job,Rec."No.",Location.Code) THEN BEGIN
+              PrefLocation.INIT;
+              PrefLocation.Type := PrefLocation.Type::Job;
+              PrefLocation."No." := Rec."No.";
+              PrefLocation.VALIDATE("Location Code",Location.Code);
+              PrefLocation."Location Name" := Location.Name;
+              PrefLocation.INSERT;
+            END;
+          END;
+        END;
+      END ELSE BEGIN
+        Rec."Global Dimension 1 Code" := xRec."Global Dimension 1 Code";
+        MESSAGE(Text001);
+      END;
+    END;
+
+    [EventSubscriber(Page,11012770,OnBeforeActionEvent,Action1210190016)]
+    LOCAL PROCEDURE Page11012770_OnBeforeCreateProject@1000000000(VAR Rec@1000000000 : Record 11012761);
+    VAR
+      ContactBusinessRelation@1000000001 : Record 5054;
+      TryoutLine@1000000002 : Record 11012755;
+    BEGIN
+      TryoutLine.SETRANGE("Try-out No.", Rec."Try-out No.");
+      IF TryoutLine.FINDSET THEN BEGIN
+        ContactBusinessRelation.SETRANGE("Contact No.", TryoutLine."Contact No.");
+        ContactBusinessRelation.SETRANGE("Link to Table", ContactBusinessRelation."Link to Table"::Customer);
+        ContactBusinessRelation.SETFILTER("No.", '<>%1', '');
+        IF NOT ContactBusinessRelation.FINDSET THEN
+          ERROR(Text001);
+      END;
+    END;
+
+    [EventSubscriber(Table,11072003,OnAfterValidateEvent,"Project Status")]
+    LOCAL PROCEDURE Table11072003_OnValidateProjectStatus@1000000001(VAR Rec@1000000000 : Record 11072003;VAR xRec@1000000001 : Record 11072003;CurrFieldNo@1000000002 : Integer);
+    VAR
+      ProjectInstallment@1000000003 : Record 11012018;
+    BEGIN
+      IF (Rec."Settlement Method" = Rec."Settlement Method"::"Fixed Price") AND (Rec."Project Status" = Rec."Project Status"::Production) THEN
+        ProjectInstallment.SETRANGE("Project No.", Rec."No.");
+        IF NOT ProjectInstallment.FINDFIRST THEN
+          ERROR(Text002);
+    END;
+
+    [EventSubscriber(Table,11072072,OnAfterValidateEvent,"Rate Code")]
+    LOCAL PROCEDURE Table11072072_OnAfterValidateRateCode@1100285100(VAR Rec@1100285100 : Record 11072072;VAR xRec@1100285101 : Record 11072072;CurrFieldNo@1100285102 : Integer);
+    VAR
+      EstimateRate@1100285103 : Record 11012160;
+      DimensionValue@1100285104 : Record 349;
+    BEGIN
+      //200408 ORANGO.EE >>
+      DimensionValue.SETRANGE("Cost Type", DimensionValue."Cost Type"::Labor);
+      DimensionValue.SETRANGE(Code, Rec."Cost Object Labor");
+      IF DimensionValue.FINDFIRST THEN
+        Rec.Norm := DimensionValue.Norm;
+      //<<
+    END;
+
+    [EventSubscriber(Page,11125322,OnBeforeActionEvent,InitCostPrice)]
+    LOCAL PROCEDURE Page11125322_OnBeforeActionInitializeFullCost@1100583002(VAR Rec@1100583000 : Record 11012151);
+    VAR
+      SummaryRestriction@1100583001 : Page 11012248;
+      SummarySheet@1100583002 : Record 11012172;
+    BEGIN
+      SummarySheet.SETRANGE("Estimate No.", Rec."No.");
+      SummarySheet.SETFILTER(Summary,'%1','COST');
+      IF SummarySheet.FINDSET THEN BEGIN
+        SummaryRestriction.SETRECORD(SummarySheet);
+        SummaryRestriction.RefreshSheet;
+        SummaryRestriction.RefreshEstimate;
+        END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

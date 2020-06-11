@@ -1,0 +1,540 @@
+OBJECT Codeunit 415 Release Purchase Document
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.05,4PS14.00,EXF;
+  }
+  PROPERTIES
+  {
+    TableNo=38;
+    Permissions=TableData 38=rm;
+    OnRun=BEGIN
+            PurchaseHeader.COPY(Rec);
+            Code;
+            Rec := PurchaseHeader;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text001@1010 : TextConst 'ENU=There is nothing to release for the document of type %1 with the number %2.;NOR=Det finnes ingenting † frigi for dokumentet av typen %1 med nummer %2.;SVE=Det finns ingenting att frisl„ppa f”r dokumentet av typen %1 med numret %2.';
+      PurchSetup@1002 : Record 312;
+      InvtSetup@1000 : Record 313;
+      PurchaseHeader@1007 : Record 38;
+      ProjRec@1100409000 : Record 11072003;
+      ProjectElement@1100409001 : Record 11012010;
+      WhsePurchRelease@1004 : Codeunit 5772;
+      Text002@1005 : TextConst 'ENU=This document can only be released when the approval process is complete.;NOR=Dette dokumentet kan f›rst frigis n†r godkjenningsprosessen er fullf›rt.;SVE=Det h„r dokumentet kan inte sl„ppas f”rr„n godk„nnandeprocessen har slutf”rts.';
+      Text003@1006 : TextConst 'ENU=The approval process must be cancelled or completed to reopen this document.;NOR=Godkjenningsprosessen m† avbrytes eller fullf›res f›r du kan †pne dette dokumentet p† nytt.;SVE=Godk„nnandeprocessen m†ste avbrytas eller slutf”ras f”r att det h„r dokumentet ska kunna ”ppnas igen.';
+      Text005@1001 : TextConst 'ENU=There are unpaid prepayment invoices that are related to the document of type %1 with the number %2.;NOR=Det finnes ubetalte forskuddsfakturaer som er relatert til dokumentet av typen %1 med nummer %2.;SVE=Det finns obetalda f”rskottsfakturor som „r relaterade till dokumentet med typen %1 och numret %2.';
+      UnpostedPrepaymentAmountsErr@1003 : TextConst '@@@="%1 - Document Type; %2 - Document No.";ENU=There are unposted prepayment amounts on the document of type %1 with the number %2.;NOR=Det finnes ikke-bokf›rte forskuddsbel›p p† dokumentet av typen %1 med nummer %2.';
+      PreviewMode@1008 : Boolean;
+      SkipCheckReleaseRestrictions@1009 : Boolean;
+      PhasePlanMgt@1100525001 : Codeunit 11012242;
+      PhaseAction@1100525000 : 'Consent,Print,ICMStatus,Word,Confirm,OrderStatus,QuoteStatus,Manual,E-mail,GS1,GS1Posting';
+      Text11012001@1100530000 : TextConst 'ENU=Order can not be closed, Expected costs are already posted to the GL.;NOR=Ordren kan ikke v‘re lukket, forventede kostnader er allerede bokf›rt.;SVE=Ordern f†r inte vara st„ngd, f”rv„ntade kostnader har redan redovisats.';
+      "*** ExFlow ***"@12013587 : Integer;
+      ExfRelPurchDoc@12013588 : Codeunit 12013610;
+
+    LOCAL PROCEDURE Code@11() LinesWereModified : Boolean;
+    VAR
+      PurchLine@1006 : Record 39;
+      PrepaymentMgt@1003 : Codeunit 441;
+      NotOnlyDropShipment@1002 : Boolean;
+      PostingDate@1001 : Date;
+      PrintPostedDocuments@1000 : Boolean;
+      IsHandled@1004 : Boolean;
+      ApprovalsMgmt@1100528400 : Codeunit 1535;
+    BEGIN
+      WITH PurchaseHeader DO BEGIN
+        IF Status = Status::Released THEN
+          EXIT;
+
+        OnBeforeReleasePurchaseDoc(PurchaseHeader,PreviewMode);
+        IF NOT (PreviewMode OR SkipCheckReleaseRestrictions) THEN
+          CheckPurchaseReleaseRestrictions;
+
+        TESTFIELD("Buy-from Vendor No.");
+
+        PurchLine.SETRANGE("Document Type","Document Type");
+        PurchLine.SETRANGE("Document No.","No.");
+        PurchLine.SETFILTER(Type,'>0');
+        IF NOT "Amounts only" THEN //**4PS.n
+          PurchLine.SETFILTER(Quantity,'<>0');
+        IF NOT PurchLine.FIND('-') THEN
+          ERROR(Text001,"Document Type","No.");
+        InvtSetup.GET;
+        IF InvtSetup."Location Mandatory" THEN BEGIN
+          PurchLine.SETRANGE(Type,PurchLine.Type::Item);
+          IF PurchLine.FIND('-') THEN
+            REPEAT
+              IF PurchLine.IsInventoriableItem THEN
+                PurchLine.TESTFIELD("Location Code");
+            UNTIL PurchLine.NEXT = 0;
+          PurchLine.SETFILTER(Type,'>0');
+        END;
+        //**4PS.sn
+        IF (NOT ApprovalsMgmt.IsPurchaseApprovalsWorkflowEnabled(PurchaseHeader)) AND
+           (Status <> Status::"Pending Approval")
+        THEN
+          CheckSignhostSignersBeforeReleasingPurchaseOrder;
+        //**4PS.en
+        //**4PS.sn dp00556: C000132 + C015244
+        PurchSetup.GET;
+        PurchLine.SETFILTER("Job No.",'<>%1', '');
+        IF PurchLine.FINDSET THEN
+          REPEAT
+            ProjRec.CHANGECOMPANY(PurchLine."Receiving Company");
+            ProjectElement.CHANGECOMPANY(PurchLine."Receiving Company");
+            ProjRec.GET(PurchLine."Job No.");
+            IF ProjRec."Posting Element Mandatory" THEN BEGIN
+              PurchLine.TESTFIELD(Element);
+              ProjectElement.GET(PurchLine."Job No.", PurchLine.Element);
+            END;
+            IF (PurchLine."Qty. to Receive" <> 0) OR (PurchLine."Amnt. to Receive" <> 0) THEN BEGIN
+              IF (PurchSetup."Preregister WIP Purch. Inv.") AND
+                (PurchSetup."Preregistration WIP Account" = PurchLine."No.") AND
+                (PurchLine.Type = PurchLine.Type::"G/L Account")
+              THEN
+                PurchLine.TESTFIELD("Shortcut Dimension 2 Code",'')
+              ELSE
+                PurchLine.TESTFIELD("Shortcut Dimension 2 Code");
+            END;
+          UNTIL PurchLine.NEXT = 0;
+        PurchLine.SETRANGE("Job No.");
+        //**4PS.en dp00556: C000132 + C015244
+
+        OnCodeOnAfterCheck(PurchaseHeader,PurchLine,LinesWereModified);
+
+        PurchLine.SETRANGE("Drop Shipment",FALSE);
+        NotOnlyDropShipment := PurchLine.FIND('-');
+        PurchLine.RESET;
+
+        OnBeforeCalcInvDiscount(PurchaseHeader,PreviewMode);
+
+        PurchSetup.GET;
+        IF PurchSetup."Calc. Inv. Discount" THEN BEGIN
+          PostingDate := "Posting Date";
+          PrintPostedDocuments := "Print Posted Documents";
+          CODEUNIT.RUN(CODEUNIT::"Purch.-Calc.Discount",PurchLine);
+          LinesWereModified := TRUE;
+          GET("Document Type","No.");
+          "Print Posted Documents" := PrintPostedDocuments;
+          IF PostingDate <> "Posting Date" THEN
+            VALIDATE("Posting Date",PostingDate);
+        END;
+
+        IsHandled := FALSE;
+        OnBeforeModifyPurchDoc(PurchaseHeader,PreviewMode,IsHandled);
+        IF IsHandled THEN
+          EXIT;
+
+        IF PrepaymentMgt.TestPurchasePrepayment(PurchaseHeader) AND ("Document Type" = "Document Type"::Order) THEN BEGIN
+          Status := Status::"Pending Prepayment";
+          MODIFY(TRUE);
+          OnAfterReleasePurchaseDoc(PurchaseHeader,PreviewMode,LinesWereModified);
+          EXIT;
+        END;
+        Status := Status::Released;
+        "Closing Date" := 0D; //**4PS.n
+        MODIFY(TRUE); //**4PS.n In PurchLine Header.MODIFY can be carried out
+
+        LinesWereModified := LinesWereModified OR CalcAndUpdateVATOnLines(PurchaseHeader,PurchLine);
+
+        OnCodeOnBeforeModifyHeader(PurchaseHeader,PurchLine,PreviewMode,LinesWereModified);
+
+        MODIFY(TRUE);
+
+        RebuildPurchOrderControl(PurchaseHeader); //**4PS.n  CALL T003002
+        IF NotOnlyDropShipment THEN
+          IF "Document Type" IN ["Document Type"::Order,"Document Type"::"Return Order"] THEN
+            WhsePurchRelease.Release(PurchaseHeader);
+
+        // ExFlow
+        IF Approve THEN BEGIN
+          ExfRelPurchDoc.RUN(PurchaseHeader);
+          GET("Document Type","No.");
+        END;
+        // ExFlow
+
+        OnAfterReleasePurchaseDoc(PurchaseHeader,PreviewMode,LinesWereModified);
+      END;
+    END;
+
+    [External]
+    PROCEDURE Reopen@1(VAR PurchHeader@1000 : Record 38);
+    VAR
+      PreviousStatus@1210190000 : Option;
+      PurchLine@1100409000 : Record 39;
+    BEGIN
+      OnBeforeReopenPurchaseDoc(PurchHeader,PreviewMode);
+
+      WITH PurchHeader DO BEGIN
+        IF Status = Status::Open THEN
+          EXIT;
+        PreviousStatus := Status;  //**4PS.n
+        IF "Document Type" IN ["Document Type"::Order,"Document Type"::"Return Order"] THEN
+          WhsePurchRelease.Reopen(PurchHeader);
+        Status := Status::Open;
+
+        //**4PS.sn
+        "Closing Date" := 0D;
+        IF "Purchase Plan" = '' THEN
+          "Consented Date-Time" := 0DT;
+        //**4PS.en
+
+        MODIFY(TRUE);
+        //**4PS.sn
+        IF "Purchase Plan" <> '' THEN
+          PhasePlanMgt.CheckReopenAllowed(PurchHeader);
+
+        IF (PreviousStatus = Status::Closed) AND ("Document Type" = "Document Type"::Order) THEN BEGIN
+          PurchLine.RESET;
+          PurchLine.SETRANGE("Document Type","Document Type");
+          PurchLine.SETRANGE("Document No.","No.");
+          PurchLine.SETFILTER(Type,'>0');
+          IF PurchLine.FINDSET(TRUE,FALSE) THEN BEGIN
+            REPEAT
+              PurchLine.InitOutstanding;
+              PurchLine."Modified by" := USERID;
+              PurchLine."Last Date Modified" := TODAY;
+              PurchLine.MODIFY;
+            UNTIL PurchLine.NEXT = 0;
+          END;
+        END;
+        RebuildPurchOrderControl(PurchHeader);
+        //**4PS.en
+      END;
+      // ExFlow
+      IF PurchHeader.Approve THEN BEGIN
+        ExfRelPurchDoc.Reopen(PurchHeader);
+        PurchHeader.GET(PurchHeader."Document Type",PurchHeader."No.");
+      END;
+      //ExFlow
+      OnAfterReopenPurchaseDoc(PurchHeader,PreviewMode);
+    END;
+
+    [External]
+    PROCEDURE PerformManualRelease@2(VAR PurchHeader@1002 : Record 38);
+    VAR
+      PrepaymentMgt@1001 : Codeunit 441;
+    BEGIN
+      OnPerformManualReleaseOnBeforeTestPurchasePrepayment(PurchHeader,PreviewMode);
+      IF PrepaymentMgt.TestPurchasePrepayment(PurchHeader) THEN
+        ERROR(UnpostedPrepaymentAmountsErr,PurchHeader."Document Type",PurchHeader."No.");
+
+      OnBeforeManualReleasePurchaseDoc(PurchHeader,PreviewMode);
+      PerformManualCheckAndRelease(PurchHeader);
+      OnAfterManualReleasePurchaseDoc(PurchHeader,PreviewMode);
+    END;
+
+    [External]
+    PROCEDURE PerformManualCheckAndRelease@13(VAR PurchHeader@1002 : Record 38);
+    VAR
+      PrepaymentMgt@1001 : Codeunit 441;
+      ApprovalsMgmt@1000 : Codeunit 1535;
+      IsHandled@1003 : Boolean;
+    BEGIN
+      OnBeforePerformManualCheckAndRelease(PurchHeader,PreviewMode);
+
+      WITH PurchHeader DO
+        IF ("Document Type" = "Document Type"::Order) AND PrepaymentMgt.TestPurchasePayment(PurchHeader) THEN BEGIN
+          IF Status <> Status::"Pending Prepayment" THEN BEGIN
+            Status := Status::"Pending Prepayment";
+            MODIFY;
+            COMMIT;
+          END;
+          ERROR(Text005,"Document Type","No.");
+        END;
+
+      IF ApprovalsMgmt.IsPurchaseHeaderPendingApproval(PurchHeader) THEN
+        ERROR(Text002);
+
+      IsHandled := FALSE;
+      OnBeforePerformManualRelease(PurchHeader,PreviewMode,IsHandled);
+      IF IsHandled THEN
+        EXIT;
+
+      CODEUNIT.RUN(CODEUNIT::"Release Purchase Document",PurchHeader);
+    END;
+
+    [External]
+    PROCEDURE PerformManualReopen@3(VAR PurchHeader@1002 : Record 38);
+    VAR
+      UserSetup@1100525000 : Record 91;
+      ApprovalsMgmt@1100525001 : Codeunit 1535;
+    BEGIN
+      IF (PurchHeader.Status = PurchHeader.Status::"Pending Approval") AND ApprovalsMgmt.HasOpenOrPendingApprovalEntries(PurchHeader.RECORDID) THEN
+        ERROR(Text003);
+
+      //**4PS.sn  34285
+      IF PurchHeader."Document Type" = PurchHeader."Document Type"::Order THEN BEGIN
+        UserSetup.GET(USERID);
+        UserSetup.TESTFIELD("Reopen Purch. Order Allowed", TRUE);
+      END;
+      //**4PS.en
+
+      OnBeforeManualReopenPurchaseDoc(PurchHeader,PreviewMode);
+      Reopen(PurchHeader);
+      OnAfterManualReopenPurchaseDoc(PurchHeader,PreviewMode);
+    END;
+
+    [External]
+    PROCEDURE ReleasePurchaseHeader@8(VAR PurchHdr@1000 : Record 38;Preview@1001 : Boolean) LinesWereModified : Boolean;
+    BEGIN
+      PreviewMode := Preview;
+      PurchaseHeader.COPY(PurchHdr);
+      LinesWereModified := Code;
+      PurchHdr := PurchaseHeader;
+    END;
+
+    [External]
+    PROCEDURE CalcAndUpdateVATOnLines@9(VAR PurchaseHeader@1003 : Record 38;VAR PurchLine@1002 : Record 39) LinesWereModified : Boolean;
+    VAR
+      TempVATAmountLine0@1001 : TEMPORARY Record 290;
+      TempVATAmountLine1@1000 : TEMPORARY Record 290;
+    BEGIN
+      PurchLine.SetPurchHeader(PurchaseHeader);
+      PurchLine.CalcVATAmountLines(0,PurchaseHeader,PurchLine,TempVATAmountLine0);
+      PurchLine.CalcVATAmountLines(1,PurchaseHeader,PurchLine,TempVATAmountLine1);
+      LinesWereModified :=
+        PurchLine.UpdateVATOnLines(0,PurchaseHeader,PurchLine,TempVATAmountLine0) OR
+        PurchLine.UpdateVATOnLines(1,PurchaseHeader,PurchLine,TempVATAmountLine1);
+      //**4PS.sn
+      IF PurchaseHeader."Document Type" = PurchaseHeader."Document Type"::Order THEN BEGIN
+        PhasePlanMgt.FinishPhase(PurchaseHeader,PhaseAction::OrderStatus,1);
+        PurchaseHeader.GET(PurchaseHeader."Document Type", PurchaseHeader."No.");
+      END;
+      //**4PS.en
+    END;
+
+    [External]
+    PROCEDURE SetSkipCheckReleaseRestrictions@17();
+    BEGIN
+      SkipCheckReleaseRestrictions := TRUE;
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeCalcInvDiscount@18(VAR PurchaseHeader@1000 : Record 38;PreviewMode@1001 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeManualReleasePurchaseDoc@10(VAR PurchaseHeader@1000 : Record 38;PreviewMode@1001 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforePerformManualCheckAndRelease@29(VAR PurchHeader@1000 : Record 38;PreviewMode@1001 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeReleasePurchaseDoc@5(VAR PurchaseHeader@1000 : Record 38;PreviewMode@1001 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterReleasePurchaseDoc@4(VAR PurchaseHeader@1000 : Record 38;PreviewMode@1001 : Boolean;VAR LinesWereModified@1002 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterManualReleasePurchaseDoc@14(VAR PurchaseHeader@1000 : Record 38;PreviewMode@1001 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeManualReopenPurchaseDoc@12(VAR PurchaseHeader@1000 : Record 38;PreviewMode@1001 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeReopenPurchaseDoc@6(VAR PurchaseHeader@1000 : Record 38;PreviewMode@1001 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeModifyPurchDoc@22(VAR PurchaseHeader@1000 : Record 38;PreviewMode@1001 : Boolean;VAR IsHandled@1002 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforePerformManualRelease@19(VAR PurchaseHeader@1000 : Record 38;PreviewMode@1002 : Boolean;VAR IsHandled@1001 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterReopenPurchaseDoc@7(VAR PurchaseHeader@1000 : Record 38;PreviewMode@1001 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterManualReopenPurchaseDoc@15(VAR PurchaseHeader@1000 : Record 38;PreviewMode@1001 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnCodeOnAfterCheck@16(PurchaseHeader@1000 : Record 38;VAR PurchaseLine@1001 : Record 39;VAR LinesWereModified@1002 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnCodeOnBeforeModifyHeader@20(VAR PurchaseHeader@1000 : Record 38;VAR PurchaseLine@1001 : Record 39;PreviewMode@1002 : Boolean;VAR LinesWereModified@1003 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnPerformManualReleaseOnBeforeTestPurchasePrepayment@21(VAR PurchaseHeader@1000 : Record 38;PreviewMode@1001 : Boolean);
+    BEGIN
+    END;
+
+    PROCEDURE Close@1210190000(VAR PurchHeader@1210190000 : Record 38);
+    VAR
+      InventorySetup@1210190001 : Record 313;
+      PurchLine@1210190002 : Record 39;
+    BEGIN
+      //**4PS
+      WITH PurchHeader DO BEGIN
+        IF Status = Status::Closed THEN
+          EXIT;
+
+        IF "Document Type" <> "Document Type"::Order THEN
+          EXIT;
+
+        InventorySetup.GET;
+
+        IF (NOT "Amounts only") AND
+           (InventorySetup."Expected Cost Posting to G/L") THEN
+        BEGIN
+          PurchLine.SETRANGE("Document Type","Document Type");
+          PurchLine.SETRANGE("Document No.","No.");
+          PurchLine.SETRANGE(Type,PurchLine.Type::Item);
+          PurchLine.SETRANGE("Job No.",'');
+          IF PurchLine.FINDSET THEN
+            REPEAT
+              IF PurchLine."Quantity Received" <> PurchLine."Quantity Invoiced" THEN
+                ERROR(Text11012001);
+            UNTIL PurchLine.NEXT = 0;
+        END;
+
+        Status := Status::Closed;
+        IF "Closing Date" = 0D THEN
+          "Closing Date" := WORKDATE;
+        PhasePlanMgt.FinishPhase(PurchHeader,PhaseAction::OrderStatus,1);
+
+        MODIFY(TRUE);
+
+        PurchLine.RESET;
+        PurchLine.SETRANGE("Document Type","Document Type");
+        PurchLine.SETRANGE("Document No.","No.");
+        PurchLine.SETFILTER(Type,'>0');
+        IF PurchLine.FINDSET(TRUE,FALSE) THEN BEGIN
+          REPEAT
+            PurchLine."Outstanding Quantity" := 0;
+            PurchLine."Outstanding Qty. (Base)" := 0;
+            PurchLine."Outstanding Amount" := 0;
+            PurchLine."Outstanding Amount (LCY)" := 0;
+            PurchLine."Outst. Amount exc. VAT (LCY)" :=0;
+            PurchLine."Outst. Amount exc. VAT" := 0;
+            PurchLine."Outstanding-Rcd/Not Invoiced" := FALSE;
+            PurchLine."Modified by" := USERID;
+            PurchLine."Last Date Modified" := TODAY;
+            PurchLine.MODIFY;
+          UNTIL PurchLine.NEXT = 0;
+        END;
+        RebuildPurchOrderControl(PurchHeader);
+      END;
+    END;
+
+    PROCEDURE CloseQuote@1100525001(VAR PurchHeader@1210190000 : Record 38);
+    BEGIN
+      //**4PS
+      WITH PurchHeader DO BEGIN
+        IF Status = Status::Closed THEN
+          EXIT;
+        TESTFIELD("Document Type", "Document Type"::Quote);
+
+        Status := Status::Closed;
+        PhasePlanMgt.FinishPhase(PurchHeader,PhaseAction::OrderStatus,1); //**4PS.n
+        MODIFY(TRUE);
+      END;
+    END;
+
+    PROCEDURE CloseBlanketOrder@1100525000(VAR PurchHeader@1100525000 : Record 38);
+    BEGIN
+      //**4PS
+      WITH PurchHeader DO BEGIN
+        IF Status = Status::Closed THEN
+          EXIT;
+        IF "Document Type" <> "Document Type"::"Blanket Order" THEN
+          EXIT;
+
+        Status := Status::Closed;
+        MODIFY(TRUE);
+      END;
+    END;
+
+    PROCEDURE RebuildPurchOrderControl@1210190001(PurchHeader@1210190000 : Record 38);
+    VAR
+      PurchLine@1210190001 : Record 39;
+    BEGIN
+      //**4PS
+      WITH PurchHeader DO BEGIN
+        PurchLine.SETRANGE("Document Type","Document Type");
+        PurchLine.SETRANGE("Document No.","No.");
+        IF PurchLine.FINDSET THEN
+          REPEAT
+            PurchLine.CreatePurchOrderControl(FALSE);
+          UNTIL PurchLine.NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE PublishServOrdOnPortal@1100528100(PurchHeader@1100528101 : Record 38);
+    VAR
+      ServiceOrder@1100528100 : Record 11012823;
+      WorkOrder@1100528600 : Record 11229279;
+      Vendor@1100528601 : Record 23;
+      ResourceNo@1100528602 : Code[20];
+    BEGIN
+      //**4PS
+      IF PurchHeader.Status <> PurchHeader.Status::Released THEN
+        EXIT;
+      IF PurchHeader."Service Order No." = '' THEN
+        EXIT;
+      IF NOT ServiceOrder.GET(PurchHeader."Service Order No.") THEN
+        EXIT;
+      IF NOT Vendor.GET(PurchHeader."Buy-from Vendor No.") THEN
+        EXIT;
+      ResourceNo := Vendor.GetResourceNo;
+      IF ResourceNo = '' THEN
+        EXIT;
+      WorkOrder.SETRANGE("Source Company", COMPANYNAME);
+      WorkOrder.SETRANGE("Source Type", WorkOrder."Source Type"::ServiceOrder);
+      WorkOrder.SETRANGE("Source No.", PurchHeader."Service Order No.");
+      WorkOrder.SETRANGE("Resource Type", WorkOrder."Resource Type"::Subcontractor);
+      WorkOrder.SETRANGE("Resource No.", Vendor.GetResourceNo);
+      IF WorkOrder.FINDSET(TRUE) THEN
+        REPEAT
+          IF NOT WorkOrder."Publish on Subcontr. Portal" AND WorkOrder.CanPublishOnSubcontrPortal THEN BEGIN
+            WorkOrder.VALIDATE("Publish on Subcontr. Portal", TRUE);
+            WorkOrder.MODIFY(TRUE);
+          END;
+        UNTIL WorkOrder.NEXT = 0;
+    END;
+
+    BEGIN
+    {
+      --- ExFlow --->
+      Code        : OnRun, ReOpen
+      Globals
+      161207 ITERO.WG Merge ExFlow 4.11
+      <--- ExFlow
+    }
+    END.
+  }
+}
+

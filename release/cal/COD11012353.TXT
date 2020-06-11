@@ -1,0 +1,156 @@
+OBJECT Codeunit 11012353 NS Item Tracking-Check
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Item@1100528606 : Record 27;
+      SNRequired@1100528603 : Boolean;
+      LotRequired@1100528602 : Boolean;
+      SNInfoRequired@1100528601 : Boolean;
+      LotInfoRequired@1100528600 : Boolean;
+      Text001@1100528605 : TextConst 'DEU=Fr Artikel %1 ist eine Seriennr. erforderlich.;ENU=Serial Number is required for Item %1.;NLD=Serienummer is vereist voor artikel %1.;NOR=Serienr kreves for artikkel %1.;SVE=Serienr kr„vs f”r artikel %1.';
+      Text002@1100528604 : TextConst 'DEU=Fr Artikel %1 ist eine Chargennr. erforderlich.;ENU=Lot Number is required for Item %1.;NLD=Lotnummer is vereist voor artikel %1.;NOR=Partinr kreves for artikkel %1.;SVE=Partinr kr„vs f”r artikel %1.';
+      Text003@1100528500 : TextConst 'DEU=%1 entspricht nicht der in der Artikelverfolgung definierten Menge.;ENU=The %1 does not match the quantity defined in item tracking for item %2.;NLD=%1 komt niet overeen met het aantal dat is gedefinieerd bij artikeltracering voor artikel %2.;NOR=%1 samsvarer ikke med antallet som er definert i varesporing.;SVE=%1 st„mmer inte med det antal som har angetts vid artikelsp†rning.';
+      Text004@1100528501 : TextConst 'DEU=Die Seriennr. %1 befindet sich bereits am Lager.;ENU=Serial No. %1 is already on inventory.;NLD=Serienr. %1 is reeds in voorraad.;NOR=Serienr %1 er allerede p† lager.;SVE=Serienr %1 finns redan i lagret.';
+      ProjDeliveryNoteReturn@1100526200 : Boolean;
+
+    PROCEDURE CheckLine@1100528601(VAR NSReservationEntry@1100528600 : Record 11071900;EntryType@1100528615 : 'Purchase,Sale,Positive Adjmt.,Negative Adjmt.,Transfer,Consumption,Output';DocumentDate@1100528608 : Date;QtyToHandleBase@1100528610 : Decimal;IsFirstReservLine@1100528500 : Boolean;FieldCap@1100528501 : Text[250]);
+    VAR
+      ItemJnlLine@1100528604 : Record 83;
+      Item@1100528603 : Record 27;
+      ItemTrackingCode@1100528602 : Record 6502;
+      NSReservationEntry2@1100528601 : Record 11071900;
+      TempTrackingSpecification@1100528614 : TEMPORARY Record 336;
+      ItemTrackingMgt@1100528605 : Codeunit 6500;
+      ItemJnlPostLine@1100528613 : Codeunit 22;
+      CalcWarrantyDate@1100528607 : Date;
+      CalcExpirationDate@1100528606 : Date;
+      ExistingExpirationDate@1100528611 : Date;
+      SignFactor@1100528609 : Integer;
+      EntriesExist@1100528612 : Boolean;
+    BEGIN
+      WITH NSReservationEntry DO BEGIN
+        IF "Item No." = '' THEN
+          EXIT;
+
+        Item.GET("Item No.");
+        Item.TESTFIELD(Blocked,FALSE);
+        ItemTrackingCode.Code := Item."Item Tracking Code";
+
+        ItemJnlLine."Entry Type" := EntryType;
+        ItemTrackingMgt.GetItemTrackingSettings(
+          ItemTrackingCode,EntryType,ItemJnlLine.Signed(QtyToHandleBase) > 0,
+          SNRequired,LotRequired,SNInfoRequired,LotInfoRequired);
+
+        IF SNRequired AND ("Serial No." = '') THEN
+          ERROR(Text001, "Item No.");
+        IF LotRequired AND ("Lot No." = '') THEN
+          ERROR(Text002, "Item No.");
+
+        IF ("Qty. to Handle (Base)" > 0) AND ItemTrackingCode."SN Specific Tracking" THEN
+          IF "New Serial No." <> '' THEN BEGIN
+            IF ItemTrackingMgt.FindInInventory("Item No.","Variant Code","New Serial No.") THEN
+              ERROR(Text004,"New Serial No.");
+          END ELSE BEGIN
+            IF ItemTrackingMgt.FindInInventory("Item No.","Variant Code","Serial No.") THEN
+              ERROR(Text004,"Serial No.");
+          END;
+
+        SignFactor := ItemJnlLine.Signed(1);
+        IF ProjDeliveryNoteReturn THEN
+          SignFactor := -SignFactor;
+
+        IF FORMAT(ItemTrackingCode."Warranty Date Formula") <> '' THEN
+          CalcWarrantyDate := CALCDATE(ItemTrackingCode."Warranty Date Formula",DocumentDate);
+        IF FORMAT(Item."Expiration Calculation") <> '' THEN
+          CalcExpirationDate := CALCDATE(Item."Expiration Calculation",DocumentDate);
+
+        IF IsFirstReservLine THEN BEGIN
+          NSReservationEntry2.SETCURRENTKEY(
+            "Source ID","Source Ref. No.","Source Type","Source Subtype",
+            "Source Batch Name","Source Prod. Order Line");
+
+          NSReservationEntry2.SETRANGE("Source ID", "Source ID");
+          NSReservationEntry2.SETRANGE("Source Ref. No.", "Source Ref. No.");
+          NSReservationEntry2.SETRANGE("Source Type", "Source Type");
+          NSReservationEntry2.SETRANGE("Source Subtype", "Source Subtype");
+          NSReservationEntry2.SETRANGE("Source Batch Name", "Source Batch Name");
+          NSReservationEntry2.SETRANGE("Source Prod. Order Line", "Source Prod. Order Line");
+
+          NSReservationEntry2.CALCSUMS("Qty. to Handle (Base)");
+          IF NSReservationEntry2."Qty. to Handle (Base)" <> SignFactor * QtyToHandleBase THEN
+            ERROR(STRSUBSTNO(Text003,FieldCap,"Item No."));
+        END;
+
+        IF ItemTrackingCode."Man. Warranty Date Entry Reqd." THEN
+          TESTFIELD("Warranty Date Vendor");
+
+        ExistingExpirationDate :=
+          ItemTrackingMgt.ExistingExpirationDate(
+            "Item No.",
+            "Variant Code",
+            "Lot No.",
+            "Serial No.",
+            TRUE,
+            EntriesExist);
+
+        // Supply
+        IF (SignFactor * QtyToHandleBase > 0) THEN BEGIN        // Only expiration dates on supply.
+
+          IF NOT (EntryType = EntryType::Transfer) THEN
+            IF ItemTrackingCode."Man. Expir. Date Entry Reqd." THEN
+              TESTFIELD("Expiration Date");
+
+          IF CalcExpirationDate <> 0D THEN
+            IF ExistingExpirationDate <> 0D THEN
+              CalcExpirationDate := ExistingExpirationDate;
+
+          IF (EntryType = EntryType::Transfer) THEN
+            IF "New Expiration Date" = 0D THEN
+              "New Expiration Date" := ExistingExpirationDate;
+
+          IF "Expiration Date" = 0D THEN
+            "Expiration Date" := CalcExpirationDate;
+
+          IF EntriesExist THEN
+            TESTFIELD("Expiration Date",ExistingExpirationDate);
+
+        END;
+
+        ItemJnlLine."Item No." := "Item No.";
+        ItemJnlLine."Variant Code" := "Variant Code";
+        TempTrackingSpecification.TRANSFERFIELDS(NSReservationEntry);
+        ItemJnlPostLine.CheckItemTrackingInfo(ItemJnlLine,TempTrackingSpecification,SNInfoRequired,LotInfoRequired,SignFactor,ItemTrackingCode);
+
+        IF "Warranty Date Vendor" = 0D THEN
+          "Warranty Date Vendor" := CalcWarrantyDate;
+
+      END;
+    END;
+
+    PROCEDURE SetProjDeliveryNoteReturn@1100526200(ProjDelNoteReturn@1100526200 : Boolean);
+    BEGIN
+      //C007689
+      ProjDeliveryNoteReturn := ProjDelNoteReturn;
+    END;
+
+    BEGIN
+    {
+      //Most of this code is copied from codeunit 22
+    }
+    END.
+  }
+}
+

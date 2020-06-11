@@ -1,0 +1,374 @@
+OBJECT Codeunit 11020228 PDF File Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS10.00,4PSSE;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+
+    LOCAL PROCEDURE GetAuthorName@1210190002() : Text[50];
+    VAR
+      CompanyInfo@1210190000 : Record 79;
+    BEGIN
+      CompanyInfo.GET;
+      EXIT(CompanyInfo.Name);
+    END;
+
+    LOCAL PROCEDURE GetPDFPrinterName@1210190001() : Text[30];
+    BEGIN
+      EXIT('PDF Writer - bioPDF');
+    END;
+
+    PROCEDURE MergePDFEmailAttachmentsOnServer@1100528500(VAR TempEmailAttachment@1100528500 : TEMPORARY Record 11229294);
+    VAR
+      BioPDFSetup@1100528400 : Record 11229375;
+      FileManagement@1100528507 : Codeunit 419;
+      OfficetoPDFManagement@1100528600 : Codeunit 11012626;
+      TempServerFileName@1100528506 : Text[250];
+    BEGIN
+      IF UseOnlinePDFConverter THEN
+        OfficetoPDFManagement.MergeTempItemAttachmentsToPDF(TempEmailAttachment)
+      ELSE BEGIN
+        IF BioPDFSetup.GET THEN;
+        TempServerFileName := FileManagement.ServerTempFileName('pdf');
+        TempEmailAttachment.SETFILTER("Attachment Server File Path", '@*.pdf');
+        IF BioPDFSetup."BioPDF Installed on Server" THEN
+          MergePDFEmailAttachmentsOnServerBioPDF(TempServerFileName, TempEmailAttachment)
+        ELSE
+          MergePDFEmailAttachmentsOnServerPdfSharp(TempServerFileName, TempEmailAttachment);
+        IF TempEmailAttachment.FINDSET THEN BEGIN
+          REPEAT
+            IF TempEmailAttachment."Delete Server File" THEN
+              IF EXISTS(TempEmailAttachment."Attachment Server File Path") THEN
+                ERASE(TempEmailAttachment."Attachment Server File Path");
+            IF TempEmailAttachment."Delete Client File" THEN
+              IF FileManagement.ClientFileExists(TempEmailAttachment."Attachment Client File Path") THEN
+                FileManagement.DeleteClientFile(TempEmailAttachment."Attachment Client File Path");
+          UNTIL TempEmailAttachment.NEXT = 0;
+          TempEmailAttachment.FINDFIRST;
+          TempEmailAttachment.DELETEALL;
+          TempEmailAttachment."Attachment Server File Path" := TempServerFileName;
+          TempEmailAttachment.INSERT;
+        END;
+        TempEmailAttachment.SETRANGE("Attachment Server File Path");
+      END;
+    END;
+
+    LOCAL PROCEDURE MergePDFEmailAttachmentsOnServerBioPDF@1100528415(TempServerFileName@1100528400 : Text[250];VAR TempEmailAttachment@1100528500 : TEMPORARY Record 11229294);
+    VAR
+      BioPDFPrinterManagement@1100528401 : Codeunit 11229298;
+      FileArray@1100528402 : DotNet "'mscorlib, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Array";
+      StringType@1100528404 : DotNet "'mscorlib, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Type";
+      String@1100528403 : DotNet "'mscorlib, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.String";
+      TimeOut@1100528405 : Integer;
+      Counter@1100528406 : Integer;
+    BEGIN
+      BioPDFPrinterManagement.SetOnClient(FALSE);
+      InitializeBioPDFSettingsForMergingFiles(BioPDFPrinterManagement);
+      BioPDFPrinterManagement.InstantiatePDFUtil;
+      StringType := GETDOTNETTYPE(String);
+      FileArray := FileArray.CreateInstance(StringType, TempEmailAttachment.COUNT);
+      TimeOut := 30;
+      IF TempEmailAttachment.FINDSET THEN BEGIN
+        REPEAT
+          FileArray.SetValue(TempEmailAttachment."Attachment Server File Path", Counter);
+          Counter := Counter + 1;
+        UNTIL TempEmailAttachment.NEXT = 0;
+      END;
+      BioPDFPrinterManagement.Merge(FileArray, TempServerFileName, GetPDFPrinterName, TimeOut * 1000);
+      BioPDFPrinterManagement.DeletePDFSettingsFile;
+    END;
+
+    LOCAL PROCEDURE MergePDFEmailAttachmentsOnServerPdfSharp@1100528416(TempServerFileName@1100528400 : Text[250];VAR TempEmailAttachment@1100528500 : TEMPORARY Record 11229294);
+    VAR
+      PdfOutputDocument@1100528504 : DotNet "'PdfSharp, Version=1.32.2608.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb'.PdfSharp.Pdf.PdfDocument";
+      PdfInputDocument@1100528503 : DotNet "'PdfSharp, Version=1.32.2608.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb'.PdfSharp.Pdf.PdfDocument";
+      PdfReader@1100528502 : DotNet "'PdfSharp, Version=1.32.2608.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb'.PdfSharp.Pdf.IO.PdfReader";
+      PdfDocumentOpenMode@1100528501 : DotNet "'PdfSharp, Version=1.32.2608.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb'.PdfSharp.Pdf.IO.PdfDocumentOpenMode";
+      I@1100528505 : Integer;
+    BEGIN
+      PdfOutputDocument :=PdfOutputDocument.PdfDocument;
+      IF TempEmailAttachment.FINDSET THEN BEGIN
+        REPEAT
+          PdfInputDocument := PdfReader.Open(
+            TempEmailAttachment."Attachment Server File Path", PdfDocumentOpenMode.Import);
+          FOR I := 1 TO PdfInputDocument.PageCount DO BEGIN
+            PdfOutputDocument.AddPage(PdfInputDocument.Pages.Item(I-1));
+          END;
+        UNTIL TempEmailAttachment.NEXT = 0;
+        PdfOutputDocument.Save(TempServerFileName);
+      END;
+    END;
+
+    PROCEDURE UploadFileSilentAsPDF@1100528521(ClientFileName@1100528500 : Text[250]) ServerFileName : Text[250];
+    VAR
+      BioPDFSetup@1100528400 : Record 11229375;
+      FileManagement@1100528504 : Codeunit 419;
+      OfficetoPDFManagement@1100528600 : Codeunit 11012626;
+      ClientPDFFileName@1100528503 : Text[250];
+      ServerFileName2@1100528401 : Text;
+    BEGIN
+      // If conversion to PDF is not possible, the file is uploaded with the original extension.
+      IF FileCanBeConvertedToPDF(ClientFileName) THEN BEGIN
+        IF NOT UseOnlinePDFConverter THEN BEGIN
+          IF BioPDFSetup.GET THEN;
+          IF BioPDFSetup."BioPDF Installed on Server" THEN BEGIN
+            ServerFileName2 := FileManagement.UploadFileSilent(ClientFileName);
+            ConvertFileToPDF(ServerFileName2, FALSE, ServerFileName);
+            IF ServerFileName2 <> ServerFileName THEN
+              FileManagement.DeleteServerFile(ServerFileName2);
+          END ELSE
+            IF FileManagement.ClientAvailable THEN BEGIN
+              ConvertFileToPDF(ClientFileName, TRUE, ClientPDFFileName);
+              ServerFileName := FileManagement.UploadFileSilent(ClientPDFFileName);
+              FileManagement.DeleteClientFile(ClientPDFFileName);
+            END ELSE
+              ServerFileName := TryConvertWordBlobToPdfOnServer(ClientFileName);
+        END ELSE
+          OfficetoPDFManagement.ConvertFileToPDF(ClientFileName, '', ClientPDFFileName);
+      END ELSE BEGIN
+        ServerFileName := FileManagement.UploadFileSilent(ClientFileName);
+      END;
+    END;
+
+    LOCAL PROCEDURE ConvertFileToPDF@1100528502(FullFileName@1100528500 : Text[250];OnClient@1100528400 : Boolean;VAR FullPDFFileName@1100528505 : Text[250]);
+    VAR
+      FileManagement@1100528501 : Codeunit 419;
+      BioPDFPrinterManagement@1100528401 : Codeunit 11229298;
+      FullStatusFileName@1100528502 : Text[250];
+      Extension@1100528402 : Text;
+      TimeOut@1100528503 : Integer;
+    BEGIN
+      IF NOT FileCanBeConvertedToPDF(FullFileName) THEN
+        EXIT;
+      Extension := LOWERCASE(FileManagement.GetExtension(FullFileName));
+      IF NOT OnClient AND    // Printing PDF files on server does not work because
+         (Extension = 'pdf') // Acrobat Wrapper cannot close Acrobat Reader on server.
+      THEN BEGIN
+        FullPDFFileName := FullFileName;
+        EXIT;
+      END;
+
+      IF OnClient THEN BEGIN
+        FullPDFFileName := FileManagement.ClientTempFileName('pdf');
+        BioPDFPrinterManagement.SetOnClient(TRUE);
+      END ELSE BEGIN
+        FullPDFFileName := FileManagement.ServerTempFileName('pdf');
+        BioPDFPrinterManagement.SetOnClient(FALSE);
+      END;
+      FullStatusFileName := FileManagement.ChangeExtension(FullPDFFileName, 'ini');
+      InitializeBioPDFSettingsForConvertingFile(FullPDFFileName, FullStatusFileName, BioPDFPrinterManagement);
+      BioPDFPrinterManagement.InstantiatePDFUtil;
+      TimeOut := 30;
+      BioPDFPrinterManagement.PrintFile(FullFileName, GetPDFPrinterName);
+      BioPDFPrinterManagement.WaitForFile(FullStatusFileName, TimeOut * 1000);
+      IF OnClient THEN BEGIN
+        FileManagement.DeleteClientFile(FullStatusFileName);
+        IF (Extension = 'pdf') AND NOT FileManagement.ClientFileExists(FullPDFFileName) THEN
+          FileManagement.CopyClientFile(FullFileName, FullPDFFileName, TRUE);
+      END ELSE
+        FileManagement.DeleteServerFile(FullStatusFileName);
+    END;
+
+    LOCAL PROCEDURE InitializeBioPDFSettingsForConvertingFile@1100528504(FullPDFFileName@1100528502 : Text[250];FullStatusFileName@1100528503 : Text[250];VAR BioPDFPrinterManagement@1100528403 : Codeunit 11229298);
+    BEGIN
+      BioPDFPrinterManagement.InstantiatePDFSettings;
+      BioPDFPrinterManagement.SetPDFSettingsPrinterName(GetPDFPrinterName);
+      BioPDFPrinterManagement.DeletePDFSettingsFile;
+      BioPDFPrinterManagement.InitPDFSettings;
+      BioPDFPrinterManagement.SetPDFSettingsPrinterName(GetPDFPrinterName);
+      BioPDFPrinterManagement.SetPDFSettingsOutput(FullPDFFileName);
+      BioPDFPrinterManagement.SetPDFSettingsStatusFile(FullStatusFileName);
+      BioPDFPrinterManagement.SetPDFSettingsConfirmOverWrite('no');
+      BioPDFPrinterManagement.SetPDFSettingsShowSettings('never');
+      BioPDFPrinterManagement.SetPDFSettingsShowPDF('no');
+      BioPDFPrinterManagement.SetPDFSettingsShowProgress('yes');
+      BioPDFPrinterManagement.SetPDFSettingsShowProgressFinished('yes');
+      BioPDFPrinterManagement.SetPDFSettingsSupressErrors('no');
+      BioPDFPrinterManagement.SetPDFSetttingsAuthor(GetAuthorName);
+      BioPDFPrinterManagement.SetPDFSettingsTitle('');
+      BioPDFPrinterManagement.SetPDFSettingsLicenseData;
+      BioPDFPrinterManagement.WritePDFSettingsFile;
+    END;
+
+    LOCAL PROCEDURE InitializeBioPDFSettingsForMergingFiles@1100528430(VAR BioPDFPrinterManagement@1100528403 : Codeunit 11229298);
+    BEGIN
+      BioPDFPrinterManagement.InstantiatePDFSettings;
+      BioPDFPrinterManagement.DeletePDFSettingsFile;
+      BioPDFPrinterManagement.InitPDFSettings;
+      BioPDFPrinterManagement.SetPDFSettingsShowSettings('never');
+      BioPDFPrinterManagement.SetPDFSettingsShowSaveAs('never');
+      BioPDFPrinterManagement.SetPDFSettingsShowProgress('no');
+      BioPDFPrinterManagement.SetPDFSettingsShowProgressFinished('no');
+      BioPDFPrinterManagement.SetPDFSettingsShowPDF('no');
+      BioPDFPrinterManagement.SetPDFSettingsConfirmOverWrite('no');
+      BioPDFPrinterManagement.SetPDFSettingsLicenseData;
+      BioPDFPrinterManagement.WritePDFSettingsFile;
+    END;
+
+    PROCEDURE AddBackground@1100528501(ServerTempFileName@1100528500 : Text;MailTemplateNo@1100528400 : Integer;ShortcutDimension1Code@1100528401 : Code[20];PDFIsPrinted@1100528404 : Boolean);
+    VAR
+      MailTemplate@1100528402 : Record 11229450;
+      MailTemplateManagement@1100528300 : Codeunit 11012622;
+      PdfDocument@1100528511 : DotNet "'PdfSharp, Version=1.32.2608.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb'.PdfSharp.Pdf.PdfDocument";
+      PdfReader@1100528510 : DotNet "'PdfSharp, Version=1.32.2608.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb'.PdfSharp.Pdf.IO.PdfReader";
+      PdfPage@1100528509 : DotNet "'PdfSharp, Version=1.32.2608.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb'.PdfSharp.Pdf.PdfPage";
+      XImageBackground@1100528508 : DotNet "'PdfSharp, Version=1.32.2608.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb'.PdfSharp.Drawing.XImage";
+      XGraphics@1100528507 : DotNet "'PdfSharp, Version=1.32.2608.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb'.PdfSharp.Drawing.XGraphics";
+      XGraphicsOptions@1100528506 : DotNet "'PdfSharp, Version=1.32.2608.0, Culture=neutral, PublicKeyToken=f94615aa0424f9eb'.PdfSharp.Drawing.XGraphicsPdfPageOptions";
+      PageCounter@1100528501 : Integer;
+      ServerBackgroundFileName@1100528504 : Text;
+      ServerBackgroundFileNameFirstPage@1100528403 : Text;
+    BEGIN
+      IF (NOT MailTemplateManagement.GetMailTemplate(MailTemplate, MailTemplateNo, ShortcutDimension1Code)) THEN
+        EXIT;
+      IF MailTemplate."Pdf Background File Name" = '' THEN
+        EXIT;
+      IF NOT EXISTS(ServerTempFileName) THEN
+        EXIT;
+      IF MailTemplate."Print Pdf without Background" AND
+         PDFIsPrinted
+      THEN
+        EXIT;
+
+      UploadPDFBackgroundFilesSilent(MailTemplate, ServerBackgroundFileNameFirstPage, ServerBackgroundFileName);
+
+      PdfDocument := PdfReader.Open(ServerTempFileName);
+      FOR PageCounter := 0 TO PdfDocument.Pages.Count - 1 DO BEGIN
+        IF PageCounter = 0 THEN
+          XImageBackground := XImageBackground.FromFile(ServerBackgroundFileNameFirstPage)
+        ELSE
+          XImageBackground := XImageBackground.FromFile(ServerBackgroundFileName);
+        PdfPage := PdfDocument.Pages.Item(PageCounter);
+        XGraphics := XGraphics.FromPdfPage(PdfPage, XGraphicsOptions.Prepend);  //Prepend = Background
+        XGraphics.DrawImage(XImageBackground,0,0);
+      END;
+
+      PdfDocument.Save(ServerTempFileName);
+      ERASE(ServerBackgroundFileNameFirstPage);
+      IF ServerBackgroundFileName <> ServerBackgroundFileNameFirstPage THEN
+        ERASE(ServerBackgroundFileName);
+    END;
+
+    LOCAL PROCEDURE UploadPDFBackgroundFilesSilent@1100528401(MailTemplate@1100528402 : Record 11229450;VAR ServerBackgroundFileNameFirstPage@1100528400 : Text;VAR ServerBackgroundFileName@1100528401 : Text);
+    VAR
+      FileManagement@1100528403 : Codeunit 419;
+    BEGIN
+      ServerBackgroundFileName := FileManagement.UploadFileSilent(MailTemplate."Pdf Background File Name");
+      IF MailTemplate."Pdf Bckg. File Name First Page" = '' THEN
+        ServerBackgroundFileNameFirstPage := ServerBackgroundFileName
+      ELSE
+        ServerBackgroundFileNameFirstPage := FileManagement.UploadFileSilent(MailTemplate."Pdf Bckg. File Name First Page");
+    END;
+
+    PROCEDURE FileCanBeConvertedToPDF@1100528400(FileName@1100525000 : Text) : Boolean;
+    VAR
+      FileManagement@1100525002 : Codeunit 419;
+      Extension@1100525001 : Text;
+    BEGIN
+      Extension := LOWERCASE(FileManagement.GetExtension(FileName));
+      IF Extension IN [
+        'pdf', 'doc', 'docx', 'xls', 'xlsx', 'txt', 'gif', 'jpeg', 'jpg', 'bmp', 'png','docm']
+      THEN
+        EXIT(TRUE);
+    END;
+
+    PROCEDURE UseOnlinePDFConverter@1100528600() : Boolean;
+    VAR
+      PermissionManager@1100528600 : Codeunit 9002;
+    BEGIN
+      IF PermissionManager.SoftwareAsAService THEN
+        EXIT(TRUE);
+    END;
+
+    PROCEDURE HourAccLines@1100294002(VAR HourAccountingLine@1100525004 : Record 11012039;ReportID@1100525003 : Integer;VAR FolderName@1100294000 : Text[260];VAR FileName@1100525001 : Text[260];TimeOut@1100525000 : Integer) : Boolean;
+    VAR
+      TempServerFileName@1210190000 : Text[1024];
+    BEGIN
+      // SESB.I035.I036 VKO 26.07.2013 >>
+      IF NOT HourAccountingLine.MARKEDONLY THEN
+        EXIT;
+
+      FolderName := TEMPORARYPATH;
+
+      IF EXISTS(FolderName + FileName + '.pdf') THEN BEGIN
+        FileName := FileName + '_1';
+        WHILE(EXISTS(FolderName + FileName + '.pdf')) DO
+          FileName := INCSTR(FileName);
+      END;
+
+      TempServerFileName := FolderName + FileName + '.pdf';
+      FolderName := '';
+      REPORT.SAVEASPDF(ReportID,TempServerFileName,HourAccountingLine);
+      FileName := TempServerFileName;
+      // SESB.I035.I036 VKO 26.07.2013 <<
+    END;
+
+    PROCEDURE GetNoOfPagesOfPDF@1100528402(ServerFileName@1100528406 : Text) NoOfPages : Integer;
+    VAR
+      Regex@1100528400 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.RegularExpressions.Regex";
+      MatchCollection@1100528408 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.RegularExpressions.MatchCollection";
+      FileStream@1100528401 : DotNet "'mscorlib, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.FileStream";
+      FileMode@1100528402 : DotNet "'mscorlib, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.FileMode";
+      FileAccess@1100528403 : DotNet "'mscorlib, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.FileAccess";
+      StreamReader@1100528404 : DotNet "'mscorlib, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.StreamReader";
+      PDFString@1100528409 : Text;
+    BEGIN
+      FileStream := FileStream.FileStream(ServerFileName, FileMode.Open, FileAccess.Read);
+      StreamReader := StreamReader.StreamReader(FileStream);
+      PDFString := StreamReader.ReadToEnd;
+      Regex := Regex.Regex('\/Type\s?\/Page[^s]');
+      MatchCollection := Regex.Matches(PDFString);
+      IF NOT ISNULL(MatchCollection) THEN
+        NoOfPages := MatchCollection.Count;
+    END;
+
+    LOCAL PROCEDURE TryConvertWordBlobToPdfOnServer@1100529600(ClientFileName@1100529602 : Text[250]) ServerFileName : Text[250];
+    VAR
+      TempBlob@1100529601 : Record 99008535;
+      TypeHelper@1100529600 : Codeunit 10;
+      FileManagement@1100529603 : Codeunit 419;
+      WordAutomation@1100529604 : Codeunit 11012400;
+      TmpServerFileName@1100529605 : Text;
+    BEGIN
+      FileManagement.BLOBImportFromServerFile(TempBlob, ClientFileName);
+      IF TypeHelper.TryConvertWordBlobToPdf(TempBlob) THEN BEGIN
+        ServerFileName := FileManagement.ServerTempFileName('pdf');
+        FileManagement.BLOBExportToServerFile(TempBlob, ServerFileName);
+        EXIT;
+      END;
+
+      TmpServerFileName := WordAutomation.ConvertWordDocCreatedFromTemplate(ClientFileName);
+      IF TmpServerFileName <> '' THEN BEGIN
+        CLEAR(TempBlob);
+        FileManagement.BLOBImportFromServerFile(TempBlob, TmpServerFileName);
+        IF TypeHelper.TryConvertWordBlobToPdf(TempBlob) THEN BEGIN
+          ServerFileName := FileManagement.ServerTempFileName('pdf');
+          FileManagement.BLOBExportToServerFile(TempBlob, ServerFileName);
+          EXIT;
+        END;
+      END;
+
+      ServerFileName := ClientFileName;
+    END;
+
+    BEGIN
+    {
+      SESB.I035.I036 Message when dissaproving-correcting hours
+         VKO 26.07.2013 Trigger HourAccLines added
+
+      170830 ITERO.DL bioPDF on server
+    }
+    END.
+  }
+}
+

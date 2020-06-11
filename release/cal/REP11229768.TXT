@@ -1,0 +1,891 @@
+OBJECT Report 11229768 Calc.EstPart (Open Budget)
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    CaptionML=[ENU=Calculate Part Open Budget;
+               NOR=Beregn del, †pne budsjett;
+               SVE=Ber„kna del, ”ppen budget];
+    ProcessingOnly=Yes;
+    OnPreReport=BEGIN
+                  StoreFilterEstLineRec.COPY("Estimate Line");
+                  IF NOT CurrReport.USEREQUESTPAGE THEN
+                    InitOfferPrice := gvInitOfferPrice;
+
+                  DialogWindow.OPEN(Text010);  //C055105
+                END;
+
+  }
+  DATASET
+  {
+    { 1100528900;;DataItem;                  ;
+               DataItemTable=Table11012151;
+               DataItemTableView=SORTING(No.)
+                                 ORDER(Ascending);
+               OnPreDataItem=BEGIN
+                               Estimate.SETFILTER("No.", StoreFilterEstLineRec.GETFILTER("Estimate No."));
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  //db, 10-03-14
+                                  InitTempTables;
+                                  InitCalculatedPrice;
+                                  DetermineAdditionalCost;
+                                END;
+
+               OnPostDataItem=BEGIN
+                                AggregatePartTotals;  //db, 13-05-14
+                                DialogWindow.CLOSE;  //C055105
+                              END;
+                               }
+
+    { 1100528901;1;DataItem;                 ;
+               DataItemTable=Table11072074;
+               DataItemTableView=SORTING(Estimate No.,Sub-Estimate No.);
+               OnPreDataItem=BEGIN
+                               "Sub-Estimate".SETFILTER("Sub-Estimate No.",StoreFilterEstLineRec.GETFILTER("Sub-Estimate No."));  //db, 23-02-10
+                             END;
+
+               DataItemLink=Estimate No.=FIELD(No.) }
+
+    { 1100528902;2;DataItem;                 ;
+               DataItemTable=Table11072072;
+               DataItemTableView=SORTING(Estimate No.,Sub-Estimate No.,Part Group,Part,Line No.);
+               OnPreDataItem=BEGIN
+                               CLEAR(CurrEstLineRec);  //C055105
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  EstimatePart@1100529400 : Record 11072073;
+                                BEGIN
+                                  //DP00381
+                                  WITH "Estimate Line" DO BEGIN
+                                    //db.sn, 10-03-14
+                                    IF (CurrEstLineRec."Estimate No." <> "Estimate No.") OR (CurrEstLineRec."Sub-Estimate No." <> "Sub-Estimate No.") OR
+                                       (CurrEstLineRec."Part Group" <> "Part Group") OR (CurrEstLineRec.Part <> Part) THEN BEGIN  //C055105
+                                      IF (CurrEstLineRec."Estimate No." <> '') THEN
+                                        StoreCalculatedPrice(CurrEstLineRec."Estimate No.", CurrEstLineRec."Sub-Estimate No.", CurrEstLineRec."Part Group", CurrEstLineRec.Part);  //C055105
+                                      CostAmount := 0;
+                                      SalesAmount := 0;
+                                      CumTotalCost := 0;
+                                      CumTotalSales := 0;
+                                      DialogWindow.UPDATE(1, "Sub-Estimate No."+'-'+Part);  //C055105
+                                    END;
+                                    //db.en, 10-03-14
+                                    CurrEstLineRec := "Estimate Line";
+                                    IF Recipe = '' THEN
+                                      DetermineSurchEstLine("Estimate Line")
+                                    ELSE
+                                      DetermineAmountRecipeEstLine("Estimate Line");
+
+                                    IF (EstTotal <> 0) AND (AdditionalCost <> 0) THEN BEGIN
+                                      EstimatePart.GET("Estimate No.", "Sub-Estimate No.", "Part Group", Part);  //T007289
+                                      IF (EstimatePart."Exclude Additional Costs" = FALSE) THEN BEGIN  //T007289
+                                        "Cost Amount" := "Cost Amount" +
+                                          (CurrEstLineRec."Cost Amount" * AdditionalCost / EstTotal);
+                                        "Sales Amount" := "Sales Amount" +
+                                          (CurrEstLineRec."Sales Amount" * AdditionalCost / EstTotal);
+                                      END;
+                                    END;
+                                    //db.sn, 10-03-14
+                                    CostAmount := CostAmount + "Cost Amount";
+                                    SalesAmount := SalesAmount + "Sales Amount";
+                                    CumTotalCost := CumTotalCost + ("Cost Amount" * "Part Quantity");
+                                    CumTotalSales := CumTotalSales + ("Sales Amount" * "Part Quantity");
+                                    //db.sn, 10-03-14
+                                  END;
+                                END;
+
+               OnPostDataItem=BEGIN
+                                //db, 13-05-14: AggregatePartTotals moved to DataItem Estimate
+                                StoreCalculatedPrice(CurrEstLineRec."Estimate No.", CurrEstLineRec."Sub-Estimate No.", CurrEstLineRec."Part Group", CurrEstLineRec.Part);  //C055105
+                              END;
+
+               DataItemLink=Estimate No.=FIELD(Estimate No.),
+                            Sub-Estimate No.=FIELD(Sub-Estimate No.) }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+    }
+    CONTROLS
+    {
+      { 1100528903;0;Container;
+                  ContainerType=ContentArea }
+
+      { 1100528902;1;Group  ;
+                  CaptionML=[ENU=Options;
+                             NOR=Alternativer;
+                             SVE=Alternativ] }
+
+      { 1100528901;2;Field  ;
+                  CaptionML=[ENU=Summary Sheet;
+                             NOR=Sammendragsark;
+                             SVE=Summeringsark];
+                  SourceExpr=SummarySheetRec.Summary;
+                  TableRelation="Summary Sheet".Summary }
+
+      { 1100528900;2;Field  ;
+                  CaptionML=[ENU=Update Offer Price;
+                             NOR=Oppdater tilbudspris;
+                             SVE=Uppdatera anbudspris];
+                  SourceExpr=InitOfferPrice }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      Text000@1100528914 : TextConst 'ENU=NotAppl;NOR=NotAppl;SVE=NotAppl';
+      SummarySheetRec@1100525016 : Record 11012172;
+      SummarySheetLineRec@1100525015 : Record 11012171;
+      TempSummarySheetLineRec1@1100525014 : TEMPORARY Record 11012171;
+      TempSummarySheetLineRec2@1100525013 : TEMPORARY Record 11012171;
+      StoreFilterEstLineRec@1100525012 : Record 11072072;
+      CurrEstLineRec@1100525011 : Record 11072072;
+      InitOfferPrice@1100525010 : Boolean;
+      gvInitOfferPrice@1100525009 : Boolean;
+      TotSurchargeAmount@1100525008 : Decimal;
+      TotSurchargeHours@1100525007 : Decimal;
+      AdditionalCost@1100525006 : Decimal;
+      EstTotal@1100525005 : Decimal;
+      CumTotalCost@1100525004 : Decimal;
+      CumTotalSales@1100525003 : Decimal;
+      CostAmount@1100525002 : Decimal;
+      SalesAmount@1100525001 : Decimal;
+      Text010@1100528900 : TextConst 'ENU=Estimatepart  #1#################';
+      DialogWindow@1100528901 : Dialog;
+
+    PROCEDURE SetSelection@1100525001(lvEstimate@1100528900 : Code[20];lvSumSheet@1100525000 : Code[20];lvInitOfferPrice@1100525001 : Boolean);
+    BEGIN
+      //DP00381
+      gvInitOfferPrice := lvInitOfferPrice;
+      SummarySheetRec.GET(lvEstimate, lvSumSheet);
+    END;
+
+    PROCEDURE InitTempTables@1100525010();
+    BEGIN
+      //db, 10-03-14
+      TempSummarySheetLineRec1.RESET;
+      TempSummarySheetLineRec1.DELETEALL;
+      TempSummarySheetLineRec2.RESET;
+      TempSummarySheetLineRec2.DELETEALL;
+
+      SummarySheetLineRec.SETRANGE("Estimate No.", Estimate."No.");
+      SummarySheetLineRec.SETRANGE(Summary, SummarySheetRec.Summary);
+      //SummarySheetLineRec.SETFILTER(Amount, '<>%1', 0);  //C038281
+      IF SummarySheetLineRec.FINDSET THEN BEGIN
+        REPEAT
+          //C038281.sn
+          IF (SummarySheetLineRec.Amount <> 0) OR
+             (SummarySheetLineRec.Type = SummarySheetLineRec.Type::"Cost Type") THEN
+          BEGIN
+            TempSummarySheetLineRec1 := SummarySheetLineRec;
+            TempSummarySheetLineRec1.INSERT;
+          END;
+          IF SummarySheetLineRec."Surcharge Over Row" <> Text000 THEN BEGIN
+            TempSummarySheetLineRec2 := SummarySheetLineRec;
+            TempSummarySheetLineRec2.INSERT;
+          END;
+          //C038281.en
+        UNTIL SummarySheetLineRec.NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE InitCalculatedPrice@1100525009();
+    VAR
+      lvEstPartRec@1100525000 : Record 11072073;
+      DateModified@1100525002 : Date;
+      TimeModified@1100525001 : Time;
+    BEGIN
+      //db, 10-03-14
+      //DP01315.sn
+      DateModified := TODAY;
+      TimeModified := TIME;
+      //DP01315.en
+      lvEstPartRec.SETRANGE("Estimate No.", Estimate."No.");
+      lvEstPartRec.SETFILTER("Sub-Estimate No.", StoreFilterEstLineRec.GETFILTER("Sub-Estimate No."));
+      IF lvEstPartRec.FINDSET(TRUE, FALSE) THEN BEGIN
+        REPEAT
+          //DP00381.sn
+          IF SummarySheetRec."Summary Type" = SummarySheetRec."Summary Type"::Cost THEN BEGIN
+            lvEstPartRec."Calculated Cost Price" := 0;
+            lvEstPartRec."Calculated Cost Amount" := 0;
+            //DP01315.sn
+            lvEstPartRec."Last Date Modified (FCP)" := DateModified;
+            lvEstPartRec."Last Time Modified (FCP)" := TimeModified;
+            //DP01315.en
+          END ELSE BEGIN
+            lvEstPartRec."Calculated Sales Price" := 0;
+            lvEstPartRec."Calculated Sales Amount" := 0;
+            //DP01315.sn
+            lvEstPartRec."Last Date Modified (FSP)" := DateModified;
+            lvEstPartRec."Last Time Modified (FSP)" := TimeModified;
+            //DP01315.en
+          END;
+          //DP00381.en
+          IF InitOfferPrice AND NOT lvEstPartRec."Offer fixed" THEN BEGIN
+            //lvEstPartRec."Offer Price" := 0;
+            lvEstPartRec.VALIDATE("Offer Amount", 0);
+          END;
+          lvEstPartRec.MODIFY;
+        UNTIL lvEstPartRec.NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE StoreCalculatedPrice@1100528900(IEstimate@1100528901 : Code[20];ISubEstimate@1100528902 : Code[20];IPartGroup@1100528903 : Code[20];IPart@1100528904 : Code[20]);
+    VAR
+      lvEstPartRec@1100528900 : Record 11072073;
+      CumQuan@1100528905 : Decimal;
+    BEGIN
+      //DP00381
+      //db, 10-03-14: called from DataItem instead of GroupFooter
+      IF lvEstPartRec.GET(IEstimate, ISubEstimate, IPartGroup, IPart) THEN BEGIN
+        CumQuan := lvEstPartRec.GetPartQuantity;  //C060701
+        IF SummarySheetRec."Summary Type" = SummarySheetRec."Summary Type"::Cost THEN BEGIN
+          lvEstPartRec."Calculated Cost Price" := CostAmount;
+          lvEstPartRec."Calculated Cost Amount" := CumTotalCost;
+        END ELSE BEGIN
+          lvEstPartRec."Calculated Sales Price" := SalesAmount;
+          lvEstPartRec."Calculated Sales Amount" := CumTotalSales;
+        END;
+        //C060701.sn
+        IF CumQuan <> 0 THEN BEGIN
+          lvEstPartRec."Calculated Cost Price" := lvEstPartRec."Calculated Cost Amount" / CumQuan;
+          lvEstPartRec."Calculated Sales Price" := lvEstPartRec."Calculated Sales Amount" / CumQuan;
+        END;
+        //C060701.en
+        IF InitOfferPrice AND NOT lvEstPartRec."Offer fixed" THEN BEGIN
+          IF SummarySheetRec."Summary Type" = SummarySheetRec."Summary Type"::Cost THEN BEGIN  //DP00686
+            //lvEstPartRec."Offer Price" := lvEstPartRec."Calculated Cost Price";
+            lvEstPartRec.VALIDATE("Offer Amount", lvEstPartRec."Calculated Cost Amount");
+          END ELSE BEGIN
+            //lvEstPartRec."Offer Price" := lvEstPartRec."Calculated Sales Price";
+            lvEstPartRec.VALIDATE("Offer Amount", lvEstPartRec."Calculated Sales Amount");
+          END;
+        END;
+        lvEstPartRec.MODIFY;
+      END;
+    END;
+
+    PROCEDURE DetermineSurchEstLine@1100525008(VAR EstimateLineRec@1100485000 : Record 11072072);
+    VAR
+      CostHoursOld@1100485002 : Decimal;
+      SalesHoursOld@1100528900 : Decimal;
+      CostLaborOld@1100485006 : Decimal;
+      SalesLaborOld@1100528901 : Decimal;
+    BEGIN
+      //save old values
+      CostHoursOld := EstimateLineRec.Hours;
+      CostLaborOld := EstimateLineRec."Labor Cost Amount";
+      SalesHoursOld := EstimateLineRec."Hours (Sales)";
+      SalesLaborOld := EstimateLineRec."Labor Sales Amount";
+
+      //Determine surcharges for each "Cost type" line.
+      TempSummarySheetLineRec1.SETRANGE(Type,TempSummarySheetLineRec1.Type::"Cost Type");
+      IF TempSummarySheetLineRec1.FINDSET THEN BEGIN
+        REPEAT
+          //these are the lines in which estimate line exist.
+          IF EstLineInFilters(EstimateLineRec,TempSummarySheetLineRec1) THEN BEGIN
+            IF (TempSummarySheetLineRec1."Cost Type" = TempSummarySheetLineRec1."Cost Type"::Labor) OR
+               (TempSummarySheetLineRec1."Cost Type" = TempSummarySheetLineRec1."Cost Type"::Total)
+            THEN BEGIN
+              TotSurchargeAmount := 0;
+              TotSurchargeHours := 0;
+              IF SummarySheetRec."Summary Type" = SummarySheetRec."Summary Type"::Cost THEN BEGIN
+                SummaryLineInFilter(TempSummarySheetLineRec1,0,EstimateLineRec."Labor Cost Amount",EstimateLineRec.Hours);
+                EstimateLineRec."Labor Cost Amount" += TotSurchargeAmount;
+                EstimateLineRec.Hours += TotSurchargeHours;
+              END ELSE BEGIN
+                SummaryLineInFilter(TempSummarySheetLineRec1,0,EstimateLineRec."Labor Sales Amount",EstimateLineRec."Hours (Sales)");
+                EstimateLineRec."Labor Sales Amount" += TotSurchargeAmount;
+                EstimateLineRec."Hours (Sales)" += TotSurchargeHours;
+              END;
+            END;
+            IF (TempSummarySheetLineRec1."Cost Type" = TempSummarySheetLineRec1."Cost Type"::Material) OR
+               (TempSummarySheetLineRec1."Cost Type" = TempSummarySheetLineRec1."Cost Type"::Total)
+            THEN BEGIN
+              TotSurchargeAmount := 0;
+              TotSurchargeHours := 0;
+              IF SummarySheetRec."Summary Type" = SummarySheetRec."Summary Type"::Cost THEN BEGIN
+                SummaryLineInFilter(TempSummarySheetLineRec1,0,EstimateLineRec."Material Cost Amount",EstimateLineRec.Hours);
+                EstimateLineRec."Material Cost Amount" += TotSurchargeAmount;
+              END ELSE BEGIN
+                SummaryLineInFilter(TempSummarySheetLineRec1,0,EstimateLineRec."Material Sales Amount",EstimateLineRec."Hours (Sales)");
+                EstimateLineRec."Material Sales Amount" += TotSurchargeAmount;
+              END;
+            END;
+            IF (TempSummarySheetLineRec1."Cost Type" = TempSummarySheetLineRec1."Cost Type"::Subcontracting) OR
+               (TempSummarySheetLineRec1."Cost Type" = TempSummarySheetLineRec1."Cost Type"::Total)
+            THEN BEGIN
+              TotSurchargeAmount := 0;
+              TotSurchargeHours := 0;
+              IF SummarySheetRec."Summary Type" = SummarySheetRec."Summary Type"::Cost THEN BEGIN
+                SummaryLineInFilter(TempSummarySheetLineRec1,0,EstimateLineRec."Subcontracting Cost Amount",EstimateLineRec.Hours);
+                EstimateLineRec."Subcontracting Cost Amount" += TotSurchargeAmount;
+              END ELSE BEGIN
+                SummaryLineInFilter(TempSummarySheetLineRec1,0,
+                  EstimateLineRec."Subcontracting Sales Amount",EstimateLineRec."Hours (Sales)");
+                EstimateLineRec."Subcontracting Sales Amount" += TotSurchargeAmount;
+              END;
+            END;
+            IF (TempSummarySheetLineRec1."Cost Type" = TempSummarySheetLineRec1."Cost Type"::Plant) OR
+               (TempSummarySheetLineRec1."Cost Type" = TempSummarySheetLineRec1."Cost Type"::Total)
+            THEN BEGIN
+              TotSurchargeAmount := 0;
+              TotSurchargeHours := 0;
+              IF SummarySheetRec."Summary Type" = SummarySheetRec."Summary Type"::Cost THEN BEGIN
+                SummaryLineInFilter(TempSummarySheetLineRec1,0,EstimateLineRec."Plant Cost Amount",EstimateLineRec.Hours);
+                EstimateLineRec."Plant Cost Amount" += TotSurchargeAmount;
+              END ELSE BEGIN
+                SummaryLineInFilter(TempSummarySheetLineRec1,0,EstimateLineRec."Plant Sales Amount",EstimateLineRec."Hours (Sales)");
+                EstimateLineRec."Plant Sales Amount" += TotSurchargeAmount;
+              END;
+            END;
+            IF (TempSummarySheetLineRec1."Cost Type" = TempSummarySheetLineRec1."Cost Type"::Sundry) OR
+               (TempSummarySheetLineRec1."Cost Type" = TempSummarySheetLineRec1."Cost Type"::Total)
+            THEN BEGIN
+              TotSurchargeAmount := 0;
+              TotSurchargeHours := 0;
+              IF SummarySheetRec."Summary Type" = SummarySheetRec."Summary Type"::Cost THEN BEGIN
+                SummaryLineInFilter(TempSummarySheetLineRec1,0,EstimateLineRec."Sundry Cost Amount",EstimateLineRec.Hours);
+                EstimateLineRec."Sundry Cost Amount" += TotSurchargeAmount;
+              END ELSE BEGIN
+                SummaryLineInFilter(TempSummarySheetLineRec1,0,EstimateLineRec."Sundry Sales Amount",EstimateLineRec."Hours (Sales)");
+                EstimateLineRec."Sundry Sales Amount" += TotSurchargeAmount;
+              END;
+            END;
+          END;
+        UNTIL TempSummarySheetLineRec1.NEXT = 0;
+      END;
+
+      WITH EstimateLineRec DO BEGIN
+        "Cost Amount" := "Labor Cost Amount" + "Material Cost Amount" +
+          "Subcontracting Cost Amount" + "Plant Cost Amount" + "Sundry Cost Amount";
+        "Sales Amount" := "Labor Sales Amount" + "Material Sales Amount" +
+          "Subcontracting Sales Amount" + "Plant Sales Amount" + "Sundry Sales Amount";
+      END;
+    END;
+
+    PROCEDURE DetermineSurchRcpLine@1100525005(VAR VRecipeLineRec@1100485000 : Record 11072075);
+    VAR
+      CostHoursOld@1100525003 : Decimal;
+      SalesHoursOld@1100525002 : Decimal;
+      CostLaborOld@1100525001 : Decimal;
+      SalesLaborOld@1100525000 : Decimal;
+    BEGIN
+      //save old values
+      CostHoursOld := VRecipeLineRec.Hours;
+      CostLaborOld := VRecipeLineRec."Labor Cost Amount";
+      SalesHoursOld := VRecipeLineRec."Hours (Sales)";
+      SalesLaborOld := VRecipeLineRec."Labor Sales Amount";
+      //db.sn, 10-02-14: due to VAR-declaration subtotals by cost type are not reset
+      IF VRecipeLineRec."Cost Type (Price)" = VRecipeLineRec."Cost Type (Price)"::Material THEN BEGIN
+        VRecipeLineRec."Subcontracting Cost Amount" := 0;
+        VRecipeLineRec."Subcontracting Sales Amount" := 0;
+        VRecipeLineRec."Plant Cost Amount" := 0;
+        VRecipeLineRec."Plant Sales Amount" := 0;
+        VRecipeLineRec."Sundry Cost Amount" := 0;
+        VRecipeLineRec."Sundry Sales Amount" := 0;
+      END;
+      IF VRecipeLineRec."Cost Type (Price)" = VRecipeLineRec."Cost Type (Price)"::Subcontracting THEN BEGIN
+        VRecipeLineRec."Material Cost Amount" := 0;
+        VRecipeLineRec."Material Sales Amount" := 0;
+        VRecipeLineRec."Plant Cost Amount" := 0;
+        VRecipeLineRec."Plant Sales Amount" := 0;
+        VRecipeLineRec."Sundry Cost Amount" := 0;
+        VRecipeLineRec."Sundry Sales Amount" := 0;
+      END;
+      IF VRecipeLineRec."Cost Type (Price)" = VRecipeLineRec."Cost Type (Price)"::Plant THEN BEGIN
+        VRecipeLineRec."Material Cost Amount" := 0;
+        VRecipeLineRec."Material Sales Amount" := 0;
+        VRecipeLineRec."Subcontracting Cost Amount" := 0;
+        VRecipeLineRec."Subcontracting Sales Amount" := 0;
+        VRecipeLineRec."Sundry Cost Amount" := 0;
+        VRecipeLineRec."Sundry Sales Amount" := 0;
+      END;
+      IF VRecipeLineRec."Cost Type (Price)" = VRecipeLineRec."Cost Type (Price)"::Sundry THEN BEGIN
+        VRecipeLineRec."Material Cost Amount" := 0;
+        VRecipeLineRec."Material Sales Amount" := 0;
+        VRecipeLineRec."Subcontracting Cost Amount" := 0;
+        VRecipeLineRec."Subcontracting Sales Amount" := 0;
+        VRecipeLineRec."Plant Cost Amount" := 0;
+        VRecipeLineRec."Plant Sales Amount" := 0;
+      END;
+      //db.en, 10-02-14
+
+      //determine surcharges for each "Cost type" line.
+      TempSummarySheetLineRec1.SETRANGE(Type,TempSummarySheetLineRec1.Type::"Cost Type");
+      IF TempSummarySheetLineRec1.FINDSET THEN BEGIN
+        REPEAT
+          //these are the lines in which estimate line exist.
+          IF RcpLineInFilters(VRecipeLineRec,TempSummarySheetLineRec1) THEN BEGIN
+            IF (TempSummarySheetLineRec1."Cost Type" = TempSummarySheetLineRec1."Cost Type"::Labor) OR
+               (TempSummarySheetLineRec1."Cost Type" = TempSummarySheetLineRec1."Cost Type"::Total)
+            THEN BEGIN
+              TotSurchargeAmount := 0;
+              TotSurchargeHours := 0;
+              IF SummarySheetRec."Summary Type" = SummarySheetRec."Summary Type"::Cost THEN BEGIN  //db, 10-02-14
+                SummaryLineInFilter(TempSummarySheetLineRec1,0,VRecipeLineRec."Labor Cost Amount",VRecipeLineRec.Hours);
+                VRecipeLineRec."Labor Cost Amount" += TotSurchargeAmount;
+                VRecipeLineRec.Hours += TotSurchargeHours;
+              END ELSE BEGIN
+                SummaryLineInFilter(TempSummarySheetLineRec1,0,VRecipeLineRec."Labor Sales Amount",VRecipeLineRec."Hours (Sales)");
+                VRecipeLineRec."Labor Sales Amount" += TotSurchargeAmount;
+                VRecipeLineRec."Hours (Sales)" += TotSurchargeHours;
+              END;
+            END;
+            IF (TempSummarySheetLineRec1."Cost Type" = TempSummarySheetLineRec1."Cost Type"::Material) OR
+               (TempSummarySheetLineRec1."Cost Type" = TempSummarySheetLineRec1."Cost Type"::Total)
+            THEN BEGIN
+              TotSurchargeAmount := 0;
+              TotSurchargeHours := 0;
+              IF SummarySheetRec."Summary Type" = SummarySheetRec."Summary Type"::Cost THEN BEGIN  //db, 10-02-14
+                SummaryLineInFilter(TempSummarySheetLineRec1,0,VRecipeLineRec."Material Cost Amount",VRecipeLineRec.Hours);
+                VRecipeLineRec."Material Cost Amount" += TotSurchargeAmount;
+              END ELSE BEGIN
+                SummaryLineInFilter(TempSummarySheetLineRec1,0,VRecipeLineRec."Material Sales Amount",VRecipeLineRec."Hours (Sales)");
+                VRecipeLineRec."Material Sales Amount" += TotSurchargeAmount;
+              END;
+            END;
+            IF (TempSummarySheetLineRec1."Cost Type" = TempSummarySheetLineRec1."Cost Type"::Subcontracting) OR
+               (TempSummarySheetLineRec1."Cost Type" = TempSummarySheetLineRec1."Cost Type"::Total)
+            THEN BEGIN
+              TotSurchargeAmount := 0;
+              TotSurchargeHours := 0;
+              IF SummarySheetRec."Summary Type" = SummarySheetRec."Summary Type"::Cost THEN BEGIN  //db, 10-02-14
+                SummaryLineInFilter(TempSummarySheetLineRec1,0,VRecipeLineRec."Subcontracting Cost Amount",VRecipeLineRec.Hours);
+                VRecipeLineRec."Subcontracting Cost Amount" += TotSurchargeAmount;
+              END ELSE BEGIN
+                SummaryLineInFilter(TempSummarySheetLineRec1,0,
+                  VRecipeLineRec."Subcontracting Sales Amount",VRecipeLineRec."Hours (Sales)");
+                VRecipeLineRec."Subcontracting Sales Amount" += TotSurchargeAmount;
+              END;
+            END;
+            IF (TempSummarySheetLineRec1."Cost Type" = TempSummarySheetLineRec1."Cost Type"::Plant) OR
+               (TempSummarySheetLineRec1."Cost Type" = TempSummarySheetLineRec1."Cost Type"::Total)
+            THEN BEGIN
+              TotSurchargeAmount := 0;
+              TotSurchargeHours := 0;
+              IF SummarySheetRec."Summary Type" = SummarySheetRec."Summary Type"::Cost THEN BEGIN  //db, 10-02-14
+                SummaryLineInFilter(TempSummarySheetLineRec1,0,VRecipeLineRec."Plant Cost Amount",VRecipeLineRec.Hours);
+                VRecipeLineRec."Plant Cost Amount" += TotSurchargeAmount;
+              END ELSE BEGIN
+                SummaryLineInFilter(TempSummarySheetLineRec1,0,VRecipeLineRec."Plant Sales Amount",VRecipeLineRec."Hours (Sales)");
+                VRecipeLineRec."Plant Sales Amount" += TotSurchargeAmount;
+              END;
+            END;
+            IF (TempSummarySheetLineRec1."Cost Type" = TempSummarySheetLineRec1."Cost Type"::Sundry) OR
+               (TempSummarySheetLineRec1."Cost Type" = TempSummarySheetLineRec1."Cost Type"::Total)
+            THEN BEGIN
+              TotSurchargeAmount := 0;
+              TotSurchargeHours := 0;
+              IF SummarySheetRec."Summary Type" = SummarySheetRec."Summary Type"::Cost THEN BEGIN  //db, 10-02-14
+                SummaryLineInFilter(TempSummarySheetLineRec1,0,VRecipeLineRec."Sundry Cost Amount",VRecipeLineRec.Hours);
+                VRecipeLineRec."Sundry Cost Amount" += TotSurchargeAmount;
+              END ELSE BEGIN
+                SummaryLineInFilter(TempSummarySheetLineRec1,0,VRecipeLineRec."Sundry Sales Amount",VRecipeLineRec."Hours (Sales)");
+                VRecipeLineRec."Sundry Sales Amount" += TotSurchargeAmount;
+              END;
+            END;
+          END;
+        UNTIL TempSummarySheetLineRec1.NEXT = 0;
+      END;
+
+      WITH VRecipeLineRec DO BEGIN
+        "Cost Amount" := "Labor Cost Amount" + "Material Cost Amount" + "Subcontracting Cost Amount" +
+          "Plant Cost Amount" + "Sundry Cost Amount";
+        "Sales Amount" := "Labor Sales Amount" + "Material Sales Amount" + "Subcontracting Sales Amount" +
+          "Plant Sales Amount" + "Sundry Sales Amount";
+      END;
+    END;
+
+    PROCEDURE EstLineInFilters@1100525007(IEstLineRec@1100485000 : Record 11072072;ISummarySheetLineRec@1100485001 : Record 11012171) LineInFilter : Boolean;
+    VAR
+      TempEstimateLine@1100485003 : TEMPORARY Record 11072072;
+    BEGIN
+      //determine if estimate line fits in filter of "Cost type" line.
+      TempEstimateLine := IEstLineRec;
+      TempEstimateLine.INSERT;
+
+      WITH ISummarySheetLineRec DO BEGIN
+        TempEstimateLine.SETRANGE("Estimate No.", "Estimate No.");
+        TempEstimateLine.SETFILTER("Sub-Estimate No.", "Sub-Estimate Filter");
+        TempEstimateLine.SETFILTER(Part, "Part Filter");
+        TempEstimateLine.SETFILTER("Line Status", "Line Status Filter");
+        TempEstimateLine.SETFILTER("Rate Code", "Rate Filter");
+        //db.sn, 10-02-14
+        TempEstimateLine.SETFILTER(Discipline, "Discipline Filter");
+        TempEstimateLine.SETFILTER("Trade Speciality", "Trade Speciality Filter");
+        TempEstimateLine.SETFILTER("Wage Component", "Wage Component Filter");
+        //db.en, 10-02-14
+        IF ISummarySheetLineRec."Material Price Filter" <> '' THEN BEGIN
+          TempEstimateLine.SETRANGE("Cost Type (Price)", TempEstimateLine."Cost Type (Price)"::Material);  //DP00381
+          TempEstimateLine.SETFILTER("Net Cost Price", "Material Price Filter");
+        END;
+        TempEstimateLine.SETFILTER(Code, "Code Filter");
+        IF ("Cost Type"="Cost Type"::Labor) OR ("Cost Type"="Cost Type"::"Just Hours") OR
+           ("Cost Type"="Cost Type"::Total) THEN
+          TempEstimateLine.SETFILTER("Cost Object Labor", "Cost Object Filter");
+        IF ("Cost Type" = "Cost Type"::Material) OR ("Cost Type" = "Cost Type"::Subcontracting) OR
+           ("Cost Type" = "Cost Type"::Plant) OR ("Cost Type" = "Cost Type"::Sundry) OR
+           ("Cost Type"="Cost Type"::Total) THEN
+          TempEstimateLine.SETFILTER("Cost Object Price", "Cost Object Filter");
+      END;
+      TempEstimateLine.SETFILTER(Recipe, '%1', '');  //db, 10-02-14
+
+      LineInFilter := (NOT TempEstimateLine.ISEMPTY);  //C055105
+      EXIT(LineInFilter);
+    END;
+
+    PROCEDURE RcpLineInFilters@1100525004(IRecipeLineRec@1100485000 : Record 11072075;ISummarySheetLineRec@1100485001 : Record 11012171) LineInFilter : Boolean;
+    VAR
+      TempEstimateRecipeLine@1100485003 : TEMPORARY Record 11072075;
+    BEGIN
+      //determine if estimate line fits in filter of "Cost type" line.
+      TempEstimateRecipeLine := IRecipeLineRec;
+      TempEstimateRecipeLine.INSERT;
+
+      WITH ISummarySheetLineRec DO BEGIN
+        TempEstimateRecipeLine.SETRANGE("Estimate No.", "Estimate No.");
+        TempEstimateRecipeLine.SETFILTER("Sub-Estimate No.", "Sub-Estimate Filter");
+        TempEstimateRecipeLine.SETFILTER(Part, "Part Filter");
+        TempEstimateRecipeLine.SETFILTER("Line Status", "Line Status Filter");
+        TempEstimateRecipeLine.SETFILTER("Rate Code", "Rate Filter");
+        //db.sn, 10-02-14
+        TempEstimateRecipeLine.SETFILTER(Discipline, "Discipline Filter");
+        TempEstimateRecipeLine.SETFILTER("Trade Speciality", "Trade Speciality Filter");
+        TempEstimateRecipeLine.SETFILTER("Wage Component", "Wage Component Filter");
+        //db.en, 10-02-14
+        IF ISummarySheetLineRec."Material Price Filter" <> '' THEN BEGIN
+          TempEstimateRecipeLine.SETRANGE("Cost Type (Price)", TempEstimateRecipeLine."Cost Type (Price)"::Material);  //DP00381
+          TempEstimateRecipeLine.SETFILTER("Net Cost Price", "Material Price Filter");
+        END;
+        TempEstimateRecipeLine.SETFILTER(Code, ISummarySheetLineRec."Code Filter");
+        IF ("Cost Type"="Cost Type"::Labor) OR ("Cost Type"="Cost Type"::"Just Hours") OR
+           ("Cost Type"="Cost Type"::Total) THEN
+          TempEstimateRecipeLine.SETFILTER("Cost Object Labor", "Cost Object Filter");
+        IF ("Cost Type" = "Cost Type"::Material) OR ("Cost Type" = "Cost Type"::Subcontracting) OR
+           ("Cost Type" = "Cost Type"::Plant) OR ("Cost Type" = "Cost Type"::Sundry) OR
+           ("Cost Type"="Cost Type"::Total) THEN
+          TempEstimateRecipeLine.SETFILTER("Cost Object Price", "Cost Object Filter");
+      END;
+
+      LineInFilter := (NOT TempEstimateRecipeLine.ISEMPTY);  //C055105
+      EXIT(LineInFilter);
+    END;
+
+    PROCEDURE SummaryLineInFilter@1100525006(ISummarySheetLineRec@1100485000 : Record 11012171;iLevel@1100485003 : Integer;iBaseAmount@1100485004 : Decimal;iBaseHours@1100485006 : Decimal);
+    VAR
+      lvTempSummarySheetLineRec@1100485001 : TEMPORARY Record 11012171;
+      lvSummarySheetLineRec@1100485002 : Record 11012171;
+      lvSurchargeAmount@1100485005 : Decimal;
+      lvSurchargeHours@1100485007 : Decimal;
+    BEGIN
+      //Calculates 1 level surcharge: called recursively!
+
+      lvTempSummarySheetLineRec."Estimate No." := ISummarySheetLineRec."Estimate No.";
+      lvTempSummarySheetLineRec.Summary := ISummarySheetLineRec.Summary;
+      lvTempSummarySheetLineRec."Row No." := ISummarySheetLineRec."Row No.";
+      lvTempSummarySheetLineRec.INSERT;
+
+      TempSummarySheetLineRec2.SETRANGE("Estimate No.",ISummarySheetLineRec."Estimate No.");
+      TempSummarySheetLineRec2.SETRANGE(Summary,ISummarySheetLineRec.Summary);
+      IF TempSummarySheetLineRec2.FINDSET THEN BEGIN
+        REPEAT
+          IF TempSummarySheetLineRec2."Row No." <> ISummarySheetLineRec."Row No." THEN BEGIN
+            lvTempSummarySheetLineRec.SETRANGE("Estimate No.",TempSummarySheetLineRec2."Estimate No.");
+            lvTempSummarySheetLineRec.SETRANGE(Summary,TempSummarySheetLineRec2.Summary);
+            lvTempSummarySheetLineRec.SETFILTER("Row No.",TempSummarySheetLineRec2."Surcharge Over Row");
+            IF lvTempSummarySheetLineRec.FINDFIRST THEN BEGIN
+              IF TempSummarySheetLineRec2.Type = TempSummarySheetLineRec2.Type::"Surcharge Amount" THEN BEGIN
+                lvSurchargeAmount := iBaseAmount * TempSummarySheetLineRec2."Surcharge Percentage" / 100;
+                TotSurchargeAmount += lvSurchargeAmount;
+                lvSummarySheetLineRec.COPY(TempSummarySheetLineRec2); //Save
+                SummaryLineInFilter(TempSummarySheetLineRec2,iLevel + 1,lvSurchargeAmount,0);
+                TempSummarySheetLineRec2.COPY(lvSummarySheetLineRec); //Retrieve
+              END;
+              IF TempSummarySheetLineRec2.Type = TempSummarySheetLineRec2.Type::"Surcharge Hours" THEN BEGIN
+                lvSurchargeHours := iBaseHours * TempSummarySheetLineRec2."Surcharge Percentage" / 100;
+                //db.sn, 21-02-14
+                IF SummarySheetRec."Summary Type" = SummarySheetRec."Summary Type"::Cost THEN BEGIN  //DP00381
+                  TempSummarySheetLineRec2.CALCFIELDS("Cost Rate");
+                  lvSurchargeAmount := lvSurchargeHours * TempSummarySheetLineRec2."Cost Rate";
+                END ELSE BEGIN
+                  TempSummarySheetLineRec2.CALCFIELDS("Sales Rate");
+                  lvSurchargeAmount := lvSurchargeHours * TempSummarySheetLineRec2."Sales Rate";
+                END;
+                //db.en, 21-02-14
+                TotSurchargeHours += lvSurchargeHours;
+                TotSurchargeAmount += lvSurchargeAmount;
+                lvSummarySheetLineRec.COPY(TempSummarySheetLineRec2); //Save
+                SummaryLineInFilter(TempSummarySheetLineRec2,iLevel + 1,lvSurchargeAmount,lvSurchargeHours);
+                TempSummarySheetLineRec2.COPY(lvSummarySheetLineRec); //Retrieve
+              END;
+            END;
+          END;
+        UNTIL TempSummarySheetLineRec2.NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE DetermineAmountRecipeEstLine@1100525003(VAR VEstLineRec@1100485000 : Record 11072072);
+    VAR
+      lvRecipeLine@1100485001 : Record 11072075;
+    BEGIN
+      VEstLineRec.Hours := 0;
+      VEstLineRec."Labor Cost Amount" := 0;
+      VEstLineRec."Material Cost Amount" := 0;
+      VEstLineRec."Subcontracting Cost Amount" := 0;
+      VEstLineRec."Plant Cost Amount" := 0;
+      VEstLineRec."Sundry Cost Amount" := 0;
+      VEstLineRec."Cost Amount" := 0;
+      VEstLineRec.Norm := 0;
+      VEstLineRec."Cost Rate" := 0;
+      //db.sn, 10-02-14
+      VEstLineRec."Hours (Sales)" := 0;
+      VEstLineRec."Labor Sales Amount" := 0;
+      VEstLineRec."Material Sales Amount" := 0;
+      VEstLineRec."Subcontracting Sales Amount" := 0;
+      VEstLineRec."Plant Sales Amount" := 0;
+      VEstLineRec."Sundry Sales Amount" := 0;
+      VEstLineRec."Sales Amount" := 0;
+      VEstLineRec."Norm (Sales)" := 0;
+      VEstLineRec."Sales Rate" := 0;
+      //db.en, 10-02-14
+
+      lvRecipeLine.SETRANGE("Estimate No.",VEstLineRec."Estimate No.");
+      lvRecipeLine.SETRANGE("Sub-Estimate No.",VEstLineRec."Sub-Estimate No.");
+      lvRecipeLine.SETRANGE("Part Group",VEstLineRec."Part Group");
+      lvRecipeLine.SETRANGE(Part,VEstLineRec.Part);
+      lvRecipeLine.SETRANGE("Estimate Line",VEstLineRec."Line No.");
+      IF lvRecipeLine.FINDSET THEN BEGIN
+        REPEAT
+          DetermineSurchRcpLine(lvRecipeLine);
+          VEstLineRec.Hours += lvRecipeLine.Hours * VEstLineRec.Quantity;
+          VEstLineRec."Labor Cost Amount" += lvRecipeLine."Labor Cost Amount" * VEstLineRec.Quantity;
+          VEstLineRec."Material Cost Amount" += lvRecipeLine."Material Cost Amount" * VEstLineRec.Quantity;
+          VEstLineRec."Subcontracting Cost Amount" += lvRecipeLine."Subcontracting Cost Amount" * VEstLineRec.Quantity;
+          VEstLineRec."Plant Cost Amount" += lvRecipeLine."Plant Cost Amount" * VEstLineRec.Quantity;
+          VEstLineRec."Sundry Cost Amount" += lvRecipeLine."Sundry Cost Amount" * VEstLineRec.Quantity;
+          VEstLineRec."Cost Amount" += lvRecipeLine."Cost Amount" * VEstLineRec.Quantity;
+          //db.sn, 10-02-14
+          VEstLineRec."Hours (Sales)" += lvRecipeLine."Hours (Sales)" * VEstLineRec."Quantity (Sales)";
+          VEstLineRec."Labor Sales Amount" += lvRecipeLine."Labor Sales Amount" * VEstLineRec."Quantity (Sales)";
+          VEstLineRec."Material Sales Amount" += lvRecipeLine."Material Sales Amount" * VEstLineRec."Quantity (Sales)";
+          VEstLineRec."Subcontracting Sales Amount" += lvRecipeLine."Subcontracting Sales Amount" * VEstLineRec."Quantity (Sales)";
+          VEstLineRec."Plant Sales Amount" += lvRecipeLine."Plant Sales Amount" * VEstLineRec."Quantity (Sales)";
+          VEstLineRec."Sundry Sales Amount" += lvRecipeLine."Sundry Sales Amount" * VEstLineRec."Quantity (Sales)";
+          VEstLineRec."Sales Amount" += lvRecipeLine."Sales Amount" * VEstLineRec."Quantity (Sales)";
+          //db.en, 10-02-14
+        UNTIL lvRecipeLine.NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE DetermineAdditionalCost@1100525000();
+    VAR
+      ProjSetup@1100529500 : Record 315;
+      lvSumLineRec@1100525000 : Record 11012171;
+      lvSumLineRec2@1100529415 : Record 11012171;
+      lvEstRec@1100525001 : Record 11012151;
+      lvSubEstRec@1100525003 : Record 11072074;
+      EstimatePart@1100529400 : Record 11072073;
+      CostHours@1100529412 : Decimal;
+      CostLabor@1100529411 : Decimal;
+      CostMat@1100529410 : Decimal;
+      CostSubc@1100529409 : Decimal;
+      CostPlant@1100529408 : Decimal;
+      CostSundry@1100529407 : Decimal;
+      SalesHours@1100529406 : Decimal;
+      SalesLabor@1100529405 : Decimal;
+      SalesMat@1100529404 : Decimal;
+      SalesSubc@1100529403 : Decimal;
+      SalesPlant@1100529402 : Decimal;
+      SalesSundry@1100529401 : Decimal;
+      PartTotalCost@1100529413 : Decimal;
+      PartTotalSales@1100529414 : Decimal;
+    BEGIN
+      EstTotal := 0;
+      AdditionalCost := 0;
+
+      lvSumLineRec.SETRANGE("Estimate No.",SummarySheetRec."Estimate No.");
+      lvSumLineRec.SETRANGE(Summary,SummarySheetRec.Summary);
+      lvSumLineRec.SETRANGE(Type,lvSumLineRec.Type::"Additional Costs");
+      IF lvSumLineRec.FINDSET THEN BEGIN
+        REPEAT
+          AdditionalCost := AdditionalCost + lvSumLineRec.Amount;
+          //T007289.sn
+          lvSumLineRec2.SETRANGE("Estimate No.", lvSumLineRec."Estimate No.");
+          lvSumLineRec2.SETRANGE(Summary, lvSumLineRec.Summary);
+          lvSumLineRec2.SETFILTER("Surcharge Percentage", '<>%1', 0);
+          IF lvSumLineRec2.FINDSET THEN BEGIN
+            REPEAT
+              IF ProjSetup.CodeInFilter(lvSumLineRec."Row No.", lvSumLineRec2."Surcharge Over Row") THEN
+                AdditionalCost := AdditionalCost * (100 + lvSumLineRec2."Surcharge Percentage")/100;
+            UNTIL lvSumLineRec2.NEXT = 0;
+          END;
+          //T007289.en
+        UNTIL lvSumLineRec.NEXT = 0;
+      END;
+
+      IF SummarySheetRec."Sub-Estimate No." <> '' THEN BEGIN
+        IF lvSubEstRec.GET(SummarySheetRec."Estimate No.", SummarySheetRec."Sub-Estimate No.") THEN BEGIN
+          IF SummarySheetRec."Summary Type" = SummarySheetRec."Summary Type"::Cost THEN BEGIN  //DP00381
+            lvSubEstRec.CALCFIELDS("Cum. Total");
+            EstTotal := lvSubEstRec."Cum. Total";
+          END ELSE BEGIN
+            lvSubEstRec.CALCFIELDS("Cum. Total (Sales)");
+            EstTotal := lvSubEstRec."Cum. Total (Sales)";
+          END;
+        END;
+      END ELSE BEGIN
+        IF lvEstRec.GET(TempSummarySheetLineRec1."Estimate No.") THEN BEGIN
+          IF SummarySheetRec."Summary Type" = SummarySheetRec."Summary Type"::Cost THEN BEGIN  //DP00381
+            lvEstRec.CALCFIELDS("Labor Cost Amount", "Material Cost Amount",
+              "Subcontracting Cost Amount", "Plant Cost Amount", "Sundry Cost Amount");
+             EstTotal := lvEstRec."Labor Cost Amount" + lvEstRec."Material Cost Amount" +
+               lvEstRec."Subcontracting Cost Amount" + lvEstRec."Plant Cost Amount" +
+               lvEstRec."Sundry Cost Amount";
+          END ELSE BEGIN
+            lvEstRec.CALCFIELDS("Labor Sales Amount", "Material Sales Amount",
+              "Subcontracting Sales Amount", "Plant Sales Amount", "Sundry Sales Amount");
+             EstTotal := lvEstRec."Labor Sales Amount" + lvEstRec."Material Sales Amount" +
+               lvEstRec."Subcontracting Sales Amount" + lvEstRec."Plant Sales Amount" +
+               lvEstRec."Sundry Sales Amount";
+          END;
+        END;
+      END;
+
+      //T007289.sn
+      EstimatePart.SETRANGE("Estimate No.", SummarySheetRec."Estimate No.");
+      EstimatePart.SETFILTER("Sub-Estimate No.", SummarySheetRec."Sub-Estimate No.");
+      EstimatePart.SETRANGE("Exclude Additional Costs", TRUE);
+      EstimatePart.SETRANGE("Lines Exist", TRUE);  //T007450
+      //db, 06-12-16:
+      //- (cum)totals of Part are based on totals of lines assigned to current and lower level
+      //- filter on <Lines Exist> will skip parts with no lines: so PartTotal will not be subtracted twice from EstTotal
+      //- this solves not problem if lines assigned at level 1 or 2 (Chapter, Paragraph) if also lines present on level 3 (Part)
+      IF EstimatePart.FINDSET THEN BEGIN
+        REPEAT
+          EstimatePart.GetCumTotals(
+            CostHours,CostLabor,CostMat,CostSubc,CostPlant,CostSundry,
+            SalesHours,SalesLabor,SalesMat,SalesSubc,SalesPlant,SalesSundry);
+          IF SummarySheetRec."Summary Type" = SummarySheetRec."Summary Type"::Cost THEN BEGIN
+            PartTotalCost := CostLabor + CostMat + CostSubc + CostPlant + CostSundry;
+            EstTotal := EstTotal - PartTotalCost;
+          END ELSE BEGIN
+            PartTotalSales := SalesLabor + SalesMat + SalesSubc + SalesPlant + SalesSundry;
+            EstTotal := EstTotal - PartTotalSales;
+          END;
+         UNTIL EstimatePart.NEXT = 0;
+      END;
+      //T007289.en
+    END;
+
+    PROCEDURE AggregatePartTotals@1100525002();
+    VAR
+      lvEstPartRec@1100525003 : Record 11072073;
+      lvEstPartRec2@1100525002 : Record 11072073;
+      lLevel@1100525001 : Integer;
+      lPartQty@1100525000 : Decimal;
+    BEGIN
+      //db, 13-05-14
+      lvEstPartRec.SETRANGE("Estimate No.", Estimate."No.");
+      lvEstPartRec.SETFILTER("Sub-Estimate No.", StoreFilterEstLineRec.GETFILTER("Sub-Estimate No."));  //db, 15-12-14: C019301
+      FOR lLevel := 2 DOWNTO 0 DO BEGIN
+        lvEstPartRec.SETRANGE(Level, lLevel);
+        IF lvEstPartRec.FINDSET(TRUE, FALSE) THEN BEGIN
+            REPEAT
+              lvEstPartRec2.RESET;
+              lvEstPartRec2.SETCURRENTKEY("Estimate No.", "Sub-Estimate No.", Level, Chapter, Paragraph);
+              lvEstPartRec2.SETRANGE("Estimate No.", lvEstPartRec."Estimate No.");
+              lvEstPartRec2.SETRANGE("Sub-Estimate No.", lvEstPartRec."Sub-Estimate No.");
+              CASE lLevel OF
+              2: BEGIN
+                   lvEstPartRec2.SETRANGE(Level, lLevel + 1);
+                   lvEstPartRec2.SETRANGE(Chapter, lvEstPartRec.Chapter);
+                   lvEstPartRec2.SETRANGE(Paragraph, lvEstPartRec.Part);
+                 END;
+              1: BEGIN
+                   lvEstPartRec2.SETRANGE(Level, lLevel + 1);
+                   lvEstPartRec2.SETRANGE(Chapter, lvEstPartRec.Part);
+                 END;
+              0: BEGIN
+                   lvEstPartRec2.SETRANGE(Level, lLevel + 1);
+                 END;
+              END;
+              IF lvEstPartRec2.FINDFIRST THEN BEGIN
+                IF SummarySheetRec."Summary Type" = SummarySheetRec."Summary Type"::Cost THEN BEGIN
+                  lvEstPartRec2.CALCSUMS("Calculated Cost Amount");
+                  lvEstPartRec."Calculated Cost Amount" :=
+                    lvEstPartRec."Calculated Cost Amount" + lvEstPartRec2."Calculated Cost Amount";
+                END ELSE BEGIN
+                  lvEstPartRec2.CALCSUMS("Calculated Sales Amount");
+                  lvEstPartRec."Calculated Sales Amount" :=
+                    lvEstPartRec."Calculated Sales Amount" + lvEstPartRec2."Calculated Sales Amount";
+                END;
+                lvEstPartRec2.CALCSUMS("Offer Amount");
+                IF InitOfferPrice AND NOT lvEstPartRec."Offer fixed" THEN
+                  lvEstPartRec."Offer Amount" := lvEstPartRec."Offer Amount"  + lvEstPartRec2."Offer Amount";
+                lPartQty := lvEstPartRec.GetPartQuantity();
+                IF lPartQty <> 0 THEN BEGIN
+                  IF SummarySheetRec."Summary Type" = SummarySheetRec."Summary Type"::Cost THEN BEGIN
+                    lvEstPartRec."Calculated Cost Price" := lvEstPartRec."Calculated Cost Amount" / lPartQty;
+                  END ELSE BEGIN
+                    lvEstPartRec."Calculated Sales Price" := lvEstPartRec."Calculated Sales Amount" / lPartQty;
+                  END;
+                  IF InitOfferPrice AND NOT lvEstPartRec."Offer fixed" THEN
+                    lvEstPartRec.VALIDATE("Offer Price", lvEstPartRec."Offer Amount" / lPartQty);
+                END ELSE BEGIN
+                  IF SummarySheetRec."Summary Type" = SummarySheetRec."Summary Type"::Cost THEN BEGIN
+                    lvEstPartRec."Calculated Cost Price" := lvEstPartRec."Calculated Cost Amount";
+                    lvEstPartRec."Calculated Cost Amount" := 0;
+                  END ELSE BEGIN
+                    lvEstPartRec."Calculated Sales Price" := lvEstPartRec."Calculated Sales Amount";
+                    lvEstPartRec."Calculated Sales Amount" := 0;
+                  END;
+                  IF InitOfferPrice AND NOT lvEstPartRec."Offer fixed" THEN BEGIN
+                    lvEstPartRec.VALIDATE("Offer Price", lvEstPartRec."Offer Amount");
+                    //lvEstPartRec."Offer Amount" := 0;
+                  END;
+                END;
+                lvEstPartRec.MODIFY;
+              END;
+            UNTIL lvEstPartRec.NEXT = 0;
+          END;
+      END;
+    END;
+
+    BEGIN
+    {
+      db, 01-02-10:
+      - Save filter on calc.line earlier related to link estrec-estlinerec (makes it empty again)
+      - extra parameter to calculate Calculated Sales Price/Amount seperate from Offer Price/Amount (in section GroupFooter !)
+      - switch off recalculating of norm/rate; not used on form; used in copy report 11012165 for excel
+
+      db, 23-02-10:
+      - extra DataItem and function (SetSelection) in behalf of automatically processing per sub-estimate
+
+      DP00381:
+      - Only (Cum.)Total Part (Cost+Sales) are relevant; not subtotals per Cost Type
+      - do NOT remove GroupFooter-Section although report is ProcessingOnly: used for storing calculated offer price
+
+      db, 10-03-14: function StoreCalculatedPrice moved to DataItem Estimate Line; removed in GroupFooter (ProcessingOnly=Yes)
+      db, 28-10-16: Exclude Additional Cost (Summary) From Offer Price (T007289)
+    }
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

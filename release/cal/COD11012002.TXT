@@ -1,0 +1,258 @@
+OBJECT Codeunit 11012002 Check Hour Accounting
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    TableNo=11012038;
+    OnRun=VAR
+            HourAccounting@1100528400 : Record 11012038;
+          BEGIN
+            HourAccounting.COPY(Rec);
+            Code(HourAccounting);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text004@11012010 : TextConst 'DEU=%1 ist nicht eingegeben worden.;ENU=%1 is not filled.;NLD=%1 is niet gevuld.;NOR=%1 er ikke fylt ut.;SVE=%1 „r inte ifylld.';
+      Text005@1100485007 : TextConst 'DEU=Stundenerfassung nicht empfangen;ENU=No Hour Accountinglines Received;NLD=Geen ontvangst urenverantwoording;NOR=Ingen tidsrapportsrader er mottatt;SVE=Inga tidrapportsrader har tagits emot';
+      Text007@11012013 : TextConst 'DEU=Es sind keine Fehler gefunden worden.;ENU=No errors found.;NLD=Er zijn geen fouten gevonden.;NOR=Ingen feil funnet;SVE=Inga fel funna.';
+      Text008@1100485003 : TextConst 'DEU=%1 %2 ist %3.;ENU=%1 %2 is %3.;NLD=%1 %2 is %3.;NOR=%1 %2 i %3.;SVE=%1 %2 „r %3.';
+      Text009@1100485004 : TextConst 'DEU=%1 %2 hat %3 %4.;ENU=%1 %2 has %3 %4.;NLD=%1 %2 heeft %3 %4.;NOR=%1 %2 har %3 %4.;SVE=%1 %2 har %3 %4.';
+
+    PROCEDURE Code@2(VAR HourAccounting@1100528400 : Record 11012038);
+    VAR
+      ErrorRec@1100528401 : Record 11012051;
+    BEGIN
+      CheckHourAccountings(HourAccounting);
+      COMMIT;
+      ErrorRec.SETRANGE("User ID", USERID);
+      ErrorRec.SETRANGE("Source Type", ErrorRec."Source Type"::"Hours Accounting");
+      IF ErrorRec.FINDFIRST THEN
+        PAGE.RUNMODAL(PAGE::Errors, ErrorRec)
+      ELSE
+        MESSAGE(Text007);
+    END;
+
+    [External]
+    PROCEDURE CheckHourAccountings@1100528400(VAR HourAccounting@1100528400 : Record 11012038);
+    VAR
+      HumanResourcesSetup@1100525000 : Record 5218;
+      JobsSetup@1100525001 : Record 315;
+      Employee@1100528401 : Record 5200;
+      HourAccountingLine@1100528402 : Record 11012039;
+      Job@1100528403 : Record 11072003;
+      ErrorRec@1100528404 : Record 11012051;
+      ServiceSetup@1100528407 : Record 11012800;
+      ReceivingJobsSetup@1100528405 : Record 315;
+      FPSLicenseManagement@1100527400 : Codeunit 11229289;
+    BEGIN
+      //**4PS, Call 18316.sn
+      ErrorRec.SETRANGE("User ID", USERID);
+      ErrorRec.SETRANGE("Source Type", ErrorRec."Source Type"::"Hours Accounting");
+      ErrorRec.DELETEALL;
+      //**4PS, Call 18316.en
+
+      JobsSetup.GET;
+      HumanResourcesSetup.GET;
+
+      WITH HourAccounting DO BEGIN
+        //Check completeness
+        Employee.SETRANGE("Account Hours", Employee."Account Hours"::"Required according to Norm");
+        IF Employee.FINDSET THEN BEGIN
+          REPEAT
+            IF ("Posting Date" >= Employee."Employment Date") OR (Employee."Employment Date" = 0D) THEN BEGIN //DJN 9-6-2011 19381
+              SETRANGE(Year,Year);
+              SETRANGE(Week,Week);
+              SETRANGE("Employee No.",Employee."No.");
+              HourAccountingLine.SETRANGE(Year,Year);
+              HourAccountingLine.SETRANGE(Week,Week);
+              HourAccountingLine.SETRANGE("Employee No.",Employee."No.");
+              HourAccountingLine.SETRANGE("Component Type", HourAccountingLine."Component Type"::Hours);
+
+              //Check receiving Hour Accounting for Pre registration
+              IF NOT HourAccountingLine.FINDSET(FALSE,FALSE) THEN BEGIN
+                IF HumanResourcesSetup."Pre Registration Hours" THEN BEGIN
+                  StoreMessage(
+                    STRSUBSTNO(Text005, Employee.FIELDCAPTION(Employee."Full Name")),
+                    HourAccounting, Employee);
+                END;
+
+                //Create fictitious Hour Line
+                HourAccountingLine.INIT;
+                HourAccountingLine.Year := Year;
+                HourAccountingLine.Week := Week;
+                HourAccountingLine."Document No." := "Document No.";
+                HourAccountingLine."Employee No." := Employee."No.";
+                HourAccountingLine."Posting Date" := "Posting Date"; //call 29880
+                CheckNormHours(HourAccounting, HourAccountingLine, Employee);
+              END;
+            END; //DJN 9-6-2011 19381
+          UNTIL Employee.NEXT = 0;
+        END;
+
+        //Check hours and days.
+        SETRANGE("Document No.","Document No.");
+        SETRANGE("Posting Date","Posting Date");
+        SETRANGE("Employee No.");
+        IF FINDSET THEN
+          REPEAT
+            HourAccountingLine.SETRANGE(Year,Year);
+            HourAccountingLine.SETRANGE(Week,Week);
+            HourAccountingLine.SETRANGE("Employee No.","Employee No.");
+            HourAccountingLine.SETRANGE("Component Type", HourAccountingLine."Component Type"::Hours);
+
+            Employee.CHANGECOMPANY("Supplying Company");
+            IF "Employee No." <> '' THEN BEGIN
+              Employee.GET("Employee No.");
+              IF Employee."Trade Association" = '' THEN
+                StoreMessage(
+                  STRSUBSTNO(Text004, Employee.FIELDCAPTION("Trade Association")),
+                  HourAccounting, Employee);
+            END ELSE
+              CLEAR(Employee);
+
+            IF HourAccountingLine.FINDSET THEN BEGIN
+              IF Employee."Account Hours" = Employee."Account Hours"::"Required according to Norm" THEN
+                CheckNormHours(HourAccounting, HourAccountingLine, Employee);
+              REPEAT
+                IF HourAccountingLine."Total Line" <> 0 THEN BEGIN
+                  IF NOT HumanResourcesSetup.SalaryApplicationIsMultipay THEN BEGIN
+                    CASE HourAccountingLine.Type OF
+                      HourAccountingLine.Type::Project:
+                        BEGIN
+                          IF HourAccountingLine."Project No." = '' THEN
+                            StoreMessage(
+                              STRSUBSTNO(Text004, HourAccountingLine.FIELDCAPTION("Project No.")),
+                              HourAccounting, Employee);
+                          IF HourAccountingLine."Cost Object" = '' THEN
+                            StoreMessage(
+                              STRSUBSTNO(Text004, HourAccountingLine.FIELDCAPTION("Cost Object")),
+                              HourAccounting, Employee);
+                          IF JobsSetup."Cost Component Mandatory" AND (HourAccountingLine."Cost Component" = '') THEN
+                            StoreMessage(
+                              STRSUBSTNO(Text004, HourAccountingLine.FIELDCAPTION("Cost Component")),
+                              HourAccounting, Employee);
+                        END;
+                      HourAccountingLine.Type::Service:
+                        BEGIN
+                          IF HourAccountingLine."Service Order No." = '' THEN
+                            StoreMessage(
+                              STRSUBSTNO(Text004, HourAccountingLine.FIELDCAPTION("Service Order No.")),
+                              HourAccounting, Employee);
+                          IF HourAccountingLine."Cost Object" = '' THEN
+                            StoreMessage(
+                              STRSUBSTNO(Text004, HourAccountingLine.FIELDCAPTION("Cost Object")),
+                              HourAccounting, Employee);
+                          ServiceSetup.GET;
+                          IF ServiceSetup."Cost Component Mandatory" AND (HourAccountingLine."Cost Component" = '') THEN
+                            StoreMessage(
+                              STRSUBSTNO(Text004, HourAccountingLine.FIELDCAPTION("Cost Component")),
+                              HourAccounting, Employee);
+                        END;
+                      HourAccountingLine.Type::Indirect:
+                        IF HourAccountingLine."Cost Code" = '' THEN
+                          StoreMessage(
+                            STRSUBSTNO(Text004, HourAccountingLine.FIELDCAPTION("Cost Code")),
+                            HourAccounting, Employee);
+                      HourAccountingLine.Type::ResourceRequest:
+                        IF HourAccountingLine."Resource Request No." = '' THEN
+                          StoreMessage(
+                            STRSUBSTNO(Text004, HourAccountingLine.FIELDCAPTION("Resource Request No.")),
+                            HourAccounting, Employee);
+                    END;
+                  END;
+                  IF (HourAccountingLine."Cost Type" <> HourAccountingLine."Cost Type"::Plant) THEN BEGIN
+                    IF (HourAccountingLine."Employee No." = '') THEN
+                      StoreMessage(
+                        STRSUBSTNO(Text004, HourAccountingLine.FIELDCAPTION("Employee No.")),
+                        HourAccounting, Employee);
+
+                    IF HourAccountingLine."Wage Component" = '' THEN
+                      StoreMessage(
+                        STRSUBSTNO(Text004, HourAccountingLine.FIELDCAPTION("Wage Component")),
+                        HourAccounting, Employee);
+                  END;
+                  IF HourAccountingLine."Project No." <> '' THEN BEGIN
+                    Job.CHANGECOMPANY(HourAccountingLine."Receiving Company");
+                    ReceivingJobsSetup.CHANGECOMPANY(HourAccountingLine."Receiving Company");
+                    Job.GET(HourAccountingLine."Project No.");
+                    IF Job.Blocked <> Job.Blocked::" " THEN
+                      StoreMessage(
+                        STRSUBSTNO(Text008,Job.TABLECAPTION,HourAccountingLine."Project No.",Job.FIELDCAPTION(Blocked)),
+                        HourAccounting, Employee);
+
+                    IF (ReceivingJobsSetup."Provisions at Closure" AND
+                         (Job."Project Status" >= (Job."Project Status"::Finished +1))) OR
+                       (NOT ReceivingJobsSetup."Provisions at Closure" AND
+                         (Job."Project Status" >= (Job."Project Status"::Finished -1)))
+                    THEN
+                      StoreMessage(
+                        STRSUBSTNO(
+                          Text009,Job.TABLECAPTION,HourAccountingLine."Project No.",
+                          Job.FIELDCAPTION("Project Status"),Job."Project Status"),
+                        HourAccounting, Employee);
+                  END;
+                END;
+              UNTIL HourAccountingLine.NEXT = 0;
+            END;
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    [External]
+    PROCEDURE CheckNormHours@1100485000(HourAccounting@1100528400 : Record 11012038;HourAccountingLine@1100528402 : Record 11012039;Employee@1100528401 : Record 5200);
+    VAR
+      CheckHourLine@1100528700 : Codeunit 11012003;
+      ErrMsg@1100528701 : Text[1024];
+    BEGIN
+      WITH HourAccountingLine DO BEGIN
+        //DJN 9-6-2011 19381
+        IF ("Posting Date" < Employee."Employment Date") THEN
+          EXIT;
+        //DJN 9-6-2011 19381
+        IF (Employee."Inactive Date" <> 0D) AND ("Posting Date" > Employee."Inactive Date") THEN
+          EXIT;
+
+        IF NOT CheckHourLine.CheckNormPostingHours(HourAccountingLine, FALSE, TRUE, ErrMsg) THEN
+          StoreMessage(ErrMsg, HourAccounting, Employee);
+      END;
+    END;
+
+    PROCEDURE StoreMessage@7(lvMess@11012001 : Text[250];HourAccounting@1100528400 : Record 11012038;Employee@1100528401 : Record 5200);
+    VAR
+      ErrorRec@1100528402 : Record 11012051;
+      lvError@11012002 : Integer;
+    BEGIN
+      WITH ErrorRec DO BEGIN
+        SETRANGE("User ID", USERID);
+        SETRANGE("Source Type", "Source Type"::"Hours Accounting");
+        IF FINDLAST THEN
+          lvError := "Line No." + 1
+        ELSE
+          lvError := 1;
+
+        INIT;
+        "User ID" := USERID;
+        "Source Type" := "Source Type"::"Hours Accounting";
+        "Line No." := lvError;
+        "Error message" := lvMess;
+        "Employee No." := Employee."No.";
+        "Document No." := HourAccounting."Document No.";
+        "Posting Date" := HourAccounting."Posting Date";
+        "Department Code" := Employee."Global Dimension 1 Code";
+        INSERT;
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -1,0 +1,303 @@
+OBJECT Codeunit 11125677 Import ZSX
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      XMLDOMManagement@1100528700 : Codeunit 11020220;
+      ExtensionTxt@1100529900 : Text[10];
+      gTempBlob@1100529501 : Record 99008535;
+      BlobLoaded@1100529502 : Boolean;
+
+    PROCEDURE ImportZSX@1100528700(ProjectNo@1100528700 : Code[20];Principal@1100528703 : Code[20];ExtensionContractNo@1100528706 : Code[20];FileName@1100528701 : Text[250]);
+    VAR
+      FileMgt@1100528707 : Codeunit 419;
+      DOMDocument@1100528704 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      XMLRootNode@1100528702 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      Job@1100528500 : Record 11072003;
+      ProjectPrincipal@1100528708 : Record 11012005;
+      RAWCalculations@1100528705 : Codeunit 11012164;
+      RawType@1100529900 : Integer;
+    BEGIN
+      IF NOT BlobLoaded THEN
+        IF NOT FileMgt.ClientFileExists(FileName) THEN
+          EXIT;
+
+      DOMDocument := DOMDocument.XmlDocument;
+
+      IF BlobLoaded THEN
+        XMLDOMManagement.LoadXMLFromBlob(DOMDocument, gTempBlob, TRUE)
+      ELSE
+        XMLDOMManagement.LoadXMLFromClientFile(DOMDocument, FileName, TRUE);
+
+      XMLRootNode := DOMDocument.DocumentElement;
+
+      //C039372.sn
+      RawType := 0;
+      IF (XMLRootNode.Name IN ['raw.inschrijvingsstaat']) THEN
+        RawType := 1;
+        ExtensionTxt := '';
+      IF (XMLRootNode.Name IN ['raw.inschrijvingsstaat.raamovereenkomst']) THEN BEGIN
+        RawType := 2;
+        ExtensionTxt := '.ro';
+      END;
+      IF RawType = 0 THEN EXIT;
+      //C039372.en
+
+      ImportElement(ProjectNo, Principal, ExtensionContractNo, XMLRootNode);
+      ImportFooter(ProjectNo, Principal, ExtensionContractNo, XMLRootNode);
+
+      Job.GET(ProjectNo);
+      IF  Job.RAW THEN BEGIN  //C049663
+        ProjectPrincipal.GET(ProjectNo, Principal);
+        RAWCalculations.CalculateAKPerc(ProjectNo, Principal, ProjectPrincipal."Surcharge %");
+        RAWCalculations.CalculatePrincipalContractAmount(ProjectPrincipal);
+        ProjectPrincipal.MODIFY;
+      END;
+    END;
+
+    LOCAL PROCEDURE ImportElement@1100528701(ProjectNo@1100528709 : Code[20];Principal@1100528708 : Code[20];ExtensionContractNo@1100528707 : Code[20];XMLRootNode@1100528701 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode");
+    VAR
+      TenderParagraphByPrincipal@1100528700 : Record 11012470;
+      XMLNodeList@1100528705 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      XMLNode@1100528704 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      XMLNode2@1100528703 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      I@1100528706 : Integer;
+      String@1100528702 : Text[1024];
+      UnitPrice@1100525000 : Decimal;
+      LineAmount@1100529900 : Decimal;
+    BEGIN
+      IF NOT XMLDOMManagement.FindNode(XMLRootNode, 'ins.stt.voorsubtot' + ExtensionTxt, XMLNode) THEN  //C039372
+        EXIT;
+
+      IF XMLDOMManagement.FindNodes(XMLNode, 'dl22.bpost.tussenhoofd | ins.stt.bpost.6cijfer.0' + ExtensionTxt, XMLNodeList) THEN BEGIN  //C039372
+        FOR I := 0 TO XMLNodeList.Count - 1 DO BEGIN
+          XMLNode := XMLNodeList.Item(I);
+
+          String := XMLDOMManagement.FindNodeText(XMLNode, 'dl22.bpost.tussenhoofdnr | dl22.bpost.nr6.0');
+
+          TenderParagraphByPrincipal.INIT;
+          TenderParagraphByPrincipal."Project No." := ProjectNo;
+          TenderParagraphByPrincipal.Principal := Principal;
+          TenderParagraphByPrincipal."Contract No." := ExtensionContractNo;
+          TenderParagraphByPrincipal.FillDefaultSettleExcess;
+          TenderParagraphByPrincipal.VALIDATE("No.", String);
+          TenderParagraphByPrincipal.INSERT(TRUE);
+
+          String := XMLDOMManagement.FindNodeText(XMLNode, 'romptekst');
+          TenderParagraphByPrincipal.Description := String;
+
+          String := XMLDOMManagement.FindNodeText(XMLNode, 'dl22.eenheid.res.verpl' + ExtensionTxt);  //C039372
+          TenderParagraphByPrincipal."Unit of Measure" := String;
+
+          IF XMLDOMManagement.FindNode(XMLNode, 'ins.stt.hoev.res.verpl' + ExtensionTxt, XMLNode2) THEN BEGIN  //C039372
+            TenderParagraphByPrincipal.Quantity := Code2Decimal(XMLNode2.InnerText);
+            String := XMLDOMManagement.GetAttributeValue(XMLNode2, 'kenmerk');
+            CASE String OF
+              ' ':
+                CLEAR(TenderParagraphByPrincipal."Settlement Type");
+              'V':
+                TenderParagraphByPrincipal."Settlement Type" := TenderParagraphByPrincipal."Settlement Type"::Settling;
+              'N':
+                TenderParagraphByPrincipal."Settlement Type" := TenderParagraphByPrincipal."Settlement Type"::"Non Settling";
+              'M':
+                TenderParagraphByPrincipal."Settlement Type" := TenderParagraphByPrincipal."Settlement Type"::Reduction;
+              'O':
+                TenderParagraphByPrincipal."Settlement Type" := TenderParagraphByPrincipal."Settlement Type"::Open;
+              'A':
+                TenderParagraphByPrincipal."Settlement Type" := TenderParagraphByPrincipal."Settlement Type"::Approved;
+            END;
+          END;
+
+          //db.sn, 05-09-17
+          String := XMLDOMManagement.FindNodeText(XMLNode, 'ins.stt.prijs.per.eenheid');
+          UnitPrice := Code2Decimal(String);
+
+          String := XMLDOMManagement.FindNodeText(XMLNode, 'ins.stt.totaal.bedrag');
+          LineAmount := Code2Decimal(String);
+          //db.en, 05-09-17
+
+          //C039372.sn
+          IF (TenderParagraphByPrincipal."Unit of Measure" = TenderParagraphByPrincipal.EUR) AND
+             (TenderParagraphByPrincipal.Quantity = 0) AND
+             (LineAmount <> 0) THEN BEGIN
+            TenderParagraphByPrincipal.VALIDATE("Unit Price (FCY)", 1);
+            TenderParagraphByPrincipal.VALIDATE(Quantity, LineAmount);
+          END ELSE BEGIN
+            //TenderParagraphByPrincipal.VALIDATE("Total Amount (FCY)", TotalAmount);
+            //db.sn, 05-09-17
+            IF LineAmount <> 0 THEN
+              TenderParagraphByPrincipal.VALIDATE("Total Amount (FCY)", LineAmount)
+            ELSE
+              TenderParagraphByPrincipal.VALIDATE("Unit Price (FCY)", UnitPrice);
+            //db.en, 05-09-17
+          END;
+          //C039372.en
+
+          TenderParagraphByPrincipal.MODIFY;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE ImportFooter@1100528702(ProjectNo@1100528707 : Code[20];Principal@1100528706 : Code[20];ExtensionContractNo@1100528705 : Code[20];XMLRootNode@1100528704 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode");
+    VAR
+      TenderParagraphByPrincipal@1100528709 : Record 11012470;
+      XMLNodeList@1100528708 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      XMLNode@1100528703 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      XMLNode2@1100528702 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      I@1100528701 : Integer;
+      String@1100528700 : Text[1024];
+      TotalAmount@1100529900 : Decimal;
+      FactorPrice@1100528500 : Integer;
+    BEGIN
+      IF NOT XMLDOMManagement.FindNode(XMLRootNode, 'ins.stt.staart' + ExtensionTxt, XMLNode) THEN  //C039372
+        EXIT;
+
+      IF XMLDOMManagement.FindNodes(XMLNode,
+        'dl22.staart.1cijfer | dl22.staart.2cijfer.ek | ' +
+        //C039372.sn
+        'dl22.staart.1cijfer | dl22.staart.2cijfer.krt' + ExtensionTxt + ' | ' +
+        'dl22.staart.1cijfer | dl22.staart.2cijfer.uk | ' +
+        'dl22.staart.1cijfer | dl22.staart.2cijfer.ak | ' +
+        'dl22.staart.1cijfer | dl22.staart.2cijfer.wr | ' +
+        'dl22.staart.2cijfer.krt' + ExtensionTxt + ' | ins.stt.staart.6cijfer.0.krt' + ExtensionTxt + ' | ' +
+        'dl22.staart.2cijfer.uk | ins.stt.staart.6cijfer.0.uk' + ExtensionTxt + ' | ' +
+        'dl22.staart.2cijfer.ak | ins.stt.staart.6cijfer.0.ak' + ExtensionTxt + ' | ' +
+        'dl22.staart.2cijfer.wr | ins.stt.staart.6cijfer.0.wr' + ExtensionTxt + ' | ' +
+        //C039372.en
+        'ins.stt.staart.6cijfer.0.ek | ins.stt.staart.6cijfer.0 | ' +
+        'ins.stt.staart.6cijfer.0.ek.ovr |' + //C050227
+        'dl22.staart.2cijfer.stelpost | ins.stt.staart.6cijfer.0.stelpost | ' +
+        'dl22.staart.2cijfer.bijdrage | ins.stt.staart.6cijfer.0.bijdrage',
+        XMLNodeList) THEN BEGIN
+        FOR I := 0 TO XMLNodeList.Count - 1 DO BEGIN
+          XMLNode := XMLNodeList.Item(I);
+
+          String := XMLDOMManagement.FindNodeText(XMLNode,
+            'dl22.staart.nr1 | dl22.staart.nr2.ek | ' +
+            //C039372.sn
+            'dl22.staart.nr1 | dl22.staart.nr2.krt' + ExtensionTxt + ' | ' +
+            'dl22.staart.nr1 | dl22.staart.nr2.uk | ' +
+            'dl22.staart.nr1 | dl22.staart.nr2.ak | ' +
+            'dl22.staart.nr1 | dl22.staart.nr2.wr | ' +
+            'dl22.staart.nr6.krt | ' +
+            'dl22.staart.nr6.uk | ' +
+            'dl22.staart.nr6.ak | ' +
+            'dl22.staart.nr6.wr | ' +
+            //C039372.en
+            'dl22.staart.nr6.0.ek | dl22.staart.nr6 | ' +
+            'dl22.staart.nr6.ek.ovr |' + //C050227
+            'dl22.staart.nr2.stelpost | dl22.staart.nr6.0.stelpost | ' +
+            'dl22.staart.nr2.bijdrage | dl22.staart.nr6.0.bijdrage');
+
+          IF String <> '919990' THEN BEGIN // Totaal eenmalige kosten
+            TenderParagraphByPrincipal.INIT;
+            TenderParagraphByPrincipal."Project No." := ProjectNo;
+            TenderParagraphByPrincipal.Principal := Principal;
+            TenderParagraphByPrincipal."Contract No." := ExtensionContractNo;
+            TenderParagraphByPrincipal.FillDefaultSettleExcess;
+            TenderParagraphByPrincipal.VALIDATE("No.", String);
+            TenderParagraphByPrincipal.INSERT(TRUE);
+
+            String := XMLDOMManagement.FindNodeText(XMLNode, 'romptekst');
+            TenderParagraphByPrincipal.Description := String;
+
+            String := XMLDOMManagement.FindNodeText(XMLNode, 'dl22.staart.eenheid' + ExtensionTxt);  //C039372
+            TenderParagraphByPrincipal."Unit of Measure" := String;
+
+            IF XMLDOMManagement.FindNode(XMLNode, 'ins.stt.staart.hoev.res.verpl' + ExtensionTxt, XMLNode2) THEN BEGIN  //C039372
+              TenderParagraphByPrincipal.Quantity := Code2Decimal(XMLNode2.InnerText);
+              String := XMLDOMManagement.GetAttributeValue(XMLNode2, 'kenmerk');
+              CASE String OF
+                ' ':
+                  CLEAR(TenderParagraphByPrincipal."Settlement Type");
+                'V':
+                  TenderParagraphByPrincipal."Settlement Type" := TenderParagraphByPrincipal."Settlement Type"::Settling;
+                'N':
+                  TenderParagraphByPrincipal."Settlement Type" := TenderParagraphByPrincipal."Settlement Type"::"Non Settling";
+                'M':
+                  TenderParagraphByPrincipal."Settlement Type" := TenderParagraphByPrincipal."Settlement Type"::Reduction;
+                'O':
+                  TenderParagraphByPrincipal."Settlement Type" := TenderParagraphByPrincipal."Settlement Type"::Open;
+                'A':
+                  TenderParagraphByPrincipal."Settlement Type" := TenderParagraphByPrincipal."Settlement Type"::Approved;
+              END;
+            END;
+            IF XMLDOMManagement.FindNode(XMLNode, 'ins.stt.staart.hoev.res.verpl.stelpost', XMLNode2) THEN BEGIN  //C055761
+              //TenderParagraphByPrincipal.Quantity := Code2Decimal(XMLNode2.InnerText);  //force validate UnitPrice instead of TotalAmount to update SettlementPrice
+              String := XMLDOMManagement.GetAttributeValue(XMLNode2, 'kenmerk');
+              CASE String OF
+                ' ':
+                  CLEAR(TenderParagraphByPrincipal."Settlement Type");
+                'V':
+                  TenderParagraphByPrincipal."Settlement Type" := TenderParagraphByPrincipal."Settlement Type"::Settling;
+                'N':
+                  TenderParagraphByPrincipal."Settlement Type" := TenderParagraphByPrincipal."Settlement Type"::"Non Settling";
+                'M':
+                  TenderParagraphByPrincipal."Settlement Type" := TenderParagraphByPrincipal."Settlement Type"::Reduction;
+                'O':
+                  TenderParagraphByPrincipal."Settlement Type" := TenderParagraphByPrincipal."Settlement Type"::Open;
+                'A':
+                  TenderParagraphByPrincipal."Settlement Type" := TenderParagraphByPrincipal."Settlement Type"::Approved;
+              END;
+            END;
+
+            //C039372.sn
+            String := XMLDOMManagement.FindNodeText(XMLNode, 'ins.stt.totaal.bedrag');
+            TotalAmount := Code2Decimal(String);
+            IF (TenderParagraphByPrincipal."Unit of Measure" = TenderParagraphByPrincipal.EUR) AND
+               (TenderParagraphByPrincipal.Quantity = 0) AND
+               (TotalAmount <> 0) THEN BEGIN
+              //C049663.sn
+              IF TotalAmount < 0 THEN BEGIN
+                FactorPrice := -1;
+                TotalAmount := ABS(TotalAmount);
+              END ELSE BEGIN
+                FactorPrice := 1;
+              END;
+              TenderParagraphByPrincipal.VALIDATE("Unit Price (FCY)", FactorPrice);
+              //C049663.en
+              TenderParagraphByPrincipal.VALIDATE(Quantity, TotalAmount);
+            END ELSE BEGIN
+              TenderParagraphByPrincipal.VALIDATE("Total Amount (FCY)", TotalAmount);
+            END;
+            //C039372.en
+
+            TenderParagraphByPrincipal.MODIFY;
+          END;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE Code2Decimal@1100528315(Code@1100528300 : Code[10]) Result : Decimal;
+    BEGIN
+      Code := CONVERTSTR(Code, '.', ',');
+      IF EVALUATE(Result, Code) THEN;
+    END;
+
+    PROCEDURE SetBlobForImport@1100529501(VAR iTempBlob@1100529500 : Record 99008535);
+    BEGIN
+      gTempBlob := iTempBlob;
+      IF gTempBlob.Blob.HASVALUE THEN
+        BlobLoaded := TRUE;
+    END;
+
+    BEGIN
+    {
+      db, 01-08-17: C039372 (gewijzigde interface CROW2015 + onderscheid bestek-raamovereenkomst)
+    }
+    END.
+  }
+}
+

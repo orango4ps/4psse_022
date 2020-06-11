@@ -1,0 +1,517 @@
+OBJECT Codeunit 11126717 DSP Planning Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    TableNo=11126715;
+    OnRun=BEGIN
+            DSPSetup.GET;
+            GenericWebserviceFunctions.LoadGenericWebserviceSetup(GenericWebserviceSetup);
+
+            GenericWebServiceQueue := Rec;
+            CASE "Method Name" OF
+              DSPManagement.GetTcPlanning: ProcessOutboundPlanMessage;
+              ELSE
+                ERROR(Text000, FIELDCAPTION("Method Name"), "Method Name");
+            END;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ServiceSetup@1100528324 : Record 11012800;
+      DSPSetup@1100528300 : Record 11126726;
+      DocumentMgtSetup@1100528322 : Record 11071831;
+      GenericWebserviceSetup@1100528303 : Record 11126728;
+      GenericWebServiceQueue@1100528301 : Record 11126715;
+      TempBlob@1100528306 : TEMPORARY Record 99008535;
+      GenericWebserviceFunctions@1100528302 : Codeunit 11126711;
+      NOTTXT@1100528329 : TextConst 'ENU=not';
+      NOTXT@1100528319 : TextConst 'ENU=No;NOR=Nr.;SVE=Nej';
+      Text000@1100528304 : TextConst 'ENU=%1 %2 is not implemented.';
+      DSPInterfaceWS@1100528310 : Codeunit 11126713;
+      DSPManagement@1100529900 : Codeunit 11126714;
+      DotnetFunctions@1100528312 : Codeunit 11126712;
+      FileManagement@1100528308 : Codeunit 419;
+      DSPRequestManagement@1100528315 : Codeunit 11126222;
+      DocumentManagementWebservice@1100528307 : Codeunit 11012405;
+      XMLDOMManagement@1100528313 : Codeunit 6224;
+      PrefCommon@1100528305 : Text;
+      PrefPlan@1100528320 : Text;
+      RootElement@1100528323 : Text;
+      RootElementNamespace@1100528330 : Text;
+      RecId@1100529901 : RecordID;
+      RecRef@1100528311 : RecordRef;
+      DnXmlDocument@1100528333 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      DnXmlNamespaceManager@1100528332 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNamespaceManager";
+      DnXmlChildNode@1100528337 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      DnXmlRootNode@1100528335 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      DnXmlNode@1100528336 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      Text001@1100528309 : TextConst 'ENU=There are still %1s to be processed by DSP.';
+      Text002@1100528314 : TextConst 'ENU=%1 must have a value.';
+      DnBasicHttpBinding@1100528341 : DotNet "'System.ServiceModel, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.ServiceModel.BasicHttpBinding";
+      DnBasicHttpSecurityMode@1100528340 : DotNet "'System.ServiceModel, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.ServiceModel.BasicHttpSecurityMode";
+      DnEndPointAddress@1100528339 : DotNet "'System.ServiceModel, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.ServiceModel.EndpointAddress";
+      DnHttpClientCredentialType@1100528338 : DotNet "'System.ServiceModel, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.ServiceModel.HttpClientCredentialType";
+      DnNetworkCredential@1100528334 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.NetworkCredential";
+      DnWSMessageEncoding@1100528331 : DotNet "'System.ServiceModel, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.ServiceModel.WSMessageEncoding";
+      Text003@1100528321 : TextConst 'ENU=Error while sending Object %1 to the Web Service.\\Error Code %2';
+
+    PROCEDURE SendPlanMessage@1100528300(DSPPlanMessage@1100528306 : Record 11126752);
+    VAR
+      DSPAssignment@1100528301 : Record 11126740;
+      ServiceOrderObject@1100528302 : Record 11071724;
+      RemarkText@1100528300 : Text;
+      IStream@1100528303 : InStream;
+    BEGIN
+      ServiceOrderObject.GET(DSPPlanMessage."Service Order No.", DSPPlanMessage."Object No.");
+      DSPManagement.GetDspAssignmentByServiceOrderNoObjectNo(DSPPlanMessage."Service Order No.", DSPPlanMessage."Object No.", DSPAssignment);
+      GetGlobalVars(DSPAssignment."Version No.");
+      CheckSendIsAllowed(DSPPlanMessage);
+
+      DnXmlDocument := DnXmlDocument.XmlDocument();
+      CASE DSPSetup."Dsp Partner" OF
+        DSPManagement.GetTcDspPartnerM10:
+          XMLDOMManagement.AddRootElementWithPrefix(DnXmlDocument, 'PlanberichtXOPType', '', '', DnXmlRootNode);
+        DSPManagement.GetTcDspPartnerOther:
+          XMLDOMManagement.AddRootElementWithPrefix(DnXmlDocument, 'Planbericht', PrefPlan, GetNsPlan, DnXmlRootNode);
+        ELSE
+          ERROR(Text000, DSPSetup.FIELDCAPTION("Dsp Partner"), DSPSetup."Dsp Partner");
+      END;
+
+      XMLDOMManagement.AddElement(DnXmlRootNode, 'OpdrachtID', DSPAssignment."Assignment Id", GetNsCommon, DnXmlNode);
+      XMLDOMManagement.AddElement(DnXmlRootNode, 'Versienummer', FORMAT(DSPAssignment."Version No.", 0, 9), GetNsCommon, DnXmlNode);
+      AddDnPlanberichtXopTypeBijlagen(DSPPlanMessage, GetNsCommon);
+
+      DSPPlanMessage.CALCFIELDS(Remark);
+      DSPPlanMessage.Remark.CREATEINSTREAM(IStream);
+      IStream.READ(RemarkText);
+
+      CASE DSPPlanMessage.Type OF
+        DSPPlanMessage.Type::ContactAttempt: BEGIN
+          XMLDOMManagement.AddElement(DnXmlRootNode, 'Beletmelding', '', GetNsPlan, DnXmlChildNode);
+          XMLDOMManagement.AddElement(DnXmlChildNode, 'Contacttijdstip', FORMAT(DSPPlanMessage."Contact Time", 0, 9), GetNsPlan, DnXmlNode);
+          XMLDOMManagement.AddElement(DnXmlChildNode, 'TypeContactpoging', DSPManagement.GetDspCode(5, DSPPlanMessage."Contact Attempt No."), GetNsPlan, DnXmlNode);
+          XMLDOMManagement.AddElement(DnXmlChildNode, 'Opmerking', RemarkText, GetNsPlan, DnXmlNode);
+        END;
+        DSPPlanMessage.Type::Plan: BEGIN
+          XMLDOMManagement.AddElement(DnXmlRootNode, 'Planning', '', GetNsPlan, DnXmlChildNode);
+          XMLDOMManagement.AddElement(DnXmlChildNode, 'TypeTijdstip', DSPManagement.GetDspCode(4, DSPPlanMessage."Planning Time No."), GetNsPlan, DnXmlNode);
+          XMLDOMManagement.AddElement(DnXmlChildNode, 'Starttijd', FORMAT(DSPPlanMessage."Start Time", 0, 9), GetNsPlan, DnXmlNode);
+          XMLDOMManagement.AddElement(DnXmlChildNode, 'Eindtijd', FORMAT(DSPPlanMessage."End Time", 0, 9), GetNsPlan, DnXmlNode);
+          XMLDOMManagement.AddElement(DnXmlChildNode, 'Redencode', DSPManagement.GetDspCode(3, DSPPlanMessage."Reason No."), GetNsPlan, DnXmlNode);
+          XMLDOMManagement.AddElement(DnXmlChildNode, 'Toelichting', RemarkText, GetNsPlan, DnXmlNode);
+          XMLDOMManagement.AddElement(DnXmlChildNode, 'IsOpdrachtgeverBenodigd', FORMAT(DSPPlanMessage."Operator Mandatory", 0, 9), GetNsPlan, DnXmlNode);
+        END;
+        ELSE ERROR (Text000, DSPManagement.GetTcPlanningWs, DSPPlanMessage.Type);
+      END;
+
+      DotnetFunctions.SerializeToBlob(TempBlob, DnXmlDocument);
+      CreateGenericWebServiceQueue(DSPPlanMessage);
+
+      DSPPlanMessage."Xml Message" := TempBlob.Blob;
+      DSPPlanMessage."Sent To Dsp" := CURRENTDATETIME;
+      DSPPlanMessage.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SendAutomaticPlanMessage@1100528304(ServiceOrder@1100528306 : Record 11012823);
+    VAR
+      DSPAssignment@1100528301 : Record 11126740;
+      DSPOperator@1100528304 : Record 11126732;
+      DSPPlanMessage@1100528300 : Record 11126752;
+      ServiceOrderObject@1100528302 : Record 11071724;
+      ServiceOrderExtension@1100528303 : Record 11071727;
+    BEGIN
+      DSPSetup.GET;
+      IF (ServiceOrder."Starting Date" = 0D) THEN
+        EXIT;
+      IF (ServiceOrder."Ending Date" = 0D) THEN
+        ServiceOrder."Ending Date" := ServiceOrder."Starting Date";
+
+      IF (ServiceOrder."Dsp Final Planning") THEN BEGIN
+        DSPSetup.TESTFIELD("Plan Reason Final");
+        DSPSetup.TESTFIELD("Plan Time Type Final");
+      END ELSE BEGIN
+        DSPSetup.TESTFIELD("Plan Reason Tentative");
+        DSPSetup.TESTFIELD("Plan Time Type Tentative");
+      END;
+      ServiceOrderObject.SETRANGE("Service Order No.", ServiceOrder."No.");
+      IF (NOT ServiceOrderObject.FINDSET) THEN
+        EXIT;
+
+      REPEAT
+        IF (DSPManagement.GetDspAssignmentByServiceOrderNoObjectNo(ServiceOrderObject."Service Order No.", ServiceOrderObject."Object No.", DSPAssignment)) THEN BEGIN
+          GetGlobalVars(DSPAssignment."Version No.");
+          DSPOperator.GET(DSPAssignment.Operator);
+          IF (DSPOperator."Send Plan Message Automatic") THEN BEGIN
+            CreatePlanMessage(ServiceOrder, ServiceOrderObject, DSPPlanMessage);
+            SendPlanMessage(DSPPlanMessage);
+          END;
+        END;
+      UNTIL (ServiceOrderObject.NEXT = 0);
+    END;
+
+    LOCAL PROCEDURE "---Locals---"@1100528306();
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE AddDnPlanberichtXopTypeBijlagen@1100528316(DSPPlanMessage@1100528303 : Record 11126752;NamespacePrefix@1100528300 : Text);
+    VAR
+      DocumentProperties@1100528301 : Record 11012746;
+      DocumentLinkManagement@1100528302 : Codeunit 11012401;
+    BEGIN
+      RecRef.GETTABLE(DSPPlanMessage);
+      DocumentLinkManagement.GetDocumentsComp(DocumentProperties, RecRef, COMPANYNAME);
+      DocumentProperties.MARKEDONLY(TRUE);
+      IF (NOT DocumentProperties.FINDSET) THEN
+        EXIT;
+
+      REPEAT
+        DSPManagement.CreateDnBijlageXopType(DocumentProperties, DnXmlRootNode, NamespacePrefix);
+      UNTIL (DocumentProperties.NEXT = 0);
+    END;
+
+    LOCAL PROCEDURE CheckResponse@1100528336(DnXmlRequest@1100528303 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";DnXmlResponse@1100528301 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument");
+    VAR
+      ResponseCode@1100528300 : Text;
+      Text001@1100528302 : TextConst 'ENU=Error in Object:%1';
+    BEGIN
+      ResponseCode := DSPManagement.FindNodeResponseCode(DnXmlResponse);
+      IF (ResponseCode <> 'OK') THEN
+        ERROR(Text001, DnXmlResponse.OuterXml);
+    END;
+
+    LOCAL PROCEDURE CheckSendIsAllowed@1100528308(DSPPlanMessage@1100528300 : Record 11126752);
+    BEGIN
+      CASE DSPPlanMessage.Type OF
+        DSPPlanMessage.Type::ContactAttempt: BEGIN
+          DSPPlanMessage.TESTFIELD("Contact Time");
+          DSPPlanMessage.TESTFIELD("Contact Attempt No.");
+        END;
+        DSPPlanMessage.Type::Plan: BEGIN
+          DSPPlanMessage.TESTFIELD("Start Time");
+          DSPPlanMessage.TESTFIELD("End Time");
+          DSPPlanMessage.TESTFIELD("Reason No.");
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateGenericWebServiceQueue@1100528312(DSPPlanMessage@1100528300 : Record 11126752);
+    VAR
+      GenericWebServiceQueue@1100528301 : Record 11126715;
+    BEGIN
+      GenericWebServiceQueue.CreateNewQueueEntry(DSPManagement.GetTcPlanning, RecId, 2, COMPANYNAME);
+      GenericWebServiceQueue."Xml Message" := TempBlob.Blob;
+      GenericWebServiceQueue."Related Record ID" := DSPPlanMessage.RECORDID;
+      GenericWebServiceQueue.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePlanMessage@1100528309(ServiceOrder@1100528302 : Record 11012823;ServiceOrderObject@1100528300 : Record 11071724;VAR DSPPlanMessage@1100528301 : Record 11126752);
+    BEGIN
+      DSPPlanMessage.INIT;
+      DSPPlanMessage.Type := DSPPlanMessage.Type::Plan;
+      DSPPlanMessage."Service Order No." := ServiceOrderObject."Service Order No.";
+      DSPPlanMessage."Object No." := ServiceOrderObject."Object No.";
+      DSPPlanMessage."Seq No." := DSPPlanMessage.GetLastSeqNo + 10000;
+      IF (ServiceOrder."Dsp Final Planning") THEN BEGIN
+        DSPPlanMessage."Planning Time No." := DSPSetup."Plan Time Type Final";
+        DSPPlanMessage."Reason No." := DSPSetup."Plan Reason Final";
+      END ELSE BEGIN
+        DSPPlanMessage."Planning Time No." := DSPSetup."Plan Time Type Tentative";
+        DSPPlanMessage."Reason No." := DSPSetup."Plan Reason Tentative";
+      END;
+      DSPPlanMessage."Start Time" := DATI2VARIANT(ServiceOrder."Starting Date", ServiceOrder."Starting Time");
+      DSPPlanMessage."End Time" := DATI2VARIANT(ServiceOrder."Ending Date", ServiceOrder."Ending Time");
+      IF (DSPManagement.GetServiceOrderSpecLineValue(ServiceOrder."No.", ServiceOrderObject."Object No.", DSPManagement.GetTcOpg) = 'Ja') THEN
+        DSPPlanMessage."Operator Mandatory" := TRUE
+      ELSE
+        DSPPlanMessage."Operator Mandatory" := FALSE;
+      DSPPlanMessage.INSERT(TRUE);
+    END;
+
+    LOCAL PROCEDURE ConvertToDnObject@1100528307(VAR DnObject@1100528302 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Object";RootTag@1100528301 : Text;RootNamespace@1100528300 : Text);
+    BEGIN
+      IF (NOT GenericWebServiceQueue."Xml Message".HASVALUE) THEN
+        ERROR(Text002, GenericWebServiceQueue."Xml Message");
+
+      GenericWebServiceQueue.CALCFIELDS("Xml Message");
+      TempBlob.Blob := GenericWebServiceQueue."Xml Message";
+      IF (RootTag <> '') THEN
+        DotnetFunctions.DeSerializeFromBlob2(TempBlob, DnObject, RootTag, RootNamespace)
+      ELSE
+        DotnetFunctions.DeSerializeFromBlob(TempBlob, DnObject);
+    END;
+
+    LOCAL PROCEDURE GetGlobalVars@1100528318(VersionNo@1100528300 : Text);
+    VAR
+      VersionTxt@1100528301 : Text;
+    BEGIN
+      ServiceSetup.GET;
+      DSPSetup.GET;
+      DSPSetup.TESTFIELD("Dsp Active", TRUE);
+      DSPSetup.TESTFIELD("Default Company");
+      DocumentMgtSetup.GET;
+      DSPManagement.CreateXmlNamespaceManager(DnXmlNamespaceManager);
+
+      VersionTxt := DSPManagement.GetDspVersionAsText(VersionNo);
+
+      PrefCommon := DnXmlNamespaceManager.LookupPrefix(DSPManagement.GetNsAlgemeen(VersionTxt));
+      PrefPlan := DnXmlNamespaceManager.LookupPrefix(DSPManagement.GetNsPlanning(VersionTxt));
+    END;
+
+    LOCAL PROCEDURE GetNsCommon@1100528301() : Text;
+    BEGIN
+      EXIT(DnXmlNamespaceManager.LookupNamespace(PrefCommon));
+    END;
+
+    LOCAL PROCEDURE GetNsPlan@1100528302() : Text;
+    BEGIN
+      EXIT(DnXmlNamespaceManager.LookupNamespace(PrefPlan));
+    END;
+
+    LOCAL PROCEDURE GetXmlDocument@1100528314();
+    VAR
+      OStream@1100528300 : OutStream;
+    BEGIN
+      IF (NOT GenericWebServiceQueue."Xml Message".HASVALUE) THEN
+        ERROR(Text002, GenericWebServiceQueue.FIELDCAPTION("Xml Message"));
+
+      GenericWebServiceQueue."Xml Message".CREATEOUTSTREAM(OStream);
+      DnXmlDocument := DnXmlDocument.XmlDocument();
+      DnXmlDocument.Load(OStream);
+    END;
+
+    LOCAL PROCEDURE ProcessOutboundPlanMessage@1100528303();
+    VAR
+      DSPAssignment@1100528306 : Record 11126740;
+      DSPPlanMessage@1100528300 : Record 11126752;
+      ServiceOrder@1100528301 : Record 11012823;
+    BEGIN
+      GenericWebServiceQueue.TESTFIELD(Direction, GenericWebServiceQueue.Direction::Outbound);
+      DSPPlanMessage.GET(GenericWebServiceQueue."Related Record ID");
+      DSPManagement.GetDspAssignmentByServiceOrderNoObjectNo(DSPPlanMessage."Service Order No.", DSPPlanMessage."Object No.", DSPAssignment);
+      GetGlobalVars(DSPAssignment."Version No.");
+
+      CASE TRUE OF
+        (DSPSetup."Dsp Partner" = DSPManagement.GetTcDspPartnerM10) AND (DSPManagement.GetDspVersionFirst(TRUE)  = DSPAssignment."Version No."):
+          ProcessOutboundPlanMessageM10V1(DSPAssignment, DSPPlanMessage);
+        (DSPSetup."Dsp Partner" = DSPManagement.GetTcDspPartnerM10) AND (DSPManagement.GetDspVersionSecond(TRUE)  = DSPAssignment."Version No."):
+           ProcessOutboundPlanMessageM10V2(DSPAssignment, DSPPlanMessage);
+        (DSPSetup."Dsp Partner" = DSPManagement.GetTcDspPartnerOther) AND (DSPManagement.GetDspVersionFirst(TRUE)  = DSPAssignment."Version No."):
+          ProcessOutboundPlanMessageV1(DSPAssignment, DSPPlanMessage);
+        (DSPSetup."Dsp Partner" = DSPManagement.GetTcDspPartnerOther) AND (DSPManagement.GetDspVersionSecond(TRUE)  = DSPAssignment."Version No."):
+           ProcessOutboundPlanMessageV2(DSPAssignment, DSPPlanMessage);
+        ELSE ERROR(Text000, DSPAssignment.FIELDCAPTION("Version No."), DSPAssignment."Version No.");
+      END;
+
+      DSPPlanMessage.SetProcessedByDsp;
+
+      CASE DSPPlanMessage.Type OF
+        DSPPlanMessage.Type::ContactAttempt: BEGIN
+          DSPManagement.UpdateReferencePoint(DSPPlanMessage."Object No.", DSPSetup."Ref. Point Contact Attempt");
+        END;
+        DSPPlanMessage.Type::Plan: BEGIN
+          IF (DSPPlanMessage."Planning Time No." = DSPManagement.GetFinalPlanningTimeNo) THEN BEGIN
+            DSPManagement.UpdateReferencePoint(DSPPlanMessage."Object No.", DSPSetup."Ref. Point Plan Message");
+            IF (ServiceOrder.GET(DSPPlanMessage."Service Order No.")) THEN BEGIN
+              ServiceOrder."Dsp Final Planning" := TRUE;
+              ServiceOrder.MODIFY;
+            END;
+          END;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE ProcessOutboundPlanMessageM10V1@1100528305(DSPAssignment@1100528307 : Record 11126740;DSPPlanMessage@1100528308 : Record 11126752);
+    VAR
+      ConsumedWebService@1100528311 : Record 11229797;
+      ConsumedWebServiceLine@1100528310 : Record 11229798;
+      ResponseRec@1100528312 : TEMPORARY Record 99008535;
+      RequestRec@1100528309 : TEMPORARY Record 99008535;
+      ServiceName@1100528306 : Code[20];
+      LineNo@1100528305 : Integer;
+      VersionTxt@1100528304 : Text;
+      M10WebClient@1100528303 : DotNet "'Motion10.Dsp.Nav4PSGatewayService, Version=1.33.0.0, Culture=neutral, PublicKeyToken=024bd013665211e9'.Motion10.Dsp.Nav4PSGatewayService.Nav4PSServiceClient";
+      M10PlanBerichtRequest@1100528302 : DotNet "'Motion10.Dsp.Nav4PSGatewayService, Version=1.33.0.0, Culture=neutral, PublicKeyToken=024bd013665211e9'.Motion10.Dsp.Nav4PSGatewayService.PlanberichtXOPType";
+      M10DspResponseType@1100528301 : DotNet "'Motion10.Dsp.Nav4PSGatewayService, Version=1.33.0.0, Culture=neutral, PublicKeyToken=024bd013665211e9'.Motion10.Dsp.Nav4PSGatewayService.DSPResponseType";
+      ResponseCode@1100528300 : Text;
+    BEGIN
+      VersionTxt := DSPManagement.GetDspVersionAsText(DSPAssignment."Version No.");
+      ServiceName := DSPManagement.GetDspPartnerServiceName(VersionTxt);
+      LineNo := DSPManagement.GetSeqNoBijstelling;
+      ConsumedWebService.GET(ServiceName);
+      ConsumedWebServiceLine.GET(ServiceName, LineNo);
+
+      DSPManagement.GetAdjustmentWs(RootElement, RootElementNamespace, VersionTxt);
+      M10PlanBerichtRequest := M10PlanBerichtRequest.PlanberichtXOPType;
+
+      GenericWebServiceQueue.CALCFIELDS("Xml Message");
+      TempBlob.Blob := GenericWebServiceQueue."Xml Message";
+      IF (DSPSetup.Debug) THEN DotnetFunctions.SerializeToFile(M10PlanBerichtRequest, 'C:\Users\Public\Documents\PlanBericht1Empty.xml');
+      DotnetFunctions.DeSerializeFromBlob(TempBlob, M10PlanBerichtRequest);
+      IF (DSPSetup.Debug) THEN DotnetFunctions.SerializeToFile(M10PlanBerichtRequest, 'C:\Users\Public\Documents\PlanBericht1.xml');
+
+      DnBasicHttpBinding := DnBasicHttpBinding.BasicHttpBinding();
+      DnBasicHttpBinding.Name := ConsumedWebService.Code;
+      DnBasicHttpBinding.MaxReceivedMessageSize := 2147483647;
+      DnBasicHttpBinding.MessageEncoding := DnWSMessageEncoding.Mtom;
+      DnBasicHttpBinding.Security.Mode := DnBasicHttpSecurityMode.Transport;
+      DnBasicHttpBinding.Security.Transport.ClientCredentialType := DnHttpClientCredentialType.Basic;
+      DnEndPointAddress := DnEndPointAddress.EndpointAddress(ConsumedWebService."Web Service URL");
+      M10WebClient := M10WebClient.Nav4PSServiceClient(DnBasicHttpBinding, DnEndPointAddress);
+      M10WebClient.ClientCredentials.UserName.UserName := ConsumedWebService.Login;
+      M10WebClient.ClientCredentials.UserName.Password := ConsumedWebService.Password;
+      IF (DSPSetup.Debug) THEN DotnetFunctions.SerializeToFile(M10PlanBerichtRequest,'C:\Users\Public\Documents\PlanBericht1Request.xml');
+      M10DspResponseType := M10WebClient.Planning_OS_XOP(M10PlanBerichtRequest);
+      IF (DSPSetup.Debug) THEN DotnetFunctions.SerializeToFile(M10DspResponseType, 'C:\Users\Public\Documents\PlanBericht1Response.xml');
+      ResponseCode := FORMAT(M10DspResponseType.ResponseCode);
+      DotnetFunctions.SerializeToBlob(RequestRec, M10PlanBerichtRequest);
+      DotnetFunctions.SerializeToBlob(ResponseRec, M10DspResponseType);
+      ConsumedWebServiceLine.AddCwsLogLine(RequestRec, ResponseRec, DSPPlanMessage.RECORDID, DSPManagement.GetTcDsp);
+
+      IF (ResponseCode <> 'OK') THEN
+        ERROR(Text001, M10PlanBerichtRequest.ToString, ResponseCode);
+    END;
+
+    LOCAL PROCEDURE ProcessOutboundPlanMessageM10V2@1100528310(DSPAssignment@1100528309 : Record 11126740;DSPPlanMessage@1100528308 : Record 11126752);
+    VAR
+      ConsumedWebService@1100528310 : Record 11229797;
+      ConsumedWebServiceLine@1100528307 : Record 11229798;
+      ResponseRec@1100528312 : TEMPORARY Record 99008535;
+      RequestRec@1100528311 : TEMPORARY Record 99008535;
+      ServiceName@1100528306 : Code[20];
+      LineNo@1100528305 : Integer;
+      VersionTxt@1100528304 : Text;
+      M10WebClient@1100528303 : DotNet "'Motion10.Dsp.Nav4PSGatewayService134, Version=1.34.0.0, Culture=neutral, PublicKeyToken=024bd013665211e9'.Motion10.Dsp.Nav4PSGatewayService134.Nav4PSServiceClient";
+      M10PlanBerichtRequest@1100528302 : DotNet "'Motion10.Dsp.Nav4PSGatewayService134, Version=1.34.0.0, Culture=neutral, PublicKeyToken=024bd013665211e9'.Motion10.Dsp.Nav4PSGatewayService134.PlanberichtXOPType";
+      M10DspResponseType@1100528301 : DotNet "'Motion10.Dsp.Nav4PSGatewayService134, Version=1.34.0.0, Culture=neutral, PublicKeyToken=024bd013665211e9'.Motion10.Dsp.Nav4PSGatewayService134.DSPResponseType";
+      ResponseCode@1100528300 : Text;
+    BEGIN
+      VersionTxt := DSPManagement.GetDspVersionAsText(DSPAssignment."Version No.");
+      ServiceName := DSPManagement.GetDspPartnerServiceName(VersionTxt);
+      LineNo := DSPManagement.GetSeqNoBijstelling;
+      ConsumedWebService.GET(ServiceName);
+      ConsumedWebServiceLine.GET(ServiceName, LineNo);
+
+      DSPManagement.GetAdjustmentWs(RootElement, RootElementNamespace, VersionTxt);
+      M10PlanBerichtRequest := M10PlanBerichtRequest.PlanberichtXOPType;
+      GenericWebServiceQueue.CALCFIELDS("Xml Message");
+      TempBlob.Blob := GenericWebServiceQueue."Xml Message";
+      IF (DSPSetup.Debug) THEN DotnetFunctions.SerializeToFile(M10PlanBerichtRequest, 'C:\Users\Public\Documents\PlanBericht2Empty.xml');
+      DotnetFunctions.DeSerializeFromBlob(TempBlob, M10PlanBerichtRequest);
+      IF (DSPSetup.Debug) THEN DotnetFunctions.SerializeToFile(M10PlanBerichtRequest, 'C:\Users\Public\Documents\PlanBericht2.xml');
+
+      DnBasicHttpBinding := DnBasicHttpBinding.BasicHttpBinding();
+      DnBasicHttpBinding.Name := ConsumedWebService.Code;
+      DnBasicHttpBinding.MaxReceivedMessageSize := 2147483647;
+      DnBasicHttpBinding.MessageEncoding := DnWSMessageEncoding.Mtom;
+      DnBasicHttpBinding.Security.Mode := DnBasicHttpSecurityMode.Transport;
+      DnBasicHttpBinding.Security.Transport.ClientCredentialType := DnHttpClientCredentialType.Basic;
+      DnEndPointAddress := DnEndPointAddress.EndpointAddress(ConsumedWebService."Web Service URL");
+      M10WebClient := M10WebClient.Nav4PSServiceClient(DnBasicHttpBinding, DnEndPointAddress);
+      M10WebClient.ClientCredentials.UserName.UserName := ConsumedWebService.Login;
+      M10WebClient.ClientCredentials.UserName.Password := ConsumedWebService.Password;
+      IF (DSPSetup.Debug) THEN DotnetFunctions.SerializeToFile(M10PlanBerichtRequest,'C:\Users\Public\Documents\PlanBericht2Request.xml');
+      M10DspResponseType := M10WebClient.Planning_OS_XOP(M10PlanBerichtRequest);
+      IF (DSPSetup.Debug) THEN DotnetFunctions.SerializeToFile(M10DspResponseType, 'C:\Users\Public\Documents\PlanBericht2Response.xml');
+      ResponseCode := FORMAT(M10DspResponseType.ResponseCode);
+
+      DotnetFunctions.SerializeToBlob(RequestRec, M10PlanBerichtRequest);
+      DotnetFunctions.SerializeToBlob(ResponseRec, M10DspResponseType);
+      ConsumedWebServiceLine.AddCwsLogLine(RequestRec, ResponseRec, DSPPlanMessage.RECORDID, DSPManagement.GetTcDsp);
+
+      IF (ResponseCode <> 'OK') THEN
+        ERROR(Text001, M10PlanBerichtRequest.ToString, ResponseCode);
+    END;
+
+    LOCAL PROCEDURE ProcessOutboundPlanMessageV1@1100528320(DSPAssignment@1100528307 : Record 11126740;DSPPlanMessage@1100528308 : Record 11126752);
+    VAR
+      ConsumedWebServiceLine@1100528310 : Record 11229798;
+      ResponseRec@1100528312 : TEMPORARY Record 99008535;
+      RequestRec@1100528309 : TEMPORARY Record 99008535;
+      MessageId@1100528300 : Text;
+      DnXmlRequest@1100528301 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      DnXmlResponse@1100528302 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      TargetNode@1100528304 : Text;
+    BEGIN
+      DSPManagement.GetConsumedWebServiceLineByVersion(DSPAssignment."Version No.", DSPManagement.GetSeqNoPlanning, ConsumedWebServiceLine);
+
+      GenericWebServiceQueue.CALCFIELDS("Xml Message");
+      RequestRec.Blob := GenericWebServiceQueue."Xml Message";
+      DSPManagement.GetXmlDocument(RequestRec,DnXmlRequest);
+      TargetNode := STRSUBSTNO('//%1:%2',ConsumedWebServiceLine."Prefix Method Namespace", ConsumedWebServiceLine."Request Root Tag");
+      MessageId := STRSUBSTNO('%1 %2: %3', DSPManagement.GetTcDsp, ConsumedWebServiceLine."Method Name", GenericWebServiceQueue."Entry No.");
+
+      DSPManagement.DebugSaveXml(DSPSetup, DnXmlRequest, ConsumedWebServiceLine."Method Name"+'Request.xml');
+      DSPManagement.SendCws(ConsumedWebServiceLine, DnXmlRequest, DnXmlResponse, MessageId);
+      DSPManagement.DebugSaveXml(DSPSetup, DnXmlResponse, ConsumedWebServiceLine."Method Name"+'Response.xml');
+
+      DSPManagement.SerializeToBlob(ResponseRec, DnXmlResponse);
+      ConsumedWebServiceLine.AddCwsLogLine(RequestRec, ResponseRec, DSPPlanMessage.RECORDID, DSPManagement.GetTcDsp);
+      CheckResponse(DnXmlRequest, DnXmlResponse);
+    END;
+
+    LOCAL PROCEDURE ProcessOutboundPlanMessageV2@1100528329(DSPAssignment@1100528301 : Record 11126740;DSPPlanMessage@1100528300 : Record 11126752);
+    BEGIN
+      ProcessOutboundPlanMessageV1(DSPAssignment, DSPPlanMessage);
+    END;
+
+    EVENT DnXmlDocument@1100528333::NodeInserting@94(sender@1100528301 : Variant;e@1100528300 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT DnXmlDocument@1100528333::NodeInserted@95(sender@1100528301 : Variant;e@1100528300 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT DnXmlDocument@1100528333::NodeRemoving@96(sender@1100528301 : Variant;e@1100528300 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT DnXmlDocument@1100528333::NodeRemoved@97(sender@1100528301 : Variant;e@1100528300 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT DnXmlDocument@1100528333::NodeChanging@98(sender@1100528301 : Variant;e@1100528300 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT DnXmlDocument@1100528333::NodeChanged@99(sender@1100528301 : Variant;e@1100528300 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT DnXmlRootNode@1100528335::NodeInserting@94(sender@1100528301 : Variant;e@1100528300 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT DnXmlRootNode@1100528335::NodeInserted@95(sender@1100528301 : Variant;e@1100528300 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT DnXmlRootNode@1100528335::NodeRemoving@96(sender@1100528301 : Variant;e@1100528300 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT DnXmlRootNode@1100528335::NodeRemoved@97(sender@1100528301 : Variant;e@1100528300 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT DnXmlRootNode@1100528335::NodeChanging@98(sender@1100528301 : Variant;e@1100528300 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT DnXmlRootNode@1100528335::NodeChanged@99(sender@1100528301 : Variant;e@1100528300 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

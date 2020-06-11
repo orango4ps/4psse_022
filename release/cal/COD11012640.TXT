@@ -1,0 +1,587 @@
+OBJECT Codeunit 11012640 OSA Replication Msg. Processor
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1100528702 : TextConst 'DEU=Kein solcher Befehl: %1 - %2;ENU=No such command: %1 - %2;NLD=Onbekend commando: %1 - %2';
+      BaseLib@1100528703 : Codeunit 11130048;
+      Text001@1100528704 : TextConst 'DEU=Eigenschaft nicht gefunden (%1).;ENU=No property found (%1).;NLD=Eigenschap niet gevonden (%1).';
+      Text002@1100528700 : TextConst 'DEU=Belegnr. ist leer.;ENU=Document No. is empty.;NLD=Documentnr. is leeg.';
+
+    PROCEDURE ProcessReplicationMessage@1100528004(VAR AppReplicationMessage@1100528000 : Record 11130032) : Boolean;
+    BEGIN
+      AppReplicationMessage.TESTFIELD(App, BaseLib.AppCodeOSA);
+
+      CASE AppReplicationMessage."Request Type" OF
+        'ChecklistCopyInsert' : ProcessChecklistCopyInsert(AppReplicationMessage);
+        'ChecklistCopyUpdateLinks' : ProcessChecklistCopyUpdateLinks(AppReplicationMessage);
+        'ChecklistCopyLineUpdate' : ProcessChecklistCopyLineUpdate(AppReplicationMessage);
+        'ChecklistCopyLineCommentInsert' : ProcessChecklistCopyLineCommentInsert(AppReplicationMessage);
+        'IssueInsert' : ProcessIssueInsert(AppReplicationMessage);
+        'IssueUpdate' : ProcessIssueUpdate(AppReplicationMessage);
+        'IssueUpdateLinks' : ProcessIssueUpdateLinks(AppReplicationMessage);
+        'IssueCommentInsert' : ProcessIssueCommentInsert(AppReplicationMessage);
+      ELSE
+        ERROR(Text000, AppReplicationMessage.App, AppReplicationMessage."Request Type");
+      END;
+    END;
+
+    LOCAL PROCEDURE "=== Processors ==="@1100528003();
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE ProcessChecklistCopyInsert@1100528702(VAR AppReplicationMessage@1100528700 : Record 11130032);
+    VAR
+      EntitiesOSAWS@1100528702 : Codeunit 11012641;
+      ChecklistCopyComposite@1100528703 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      GenChecklistCopy@1100528701 : Record 11125902;
+    BEGIN
+      InsertChecklistCopy(AppReplicationMessage.GetRequestDataUTF8, GenChecklistCopy);
+      InsertChecklistCopyLinks(AppReplicationMessage.GetRequestDataUTF8, GenChecklistCopy);
+
+      EntitiesOSAWS.GetChecklistCopyComposite(GenChecklistCopy, ChecklistCopyComposite);
+      AppReplicationMessage.SetResponseData(BaseLib.ConvertUTF8ToBase64(ChecklistCopyComposite.ToString));
+      AppReplicationMessage."Response Type" := BaseLib.ResponseOK;
+    END;
+
+    LOCAL PROCEDURE ProcessChecklistCopyUpdateLinks@1100528701(VAR AppReplicationMessage@1100528700 : Record 11130032);
+    VAR
+      JsonManagement@1100528711 : Codeunit 5459;
+      JObject@1100528710 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      GenChecklistCopy@1100528701 : Record 11125902;
+      GenChecklistCopyLink@1100528703 : Record 11125904;
+      Value@1100528702 : Variant;
+    BEGIN
+      CLEAR(JsonManagement);
+      JsonManagement.InitializeObject(AppReplicationMessage.GetRequestDataUTF8);
+      JsonManagement.GetJSONObject(JObject);
+      Value := BaseLib.GetPropertyValueByNameAsText(JObject, 'No');
+      GenChecklistCopy.SETRANGE("No.", Value);
+      GenChecklistCopy.FINDFIRST;
+
+      GenChecklistCopyLink.SETRANGE("Checklist Copy No.", GenChecklistCopy."No.");
+      GenChecklistCopyLink.DELETEALL(TRUE);
+
+      InsertChecklistCopyLinks(AppReplicationMessage.GetRequestDataUTF8, GenChecklistCopy);
+
+      AppReplicationMessage."Response Type" := BaseLib.ResponseOK;
+    END;
+
+    LOCAL PROCEDURE ProcessChecklistCopyLineUpdate@1100528700(VAR AppReplicationMessage@1100528700 : Record 11130032);
+    VAR
+      JsonManagement@1100528705 : Codeunit 5459;
+      JObject@1100528702 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      GenChecklistCopyLine@1100528704 : Record 11125903;
+      GenChecklistOptionValue@1100528708 : Record 11125899;
+      Value@1100528703 : Variant;
+      LineNo@1100528701 : Integer;
+      PropertyName@1100528707 : Text;
+      D@1100528709 : Date;
+    BEGIN
+      CLEAR(JsonManagement);
+      JsonManagement.InitializeObject(AppReplicationMessage.GetRequestDataUTF8);
+      JsonManagement.GetJSONObject(JObject);
+      Value := BaseLib.GetPropertyValueByNameAsText(JObject, 'ChecklistCopyNo');
+      GenChecklistCopyLine.SETRANGE("Checklist Copy No.", Value);
+      LineNo := BaseLib.GetPropertyValueByNameAsInt(JObject, 'LineNo');
+      GenChecklistCopyLine.SETRANGE("Line No.", LineNo);
+      GenChecklistCopyLine.FINDFIRST;
+      IF GenChecklistCopyLine."Line Type" = GenChecklistCopyLine."Line Type"::Group THEN BEGIN
+        AppReplicationMessage."Response Type" := BaseLib.ResponseOK;
+        EXIT;
+      END;
+
+      PropertyName := GetPropertyName(GenChecklistCopyLine."Field Type");
+      BaseLib.GetPropertyValueByName(JObject, PropertyName, Value);
+      CASE GenChecklistCopyLine."Field Type" OF
+        GenChecklistCopyLine."Field Type"::Text:
+          GenChecklistCopyLine.VALIDATE(Value, Value);
+        GenChecklistCopyLine."Field Type"::Numeric:
+          GenChecklistCopyLine.VALIDATE(Value, Value);
+        GenChecklistCopyLine."Field Type"::Date:
+          BEGIN
+            D := BaseLib.GetPropertyValueByNameAsDate(JObject, PropertyName);
+            GenChecklistCopyLine.VALIDATE(Value, FORMAT(D));
+          END;
+        GenChecklistCopyLine."Field Type"::Option:
+          BEGIN
+            GenChecklistOptionValue.SETRANGE("Option Set Code", GenChecklistCopyLine."Option Set Code");
+            GenChecklistOptionValue.SETRANGE(Code, Value);
+            IF GenChecklistOptionValue.FINDFIRST THEN
+              GenChecklistCopyLine.VALIDATE(Value, GenChecklistOptionValue.Description);
+          END;
+      END;
+      GenChecklistCopyLine.VALIDATE(Value, Value);
+      GenChecklistCopyLine.MODIFY(TRUE);
+
+      AppReplicationMessage."Response Type" := BaseLib.ResponseOK;
+    END;
+
+    LOCAL PROCEDURE ProcessChecklistCopyLineCommentInsert@1100528704(VAR AppReplicationMessage@1100528700 : Record 11130032);
+    VAR
+      JsonManagement@1100528708 : Codeunit 5459;
+      JObject@1100528706 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      GenChecklistCopyLine@1100528702 : Record 11125903;
+      GeneralText@1100528704 : Record 11020260;
+      Value@1100528703 : Variant;
+      LineNo@1100528701 : Integer;
+      Comment@1100528707 : Text;
+      CreatedAt@1100528709 : DateTime;
+      CreatedBy@1100528705 : Text;
+      UserId@1100528710 : Code[50];
+    BEGIN
+      CLEAR(JsonManagement);
+      JsonManagement.InitializeObject(AppReplicationMessage.GetRequestDataUTF8);
+      JsonManagement.GetJSONObject(JObject);
+      Value := BaseLib.GetPropertyValueByNameAsText(JObject, 'ChecklistCopyNo');
+      GenChecklistCopyLine.SETRANGE("Checklist Copy No.", Value);
+      LineNo := BaseLib.GetPropertyValueByNameAsInt(JObject, 'LineNo');
+      GenChecklistCopyLine.SETRANGE("Line No.", LineNo);
+      GenChecklistCopyLine.FINDFIRST;
+      IF GenChecklistCopyLine."Line Type" = GenChecklistCopyLine."Line Type"::Group THEN BEGIN
+        AppReplicationMessage."Response Type" := BaseLib.ResponseOK;
+        EXIT;
+      END;
+
+      Comment := BaseLib.GetPropertyValueByNameAsText(JObject, 'Comment');
+      CreatedAt := BaseLib.GetPropertyValueByNameAsDateTime(JObject, 'CreationDate');
+      CreatedBy := BaseLib.GetPropertyValueByNameAsText(JObject, 'CreatedBy');
+      UserId := GetUserIdFromResource(CreatedBy);
+      GeneralText.InsertGeneralText(
+        Comment, CreatedAt, UserId,
+        GeneralText.Table::GenCheckListCopyLine, GenChecklistCopyLine."Checklist Copy No.", GenChecklistCopyLine."Line No.");
+
+      AppReplicationMessage."Response Type" := BaseLib.ResponseOK;
+    END;
+
+    LOCAL PROCEDURE ProcessIssueInsert@1100528710(VAR AppReplicationMessage@1100528700 : Record 11130032);
+    VAR
+      JsonManagement@1100528704 : Codeunit 5459;
+      EntitiesOSAWS@1100528715 : Codeunit 11012641;
+      JObject@1100528705 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      IssueComposite@1100528716 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      GenIssue@1100528702 : Record 11125907;
+      GenChecklistCopy@1100528706 : Record 11125902;
+      GenChecklistCopyLink@1100528707 : Record 11125904;
+      GeneralText@1100528712 : Record 11020260;
+      Resource@1100528713 : Record 11229278;
+      Value@1100528703 : Variant;
+      D@1100528701 : Date;
+      DT@1100528708 : DateTime;
+      Comment@1100528711 : Text;
+      CreatedAt@1100528710 : DateTime;
+      CreatedBy@1100528709 : Text;
+      UserId@1100528714 : Code[50];
+    BEGIN
+      CLEAR(JsonManagement);
+      JsonManagement.InitializeObject(AppReplicationMessage.GetRequestDataUTF8);
+      JsonManagement.GetJSONObject(JObject);
+      GenIssue.INIT;
+      Value := BaseLib.GetPropertyValueByNameAsText(JObject, 'Description');
+      GenIssue.VALIDATE(Description, Value);
+      Value := BaseLib.GetPropertyValueByNameAsInt(JObject, 'Status');
+      GenIssue.VALIDATE(Status, Value);
+      D := BaseLib.GetPropertyValueByNameAsDate(JObject, 'SolutionDeadline');
+      GenIssue.VALIDATE("Solution Deadline", D);
+      Value := BaseLib.GetPropertyValueByNameAsText(JObject, 'IssueType');
+      GenIssue."Issue Type" := Value; // No validate
+      Value := BaseLib.GetPropertyValueByNameAsText(JObject, 'ResponsiblePerson');
+      GenIssue.VALIDATE("Responsible Person", Value);
+      GenIssue.INSERT(TRUE);
+      DT := BaseLib.GetPropertyValueByNameAsDateTime(JObject, 'CreatedOn');
+      GenIssue.VALIDATE("Created On", DT);
+      Value := BaseLib.GetPropertyValueByNameAsText(JObject, 'CreatedBy');
+      GenIssue.VALIDATE("Created By", Value);
+      GenIssue.MODIFY(TRUE);
+
+      Comment := BaseLib.GetPropertyValueByNameAsText(JObject, 'DetailedDescription');
+      CreatedAt := BaseLib.GetPropertyValueByNameAsDateTime(JObject, 'CreatedOn');
+      CreatedBy := BaseLib.GetPropertyValueByNameAsText(JObject, 'CreatedBy');
+      UserId := GetUserIdFromResource(CreatedBy);
+      GeneralText.InsertGeneralText(
+        Comment, CreatedAt, UserId,
+        GeneralText.Table::GenIssue, GenIssue."No.", GenIssue.GetDetailedDescriptionID);
+
+      Comment := BaseLib.GetPropertyValueByNameAsText(JObject, 'Solution');
+      GeneralText.InsertGeneralText(
+        Comment, CreatedAt, UserId,
+        GeneralText.Table::GenIssue, GenIssue."No.", GenIssue.GetSolutionDescriptionID);
+
+      InsertIssueLinks(AppReplicationMessage.GetRequestDataUTF8, GenIssue);
+
+      Value := BaseLib.GetPropertyValueByNameAsText(JObject, 'Pinpoint');
+      IF (FORMAT(Value) <> '') THEN
+        InsertDocumentUsage(Value, GenIssue);
+
+      Value := BaseLib.GetPropertyValueByNameAsText(JObject, 'ChecklistCopy');
+      IF (FORMAT(Value) <> '') THEN BEGIN
+        InsertChecklistCopy(Value, GenChecklistCopy);
+        GenChecklistCopyLink.INIT;
+        GenChecklistCopyLink.VALIDATE("Checklist Copy No.", GenChecklistCopy."No.");
+        GenChecklistCopyLink."Line No." := 10000;
+        GenChecklistCopyLink.VALIDATE("Linked To", GenIssue.RECORDID);
+        GenChecklistCopyLink.INSERT(TRUE);
+      END;
+
+      EntitiesOSAWS.GetIssueComposite(GenIssue, IssueComposite);
+      AppReplicationMessage.SetResponseData(BaseLib.ConvertUTF8ToBase64(IssueComposite.ToString));
+      AppReplicationMessage."Response Type" := BaseLib.ResponseOK;
+    END;
+
+    LOCAL PROCEDURE ProcessIssueUpdate@1100528713(VAR AppReplicationMessage@1100528700 : Record 11130032);
+    VAR
+      JsonManagement@1100528704 : Codeunit 5459;
+      EntitiesOSAWS@1100528714 : Codeunit 11012641;
+      JObject@1100528705 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      JObject2@1100528712 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      JArray@1100528711 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JArray";
+      IEnumerator@1100528710 : DotNet "'mscorlib'.System.Collections.Generic.IEnumerator`1";
+      IssueComposite@1100528715 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      GenIssue@1100528702 : Record 11125907;
+      GeneralText@1100528706 : Record 11020260;
+      Value@1100528703 : Variant;
+      D@1100528701 : Date;
+      Comment@1100528709 : Text;
+      CreatedAt@1100528708 : DateTime;
+      CreatedBy@1100528707 : Text;
+      UserId@1100528713 : Code[50];
+    BEGIN
+      CLEAR(JsonManagement);
+      JsonManagement.InitializeObject(AppReplicationMessage.GetRequestDataUTF8);
+      JsonManagement.GetJSONObject(JObject);
+      Value := BaseLib.GetPropertyValueByNameAsText(JObject, 'No');
+      GenIssue.SETRANGE("No.", Value);
+      GenIssue.FINDFIRST;
+      Value := BaseLib.GetPropertyValueByNameAsText(JObject, 'Description');
+      GenIssue.VALIDATE(Description, Value);
+      Value := BaseLib.GetPropertyValueByNameAsInt(JObject, 'Status');
+      GenIssue.VALIDATE(Status, Value);
+      D := BaseLib.GetPropertyValueByNameAsDate(JObject, 'SolutionDeadline');
+      GenIssue.VALIDATE("Solution Deadline", D);
+      Value := BaseLib.GetPropertyValueByNameAsText(JObject, 'IssueType');
+      GenIssue."Issue Type" := Value; // No validate
+      Value := BaseLib.GetPropertyValueByNameAsText(JObject, 'ResponsiblePerson');
+      GenIssue.VALIDATE("Responsible Person", Value);
+      GenIssue.MODIFY(TRUE);
+
+      Comment := BaseLib.GetPropertyValueByNameAsText(JObject, 'DetailedDescription');
+      CreatedAt := CURRENTDATETIME;
+      CreatedBy := BaseLib.GetPropertyValueByNameAsText(JObject, 'CreatedBy');
+      GeneralText.SETRANGE(Table, GeneralText.Table::GenIssue);
+      GeneralText.SETRANGE(Code, GenIssue."No.");
+      GeneralText.SETRANGE("Table Line No.", GenIssue.GetDetailedDescriptionID);
+      GeneralText.DELETEALL;
+      UserId := GetUserIdFromResource(CreatedBy);
+      GeneralText.InsertGeneralText(
+        Comment, CreatedAt, UserId,
+        GeneralText.Table::GenIssue, GenIssue."No.", GenIssue.GetDetailedDescriptionID);
+
+      Comment := BaseLib.GetPropertyValueByNameAsText(JObject, 'Solution');
+      GeneralText.RESET;
+      GeneralText.SETRANGE(Table, GeneralText.Table::GenIssue);
+      GeneralText.SETRANGE(Code, GenIssue."No.");
+      GeneralText.SETRANGE("Table Line No.", GenIssue.GetSolutionDescriptionID);
+      GeneralText.DELETEALL;
+      GeneralText.InsertGeneralText(
+        Comment, CreatedAt, UserId,
+        GeneralText.Table::GenIssue, GenIssue."No.", GenIssue.GetSolutionDescriptionID);
+
+      Value := BaseLib.GetPropertyValueByNameAsText(JObject, 'Pinpoint');
+      IF (FORMAT(Value) <> '') THEN
+        TryUpdateDocumentUsage(Value, GenIssue);
+
+      JsonManagement.GetArrayPropertyValueFromJObjectByName(JObject, 'BeforePhotos', JArray);
+      IF (JArray.HasValues) THEN BEGIN
+        IEnumerator := JArray.GetEnumerator;
+        WHILE IEnumerator.MoveNext DO BEGIN
+          JObject2 := IEnumerator.Current;
+          IF NOT TryUpdateDocumentUsage(JObject2.ToString, GenIssue) THEN
+            InsertDocumentUsage(JObject2.ToString, GenIssue);
+        END;
+      END;
+
+      JsonManagement.GetArrayPropertyValueFromJObjectByName(JObject, 'AfterPhotos', JArray);
+      IF (JArray.HasValues) THEN BEGIN
+        IEnumerator := JArray.GetEnumerator;
+        WHILE IEnumerator.MoveNext DO BEGIN
+          JObject2 := IEnumerator.Current;
+          IF NOT TryUpdateDocumentUsage(JObject2.ToString, GenIssue) THEN
+            InsertDocumentUsage(JObject2.ToString, GenIssue);
+        END;
+      END;
+
+      EntitiesOSAWS.GetIssueComposite(GenIssue, IssueComposite);
+      AppReplicationMessage.SetResponseData(BaseLib.ConvertUTF8ToBase64(IssueComposite.ToString));
+      AppReplicationMessage."Response Type" := BaseLib.ResponseOK;
+    END;
+
+    LOCAL PROCEDURE ProcessIssueUpdateLinks@1100528711(VAR AppReplicationMessage@1100528700 : Record 11130032);
+    VAR
+      JsonManagement@1100528711 : Codeunit 5459;
+      JObject@1100528710 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      GenIssue@1100528701 : Record 11125907;
+      GenIssueLink@1100528703 : Record 11125908;
+      Value@1100528702 : Variant;
+    BEGIN
+      CLEAR(JsonManagement);
+      JsonManagement.InitializeObject(AppReplicationMessage.GetRequestDataUTF8);
+      JsonManagement.GetJSONObject(JObject);
+      Value := BaseLib.GetPropertyValueByNameAsText(JObject, 'No');
+      GenIssue.SETRANGE("No.", Value);
+      GenIssue.FINDFIRST;
+
+      GenIssueLink.SETRANGE("Issue No.", GenIssue."No.");
+      GenIssueLink.DELETEALL(TRUE);
+
+      InsertIssueLinks(AppReplicationMessage.GetRequestDataUTF8, GenIssue);
+
+      AppReplicationMessage."Response Type" := BaseLib.ResponseOK;
+    END;
+
+    LOCAL PROCEDURE ProcessIssueCommentInsert@1100528715(VAR AppReplicationMessage@1100528700 : Record 11130032);
+    VAR
+      JsonManagement@1100528708 : Codeunit 5459;
+      JObject@1100528706 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      GenIssue@1100528702 : Record 11125907;
+      GeneralText@1100528704 : Record 11020260;
+      Value@1100528703 : Variant;
+      LineNo@1100528701 : Integer;
+      Comment@1100528707 : Text;
+      CreatedAt@1100528709 : DateTime;
+      CreatedBy@1100528705 : Text;
+      UserId@1100528710 : Code[50];
+    BEGIN
+      CLEAR(JsonManagement);
+      JsonManagement.InitializeObject(AppReplicationMessage.GetRequestDataUTF8);
+      JsonManagement.GetJSONObject(JObject);
+      Value := BaseLib.GetPropertyValueByNameAsText(JObject, 'IssueNo');
+      GenIssue.SETRANGE("No.", Value);
+      GenIssue.FINDFIRST;
+
+      Comment := BaseLib.GetPropertyValueByNameAsText(JObject, 'Comment');
+      CreatedAt := BaseLib.GetPropertyValueByNameAsDateTime(JObject, 'CreationDate');
+      CreatedBy := BaseLib.GetPropertyValueByNameAsText(JObject, 'CreatedBy');
+      UserId := GetUserIdFromResource(CreatedBy);
+      GeneralText.InsertGeneralText(
+        Comment, CreatedAt, UserId,
+        GeneralText.Table::GenIssue, GenIssue."No.", GenIssue.GetCommentsID);
+
+      AppReplicationMessage."Response Type" := BaseLib.ResponseOK;
+    END;
+
+    LOCAL PROCEDURE InsertChecklistCopy@1100528726(JSONString@1100528705 : Text;VAR GenChecklistCopy@1100528706 : Record 11125902);
+    VAR
+      JsonManagement@1100528704 : Codeunit 5459;
+      JObject@1100528703 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      Value@1100528701 : Variant;
+      D@1100528700 : Date;
+    BEGIN
+      CLEAR(JsonManagement);
+      JsonManagement.InitializeObject(JSONString);
+      JsonManagement.GetJSONObject(JObject);
+      GenChecklistCopy.INIT;
+      Value := BaseLib.GetPropertyValueByNameAsText(JObject, 'ChecklistCode');
+      GenChecklistCopy.VALIDATE("Checklist Code", Value);
+      Value := BaseLib.GetPropertyValueByNameAsText(JObject, 'Description');
+      GenChecklistCopy.VALIDATE(Description, Value);
+      D := BaseLib.GetPropertyValueByNameAsDate(JObject, 'Date');
+      GenChecklistCopy.VALIDATE(Date, D);
+      GenChecklistCopy.INSERT(TRUE);
+    END;
+
+    LOCAL PROCEDURE InsertChecklistCopyLinks@1100528716(JSONString@1100528700 : Text;GenChecklistCopy@1100528717 : Record 11125902);
+    VAR
+      JsonManagement@1100528711 : Codeunit 5459;
+      GenChecklistLinkMgt@1100528715 : Codeunit 11012688;
+      JObject@1100528710 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      JObject1@1100528713 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      JArray1@1100528712 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JArray";
+      JArray2@1100528714 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JArray";
+      IEnumerator1@1100528709 : DotNet "'mscorlib'.System.Collections.Generic.IEnumerator`1";
+      IEnumerator2@1100528706 : DotNet "'mscorlib'.System.Collections.Generic.IEnumerator`1";
+      GenChecklistCopyLink@1100528703 : Record 11125904;
+      Value@1100528702 : Variant;
+      I@1100528704 : Integer;
+      LineNo@1100528707 : Integer;
+      TableNo@1100528705 : Integer;
+      RecRef@1100528708 : RecordRef;
+      KeyValues@1100528716 : ARRAY [10] OF Code[20];
+    BEGIN
+      CLEAR(JsonManagement);
+      JsonManagement.InitializeObject(JSONString);
+      JsonManagement.GetJSONObject(JObject);
+      JsonManagement.GetArrayPropertyValueFromJObjectByName(JObject, 'LinkIdentifiers', JArray1);
+      IEnumerator1 := JArray1.GetEnumerator;
+      LineNo := 10000;
+      WHILE IEnumerator1.MoveNext DO BEGIN
+        JObject1 := IEnumerator1.Current;
+        TableNo := BaseLib.GetPropertyValueByNameAsInt(JObject1, 'LinkedToType');
+        JsonManagement.GetArrayPropertyValueFromJObjectByName(JObject1, 'KeyValues', JArray2);
+        IEnumerator2 := JArray2.GetEnumerator;
+        CLEAR(KeyValues);
+        I := 0;
+        WHILE IEnumerator2.MoveNext DO BEGIN
+          I += 1;
+          KeyValues[I] := IEnumerator2.Current;
+        END;
+        GenChecklistLinkMgt.GetRecRefToLinkedTable(TableNo, KeyValues, RecRef);
+        GenChecklistCopyLink.VALIDATE("Checklist Copy No.", GenChecklistCopy."No.");
+        GenChecklistCopyLink."Line No." := LineNo;
+        GenChecklistCopyLink.VALIDATE("Linked To", RecRef.RECORDID);
+
+        GenChecklistCopyLink.INSERT(TRUE);
+        LineNo += 10000;
+      END;
+    END;
+
+    LOCAL PROCEDURE InsertIssueLinks@1100528712(JSONString@1100528717 : Text;GenIssue@1100528700 : Record 11125907);
+    VAR
+      JsonManagement@1100528716 : Codeunit 5459;
+      GenChecklistLinkMgt@1100528715 : Codeunit 11012688;
+      JObject@1100528714 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      JObject1@1100528713 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      JArray1@1100528712 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JArray";
+      JArray2@1100528711 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JArray";
+      IEnumerator1@1100528710 : DotNet "'mscorlib'.System.Collections.Generic.IEnumerator`1";
+      IEnumerator2@1100528709 : DotNet "'mscorlib'.System.Collections.Generic.IEnumerator`1";
+      GenIssueLink@1100528707 : Record 11125908;
+      Value@1100528706 : Variant;
+      I@1100528705 : Integer;
+      LineNo@1100528704 : Integer;
+      TableNo@1100528703 : Integer;
+      RecRef@1100528702 : RecordRef;
+      KeyValues@1100528701 : ARRAY [10] OF Code[20];
+    BEGIN
+      CLEAR(JsonManagement);
+      JsonManagement.InitializeObject(JSONString);
+      JsonManagement.GetJSONObject(JObject);
+      JsonManagement.GetArrayPropertyValueFromJObjectByName(JObject, 'LinkIdentifiers', JArray1);
+      IEnumerator1 := JArray1.GetEnumerator;
+      LineNo := 10000;
+      WHILE IEnumerator1.MoveNext DO BEGIN
+        JObject1 := IEnumerator1.Current;
+        TableNo := BaseLib.GetPropertyValueByNameAsInt(JObject1, 'LinkedToType');
+        JsonManagement.GetArrayPropertyValueFromJObjectByName(JObject1, 'KeyValues', JArray2);
+        IEnumerator2 := JArray2.GetEnumerator;
+        CLEAR(KeyValues);
+        I := 0;
+        WHILE IEnumerator2.MoveNext DO BEGIN
+          I += 1;
+          KeyValues[I] := IEnumerator2.Current;
+        END;
+        GenChecklistLinkMgt.GetRecRefToLinkedTable(TableNo, KeyValues, RecRef);
+        GenIssueLink.VALIDATE("Issue No.", GenIssue."No.");
+        GenIssueLink."Line No." := LineNo;
+        GenIssueLink.VALIDATE("Linked To", RecRef.RECORDID);
+
+        GenIssueLink.INSERT(TRUE);
+        LineNo += 10000;
+      END;
+    END;
+
+    LOCAL PROCEDURE InsertDocumentUsage@1100528721(JSONString@1100528700 : Text;GenIssue@1100528701 : Record 11125907);
+    VAR
+      JsonManagement@1100528703 : Codeunit 5459;
+      JObject@1100528704 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      RecRef@1100528706 : RecordRef;
+      Value@1100528702 : Variant;
+      DocumentUsage@1100528705 : Record 11072450;
+    BEGIN
+      CLEAR(JsonManagement);
+      JsonManagement.InitializeObject(JSONString);
+      JsonManagement.GetJSONObject(JObject);
+      DocumentUsage.INIT;
+      DocumentUsage.VALIDATE("Linked To", GenIssue.RECORDID);
+      Value := BaseLib.GetPropertyValueByNameAsText(JObject, 'DocumentNo');
+      IF (FORMAT(Value)) = '' THEN
+        ERROR(Text002);
+      DocumentUsage.VALIDATE("Document No.", Value);
+      Value := BaseLib.GetPropertyValueByNameAsInt(JObject, 'Usage');
+      DocumentUsage.VALIDATE(Usage, Value);
+      Value := BaseLib.GetPropertyValueByNameAsDecimal(JObject, 'PointX');
+      DocumentUsage.VALIDATE("Point-X", Value);
+      Value := BaseLib.GetPropertyValueByNameAsDecimal(JObject, 'PointY');
+      DocumentUsage.VALIDATE("Point-Y", Value);
+      DocumentUsage.INSERT(TRUE);
+    END;
+
+    LOCAL PROCEDURE TryUpdateDocumentUsage@1100528714(JSONString@1100528700 : Text;GenIssue@1100528701 : Record 11125907) : Boolean;
+    VAR
+      JsonManagement@1100528703 : Codeunit 5459;
+      JObject@1100528704 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      RecRef@1100528706 : RecordRef;
+      Value@1100528702 : Variant;
+      DocumentUsage@1100528705 : Record 11072450;
+    BEGIN
+      CLEAR(JsonManagement);
+      JsonManagement.InitializeObject(JSONString);
+      JsonManagement.GetJSONObject(JObject);
+      DocumentUsage.SETRANGE("Linked To", GenIssue.RECORDID);
+      Value := BaseLib.GetPropertyValueByNameAsText(JObject, 'DocumentNo');
+      IF (FORMAT(Value)) = '' THEN
+        ERROR(Text002);
+      DocumentUsage.SETRANGE("Document No.", Value);
+      Value := BaseLib.GetPropertyValueByNameAsInt(JObject, 'Usage');
+      DocumentUsage.SETRANGE(Usage, Value);
+      IF NOT DocumentUsage.FINDFIRST THEN
+        EXIT(FALSE);
+      Value := BaseLib.GetPropertyValueByNameAsDecimal(JObject, 'PointX');
+      DocumentUsage.VALIDATE("Point-X", Value);
+      Value := BaseLib.GetPropertyValueByNameAsDecimal(JObject, 'PointY');
+      DocumentUsage.VALIDATE("Point-Y", Value);
+      DocumentUsage.MODIFY(TRUE);
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE GetUserIdFromResource@1100528717(ResourceNo@1100528700 : Code[20]) : Code[50];
+    VAR
+      Resource@1100528701 : Record 11229278;
+      Employee@1100528702 : Record 5200;
+      UserSetup@1100528703 : Record 91;
+    BEGIN
+      IF Resource.GET(ResourceNo) THEN BEGIN
+        IF Resource.Type <> Resource.Type::Employee THEN
+          EXIT;
+        Employee.CHANGECOMPANY(Resource.Company);
+        UserSetup.CHANGECOMPANY(Resource.Company);
+        IF Employee.GET(Resource."Source No.") THEN BEGIN
+          UserSetup.SETRANGE("Employee No.", Employee."No.");
+          IF UserSetup.FINDFIRST THEN
+            EXIT(UserSetup."User ID");
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE GetPropertyName@1100528707(FieldType@1100528700 : Option) : Text;
+    VAR
+      GenChecklistCopyLine@1100528701 : Record 11125903;
+    BEGIN
+      CASE FieldType OF
+        GenChecklistCopyLine."Field Type"::Text:
+          EXIT('Value');
+        GenChecklistCopyLine."Field Type"::Numeric:
+          EXIT('NumericValue');
+        GenChecklistCopyLine."Field Type"::Date:
+          EXIT('DateValue');
+        GenChecklistCopyLine."Field Type"::Option:
+          EXIT('OptionValueCode');
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

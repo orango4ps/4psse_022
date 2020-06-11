@@ -1,0 +1,2109 @@
+OBJECT Codeunit 11128035 Exp. Sales Inv. Svefaktura 3
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW111.00.00.26401;
+  }
+  PROPERTIES
+  {
+    TableNo=62;
+    OnRun=VAR
+            SalesInvoiceHeader@1001 : Record 112;
+            RecordRef@1002 : RecordRef;
+            SalesRecSetup@1100285102 : Record 311;
+          BEGIN
+            IF ID <> 0 THEN BEGIN
+              SalesRecSetup.GET;
+              SalesRecSetup.TESTFIELD("Export Path Svefaktura");
+              SalesRecSetup.TESTFIELD(SalesRecSetup."External Doc. No. as Pmt. Ref", TRUE); // 141007
+
+              RecordRef.GET(RecordID);
+              RecordRef.SETTABLE(SalesInvoiceHeader);
+
+              IF SalesRecSetup."Svefaktura Background Export" AND (NOT gFromNAS) THEN
+                EXIT;
+
+              gFromNAS := TRUE;
+              HandleInvoicesFromNAS(SalesInvoiceHeader,Rec);
+              MODIFY;
+            END
+            ELSE
+              NASRunExportAll;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      gFromNAS@111280003 : Boolean;
+      PEPPOLMgt@1100285108 : Codeunit 1605;
+      gGLSetup@111280000 : Record 98;
+      gSvefakturasettings@1100285104 : Record 11128035;
+      gXMLWriter@1100285109 : Codeunit 11128077;
+      gNScac@1100285107 : Text;
+      gNScbc@1100285106 : Text;
+      gNSccts@1100285105 : Text;
+      gNSqdt@1100285103 : Text;
+      gNSudt@1100285102 : Text;
+      gNSurn@1100285101 : Text;
+      gStrippedView@1100285121 : Boolean;
+      gSalesHeader@1100285112 : TEMPORARY Record 36;
+      gSalesLine@1100285100 : TEMPORARY Record 37;
+      TempVATAmtLine@1100285110 : TEMPORARY Record 290;
+      TempVATProductPostingGroup@1100285111 : TEMPORARY Record 324;
+      LineNoWithData@1100285113 : Integer;
+      txtInvoiceAmount@1100285115 : TextConst 'ENU=Removed cotained amount;NOR=Fradrag innest†ende bel›p;SVE=Avdrag inneh†llet belopp';
+      TextSE@1100285114 : TextConst 'ENU=Godk„nd f”r F-skatt;SVE=Godk„nd f”r F-skatt';
+      GenericSalesHeaderTEMP@1100285120 : TEMPORARY Record 11071888;
+      GenericSalesLineTEMP@1100285119 : TEMPORARY Record 11071889;
+      SalesInvoiceHeaderTEMP@1100285118 : TEMPORARY Record 112;
+      SalesInvoiceLineTEMP@1100285117 : TEMPORARY Record 113;
+      SalesReportTextLineRec@1100285116 : Record 11071912;
+      SpecifyASalesInvoiceNoErr@1100285122 : TextConst 'ENU=You must specify a sales invoice number.;SVE=Du m†ste ange ett f”rs„ljningsfakturanummer.';
+
+    LOCAL PROCEDURE NASRunExportAll@111280000();
+    VAR
+      SalesRecSetup@111280002 : Record 311;
+      SalesInvoiceHeader@111280001 : Record 112;
+      SalesCrMemoHeader@111280000 : Record 114;
+      RecordExportBuffer@1100285101 : Record 62;
+    BEGIN
+      // Runs export of invoices and marks "Invoice exported by xml" to TRUE when physically exported.
+      SELECTLATESTVERSION;
+      CLEARALL;
+      SalesRecSetup.GET;
+      IF NOT SalesRecSetup."Svefaktura Background Export" THEN
+        EXIT;
+      gFromNAS := TRUE;
+
+      // ******************* Sales Invoices ***************************
+      SalesInvoiceHeader.SETRANGE("Invoice Exported by XML", FALSE);
+      SalesInvoiceHeader.SETRANGE("Electronic Invoice Created", TRUE);
+      SalesInvoiceHeader.SETRANGE("Electronic Invoicing", SalesInvoiceHeader."Electronic Invoicing"::"Svefaktura (XML)");
+      IF SalesInvoiceHeader.FINDSET THEN REPEAT
+        HandleInvoicesFromNAS(SalesInvoiceHeader,RecordExportBuffer);
+      UNTIL SalesInvoiceHeader.NEXT=0;
+
+      // ******************* Sales Cr. Memo ***************************
+      SalesCrMemoHeader.SETRANGE("Invoice Exported by XML", FALSE);
+      SalesCrMemoHeader.SETRANGE("Electronic Credit Memo Created", TRUE);
+      SalesCrMemoHeader.SETRANGE("Electronic Invoicing", SalesCrMemoHeader."Electronic Invoicing"::"Svefaktura (XML)");
+      IF NOT SalesCrMemoHeader.ISEMPTY THEN BEGIN
+        HandleCrMemosFromNAS(SalesCrMemoHeader,RecordExportBuffer);
+      END;
+    END;
+
+    LOCAL PROCEDURE HandleInvoicesFromNAS@1100285124(VAR pSalesInvHeader@1100285100 : Record 112;VAR RecordExportBuffer@1100285106 : Record 62);
+    VAR
+      SalesInvHead@1100285105 : Record 112;
+      HideItemNo@1100285104 : Boolean;
+      ShowDiscount@1100285103 : Boolean;
+      FileManagement@1100285102 : Codeunit 419;
+      SalesReceivablesSetup@1100285101 : Record 311;
+    BEGIN
+      SalesInvHead.GET(pSalesInvHeader."No.");
+      GetSettingsFromLayoutCode(SalesInvHead."Invoice Layout Code", SalesInvHead."E-Invoice Layout Code", HideItemNo, ShowDiscount);
+      SalesInvHead.MODIFY;
+      COMMIT;
+      SalesReceivablesSetup.GET;
+      RecordExportBuffer.ClientFileName := SalesReceivablesSetup."Export Path Svefaktura" + '\' + 'Inv_';
+      RecordExportBuffer.ClientFileName += pSalesInvHeader."No." + '_' + FORMAT(CURRENTDATETIME,0,'<year4><month,2><day,2>_<Hours24,2><Filler Character,0><Minutes,2><Seconds,2><Second dec.><Comma,.>T.xml');
+      // RecordExportBuffer.ClientFileName += pSalesInvHeader."No." + '_' + FORMAT(CURRENTDATETIME,0,'<year4><month,2><day,2>_<Hours24,2>T.xml');
+
+      CreateSalesInvoice(SalesInvHead, 0, HideItemNo, ShowDiscount,RecordExportBuffer,FALSE);
+      // RecordExportBuffer.ServerFilePath := GenerateXMLFile(SalesInvHead, FORMAT(0), HideItemNo, ShowDiscount);
+
+      FileManagement.DeleteClientFile(RecordExportBuffer.ClientFileName);
+      FileManagement.DownloadToFile(RecordExportBuffer.ServerFilePath,RecordExportBuffer.ClientFileName);
+
+      SalesInvHead."Invoice Exported by XML" := TRUE;
+      SalesInvHead.MODIFY;
+      COMMIT;
+    END;
+
+    PROCEDURE HandleCrMemosFromNAS@1100285106(VAR pSalesCrMemoHeader@1100285100 : Record 114;VAR RecordExportBuffer@1100285106 : Record 62);
+    VAR
+      SalesInvHead@1100285105 : Record 112;
+      SalesCrMemoHeader@1100285101 : Record 114;
+      SalesReceivablesSetup@1100285107 : Record 311;
+      HideItemNo@1100285104 : Boolean;
+      ShowDiscount@1100285103 : Boolean;
+      FileManagement@1100285102 : Codeunit 419;
+    BEGIN
+      SalesCrMemoHeader.GET(pSalesCrMemoHeader."No.");
+      GetSettingsFromLayoutCode(SalesCrMemoHeader."Invoice Layout Code", SalesCrMemoHeader."E-Invoice Layout Code", HideItemNo, ShowDiscount);
+      SalesCrMemoHeader.MODIFY;
+      COMMIT;
+
+      SalesReceivablesSetup.GET;
+      RecordExportBuffer.ClientFileName := SalesReceivablesSetup."Export Path Svefaktura" + '\' + 'CrM_';
+      // RecordExportBuffer.ClientFileName += pSalesCrMemoHeader."No." + '_' + FORMAT(CURRENTDATETIME,0,'<year4><month,2><day,2>_<Hours24,2><Filler Character,0><Minutes,2><Seconds,2><Second dec.><Comma,.>T.xml');
+      RecordExportBuffer.ClientFileName += pSalesCrMemoHeader."No." + '_' + FORMAT(CURRENTDATETIME,0,'<year4><month,2><day,2>_<Hours24,2>T.xml');
+
+      SalesInvHead.TRANSFERFIELDS(SalesCrMemoHeader);
+      // SalesInvHead.COPYFILTERS(SalesCrMemoHeader);
+      pSalesCrMemoHeader.COPYFILTER("No.",SalesInvHead."No.");
+      pSalesCrMemoHeader.COPYFILTER("Invoice Exported by XML",SalesInvHead."Invoice Exported by XML");
+      pSalesCrMemoHeader.COPYFILTER("Electronic Credit Memo Created",SalesInvHead."Electronic Invoice Created");
+      pSalesCrMemoHeader.COPYFILTER("Electronic Invoicing",SalesInvHead."Electronic Invoicing");
+
+      CreateSalesInvoice(SalesInvHead, 0, HideItemNo, ShowDiscount,RecordExportBuffer,TRUE);
+      // RecordExportBuffer.ServerFilePath := GenerateXMLFile(SalesInvHead, FORMAT(0), HideItemNo, ShowDiscount);
+
+      FileManagement.DeleteClientFile(RecordExportBuffer.ClientFileName);
+      FileManagement.DownloadToFile(RecordExportBuffer.ServerFilePath,RecordExportBuffer.ClientFileName);
+
+      SalesCrMemoHeader."Invoice Exported by XML" := TRUE;
+      SalesCrMemoHeader.MODIFY;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CreateSalesInvoice@1100285002(VAR pSalesInvHeader@1100285500 : Record 112;LayoutCode@1100285000 : Integer;HideItemNo@1100285001 : Boolean;ShowDiscount@1100285002 : Boolean;VAR RecordExportBuffer@1100285107 : Record 62;IsCreditMemo@1100285116 : Boolean);
+    VAR
+      SalesReportTextManagement@1100285100 : Codeunit 11012369;
+      SalesRecSetup@1100285101 : Record 311;
+      SalesInvoiceLine@1100285102 : Record 113;
+      lvSalesReportTextLineRec@1100285103 : Record 11071912;
+      lvCustomerRec@1000000002 : Record 18;
+      lvStrippedView@1000000003 : Boolean;
+      lvDescription@1000000004 : Text[100];
+      lvExtensionContract@1000000005 : Code[10];
+      lvExtensionContractCount@1000000006 : Integer;
+      lvSalesReportTextCondition@111285100 : Record 11071891;
+      lvStringLen@1100285108 : Integer;
+      lvInvoiceText@1100285109 : Text[250];
+      lvInvoiceLineNo@1100285110 : Integer;
+      PEPPOLManagement@1100285115 : Codeunit 1605;
+      FileManagement@1100285104 : Codeunit 419;
+      OutFile@1100285113 : File;
+      OutStream@1100285112 : OutStream;
+      XmlServerPath@1100285111 : Text;
+      SalesCrMemoHeader@1100285117 : Record 114;
+      SalesCrMemoLine@1100285118 : Record 115;
+    BEGIN
+      SalesRecSetup.GET;
+      //>> 160919 ITERO.AC IME484 Check if stripped invoice should be used.
+      //   Now we are adding group headers and group footers as invoice lines for non-stripped invoices
+      IF gFromNAS THEN BEGIN
+        gGLSetup.GET;
+        IF lvCustomerRec.GET(pSalesInvHeader."Sell-to Customer No.") THEN;
+        lvStrippedView := lvCustomerRec."Stripped E-Invoice" AND NOT gGLSetup."Norwegian Localization Active";
+      END;
+
+      GenericSalesHeaderTEMP.DELETEALL;
+      GenericSalesLineTEMP.DELETEALL;
+      SalesInvoiceHeaderTEMP.DELETEALL;
+      SalesInvoiceHeaderTEMP.INIT;
+
+      IF IsCreditMemo THEN BEGIN
+        SalesCrMemoHeader.TRANSFERFIELDS(pSalesInvHeader);
+        GenericSalesHeaderTEMP.InsertSalesCrMemoHeader(SalesCrMemoHeader);
+      END
+      ELSE
+        GenericSalesHeaderTEMP.InsertSalesInvoiceHeader(pSalesInvHeader);
+
+      IF NOT GenericSalesHeaderTEMP.HasTextLines THEN BEGIN
+
+        pSalesInvHeader."Invoice Layout Code" := FORMAT(LayoutCode);
+        IF IsCreditMemo THEN BEGIN
+          SalesCrMemoHeader.GET(pSalesInvHeader."No.");
+          SalesCrMemoHeader."Invoice Layout Code" := pSalesInvHeader."Invoice Layout Code";
+          SalesCrMemoHeader.MODIFY(FALSE);
+        END ELSE
+          pSalesInvHeader.MODIFY(FALSE);
+
+        IF IsCreditMemo THEN
+          SalesReportTextManagement.CreateTextLinesForPostedCrMemo(SalesCrMemoHeader)
+        ELSE
+          SalesReportTextManagement.CreateTextLinesForPostedInvoice(pSalesInvHeader);
+        //>> 160919 ITERO.AC IME484 Bugfix if the invoice has no Invoice Layout Code (if the invoice is printed before RFC-001)
+        GenericSalesHeaderTEMP."Invoice Layout Code" := pSalesInvHeader."Invoice Layout Code";
+      END ELSE BEGIN
+        IF pSalesInvHeader."Invoice Layout Code" = '' THEN BEGIN
+          pSalesInvHeader."Invoice Layout Code" := FORMAT(LayoutCode);
+          IF IsCreditMemo THEN BEGIN
+            SalesCrMemoHeader.GET(pSalesInvHeader."No.");
+            SalesCrMemoHeader."Invoice Layout Code" := pSalesInvHeader."Invoice Layout Code";
+            SalesCrMemoHeader.MODIFY(FALSE);
+          END ELSE
+            pSalesInvHeader.MODIFY(FALSE);
+          GenericSalesHeaderTEMP."Invoice Layout Code" := pSalesInvHeader."Invoice Layout Code";
+        END;
+      //<< 160919 ITERO.AC IME484 Bugfix
+      END;
+
+      SalesInvoiceHeaderTEMP.TRANSFERFIELDS(GenericSalesHeaderTEMP);
+      SalesInvoiceHeaderTEMP.INSERT;
+      //140602
+      SalesInvoiceLineTEMP.DELETEALL;
+      SalesInvoiceLine.SETRANGE("Document No.", pSalesInvHeader."No.");
+      IF SalesInvoiceLine.FINDSET(FALSE) AND NOT IsCreditMemo THEN REPEAT
+        //>> 161024 ITERO.AC IME484-2 Count number of Extension contracts
+        IF SalesInvoiceLine."Extension Contract" <> '' THEN BEGIN
+          IF lvExtensionContract <> SalesInvoiceLine."Extension Contract" THEN BEGIN
+            lvExtensionContractCount += 1;
+            lvExtensionContract := SalesInvoiceLine."Extension Contract";
+          END;
+        END;
+        //<< 161024 ITERO.AC IME484-2
+        IF (SalesInvoiceHeaderTEMP."Invoice Layout Code" IN ['1', '2', '3', '4']) THEN
+            GenericSalesLineTEMP.InsertSalesInvoiceLine(SalesInvoiceLine)
+        ELSE
+          GenericSalesLineTEMP.InsertSalesInvoiceLineGroup(SalesInvoiceLine);
+      UNTIL SalesInvoiceLine.NEXT = 0;
+
+
+      SalesCrMemoLine.SETRANGE("Document No.",pSalesInvHeader."No.");
+      IF SalesCrMemoLine.FINDSET(FALSE) AND IsCreditMemo THEN REPEAT
+        IF SalesCrMemoLine."Extension Contract" <> '' THEN BEGIN
+          IF lvExtensionContract <> SalesCrMemoLine."Extension Contract" THEN BEGIN
+            lvExtensionContractCount += 1;
+            lvExtensionContract := SalesCrMemoLine."Extension Contract";
+          END;
+        END;
+        IF (SalesInvoiceHeaderTEMP."Invoice Layout Code" IN ['1', '2', '3', '4']) THEN
+            GenericSalesLineTEMP.InsertSalesCrMemoLine(SalesCrMemoLine)
+        ELSE
+            GenericSalesLineTEMP.InsertSalesCrMemoLineGroup(SalesCrMemoLine);
+      UNTIL SalesCrMemoLine.NEXT = 0;
+
+      IF GenericSalesLineTEMP.FINDSET(FALSE) THEN
+      BEGIN
+        IF gFromNAS AND (NOT lvStrippedView) AND (lvExtensionContractCount = 1) THEN BEGIN
+          SalesInvoiceLineTEMP.INIT;
+          lvSalesReportTextCondition.RESET;
+          lvSalesReportTextCondition.SETRANGE("Document Type",lvSalesReportTextCondition."Document Type"::"Posted Invoice");
+          lvSalesReportTextCondition.SETRANGE("Text Line Type", lvSalesReportTextCondition."Text Line Type"::"Before Detail");
+          lvSalesReportTextCondition.SETRANGE("Function Name",'EXTENSIONINVOICE2');
+          IF lvSalesReportTextCondition.FINDFIRST THEN BEGIN
+            lvSalesReportTextLineRec.SETRANGE("Document Type", lvSalesReportTextLineRec."Document Type"::"Posted Invoice");
+            lvSalesReportTextLineRec.SETRANGE("Document No.", pSalesInvHeader."No.");
+            lvSalesReportTextLineRec.SETRANGE("Document Line No.",GenericSalesLineTEMP."Line No.");
+            lvSalesReportTextLineRec.SETRANGE("Text Line Type", lvSalesReportTextLineRec."Text Line Type"::"Before Detail");
+            lvSalesReportTextLineRec.SETFILTER(Text, '<>%1', '');
+            lvSalesReportTextLineRec.SETRANGE("Line No.",lvSalesReportTextCondition."Text Line No.");
+            IF lvSalesReportTextLineRec.FINDFIRST THEN BEGIN
+              IF CheckGroupHeader(lvSalesReportTextLineRec, lvExtensionContractCount, SalesInvoiceHeaderTEMP."Invoice Layout Code") THEN BEGIN
+                SalesInvoiceLineTEMP.TRANSFERFIELDS(GenericSalesLineTEMP);
+
+                //180913 always top of print regardless of "Invoice Layout Code"
+                SalesInvoiceLineTEMP."Cost Type Cost Plus Line" := 0;
+                SalesInvoiceLineTEMP."Job No." := '';
+                SalesInvoiceLineTEMP."Extension Contract":='';
+
+                SalesInvoiceLineTEMP."Document No." := GenericSalesLineTEMP."Document No.";
+                SalesInvoiceLineTEMP."Line No." := GenericSalesLineTEMP."Line No." -20;
+                lvDescription := COPYSTR(DeleteHTML(lvSalesReportTextLineRec.Text), 1, 100);
+                SalesInvoiceLineTEMP.Description := COPYSTR(lvDescription, 1, 50);
+                IF STRLEN(lvDescription) > 50 THEN
+                  SalesInvoiceLineTEMP."Description 2" := COPYSTR(lvDescription, 51, 50);
+                BlankInvoiceLineFieldsForGroupHeader(SalesInvoiceLineTEMP);
+                SalesInvoiceLineTEMP.MARK(TRUE);      // XML Port checks the MARK flag to determine if the line is an extra text line or not!
+                SalesInvoiceLineTEMP.INSERT(FALSE);
+                SalesInvoiceLineTEMP.INIT;
+              END;
+            END;
+            lvSalesReportTextLineRec.SETRANGE("Line No.");
+            lvExtensionContractCount := 0; //don't double print the extension line
+          END;
+        END;
+        REPEAT
+          SalesInvoiceLineTEMP.INIT;
+          IF gFromNAS AND NOT lvStrippedView THEN BEGIN
+            // Add Line before current invoice line if exists in Sales Report Text Line
+            lvSalesReportTextLineRec.SETRANGE("Document Type", lvSalesReportTextLineRec."Document Type"::"Posted Invoice");
+            lvSalesReportTextLineRec.SETRANGE("Document No.", pSalesInvHeader."No.");
+            lvSalesReportTextLineRec.SETRANGE("Document Line No.",GenericSalesLineTEMP."Line No.");
+            lvSalesReportTextLineRec.SETRANGE("Text Line Type", lvSalesReportTextLineRec."Text Line Type"::"Before Detail");
+            lvSalesReportTextLineRec.SETFILTER(Text, '<>%1', '');
+            // Very important to fetch last row, Otherwise we will get the first invoice header text row, in the first group header!!!
+            IF lvSalesReportTextLineRec.FINDLAST THEN BEGIN
+              IF CheckGroupHeader(lvSalesReportTextLineRec, lvExtensionContractCount, SalesInvoiceHeaderTEMP."Invoice Layout Code") THEN BEGIN
+                SalesInvoiceLineTEMP.TRANSFERFIELDS(GenericSalesLineTEMP);
+                SalesInvoiceLineTEMP."Document No." := GenericSalesLineTEMP."Document No.";
+                SalesInvoiceLineTEMP."Line No." := GenericSalesLineTEMP."Line No." -10;
+                lvDescription := COPYSTR('* ' + DeleteHTML(lvSalesReportTextLineRec.Text), 1, 100);
+                SalesInvoiceLineTEMP.Description := COPYSTR(lvDescription, 1, 50);
+                IF STRLEN(lvDescription) > 50 THEN
+                  SalesInvoiceLineTEMP."Description 2" := COPYSTR(lvDescription, 51, 50);
+                BlankInvoiceLineFieldsForGroupHeader(SalesInvoiceLineTEMP);
+                SalesInvoiceLineTEMP.MARK(TRUE);      // XML Port checks the MARK flag to determine if the line is an extra text line or not!
+                SalesInvoiceLineTEMP.INSERT(FALSE);
+                SalesInvoiceLineTEMP.INIT;
+              END;
+            END;
+          END;
+
+          IF gFromNAS AND (NOT lvStrippedView) THEN BEGIN //>>190219 RFC1150
+            IF GenericSalesLineTEMP."Text Block" AND (GenericSalesLineTEMP."Extension Contract" = '') THEN BEGIN
+              lvInvoiceText   := GenericSalesLineTEMP.Text;
+              lvInvoiceLineNo := GenericSalesLineTEMP."Line No." - 30 ;
+              REPEAT
+                lvStringLen   := STRLEN(lvInvoiceText);
+                IF lvStringLen > 50 THEN
+                  lvStringLen := GetLastSpacePos(COPYSTR(lvInvoiceText,1,50));
+                SalesInvoiceLineTEMP.INIT;
+                SalesInvoiceLineTEMP."Document No."  := GenericSalesLineTEMP."Document No.";
+                SalesInvoiceLineTEMP."Line No."      := lvInvoiceLineNo;
+                SalesInvoiceLineTEMP.Description     := COPYSTR(lvInvoiceText,1,lvStringLen);
+                SalesInvoiceLineTEMP.MARK(TRUE);
+                SalesInvoiceLineTEMP.INSERT(FALSE);
+                lvInvoiceText := DELSTR(lvInvoiceText,1,lvStringLen);
+                lvInvoiceLineNo += 1;
+              UNTIL STRLEN(lvInvoiceText) = 0;
+            END;
+          END;
+
+          // Add the "real" Invoice Line
+          // Use same filter as in Report 81666 - Generic Sales Document Imtech (Skip "hidden" rows even if we use them to find group headers)
+          IF (((GenericSalesLineTEMP."System-Created Entry" = FALSE) AND (GenericSalesLineTEMP.Description <> '') AND (GenericSalesLineTEMP.Type = GenericSalesLineTEMP.Type::" "))
+              OR (GenericSalesLineTEMP.Amount <> 0) OR (GenericSalesLineTEMP."Amount Including VAT" <> 0)
+              OR ((GenericSalesLineTEMP.Type = GenericSalesLineTEMP.Type::"G/L Account") AND (lvStrippedView = FALSE)) ) THEN BEGIN   // Inlude text lines from project cost plus entries
+            SalesInvoiceLineTEMP.TRANSFERFIELDS(GenericSalesLineTEMP);
+            SalesInvoiceLineTEMP.INSERT(FALSE);   //  Do not run trigger on temporary records !!
+          END;
+          IF gFromNAS AND NOT lvStrippedView THEN BEGIN
+            // Add Line after the current invoice line if exists in Sales Report Text Line
+            lvSalesReportTextLineRec.SETRANGE("Text Line Type", lvSalesReportTextLineRec."Text Line Type"::"After Detail");
+            IF lvSalesReportTextLineRec.FINDFIRST THEN BEGIN
+              IF CheckGroupFooter(lvSalesReportTextLineRec) THEN BEGIN
+                SalesInvoiceLineTEMP.TRANSFERFIELDS(GenericSalesLineTEMP);
+                SalesInvoiceLineTEMP."Document No." := GenericSalesLineTEMP."Document No.";
+                SalesInvoiceLineTEMP."Line No." := GenericSalesLineTEMP."Line No." +10;
+                lvDescription := COPYSTR('** ' + DeleteHTML(lvSalesReportTextLineRec.Text), 1, 100);
+                SalesInvoiceLineTEMP.Description := COPYSTR(lvDescription, 1, 50);
+                IF STRLEN(lvDescription) > 50 THEN
+                  SalesInvoiceLineTEMP."Description 2" := COPYSTR(lvDescription, 51, 50);
+                BlankInvoiceLineFieldsForGroupHeader(SalesInvoiceLineTEMP);
+                SalesInvoiceLineTEMP.MARK(TRUE);      // XML Port checks the MARK flag to determine if the line is an extra text line or not !
+                SalesInvoiceLineTEMP.INSERT(FALSE);
+                SalesInvoiceLineTEMP.INIT;
+              END;
+            END;
+          END;
+        UNTIL GenericSalesLineTEMP.NEXT = 0;
+
+      END;
+
+      RecordExportBuffer.ServerFilePath := FileManagement.ServerTempFileName('xml');
+      gSalesLine.RESET;
+      IF gSalesLine.ISTEMPORARY THEN gSalesLine.DELETEALL(FALSE);
+      gSalesHeader.INIT;
+      gSalesHeader.TRANSFERFIELDS(pSalesInvHeader);
+      gSalesHeader."Document Type" := gSalesHeader."Document Type"::Invoice;
+      IF IsCreditMemo THEN
+        gSalesHeader."Document Type" := gSalesHeader."Document Type"::"Credit Memo";
+      CreateInvoice(gSalesHeader,IsCreditMemo,HideItemNo);
+      gXMLWriter.SaveToFile(RecordExportBuffer.ServerFilePath);
+
+      pSalesInvHeader."Electronic Invoice Created" := TRUE;
+      IF gFromNAS OR (NOT SalesRecSetup."Svefaktura Background Export") THEN BEGIN
+        pSalesInvHeader."Invoice Exported by XML" := TRUE;
+      END ELSE BEGIN
+        IF STRPOS(pSalesInvHeader."Invoice Layout Code", ',') = 0 THEN
+          SetSettingsToEInvoiceLayoutCode(pSalesInvHeader."Invoice Layout Code", pSalesInvHeader."E-Invoice Layout Code", HideItemNo, ShowDiscount);
+        pSalesInvHeader."Invoice Exported by XML" := FALSE;
+      END;
+      IF NOT IsCreditMemo THEN pSalesInvHeader.MODIFY
+      ELSE BEGIN
+        SalesCrMemoHeader.GET(pSalesInvHeader."No.");
+        SalesCrMemoHeader."Electronic Credit Memo Created" := pSalesInvHeader."Electronic Invoice Created";
+        IF STRPOS(SalesCrMemoHeader."Invoice Layout Code", ',') = 0 THEN
+          SetSettingsToEInvoiceLayoutCode(SalesCrMemoHeader."Invoice Layout Code", SalesCrMemoHeader."E-Invoice Layout Code", HideItemNo, ShowDiscount);
+        SalesCrMemoHeader."Invoice Exported by XML" := pSalesInvHeader."Invoice Exported by XML";
+        SalesCrMemoHeader.MODIFY;
+      END;
+    END;
+
+    LOCAL PROCEDURE GetSettingsFromLayoutCode@1100285005(VAR LayoutCode@1100285000 : Code[20];VAR EInvoiceLayoutCode@1100285004 : Code[10];VAR HideItemNo@1100285001 : Boolean;VAR ShowDiscount@1100285002 : Boolean);
+    VAR
+      TextTemp@1100285003 : Code[10];
+    BEGIN
+      IF STRPOS(EInvoiceLayoutCode, ',') <> 0 THEN BEGIN
+         TextTemp := EInvoiceLayoutCode;
+         LayoutCode := SELECTSTR(1, TextTemp);
+         EVALUATE(HideItemNo, SELECTSTR(2, TextTemp));
+         EVALUATE(ShowDiscount, SELECTSTR(3, TextTemp));
+      END ELSE BEGIN
+        TextTemp := LayoutCode;
+        IF STRPOS(LayoutCode, ',') <> 0 THEN BEGIN
+          LayoutCode := SELECTSTR(1, TextTemp);
+          EVALUATE(HideItemNo, SELECTSTR(2, TextTemp));
+          EVALUATE(ShowDiscount, SELECTSTR(3, TextTemp));
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE SetSettingsToLayoutCode@1100285006(VAR LayoutCode@1100285000 : Code[20];VAR HideItemNo@1100285001 : Boolean;VAR ShowDiscount@1100285002 : Boolean);
+    VAR
+      int@1100285003 : Integer;
+    BEGIN
+      CASE HideItemNo OF
+         TRUE: int := 1;
+         FALSE: int := 0;
+      END;
+      LayoutCode := LayoutCode + ',' + FORMAT(int);
+
+      CASE ShowDiscount OF
+         TRUE: int := 1;
+         FALSE: int := 0;
+      END;
+      LayoutCode := LayoutCode + ',' + FORMAT(int);
+    END;
+
+    LOCAL PROCEDURE SetSettingsToEInvoiceLayoutCode@1100285007(LayoutCode@1100285002 : Code[20];VAR EInvoiceLayoutCode@1100285003 : Code[20];VAR HideItemNo@1100285001 : Boolean;VAR ShowDiscount@1100285000 : Boolean);
+    VAR
+      int@1100285004 : Integer;
+    BEGIN
+      // 160121 ITERO.AC IME445 New Function used to calculate E-Invoice Layout Code
+      IF (EInvoiceLayoutCode = '') OR (STRPOS(EInvoiceLayoutCode, ',') < 1 ) THEN BEGIN
+        EInvoiceLayoutCode := SELECTSTR(1, LayoutCode);
+        CASE HideItemNo OF
+          TRUE: int := 1;
+          FALSE: int := 0;
+        END;
+
+        EInvoiceLayoutCode := EInvoiceLayoutCode + ',' + FORMAT(int);
+
+        CASE ShowDiscount OF
+          TRUE: int := 1;
+          FALSE: int := 0;
+        END;
+        EInvoiceLayoutCode := EInvoiceLayoutCode + ',' + FORMAT(int);
+
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckGroupHeader@1000000002(VAR pSalesReportTextLineRec@1000000000 : Record 11071912;pExtensionContractCount@1000000002 : Integer;pInvLayoutCode@1000000003 : Code[10]) : Boolean;
+    VAR
+      lvSalesReportTextCondRec@1000000001 : Record 11071891;
+    BEGIN
+      // 160920 ITERO.AC IME484 New help function
+      // Used to determine if a line before detail should be added as a MARKED Invoice Line or not in Svefaktura XML Export
+
+      lvSalesReportTextCondRec.SETRANGE("Document Type", pSalesReportTextLineRec."Document Type");
+      lvSalesReportTextCondRec.SETRANGE("Text Line Type", pSalesReportTextLineRec."Text Line Type");
+      lvSalesReportTextCondRec.SETRANGE("Text Line No.", pSalesReportTextLineRec."Line No.");
+      lvSalesReportTextCondRec.SETFILTER("Function Name", 'ELEMENTINVOICE|EXTENSIONINVOICE|FirstLineOfType'); //190529 ORANGO.FH RFC1153
+      IF lvSalesReportTextCondRec.FINDSET(FALSE) THEN BEGIN
+        EXIT(TRUE);
+      END ELSE BEGIN
+        //>> 161024 ITERO.AC IME484-2 Adjustment
+        // Check if only one Extension contract, Write a header line if the invoice only contains one single extension contract
+        // Do not use this for invoices with Invoice Layout Code 3 (Sorted by Extension contract)
+        IF (pExtensionContractCount = 1) AND (pInvLayoutCode <> '3') THEN BEGIN
+          lvSalesReportTextCondRec.SETFILTER("Function Name", 'EXTENSIONINVOICE2');
+          IF lvSalesReportTextCondRec.FINDSET(FALSE) THEN BEGIN
+            EXIT(TRUE);
+          END;
+        END ELSE BEGIN
+          EXIT(FALSE);
+        //<< 161024 ITERO.AC IME484-2
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckGroupFooter@1000000018(VAR pSalesReportTextLineRec@1000000000 : Record 11071912) : Boolean;
+    VAR
+      lvSalesReportTextCondRec@1000000001 : Record 11071891;
+    BEGIN
+      // 160920 ITERO.AC IME484 New help function
+      // Used to determine if a line after detail should be added as a MARKED Invoice Line or not in Svefaktura XML Export
+      // A Group Footer as Installment Withheld Amount will result in FALSE because the XML port will add it
+
+      lvSalesReportTextCondRec.SETRANGE("Document Type", pSalesReportTextLineRec."Document Type");
+      lvSalesReportTextCondRec.SETRANGE("Text Line Type", pSalesReportTextLineRec."Text Line Type");
+      lvSalesReportTextCondRec.SETRANGE("Text Line No.", pSalesReportTextLineRec."Line No.");
+      lvSalesReportTextCondRec.SETFILTER("Function Name", 'InstallmentAmountHasValue');
+      IF lvSalesReportTextCondRec.FINDSET(FALSE) THEN BEGIN
+          EXIT(FALSE);
+      END ELSE BEGIN
+          EXIT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE DeleteHTML@1100285018(IncomingHTML@1100285000 : Text) : Text;
+    VAR
+      StartPos@1100285001 : Integer;
+      EndPos@1100285002 : Integer;
+      Maxtry@1100285100 : Integer;
+    BEGIN
+      // 160919 ITERO.AC IME484 New Function used to remove HTML tags in text
+      // Is is a copy of the same function from XML Port 81647 - Imtech Svefaktura
+      Maxtry := 0;
+      IF STRPOS(IncomingHTML, '<') <> 0 THEN REPEAT
+         Maxtry += 1;
+         StartPos := STRPOS(IncomingHTML, '<');
+         EndPos := STRPOS(IncomingHTML, '>');
+         IF (StartPos > 1) THEN
+            IncomingHTML := COPYSTR(IncomingHTML, 1, StartPos - 1) + COPYSTR(IncomingHTML, EndPos + 1)
+         ELSE IF (StartPos = 1) THEN
+            IncomingHTML := COPYSTR(IncomingHTML, EndPos + 1);
+      UNTIL (STRPOS(IncomingHTML, '<') = 0) OR (EndPos = 0) OR (Maxtry > 250);
+
+      IncomingHTML := CONVERTSTR(IncomingHTML, ';', ' ');
+
+      EXIT(IncomingHTML);
+    END;
+
+    LOCAL PROCEDURE BlankInvoiceLineFieldsForGroupHeader@1000000008(VAR SalesInvoiceLineTEMP@1000000000 : Record 113);
+    BEGIN
+      // 160919 ITERO.AC IME484 Help function
+      // We are now using Invoice Lines for group headers and some fields must be
+      // blank or zero in order to avoid export of field data.
+
+      // SalesInvoiceLineTEMP."Unit of Measure" := '';
+      // SalesInvoiceLineTEMP."Unit of Measure Code" := '';
+      SalesInvoiceLineTEMP.Quantity :=0;
+      SalesInvoiceLineTEMP."Line Amount" :=0;
+      SalesInvoiceLineTEMP."Line Discount %" :=0;
+      SalesInvoiceLineTEMP.Amount :=0;
+      SalesInvoiceLineTEMP."Amount Including VAT" :=0;
+      SalesInvoiceLineTEMP."Unit Price" :=0;
+      SalesInvoiceLineTEMP."VAT Base Amount" := 0;
+      SalesInvoiceLineTEMP."Unit Cost" :=0;
+      SalesInvoiceLineTEMP."Unit Cost (LCY)" :=0;
+      SalesInvoiceLineTEMP."VAT Bus. Posting Group" := '';
+      SalesInvoiceLineTEMP."VAT Prod. Posting Group" := '';
+      SalesInvoiceLineTEMP."VAT %" :=0;
+      // SalesInvoiceLineTEMP."Surcharge %" :=0;
+      SalesInvoiceLineTEMP."Item No." := '';
+      SalesInvoiceLineTEMP."Basic Item" := '';
+      SalesInvoiceLineTEMP."Trade Item" := '';
+      SalesInvoiceLineTEMP.Manufacturer := '';
+      SalesInvoiceLineTEMP."Vendor (Trade Item)" := '';
+      // SalesInvoiceLineTEMP."VAT Calculation Type"
+      // SalesInvoiceLineTEMP."Job No."
+      // SalesInvoiceLineTEMP."Sell-to Customer No."
+      SalesInvoiceLineTEMP."Commission No." := '';
+      SalesInvoiceLineTEMP."Settl.Sheet No." := '';
+      SalesInvoiceLineTEMP."Cost Plus Line No." :=0;
+    END;
+
+    LOCAL PROCEDURE GetLastSpacePos@1100285115(str@1100285100 : Text[50]) SpacePlace : Integer;
+    VAR
+      pos@1100285101 : Integer;
+      reverseStr@1100285102 : Text[50];
+    BEGIN
+      IF 1 = STRPOS(str, ' ') THEN
+        str := DELSTR(str,1,1);
+      pos := STRLEN(str);
+      REPEAT
+        reverseStr := reverseStr + COPYSTR(str,pos,1);
+        pos -= 1;
+      UNTIL pos = 0;
+      EXIT(STRLEN(str) - STRPOS(reverseStr,' '));
+    END;
+
+    LOCAL PROCEDURE "//nytag"@1100285100();
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE AdjSalesInvoiceLineDescPublisher@1101285001(SalesInvoiceHeader@1101285000 : Record 112;SalesInvoiceLine@1101285002 : Record 113;VAR SalesInvoiceLineDescription@1101285001 : Text);
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE GetCustomizationID@9() : Text;
+    BEGIN
+      EXIT('urn:cen.eu:en16931:2017#compliant#urn:fdc:peppol.eu:2017:poacc:billing:3.0')
+    END;
+
+    LOCAL PROCEDURE GetProfileID@10() : Text;
+    BEGIN
+      EXIT('urn:fdc:peppol.eu:2017:poacc:billing:01:1.0');
+    END;
+
+    LOCAL PROCEDURE GetBuyerReference@1100285126(VAR SalesHeader@1100285100 : Record 36) BuyerReference : Text;
+    VAR
+      SESetup@1100285101 : Record 11128004;
+      ServiceOrder@1100285102 : Record 11012823;
+      lContact@1100285103 : Record 5050;
+    BEGIN
+      BuyerReference := (SalesHeader."Order No. Customer");
+
+      //fr†n SeSetup byt ut till kontakt.namn om det finns
+      IF (NOT SESetup.GET(SESetup."Line type"::Mapping,'X82440RDR',SalesHeader."Sell-to Customer No.")) THEN BEGIN
+        SESetup.INIT;
+        SESetup."Line type" := SESetup."Line type"::Mapping;
+        SESetup.Code := 'X82440RDR';
+        SESetup."Code 2" := SalesHeader."Sell-to Customer No.";
+        SESetup.Description := 'Use Sell-to.Contact.Name as RequisitionistDocumentReference  (code2,bool)';
+      END;
+
+      IF (SalesHeader."Sell-to Contact No." = '') AND (SalesHeader."Service Order No."<>'') THEN
+        IF ServiceOrder.GET(SalesHeader."Service Order No.") THEN
+          SalesHeader."Sell-to Contact No." := ServiceOrder."Bill-to Contact Person";
+
+      IF SESetup."Value (bool)" AND (SalesHeader."Sell-to Contact No." <> '') AND lContact.GET(SalesHeader."Sell-to Contact No.") THEN BEGIN
+        IF lContact.Name <> '' THEN
+          BuyerReference := lContact.Name;
+      END;
+
+      IF SESetup."Value (bool)" AND (SalesHeader."Sell-to Contact No." = '') AND ServiceOrder.GET(SalesHeader."Service Order No.") THEN BEGIN
+        IF ServiceOrder."Contact Name" <> '' THEN
+          BuyerReference := ServiceOrder."Contact Name";
+      END;
+
+      IF NOT SESetup.GET(SESetup."Line type"::Setup,'SVFDOCREF2', SalesHeader."Bill-to Customer No.") THEN
+        SESetup."Value (bool)":=FALSE;
+      IF SESetup."Value (bool)" THEN
+        BuyerReference := COPYSTR(SalesHeader."Principal Reference",1,STRPOS(SalesHeader."Principal Reference",' ')-1);
+      //    AccountingCost  := COPYSTR(SalesHeader."Principal Reference",STRPOS(SalesHeader."Principal Reference",' ')+1);
+
+      IF (SalesHeader."Order No. Customer" <> '') AND SESetup.GET(SESetup."Line type"::Setup,'SVFORDNREF',SalesHeader."Bill-to Customer No.") THEN
+        IF SESetup."Value (bool)" THEN
+          BuyerReference := SalesHeader."Order No. Customer";
+    END;
+
+    PROCEDURE CreateInvoice@1100285103(VAR SalesHeader@1100285101 : Record 36;isCredit@1100285100 : Boolean;HideItemNo@1100285288 : Boolean);
+    VAR
+      CurrencyCode@1100285109 : Code[10];
+      AmountInclVAT@1100285108 : Decimal;
+      AmountExclVAT@1100285107 : Decimal;
+      VATAmount@1100285106 : Decimal;
+      RoundingAmount@1100285105 : Decimal;
+      DiscountAmount@1100285104 : Decimal;
+      ShowTextConstrVAT@1100285102 : Boolean;
+      "--- new line"@1100285119 : Integer;
+      GeneralLedgerSetup@1100285139 : Record 98;
+      SalesReceivablesSetup@1100285131 : Record 311;
+      CompanyInformation@1100285217 : Record 79;
+      PEPPOLMgt@1100285116 : Codeunit 1605;
+      SalesHeaderExtension@1100285137 : Record 11071868;
+      SalesInvoiceHeader@1100285113 : Record 112;
+      AdditionalDocRefLoop@1100285150 : Record 2000000026;
+      DocumentLink@1100285282 : Record 11012747;
+      ShiptoAddress@1100285258 : Record 222;
+      PaymentMeansLoop@1100285235 : Record 2000000026;
+      CustLedgerEntry@1100285233 : Record 21;
+      AllowanceChargeLoop@1100285216 : Record 2000000026;
+      VATProductPostingGroupCategory@1100285205 : Record 324;
+      InvoiceLineLoop@1100285167 : Record 2000000026;
+      SalesReportTextLineFooter@1100285152 : Record 11071912;
+      ID@1100285115 : Text;
+      IssueDate@1100285114 : Text;
+      InvoiceTypeCode@1100285110 : Text;
+      InvoiceTypeCodeListID@1100285117 : Text;
+      Note@1100285118 : Text;
+      TaxPointDate@1100285120 : Text;
+      DocumentCurrencyCode@1100285121 : Text;
+      DocumentCurrencyCodeListID@1100285122 : Text;
+      TaxCurrencyCode@1100285112 : Text;
+      TaxCurrencyCodeListID@1100285111 : Text;
+      AccountingCost@1100285123 : Text;
+      StrippedView@1100285124 : Boolean;
+      gNoRounding@1100285125 : Boolean;
+      custBuyersID@1100285126 : Boolean;
+      custAvtalID@1100285127 : Text;
+      DueDate@1100285129 : Text;
+      BuyerReference@1100285128 : Text;
+      InvoicePeriod@1100285130 : Text;
+      StartDate@1100285132 : Text;
+      EndDate@1100285133 : Text;
+      OrderReference@1100285134 : Text;
+      OrderReferenceID@1100285135 : Text;
+      SalesOrderID@1100285136 : Text;
+      BillingReferenceID@1100285138 : Text;
+      BillingReferenceIssueDate@1100285140 : Text;
+      ContractDocumentReferenceID@1100285144 : Text;
+      DocumentTypeCode@1100285143 : Text;
+      ContractRefDocTypeCodeListID@1100285142 : Text;
+      DocumentType@1100285141 : Text;
+      AdditionalDocumentReferenceID@1100285149 : Text;
+      AdditionalDocRefDocumentType@1100285148 : Text;
+      URI@1100285147 : Text;
+      MimeCode@1100285146 : Text;
+      EmbeddedDocumentBinaryObject@1100285145 : Text;
+      filename@1100285155 : Text;
+      DontMoveFiles@1100285151 : Boolean;
+      SupplierEndpointID@1100285156 : Text;
+      SupplierSchemeID@1100285154 : Text;
+      SupplierName@1100285153 : Text;
+      StreetName@1100285163 : Text;
+      SupplierAdditionalStreetName@1100285162 : Text;
+      CityName@1100285161 : Text;
+      PostalZone@1100285160 : Text;
+      CountrySubentity@1100285159 : Text;
+      IdentificationCode@1100285158 : Text;
+      ListID@1100285157 : Text;
+      CompanyID@1100285166 : Text;
+      CompanyIDSchemeID@1100285165 : Text;
+      TaxSchemeID@1100285164 : Text;
+      ExemptionReason@1100285103 : Text;
+      CompanyIDNO@1100285170 : Text;
+      CompanyIDSchemeIDNO@1100285169 : Text;
+      TaxSchemeIDNO@1100285168 : Text;
+      PartyLegalEntityRegName@1100285176 : Text;
+      PartyLegalEntityCompanyID@1100285175 : Text;
+      PartyLegalEntitySchemeID@1100285174 : Text;
+      SupplierRegAddrCityName@1100285173 : Text;
+      SupplierRegAddrCountryIdCode@1100285172 : Text;
+      SupplRegAddrCountryIdListId@1100285171 : Text;
+      ContactID@1100285181 : Text;
+      ContactName@1100285180 : Text;
+      Telephone@1100285179 : Text;
+      Telefax@1100285178 : Text;
+      ElectronicMail@1100285177 : Text;
+      CustomerEndpointID@1100285186 : Text;
+      CustomerSchemeID@1100285185 : Text;
+      CustomerPartyIdentificationID@1100285184 : Text;
+      CustomerPartyIDSchemeID@1100285183 : Text;
+      CustomerName@1100285182 : Text;
+      CustomerStreetName@1100285193 : Text;
+      CustomerAdditionalStreetName@1100285192 : Text;
+      CustomerCityName@1100285191 : Text;
+      CustomerPostalZone@1100285190 : Text;
+      CustomerCountrySubentity@1100285189 : Text;
+      CustomerIdentificationCode@1100285188 : Text;
+      CustomerListID@1100285187 : Text;
+      CustPartyTaxSchemeCompanyID@1100285196 : Text;
+      CustPartyTaxSchemeCompIDSchID@1100285195 : Text;
+      CustTaxSchemeID@1100285194 : Text;
+      CustPartyLegalEntityRegName@1100285199 : Text;
+      CustPartyLegalEntityCompanyID@1100285198 : Text;
+      CustPartyLegalEntityIDSchemeID@1100285197 : Text;
+      CustContactID@1100285204 : Text;
+      CustContactName@1100285203 : Text;
+      CustContactTelephone@1100285202 : Text;
+      CustContactTelefax@1100285201 : Text;
+      CustContactElectronicMail@1100285200 : Text;
+      ActualDeliveryDate@1100285208 : Text;
+      DeliveryID@1100285207 : Text;
+      DeliveryIDSchemeID@1100285206 : Text;
+      DeliveryStreetName@1100285215 : Text;
+      DeliveryAdditionalStreetName@1100285214 : Text;
+      DeliveryCityName@1100285213 : Text;
+      DeliveryPostalZone@1100285212 : Text;
+      DeliveryCountrySubentity@1100285211 : Text;
+      DeliveryCountryIdCode@1100285210 : Text;
+      DeliveryCountryListID@1100285209 : Text;
+      PaymentMeansCode@1100285224 : Text;
+      PaymentMeansListID@1100285223 : Text;
+      PaymentDueDate@1100285222 : Text;
+      PaymentChannelCode@1100285221 : Text;
+      PaymentID@1100285220 : Text;
+      PrimaryAccountNumberID@1100285219 : Text;
+      NetworkID@1100285218 : Text;
+      PayeeFinancialAccountID@1100285230 : Text;
+      PaymentMeansSchemeID@1100285229 : Text;
+      FinancialInstitutionBranchID@1100285228 : Text;
+      FinancialInstitutionID@1100285227 : Text;
+      FinancialInstitutionSchemeID@1100285226 : Text;
+      FinancialInstitutionName@1100285225 : Text;
+      PaymentTermsNote@1100285231 : Text;
+      AllowanceChargeReasonROT@1100285232 : Text;
+      AmountROT@1100285234 : Text;
+      ChargeIndicator@1100285245 : Text;
+      AllowanceChargeReasonCode@1100285244 : Text;
+      AllowanceChargeListID@1100285243 : Text;
+      AllowanceChargeReason@1100285242 : Text;
+      Amount@1100285241 : Text;
+      AllowanceChargeCurrencyID@1100285240 : Text;
+      TaxCategoryID@1100285239 : Text;
+      TaxCategorySchemeID@1100285238 : Text;
+      Percent@1100285237 : Text;
+      AllowanceChargeTaxSchemeID@1100285236 : Text;
+      TaxAmount@1100285247 : Text;
+      TaxTotalCurrencyID@1100285246 : Text;
+      TaxableAmount@1100285257 : Text;
+      TaxAmountCurrencyID@1100285256 : Text;
+      SubtotalTaxAmount@1100285255 : Text;
+      TaxSubtotalCurrencyID@1100285254 : Text;
+      TransactionCurrencyTaxAmount@1100285253 : Text;
+      TransCurrTaxAmtCurrencyID@1100285252 : Text;
+      TaxTotalTaxCategoryID@1100285251 : Text;
+      schemeID@1100285250 : Text;
+      TaxCategoryPercent@1100285249 : Text;
+      TaxTotalTaxSchemeID@1100285248 : Text;
+      TaxExemptionReason@1100285259 : Text;
+      LineDescriptionBefore@1100285260 : Text;
+      TextTaxAmount@1100285261 : Text;
+      TextTaxTotalCurrencyID@1100285262 : Text;
+      TextschemeID@1100285263 : Text;
+      TextTaxTotalTaxSchemeID@1100285264 : Text;
+      TextTaxTotalTaxCategoryID@1100285265 : Text;
+      LineExtensionAmount@1100285281 : Text;
+      LegalMonetaryTotalCurrencyID@1100285280 : Text;
+      TaxExclusiveAmount@1100285279 : Text;
+      TaxExclusiveAmountCurrencyID@1100285278 : Text;
+      TaxInclusiveAmount@1100285277 : Text;
+      TaxInclusiveAmountCurrencyID@1100285276 : Text;
+      AllowanceTotalAmount@1100285275 : Text;
+      AllowanceTotalAmountCurrencyID@1100285274 : Text;
+      ChargeTotalAmount@1100285273 : Text;
+      ChargeTotalAmountCurrencyID@1100285272 : Text;
+      PrepaidAmount@1100285271 : Text;
+      PrepaidCurrencyID@1100285270 : Text;
+      PayableRoundingAmount@1100285269 : Text;
+      PayableRndingAmountCurrencyID@1100285268 : Text;
+      PayableAmount@1100285267 : Text;
+      PayableAmountCurrencyID@1100285266 : Text;
+      CurrentLineNo@1100285284 : Integer;
+      NewLine@1100285285 : Boolean;
+      LineChange@1100285286 : Boolean;
+      SalesLines@1100285293 : Boolean;
+      ReportLinesBefore@1100285292 : Boolean;
+      ReportLinesAfter@1100285291 : Boolean;
+      ReachedLineEnd@1100285290 : Boolean;
+      ShowDiscount@1100285298 : Boolean;
+      InvoiceExtraLine@1100285324 : Boolean;
+      LineCount2@1100285287 : Integer;
+    BEGIN
+      gNScac:='urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2';
+      gNScbc:='urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2';
+      // gNSccts:='urn:un:unece:uncefact:documentation:2';
+      // gNSqdt:='urn:oasis:names:specification:ubl:schema:xsd:QualifiedDatatypes-2';
+      // gNSudt:='urn:un:unece:uncefact:data:specification:UnqualifiedDataTypesSchemaModule:2';
+      IF isCredit THEN
+        gNSurn:='urn:oasis:names:specification:ubl:schema:xsd:CreditNote-2'
+      ELSE
+        gNSurn:='urn:oasis:names:specification:ubl:schema:xsd:Invoice-2';
+
+      IF isCredit THEN gXMLWriter.CreateDomNS('UTF-8', '', 'CreditNote', '')
+      ELSE gXMLWriter.CreateDomNS('UTF-8', '', 'Invoice', '');
+      gXMLWriter.AddAttribute('xmlns:cac', gNScac);
+      gXMLWriter.AddAttribute('xmlns:cbc', gNScbc);
+      // gXMLWriter.AddAttribute('xmlns:ccts', gNSccts);
+      // gXMLWriter.AddAttribute('xmlns:qdt', gNSqdt);
+      // gXMLWriter.AddAttribute('xmlns:udt', gNSudt);
+      gXMLWriter.AddAttribute('xmlns', gNSurn);
+
+      //SalesInvoiceLine -> SalesLine
+      //SalesInvoiceLine -> SalesLine -> TempVATAmtLine + TempVATProductPostingGroup
+      GetTotals;
+
+      PEPPOLMgt.GetGeneralInfo(
+        SalesHeader,
+        ID,
+        IssueDate,
+        InvoiceTypeCode,
+        InvoiceTypeCodeListID,
+        Note,
+        TaxPointDate,
+        DocumentCurrencyCode,
+        DocumentCurrencyCodeListID,
+        TaxCurrencyCode,
+        TaxCurrencyCodeListID,
+        AccountingCost,StrippedView,gNoRounding,custBuyersID,custAvtalID);
+
+      DueDate := FORMAT(SalesHeader."Due Date",0,9);
+
+
+
+      gXMLWriter.AddElementAbsNS(2, 'cbc:CustomizationID', GetCustomizationID, gNScbc);
+      gXMLWriter.AddElementAbsNS(2, 'cbc:ProfileID', GetProfileID, gNScbc);
+      gXMLWriter.AddElementAbsNS(2, 'cbc:ID', ID, gNScbc);
+      gXMLWriter.AddElementAbsNS(2, 'cbc:IssueDate', IssueDate, gNScbc);
+      IF NOT isCredit THEN
+        gXMLWriter.AddElementAbsNS(2, 'cbc:DueDate', DueDate, gNScbc);
+
+      IF isCredit THEN gXMLWriter.AddElementAbsNS(2, 'cbc:CreditNoteTypeCode', '381', gNScbc)
+      ELSE gXMLWriter.AddElementAbsNS(2, 'cbc:InvoiceTypeCode', '380', gNScbc);
+      // IF InvoiceTypeCodeListID<>'' THEN
+      //  gXMLWriter.AddAttribute('listID',InvoiceTypeCodeListID);
+
+      IF Note<>'' THEN
+        gXMLWriter.AddElementAbsNS(2, 'cbc:Note', Note, gNScbc);
+
+      IF TaxPointDate <> '' THEN
+        gXMLWriter.AddElementAbsNS(2, 'cbc:TaxPointDate',TaxPointDate,gNScbc);
+
+      gXMLWriter.AddElementAbsNS(2, 'cbc:DocumentCurrencyCode', DocumentCurrencyCode, gNScbc);
+      // IF DocumentCurrencyCodeListID<>'' THEN
+      //  gXMLWriter.AddAttribute('listID',DocumentCurrencyCodeListID);
+
+      IF AccountingCost <>'' THEN
+        gXMLWriter.AddElementAbsNS(2,'cbc:AccountingCost',AccountingCost,gNScbc);
+
+
+      BuyerReference := GetBuyerReference(SalesHeader);
+      IF BuyerReference<>'' THEN gXMLWriter.AddElementAbsNS(2, 'cbc:BuyerReference', BuyerReference, gNScbc);
+
+      // PEPPOLMgt.GetInvoicePeriodInfo(
+      //  StartDate,
+      //  EndDate);
+      //
+      // IF InvoicePeriod<>'' THEN gXMLWriter.AddElementAbsNS(2, 'InvoicePeriod', InvoicePeriod, gNScbc);
+      // IF StartDate<>'' THEN gXMLWriter.AddElementAbsNS(2, 'StartDate', StartDate, gNScbc);
+      // IF EndDate<>'' THEN gXMLWriter.AddElementAbsNS(2, 'EndDate', EndDate, gNScbc);
+
+      PEPPOLMgt.GetOrderReferenceInfoBIS(
+        SalesHeader,
+        OrderReferenceID);
+      IF NOT SalesHeaderExtension.GET(SalesHeader."Document Type",SalesHeader."No.") THEN
+        SalesHeaderExtension.INIT;
+      SalesOrderID := SalesHeaderExtension."Order No.";
+      IF (OrderReferenceID<>'') OR (SalesOrderID<>'') THEN
+        gXMLWriter.AddElementAbsNS(2, 'cac:OrderReference', '', gNScac);
+      IF OrderReferenceID<>'' THEN gXMLWriter.AddElementAbsNS(3, 'cbc:ID', OrderReferenceID, gNScbc);
+      IF SalesOrderID<>'' THEN gXMLWriter.AddElementAbsNS(3, 'cbc:SalesOrderID', SalesOrderID, gNScbc);
+
+
+
+      BillingReferenceID := '';
+      IF StrippedView AND (SalesHeader."Applies-to Doc. No." <> '') THEN
+        BillingReferenceID := SalesHeader."Applies-to Doc. No.";
+
+      IF NOT SalesHeaderExtension.GET(SalesHeader."Document Type",SalesHeader."No.") THEN
+        SalesHeaderExtension.INIT;
+      IF (SalesHeaderExtension."Electronic Invoicing" = SalesHeaderExtension."Electronic Invoicing"::"Svefaktura (XML)") AND
+        SalesReceivablesSetup."External Doc. No. as Pmt. Ref" THEN BEGIN
+        BillingReferenceID := '';
+        CASE SalesHeader."Applies-to Doc. Type" OF
+          SalesHeader."Applies-to Doc. Type"::Invoice:
+            IF SalesInvoiceHeader.GET(SalesHeader."Applies-to Doc. No.") THEN BEGIN
+              BillingReferenceID := SalesInvoiceHeader."External Document No.";
+              BillingReferenceIssueDate := FORMAT(SalesInvoiceHeader."Posting Date",0,9);
+            END;
+        END;
+      END;
+
+      IF BillingReferenceID <> '' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(2, 'cac:BillingReference', '', gNScac);
+        gXMLWriter.AddElementAbsNS(3, 'cbc:InvoiceDocumentReference', '', gNScbc);
+        IF BillingReferenceID<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cbc:ID', BillingReferenceID, gNScbc);
+        IF BillingReferenceIssueDate<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cbc:IssueDate', BillingReferenceIssueDate, gNScbc);
+      END;
+
+      PEPPOLMgt.GetContractDocRefInfo(
+        SalesHeader,
+        ContractDocumentReferenceID,
+        DocumentTypeCode,
+        ContractRefDocTypeCodeListID,
+        DocumentType);
+      //BT-12
+      ContractDocumentReferenceID := PEPPOLMgt.getCustAvtalID(SalesHeader,ContractDocumentReferenceID);
+      IF ContractDocumentReferenceID<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(2, 'cac:ContractDocumentReference', '', gNScac);
+        gXMLWriter.AddElementAbsNS(3, 'cbc:ID', ContractDocumentReferenceID, gNScbc);
+      END;
+
+      PEPPOLMgt.GetAdditionalDocRefInfo(AdditionalDocumentReferenceID, AdditionalDocRefDocumentType, URI, MimeCode, EmbeddedDocumentBinaryObject);
+      AdditionalDocumentReferenceID := PEPPOLMgt.GetAdditionalDocRefACD(SalesHeader,AdditionalDocRefDocumentType);
+      IF AdditionalDocumentReferenceID <>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(2, 'cac:AdditionalDocumentReference', '', gNScac);
+        gXMLWriter.AddElementAbsNS(3, 'cbc:ID', AdditionalDocumentReferenceID, gNScbc);
+        gXMLWriter.AddElementAbsNS(3, 'cbc:DocumentType', AdditionalDocRefDocumentType, gNScbc);
+      END;
+
+      PEPPOLMgt.GetAdditionalDocRefInfo(AdditionalDocumentReferenceID, AdditionalDocRefDocumentType, URI, MimeCode, EmbeddedDocumentBinaryObject);
+      EmbeddedDocumentBinaryObject := PEPPOLMgt.GetAdditionalDocRefPDF(SalesHeader,filename,MimeCode,AdditionalDocumentReferenceID,AdditionalDocRefDocumentType,TRUE);
+      IF EmbeddedDocumentBinaryObject <> '' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(2, 'cac:AdditionalDocumentReference', '', gNScac);
+        gXMLWriter.AddElementAbsNS(3, 'cbc:ID', AdditionalDocumentReferenceID, gNScbc);
+        gXMLWriter.AddElementAbsNS(3, 'cbc:DocumentType', AdditionalDocRefDocumentType, gNScbc);
+        gXMLWriter.AddElementAbsNS(3, 'cac:Attachment', '', gNScac);
+      //  gXMLWriter.AddElementAbsNS(4, 'cbc:DocumentDescription', DocumentDescription, gNScbc);
+        gXMLWriter.AddElementAbsNS(4, 'cbc:EmbeddedDocumentBinaryObject', EmbeddedDocumentBinaryObject, gNScbc);
+        gXMLWriter.AddAttribute('filename', filename);
+        gXMLWriter.AddAttribute('mimeCode', MimeCode);
+      END;
+
+      AdditionalDocRefLoop.SETRANGE(Number,1,PEPPOLMgt.SetAdditionalDocRefATS(SalesHeader,DocumentLink,isCredit));
+      IF DocumentLink.FINDSET AND AdditionalDocRefLoop.FINDSET THEN REPEAT
+        PEPPOLMgt.GetAdditionalDocRefInfo(AdditionalDocumentReferenceID, AdditionalDocRefDocumentType, URI, MimeCode, EmbeddedDocumentBinaryObject);
+        PEPPOLMgt.GetAdditionalDocRefATS(DocumentLink,filename,MimeCode,AdditionalDocumentReferenceID,AdditionalDocRefDocumentType,TRUE);
+        EmbeddedDocumentBinaryObject := DocumentLink."Document No.";
+        gXMLWriter.AddElementAbsNS(2, 'cac:AdditionalDocumentReference', '', gNScac);
+        gXMLWriter.AddElementAbsNS(3, 'cbc:ID', AdditionalDocumentReferenceID, gNScbc);
+        gXMLWriter.AddElementAbsNS(3, 'cbc:DocumentType', AdditionalDocRefDocumentType, gNScbc);
+        gXMLWriter.AddElementAbsNS(3, 'cac:Attachment', '', gNScac);
+        // gXMLWriter.AddElementAbsNS(4, 'cbc:DocumentDescription', DocumentDescription, gNScbc);
+        gXMLWriter.AddElementAbsNS(4, 'cbc:EmbeddedDocumentBinaryObject', EmbeddedDocumentBinaryObject, gNScbc);
+        gXMLWriter.AddAttribute('filename', filename);
+        gXMLWriter.AddAttribute('mimeCode', MimeCode);
+        // gXMLWriter.AddElementAbsNS(4, 'cac:ExternalReference', ExternalReference, gNScac);
+        // gXMLWriter.AddElementAbsNS(4, 'cbc:URI', URI, gNScbc);
+      UNTIL (AdditionalDocRefLoop.NEXT=0) OR (DocumentLink.NEXT=0);
+
+
+      PEPPOLMgt.GetAccountingSupplierPartyInfoBIS(
+        SupplierEndpointID,
+        SupplierSchemeID,
+        SupplierName);
+
+      PEPPOLMgt.GetAccountingSupplierPartyPostalAddr(
+        SalesHeader,
+        StreetName,
+        SupplierAdditionalStreetName,
+        CityName,
+        PostalZone,
+        CountrySubentity,
+        IdentificationCode,
+        ListID);
+
+      PEPPOLMgt.GetAccountingSupplierPartyTaxSchemeBIS(
+        TempVATAmtLine,
+        CompanyID,
+        CompanyIDSchemeID,
+        TaxSchemeID);
+      ExemptionReason := TextSE;
+
+      PEPPOLMgt.GetAccountingSupplierPartyTaxSchemeNO(
+        CompanyIDNO,
+        CompanyIDSchemeIDNO,
+        TaxSchemeIDNO);
+
+      PEPPOLMgt.GetAccountingSupplierPartyLegalEntityBIS(
+        PartyLegalEntityRegName,
+        PartyLegalEntityCompanyID,
+        PartyLegalEntitySchemeID,
+        SupplierRegAddrCityName,
+        SupplierRegAddrCountryIdCode,
+        SupplRegAddrCountryIdListId);
+
+      PEPPOLMgt.GetAccountingSupplierPartyContact(
+        SalesHeader,
+        ContactID,
+        ContactName,
+        Telephone,
+        Telefax,
+        ElectronicMail);
+
+      gXMLWriter.AddElementAbsNS(2, 'cac:AccountingSupplierParty', '', gNScac);
+      gXMLWriter.AddElementAbsNS(3, 'cac:Party', '', gNScac);
+      IF SupplierEndpointID<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cbc:EndpointID', SupplierEndpointID, gNScbc);
+      IF SupplierSchemeID<>'' THEN gXMLWriter.AddAttribute('schemeID', SupplierSchemeID);
+      // IF PartyIdentificationID<>'' THEN BEGIN
+      //  gXMLWriter.AddElementAbsNS(4, 'cac:PartyIdentification', '', gNScac);
+      //  gXMLWriter.AddElementAbsNS(5, 'cbc:ID', PartyIdentificationID, gNScbc);
+      // IF SupplierPartyIDSchemeID<>'' THEN gXMLWriter.AddAttribute('schemeID', SupplierPartyIDSchemeID);
+      IF SupplierName<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(4, 'cac:PartyName', '', gNScac);
+        gXMLWriter.AddElementAbsNS(5, 'cbc:Name', SupplierName, gNScbc);
+      END;
+
+      IF (StreetName<>'') OR (SupplierAdditionalStreetName<>'') OR (CityName<>'') OR (PostalZone<>'') OR (CountrySubentity<>'') OR (IdentificationCode<>'') THEN BEGIN
+        gXMLWriter.AddElementAbsNS(4, 'cac:PostalAddress', '', gNScac);
+        IF StreetName<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:StreetName', StreetName, gNScbc);
+        IF SupplierAdditionalStreetName<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:AdditionalStreetName', SupplierAdditionalStreetName, gNScbc);
+        IF CityName<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:CityName', CityName, gNScbc);
+        IF PostalZone<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:PostalZone', PostalZone, gNScbc);
+        IF CountrySubentity<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:CountrySubentity', CountrySubentity, gNScbc);
+        IF IdentificationCode<>'' THEN BEGIN
+          gXMLWriter.AddElementAbsNS(5, 'cac:Country', '', gNScac);
+          gXMLWriter.AddElementAbsNS(6, 'cbc:IdentificationCode', IdentificationCode, gNScbc);
+        END;
+      END;
+
+      IF CompanyID<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(4, 'cac:PartyTaxScheme', '', gNScac);
+        gXMLWriter.AddElementAbsNS(5, 'cbc:CompanyID', CompanyID, gNScbc);
+        IF CompanyIDSchemeID<>'' THEN gXMLWriter.AddAttribute('schemeID', CompanyIDSchemeID);
+        IF ExemptionReason<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:ExemptionReason', ExemptionReason, gNScbc);
+        IF TaxSchemeID<>'' THEN BEGIN
+          gXMLWriter.AddElementAbsNS(5, 'cac:TaxScheme', '', gNScac);
+          gXMLWriter.AddElementAbsNS(6, 'cbc:ID', TaxSchemeID, gNScbc);
+        END;
+      END;
+      IF CompanyIDNO<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(4, 'cac:PartyTaxScheme', '', gNScac);
+        gXMLWriter.AddElementAbsNS(5, 'cbc:CompanyID', CompanyIDNO, gNScbc);
+        IF CompanyIDSchemeIDNO<>'' THEN gXMLWriter.AddAttribute('schemeID', CompanyIDSchemeIDNO);
+      // IF ExemptionReasonNO<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:ExemptionReason', ExemptionReasonNO, gNScbc);
+        IF TaxSchemeIDNO<>'' THEN BEGIN
+          gXMLWriter.AddElementAbsNS(5, 'cac:TaxScheme', '', gNScac);
+          gXMLWriter.AddElementAbsNS(6, 'cbc:ID', TaxSchemeIDNO, gNScbc);
+        END;
+      END;
+
+      IF (PartyLegalEntityRegName<>'') OR (PartyLegalEntityCompanyID<>'') THEN BEGIN
+        gXMLWriter.AddElementAbsNS(4, 'cac:PartyLegalEntity', '', gNScac);
+        IF PartyLegalEntityRegName<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:RegistrationName', PartyLegalEntityRegName, gNScbc);
+        IF PartyLegalEntityCompanyID<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:CompanyID', PartyLegalEntityCompanyID, gNScbc);
+        IF PartyLegalEntitySchemeID<>'' THEN gXMLWriter.AddAttribute('schemeID', PartyLegalEntitySchemeID);
+      END;
+
+      IF (ContactName<>'') OR (Telephone<>'') OR (Telefax<>'') OR (ElectronicMail<>'') THEN BEGIN
+        gXMLWriter.AddElementAbsNS(4, 'cac:Contact', '', gNScac);
+        IF ContactName<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:Name', ContactName, gNScbc);
+        IF Telephone<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:Telephone', Telephone, gNScbc);
+        IF Telefax<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:Telefax', Telefax, gNScbc);
+        IF ElectronicMail<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:ElectronicMail', ElectronicMail, gNScbc);
+      END;
+
+
+      PEPPOLMgt.GetAccountingCustomerPartyInfoBIS(
+        SalesHeader,
+        CustomerEndpointID,
+        CustomerSchemeID,
+        CustomerPartyIdentificationID,
+        CustomerPartyIDSchemeID ,
+        CustomerName);
+
+      PEPPOLMgt.GetAccountingCustomerPartyPostalAddr(
+        SalesHeader,
+        CustomerStreetName,
+        CustomerAdditionalStreetName,
+        CustomerCityName,
+        CustomerPostalZone,
+        CustomerCountrySubentity,
+        CustomerIdentificationCode,
+        CustomerListID);
+
+      PEPPOLMgt.GetAccountingCustomerPartyTaxScheme(
+        SalesHeader,
+        CustPartyTaxSchemeCompanyID,
+        CustPartyTaxSchemeCompIDSchID,
+        CustTaxSchemeID);
+
+      PEPPOLMgt.GetAccountingCustomerPartyLegalEntityBIS(
+        SalesHeader,
+        CustPartyLegalEntityRegName,
+        CustPartyLegalEntityCompanyID,
+        CustPartyLegalEntityIDSchemeID);
+
+      IF NOT SalesHeaderExtension.GET(SalesHeader."Document Type",SalesHeader."No.") THEN
+        SalesHeaderExtension.INIT;
+
+      PEPPOLMgt.GetAccountingCustomerPartyContact(
+        SalesHeader,
+        SalesHeaderExtension,
+        CustContactID,
+        CustContactName,
+        CustContactTelephone,
+        CustContactTelefax,
+        CustContactElectronicMail);
+
+      IF CustomerEndpointID = '' THEN
+        CustomerEndpointID := SalesHeader."Sell-to Customer No.";
+      IF ShiptoAddress.GET(SalesHeader."Sell-to Customer No.",SalesHeader."Alternative Bill-to Address") THEN
+        IF ShiptoAddress.GLN <> '' THEN BEGIN
+          CustomerEndpointID := ShiptoAddress.GLN;
+          CustomerSchemeID := '0088';
+        END;
+
+      gXMLWriter.AddElementAbsNS(2, 'cac:AccountingCustomerParty', '', gNScac);
+      gXMLWriter.AddElementAbsNS(3, 'cac:Party', '', gNScac);
+      IF CustomerEndpointID<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(4, 'cbc:EndpointID', CustomerEndpointID, gNScbc);
+        IF CustomerSchemeID<>'' THEN gXMLWriter.AddAttribute('schemeID', CustomerSchemeID);
+      END;
+      IF CustomerPartyIdentificationID<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(4, 'cac:PartyIdentification', '', gNScac);
+        gXMLWriter.AddElementAbsNS(5, 'cbc:ID', CustomerPartyIdentificationID, gNScbc);
+        IF CustomerPartyIDSchemeID<>'' THEN gXMLWriter.AddAttribute('schemeID', CustomerPartyIDSchemeID);
+      END;
+      IF CustomerName<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(4, 'cac:PartyName', '', gNScac);
+        gXMLWriter.AddElementAbsNS(5, 'cbc:Name', CustomerName, gNScbc);
+      END;
+      IF (CustomerStreetName<>'') OR (CustomerAdditionalStreetName<>'') OR (CustomerCityName<>'') OR
+          (CustomerPostalZone<>'') OR (CustomerCountrySubentity<>'') OR (CustomerIdentificationCode<>'') THEN BEGIN
+        gXMLWriter.AddElementAbsNS(4, 'cac:PostalAddress', '', gNScac);
+        IF CustomerStreetName<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:StreetName', CustomerStreetName, gNScbc);
+        IF CustomerAdditionalStreetName<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:AdditionalStreetName', CustomerAdditionalStreetName, gNScbc);
+        IF CustomerCityName<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:CityName', CustomerCityName, gNScbc);
+        IF CustomerPostalZone<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:PostalZone', CustomerPostalZone, gNScbc);
+        IF CustomerCountrySubentity<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:CountrySubentity', CustomerCountrySubentity, gNScbc);
+        IF CustomerIdentificationCode<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cac:Country', '', gNScac);
+        IF CustomerIdentificationCode<>'' THEN gXMLWriter.AddElementAbsNS(6, 'cbc:IdentificationCode', CustomerIdentificationCode, gNScbc);
+      END;
+      IF CustTaxSchemeID<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(4, 'cac:PartyTaxScheme', '', gNScac);
+        IF CustPartyTaxSchemeCompanyID<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:CompanyID', CustPartyTaxSchemeCompanyID, gNScbc);
+        IF CustPartyTaxSchemeCompIDSchID<>'' THEN gXMLWriter.AddAttribute('schemeID', CustPartyTaxSchemeCompIDSchID);
+        IF CustTaxSchemeID<>'' THEN BEGIN
+          gXMLWriter.AddElementAbsNS(5, 'cac:TaxScheme', '', gNScac);
+          gXMLWriter.AddElementAbsNS(6, 'cbc:ID', CustTaxSchemeID, gNScbc);
+        END;
+      END;
+      IF CustPartyLegalEntityRegName<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(4, 'cac:PartyLegalEntity', '', gNScac);
+        IF CustPartyLegalEntityRegName<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:RegistrationName', CustPartyLegalEntityRegName, gNScbc);
+        IF CustPartyLegalEntityCompanyID<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:CompanyID', CustPartyLegalEntityCompanyID, gNScbc);
+        IF CustPartyLegalEntityIDSchemeID<>'' THEN gXMLWriter.AddAttribute('schemeID', CustPartyLegalEntityIDSchemeID);
+      END;
+
+      IF (CustContactName<>'') OR (CustContactTelephone<>'') OR (CustContactTelefax<>'') OR (CustContactElectronicMail<>'') THEN BEGIN
+        gXMLWriter.AddElementAbsNS(4, 'cac:Contact', '', gNScac);
+        IF CustContactName<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:Name', CustContactName, gNScbc);
+        IF CustContactTelephone<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:Telephone', CustContactTelephone, gNScbc);
+        IF CustContactTelefax<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:Telefax', CustContactTelefax, gNScbc);
+        IF CustContactElectronicMail<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:ElectronicMail', CustContactElectronicMail, gNScbc);
+      END;
+
+      // PEPPOLMgt.GetTaxRepresentativePartyInfo(
+      //  TaxRepPartyNameName,
+      //  PayeePartyTaxSchemeCompanyID,
+      //  PayeePartyTaxSchCompIDSchemeID,
+      //  PayeePartyTaxSchemeTaxSchemeID);
+      //
+      // IF TaxRepPartyPartyName<>'' THEN BEGIN
+      //  gXMLWriter.AddElementAbsNS(2, 'cac:TaxRepresentativeParty', TaxRepresentativeParty, gNScac);
+      //  IF TaxRepPartyPartyName<>'' THEN gXMLWriter.AddElementAbsNS(3, 'cac:PartyName', TaxRepPartyPartyName, gNScac);
+      //  IF TaxRepPartyNameName<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cbc:Name', TaxRepPartyNameName, gNScbc);
+      //  IF PayeePartyTaxScheme<>'' THEN BEGIN
+      //    gXMLWriter.AddElementAbsNS(3, 'cac:PartyTaxScheme', PayeePartyTaxScheme, gNScac);
+      //    IF PayeePartyTaxSchemeCompanyID<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cbc:CompanyID', PayeePartyTaxSchemeCompanyID, gNScbc);
+      //    IF PayeePartyTaxSchCompIDSchemeID<>'' THEN gXMLWriter.AddAttribute('schemeID', PayeePartyTaxSchCompIDSchemeID);
+      //    IF PayeePartyTaxSchemeTaxScheme<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cac:TaxScheme', PayeePartyTaxSchemeTaxScheme, gNScac);
+      //    IF PayeePartyTaxSchemeTaxSchemeID<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:ID', PayeePartyTaxSchemeTaxSchemeID, gNScbc);
+      //  END;
+      // END;
+
+      PEPPOLMgt.GetGLNDeliveryInfo(
+        SalesHeader,
+        ActualDeliveryDate,
+        DeliveryID,
+        DeliveryIDSchemeID);
+
+      PEPPOLMgt.GetDeliveryAddress(
+        SalesHeader,
+        DeliveryStreetName,
+        DeliveryAdditionalStreetName,
+        DeliveryCityName,
+        DeliveryPostalZone,
+        DeliveryCountrySubentity,
+        DeliveryCountryIdCode,
+        DeliveryCountryListID);
+
+      gXMLWriter.AddElementAbsNS(2, 'cac:Delivery', '', gNScac);
+      IF ActualDeliveryDate<>'' THEN gXMLWriter.AddElementAbsNS(3, 'cbc:ActualDeliveryDate', ActualDeliveryDate, gNScbc);
+      IF DeliveryID<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(3, 'cac:DeliveryLocation', '', gNScac);
+        gXMLWriter.AddElementAbsNS(4, 'cbc:ID', DeliveryID, gNScbc);
+        IF DeliveryIDSchemeID<>'' THEN gXMLWriter.AddAttribute('schemeID', DeliveryIDSchemeID);
+      IF (DeliveryStreetName<>'') OR (DeliveryAdditionalStreetName<>'') OR (DeliveryCityName<>'') OR (DeliveryPostalZone<>'') OR (DeliveryCountrySubentity<>'') OR (DeliveryCountryIdCode<>'') THEN BEGIN
+        gXMLWriter.AddElementAbsNS(4, 'cac:Address', '', gNScac);
+        IF DeliveryStreetName<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:StreetName', DeliveryStreetName, gNScbc);
+        IF DeliveryAdditionalStreetName<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:AdditionalStreetName', DeliveryAdditionalStreetName, gNScbc);
+        IF DeliveryCityName<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:CityName', DeliveryCityName, gNScbc);
+        IF DeliveryPostalZone<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:PostalZone', DeliveryPostalZone, gNScbc);
+        IF DeliveryCountrySubentity<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:CountrySubentity', DeliveryCountrySubentity, gNScbc);
+        IF DeliveryCountryIdCode<>'' THEN BEGIN
+          gXMLWriter.AddElementAbsNS(5, 'cac:Country', '', gNScac);
+          gXMLWriter.AddElementAbsNS(6, 'cbc:IdentificationCode', DeliveryCountryIdCode, gNScbc);
+        END;
+      END;
+      END;
+
+
+      CompanyInformation.GET;
+      PaymentMeansLoop.SETFILTER(Number, '1..3');
+      IF CompanyInformation."Country/Region Code" = 'NO' THEN
+        PaymentMeansLoop.SETFILTER(Number, '3..4');
+
+      IF PaymentMeansLoop.FINDSET THEN REPEAT
+        PEPPOLMgt.GetPaymentMeansInfo(
+          SalesHeader,
+          PaymentMeansCode,
+          PaymentMeansListID,
+          PaymentDueDate,
+          PaymentChannelCode,
+          PaymentID,
+          PrimaryAccountNumberID,
+          NetworkID,PaymentMeansLoop.Number);
+
+        PEPPOLMgt.GetPaymentMeansPayeeFinancialAcc(
+          PayeeFinancialAccountID,
+          PaymentMeansSchemeID,
+          FinancialInstitutionBranchID,
+          FinancialInstitutionID,
+          FinancialInstitutionSchemeID,
+          FinancialInstitutionName,PaymentMeansLoop.Number);
+
+      //  PEPPOLMgt.GetPaymentMeansFinancialInstitutionAddr(
+      //    FinancialInstitutionStreetName,
+      //    AdditionalStreetName,
+      //    FinancialInstitutionCityName,
+      //    FinancialInstitutionPostalZone,
+      //    FinancialInstCountrySubentity,
+      //    FinancialInstCountryIdCode,
+      //    FinancialInstCountryListID,PaymentMeansLoop.Number);
+
+        gXMLWriter.AddElementAbsNS(2, 'cac:PaymentMeans', '', gNScac);
+        IF PaymentMeansCode<>'' THEN gXMLWriter.AddElementAbsNS(3, 'cbc:PaymentMeansCode', PaymentMeansCode, gNScbc);
+        IF PaymentMeansListID<>'' THEN gXMLWriter.AddAttribute('listID', PaymentMeansListID);
+        IF PaymentChannelCode<>'' THEN gXMLWriter.AddElementAbsNS(3, 'cbc:PaymentChannelCode', PaymentChannelCode, gNScbc);
+        IF PaymentID<>'' THEN gXMLWriter.AddElementAbsNS(3, 'cbc:PaymentID', PaymentID, gNScbc);
+        IF PrimaryAccountNumberID<>'' THEN BEGIN
+          gXMLWriter.AddElementAbsNS(3, 'cac:CardAccount', '', gNScac);
+          gXMLWriter.AddElementAbsNS(4, 'cbc:PrimaryAccountNumberID', PrimaryAccountNumberID, gNScbc);
+          IF NetworkID<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cbc:NetworkID', NetworkID, gNScbc);
+        END;
+
+        IF PayeeFinancialAccountID<>'' THEN BEGIN
+          gXMLWriter.AddElementAbsNS(3, 'cac:PayeeFinancialAccount', '', gNScac);
+          IF PayeeFinancialAccountID<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cbc:ID', PayeeFinancialAccountID, gNScbc);
+          IF PaymentMeansSchemeID<>'' THEN gXMLWriter.AddAttribute('schemeID', PaymentMeansSchemeID);
+          IF (FinancialInstitutionBranchID<>'') OR (FinancialInstitutionID<>'') THEN BEGIN
+            gXMLWriter.AddElementAbsNS(4, 'cac:FinancialInstitutionBranch', '', gNScac);
+            IF FinancialInstitutionBranchID<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:ID', FinancialInstitutionBranchID, gNScbc);
+            IF FinancialInstitutionID<>'' THEN BEGIN
+              gXMLWriter.AddElementAbsNS(5, 'cac:FinancialInstitution', '', gNScac);
+              gXMLWriter.AddElementAbsNS(6, 'cbc:ID', FinancialInstitutionID, gNScbc);
+              IF FinancialInstitutionSchemeID<>'' THEN gXMLWriter.AddAttribute('schemeID', FinancialInstitutionSchemeID);
+            END;
+          END;
+        END;
+        // IF Address<>'' THEN gXMLWriter.AddElementAbsNS(6, 'cac:Address', Address, gNScac);
+        // IF FinancialInstitutionStreetName<>'' THEN gXMLWriter.AddElementAbsNS(7, 'cbc:StreetName', FinancialInstitutionStreetName, gNScbc);
+        // IF AdditionalStreetName<>'' THEN gXMLWriter.AddElementAbsNS(7, 'cbc:AdditionalStreetName', AdditionalStreetName, gNScbc);
+        // IF FinancialInstitutionCityName<>'' THEN gXMLWriter.AddElementAbsNS(7, 'cbc:CityName', FinancialInstitutionCityName, gNScbc);
+        // IF FinancialInstitutionPostalZone<>'' THEN gXMLWriter.AddElementAbsNS(7, 'cbc:PostalZone', FinancialInstitutionPostalZone, gNScbc);
+        // IF FinancialInstCountrySubentity<>'' THEN gXMLWriter.AddElementAbsNS(7, 'cbc:CountrySubentity', FinancialInstCountrySubentity, gNScbc);
+        // IF FinancialInstitutionCountry<>'' THEN gXMLWriter.AddElementAbsNS(7, 'cac:Country', FinancialInstitutionCountry, gNScac);
+        // IF FinancialInstCountryIdCode<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:IdentificationCode', FinancialInstCountryIdCode, gNScbc);
+      UNTIL PaymentMeansLoop.NEXT=0;
+
+      PEPPOLMgt.GetPaymentTermsInfo(
+        SalesHeader,
+        PaymentTermsNote);
+      IF PaymentTermsNote<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(2, 'cac:PaymentTerms', '', gNScac);
+        gXMLWriter.AddElementAbsNS(3, 'cbc:Note', PaymentTermsNote, gNScbc);
+      END;
+
+      IF SalesHeader."ROT/RUT reduction" THEN BEGIN
+        AllowanceChargeReasonROT := 'ROT-avdrag';
+        CustLedgerEntry.SETRANGE("Document No.", SalesHeader."No.");
+        CustLedgerEntry.SETRANGE("Document Type", CustLedgerEntry."Document Type"::Invoice);
+        IF SalesHeader."Document Type"=SalesHeader."Document Type"::"Credit Memo" THEN
+          CustLedgerEntry.SETRANGE("Document Type", CustLedgerEntry."Document Type"::"Credit Memo");
+        IF CustLedgerEntry.FINDSET THEN BEGIN
+          CustLedgerEntry.CALCSUMS("Amount ROT","Amount RUT");
+          AmountROT := FORMAT((CustLedgerEntry."Amount ROT" + CustLedgerEntry."Amount RUT") , 0, 9);
+          IF CustLedgerEntry."Amount RUT" <> 0 THEN
+            AllowanceChargeReasonROT := 'RUT-avdrag';
+        END;
+        gXMLWriter.AddElementAbsNS(2, 'cac:AllowanceCharge', '', gNScac);
+        gXMLWriter.AddElementAbsNS(3, 'cbc:ChargeIndicator', 'false', gNScbc);
+        gXMLWriter.AddElementAbsNS(3, 'cbc:AllowanceChargeReasonCode', '100', gNScbc);
+      //  IF AllowanceChargeListIDROT<>'' THEN gXMLWriter.AddAttribute('listID', AllowanceChargeListIDROT);
+        gXMLWriter.AddElementAbsNS(3, 'cbc:AllowanceChargeReason', AllowanceChargeReasonROT, gNScbc);
+        IF AmountROT<>'' THEN gXMLWriter.AddElementAbsNS(3, 'cbc:Amount', AmountROT, gNScbc);
+      END;
+
+      // IF NOT FindNextVATAmtRec(TempVATAmtLine,AllowanceChargeLoop.Number) THEN
+      //  currXMLport.BREAK;
+      IF TempVATAmtLine.FINDSET THEN REPEAT
+        PEPPOLMgt.GetAllowanceChargeInfo(
+          TempVATAmtLine,
+          SalesHeader,
+          ChargeIndicator,
+          AllowanceChargeReasonCode,
+          AllowanceChargeListID,
+          AllowanceChargeReason,
+          Amount,
+          AllowanceChargeCurrencyID,
+          TaxCategoryID,
+          TaxCategorySchemeID,
+          Percent,
+          AllowanceChargeTaxSchemeID);
+        IF ChargeIndicator<>'' THEN BEGIN
+          gXMLWriter.AddElementAbsNS(2, 'cac:AllowanceCharge', '', gNScac);
+          IF ChargeIndicator<>'' THEN gXMLWriter.AddElementAbsNS(3, 'cbc:ChargeIndicator', ChargeIndicator, gNScbc);
+          IF AllowanceChargeReasonCode<>'' THEN gXMLWriter.AddElementAbsNS(3, 'cbc:AllowanceChargeReasonCode', AllowanceChargeReasonCode, gNScbc);
+          IF AllowanceChargeListID<>'' THEN gXMLWriter.AddAttribute('listID', AllowanceChargeListID);
+          IF AllowanceChargeReason<>'' THEN gXMLWriter.AddElementAbsNS(3, 'cbc:AllowanceChargeReason', AllowanceChargeReason, gNScbc);
+          IF Amount<>'' THEN gXMLWriter.AddElementAbsNS(3, 'cbc:Amount', Amount, gNScbc);
+          IF AllowanceChargeCurrencyID<>'' THEN gXMLWriter.AddAttribute('currencyID', AllowanceChargeCurrencyID);
+          IF TaxCategoryID<>'' THEN BEGIN
+            gXMLWriter.AddElementAbsNS(3, 'cac:TaxCategory', '', gNScac);
+            IF TaxCategoryID<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cbc:ID', TaxCategoryID, gNScbc);
+            IF TaxCategorySchemeID<>'' THEN gXMLWriter.AddAttribute('schemeID', TaxCategorySchemeID);
+            IF Percent<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cbc:Percent', Percent, gNScbc);
+            IF AllowanceChargeTaxSchemeID<>'' THEN BEGIN
+              gXMLWriter.AddElementAbsNS(4, 'cac:TaxScheme', '', gNScac);
+              gXMLWriter.AddElementAbsNS(5, 'cbc:ID', AllowanceChargeTaxSchemeID, gNScbc);
+            END;
+          END;
+        END;
+      UNTIL TempVATAmtLine.NEXT=0;
+
+      PEPPOLMgt.GetTaxTotalInfo(
+        SalesHeader,
+        TempVATAmtLine,
+        TaxAmount,
+        TaxTotalCurrencyID);
+      gXMLWriter.AddElementAbsNS(2, 'cac:TaxTotal', '', gNScac);
+      gXMLWriter.AddElementAbsNS(3, 'cbc:TaxAmount', TaxAmount, gNScbc);
+      IF TaxTotalCurrencyID<>'' THEN gXMLWriter.AddAttribute('currencyID', TaxTotalCurrencyID);
+      // IF NOT FindNextVATAmtRec(TempVATAmtLine,TaxSubtotalLoop.Number) THEN
+      //  currXMLport.BREAK;
+      IF TempVATAmtLine.FINDSET THEN REPEAT
+        PEPPOLMgt.GetTaxSubtotalInfo(
+          TempVATAmtLine,
+          SalesHeader,
+          TaxableAmount,
+          TaxAmountCurrencyID,
+          SubtotalTaxAmount,
+          TaxSubtotalCurrencyID,
+          TransactionCurrencyTaxAmount,
+          TransCurrTaxAmtCurrencyID,
+          TaxTotalTaxCategoryID,
+          schemeID,
+          TaxCategoryPercent,
+          TaxTotalTaxSchemeID);
+        PEPPOLMgt.GetTaxExemptionReason(TempVATProductPostingGroup,TaxExemptionReason,TaxTotalTaxCategoryID);
+        gXMLWriter.AddElementAbsNS(3, 'cac:TaxSubtotal', '', gNScac);
+        IF TaxableAmount<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cbc:TaxableAmount', TaxableAmount, gNScbc);
+        IF TaxSubtotalCurrencyID<>'' THEN gXMLWriter.AddAttribute('currencyID', TaxSubtotalCurrencyID);
+        IF SubtotalTaxAmount<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cbc:TaxAmount', SubtotalTaxAmount, gNScbc);
+        IF TaxAmountCurrencyID<>'' THEN gXMLWriter.AddAttribute('currencyID', TaxAmountCurrencyID);
+        IF TaxTotalTaxCategoryID<>'' THEN BEGIN
+          gXMLWriter.AddElementAbsNS(4, 'cac:TaxCategory', '', gNScac);
+          IF TaxTotalTaxCategoryID<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:ID', TaxTotalTaxCategoryID, gNScbc);
+          IF schemeID<>'' THEN gXMLWriter.AddAttribute('schemeID', schemeID);
+          IF TaxCategoryPercent<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:Percent', TaxCategoryPercent, gNScbc);
+          IF TaxExemptionReason<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:TaxExemptionReason', TaxExemptionReason, gNScbc);
+          IF TaxTotalTaxSchemeID<>'' THEN BEGIN
+            gXMLWriter.AddElementAbsNS(5, 'cac:TaxScheme', '', gNScac);
+            gXMLWriter.AddElementAbsNS(6, 'cbc:ID', TaxTotalTaxSchemeID, gNScbc);
+          END;
+        END;
+      UNTIL TempVATAmtLine.NEXT=0;
+
+      IF LineDescriptionBefore <> '' THEN BEGIN
+        TextTaxAmount := '0';
+        TextTaxTotalCurrencyID := 'SEK';
+      //  TextTaxableAmount := TextTaxAmount;
+      //  TextTaxSubtotalCurrencyID := TextTaxTotalCurrencyID;
+
+      //  TextSubtotalTaxAmount := TextTaxAmount;
+      //  TextTaxAmountCurrencyID := TextTaxTotalCurrencyID;
+        TextTaxTotalTaxCategoryID := 'O';
+        TextschemeID := 'UNCL5305';
+      //  TextTaxCategoryPercent := TextTaxAmount;
+        TextTaxTotalTaxSchemeID := 'VAT';
+
+        //TaxTotal
+        gXMLWriter.AddElementAbsNS(2, 'cac:TaxTotal', '', gNScac);
+        gXMLWriter.AddElementAbsNS(3, 'cbc:TaxAmount', TextTaxAmount, gNScbc);
+        gXMLWriter.AddAttribute('currencyID', TextTaxTotalCurrencyID);
+        gXMLWriter.AddElementAbsNS(3, 'cac:TaxSubtotal', '', gNScac);
+        gXMLWriter.AddElementAbsNS(4, 'cbc:TaxableAmount', TextTaxAmount, gNScbc);
+        gXMLWriter.AddAttribute('currencyID', TextTaxTotalCurrencyID);
+        gXMLWriter.AddElementAbsNS(4, 'cbc:TaxAmount', TextTaxAmount, gNScbc);
+        gXMLWriter.AddAttribute('currencyID', TextTaxTotalCurrencyID);
+        gXMLWriter.AddElementAbsNS(4, 'cac:TaxCategory', '', gNScac);
+        gXMLWriter.AddElementAbsNS(5, 'cbc:ID', TextTaxTotalTaxCategoryID, gNScbc);
+        gXMLWriter.AddAttribute('schemeID', TextschemeID);
+        gXMLWriter.AddElementAbsNS(5, 'cbc:Percent', TextTaxAmount, gNScbc);
+      //  IF TextTaxExemptionReason<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:TaxExemptionReason', TextTaxExemptionReason, gNScbc);
+        gXMLWriter.AddElementAbsNS(5, 'cac:TaxScheme', '', gNScac);
+        gXMLWriter.AddElementAbsNS(6, 'cbc:ID', TextTaxTotalTaxSchemeID, gNScbc);
+      END;
+
+      PEPPOLMgt.GetLegalMonetaryInfo(
+        SalesHeader,
+        TempVATAmtLine,
+        LineExtensionAmount,
+        LegalMonetaryTotalCurrencyID,
+        TaxExclusiveAmount,
+        TaxExclusiveAmountCurrencyID,
+        TaxInclusiveAmount,
+        TaxInclusiveAmountCurrencyID,
+        AllowanceTotalAmount,
+        AllowanceTotalAmountCurrencyID,
+        ChargeTotalAmount,
+        ChargeTotalAmountCurrencyID,
+        PrepaidAmount,
+        PrepaidCurrencyID,
+        PayableRoundingAmount,
+        PayableRndingAmountCurrencyID,
+        PayableAmount,
+        PayableAmountCurrencyID);
+      gXMLWriter.AddElementAbsNS(2, 'cac:LegalMonetaryTotal', '', gNScac);
+      IF LineExtensionAmount<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(3, 'cbc:LineExtensionAmount', LineExtensionAmount, gNScbc);
+        IF LegalMonetaryTotalCurrencyID<>'' THEN gXMLWriter.AddAttribute('currencyID', LegalMonetaryTotalCurrencyID);
+      END;
+      IF TaxExclusiveAmount<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(3, 'cbc:TaxExclusiveAmount', TaxExclusiveAmount, gNScbc);
+        IF TaxExclusiveAmountCurrencyID<>'' THEN gXMLWriter.AddAttribute('currencyID', TaxExclusiveAmountCurrencyID);
+      END;
+      IF TaxInclusiveAmount<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(3, 'cbc:TaxInclusiveAmount', TaxInclusiveAmount, gNScbc);
+        IF TaxInclusiveAmountCurrencyID<>'' THEN gXMLWriter.AddAttribute('currencyID', TaxInclusiveAmountCurrencyID);
+      END;
+      IF AllowanceTotalAmount<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(3, 'cbc:AllowanceTotalAmount', AllowanceTotalAmount, gNScbc);
+        IF AllowanceTotalAmountCurrencyID<>'' THEN gXMLWriter.AddAttribute('currencyID', AllowanceTotalAmountCurrencyID);
+      END;
+      IF ChargeTotalAmount<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(3, 'cbc:ChargeTotalAmount', ChargeTotalAmount, gNScbc);
+        IF ChargeTotalAmountCurrencyID<>'' THEN gXMLWriter.AddAttribute('currencyID', ChargeTotalAmountCurrencyID);
+      END;
+      IF PrepaidAmount<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(3, 'cbc:PrepaidAmount', PrepaidAmount, gNScbc);
+        IF PrepaidCurrencyID<>'' THEN gXMLWriter.AddAttribute('currencyID', PrepaidCurrencyID);
+      END;
+      IF PayableRoundingAmount<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(3, 'cbc:PayableRoundingAmount', PayableRoundingAmount, gNScbc);
+        IF PayableRndingAmountCurrencyID<>'' THEN gXMLWriter.AddAttribute('currencyID', PayableRndingAmountCurrencyID);
+      END;
+      IF PayableAmount<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(3, 'cbc:PayableAmount', PayableAmount, gNScbc);
+        IF PayableAmountCurrencyID<>'' THEN gXMLWriter.AddAttribute('currencyID', PayableAmountCurrencyID);
+      END;
+
+      //beforeInvoiceLineLoop(Integer)
+      // IF beforeInvoiceLineLoop(Integer)<>'' THEN gXMLWriter.AddElementAbsNS(2, 'cac:InvoiceLine', beforeInvoiceLineLoop(Integer), gNScac);
+      // IF InvoiceLineIDBefore<>'' THEN gXMLWriter.AddElementAbsNS(3, 'cbc:ID', InvoiceLineIDBefore, gNScbc);
+      // IF beforeInvoicedQuantity<>'' THEN gXMLWriter.AddElementAbsNS(3, 'cbc:InvoicedQuantity', beforeInvoicedQuantity, gNScbc);
+      // IF beforeunitCode<>'' THEN gXMLWriter.AddAttribute('unitCode', beforeunitCode);
+      // IF beforeunitCodeListID<>'' THEN gXMLWriter.AddAttribute('unitCodeListID', beforeunitCodeListID);
+      // IF InvoiceLineExtAmountBefore<>'' THEN gXMLWriter.AddElementAbsNS(3, 'cbcLineExtensionAmount', InvoiceLineExtAmountBefore);
+      // IF LineExtAmountCurrencyIDBefore<>'' THEN gXMLWriter.AddAttribute('currencyID', LineExtAmountCurrencyIDBefore);
+      // IF LineItemBefore<>'' THEN gXMLWriter.AddElementAbsNS(3, 'cac:Item', LineItemBefore, gNScac);
+      // IF LineDescriptionBefore<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cbcDescription', LineDescriptionBefore);
+      // IF beforeLineName<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cbc:Name', beforeLineName, gNScbc);
+      // IF befClassifiedTaxCategory<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cacClassifiedTaxCategory', befClassifiedTaxCategory);
+      // IF befClassifiedTaxCategoryID<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbcID', befClassifiedTaxCategoryID);
+      // IF befItemSchemeID<>'' THEN gXMLWriter.AddAttribute('schemeID', befItemSchemeID);
+      // IF befInvoiceLineTaxPercent<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbcPercent', befInvoiceLineTaxPercent);
+      // IF befClassifiedTaxCatTaxScheme<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cacTaxScheme', befClassifiedTaxCatTaxScheme);
+      // IF befClassifiedTaxCatSchemeID<>'' THEN gXMLWriter.AddElementAbsNS(6, 'cbc:ID', befClassifiedTaxCatSchemeID, gNScbc);
+      // IF beforeInvoiceLinePrice<>'' THEN gXMLWriter.AddElementAbsNS(3, 'cacPrice', beforeInvoiceLinePrice);
+      // IF beforeInvoiceLinePriceAmount<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cbcPriceAmount', beforeInvoiceLinePriceAmount);
+      // IF beforeInvLinePriceAmountCurrID<>'' THEN gXMLWriter.AddAttribute('currencyID', beforeInvLinePriceAmountCurrID);
+      // IF beforeBaseQuantity<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cbcBaseQuantity', beforeBaseQuantity);
+      // IF beforeUnitCodeBaseQty<>'' THEN gXMLWriter.AddAttribute('unitCode', beforeUnitCodeBaseQty);
+      // IF berforeCodeListIDBaseQty<>'' THEN gXMLWriter.AddAttribute('unitCodeListID', berforeCodeListIDBaseQty);
+
+
+      InvoiceLineLoop.SETRANGE(Number, 1, gSalesLine.COUNT);
+
+      IF gSalesLine.COUNT = 0 THEN
+        InvoiceLineLoop.SETFILTER(Number, '1..-1')
+      ELSE BEGIN
+        CurrentLineNo := 0;
+        CASE SalesHeader."Invoice Layout Code" OF
+          '0','1': gSalesLine.SETCURRENTKEY("Document No.","Cost Type Cost Plus Line");
+          '2': gSalesLine.SETCURRENTKEY("Document No.","Line No.");
+          '3': gSalesLine.SETCURRENTKEY("Job No.","Extension Contract");
+          '4': gSalesLine.SETCURRENTKEY("Job No.", Element);//RFC1153
+          ELSE gSalesLine.SETCURRENTKEY("Document No.","Line No.");
+        END;
+        gSalesLine.FINDSET(FALSE);
+      END;
+
+      NewLine := FALSE;
+      LineChange := FALSE;
+      SalesLines := FALSE;
+      ReportLinesBefore := FALSE;
+      ReportLinesAfter := FALSE;
+      ReachedLineEnd := FALSE;
+      LineCount2 := 0;
+
+
+      IF InvoiceLineLoop.FINDSET THEN REPEAT
+        IF GetSalesInvoiceLines(gSalesLine,SalesReportTextLineRec,InvoiceLineLoop.Number,CurrentLineNo,NewLine,
+            ReachedLineEnd,LineChange,ReportLinesBefore,ReportLinesAfter,InvoiceExtraLine,SalesLines,LineNoWithData) THEN
+          ExportLineToXML(gSalesHeader,gSalesLine,isCredit,SalesLines,ReportLinesBefore,ReportLinesAfter,ReachedLineEnd,ShowDiscount,InvoiceExtraLine,StrippedView,custBuyersID,HideItemNo);
+      UNTIL InvoiceLineLoop.NEXT=0;
+
+      //footers
+      SalesReportTextLineFooter.RESET;
+      IF isCredit THEN
+        SalesReportTextLineFooter.SETRANGE("Document Type", SalesReportTextLineRec."Document Type"::"Posted Credit Memo")
+      ELSE
+        SalesReportTextLineFooter.SETRANGE("Document Type", SalesReportTextLineRec."Document Type"::"Posted Invoice");
+      SalesReportTextLineFooter.SETRANGE("Document No.", SalesHeader."No.");
+      SalesReportTextLineFooter.SETRANGE("Text Line Type", SalesReportTextLineRec."Text Line Type"::Footer);
+      SalesReportTextLineFooter.SETFILTER(Text, '<>%1', '');
+      IF StrippedView THEN
+        SalesReportTextLineFooter.SETFILTER(Text, '-o-');
+      IF SalesReportTextLineFooter.FINDSET THEN REPEAT
+        ExportTextLine(SalesReportTextLineFooter."Line No.",SalesReportTextLineFooter.Text);
+      UNTIL SalesReportTextLineFooter.NEXT=0;
+    END;
+
+    LOCAL PROCEDURE ExportTextLine@1100285101(SalesReportTextLineLineNo@1100285100 : Integer;SalesReportTextLineLineText@1100285101 : Text);
+    BEGIN
+      gXMLWriter.AddElementAbsNS(2, 'cac:InvoiceLine', '', gNScac);
+      gXMLWriter.AddElementAbsNS(3, 'cbc:ID', SalesReportTextLineLineNo, gNScbc);
+      gXMLWriter.AddElementAbsNS(3, 'cbc:InvoicedQuantity', 0, gNScbc);
+      gXMLWriter.AddAttribute('unitCode', 'EA');
+      gXMLWriter.AddElementAbsNS(3, 'cbc:LineExtensionAmount', 0, gNScbc);
+      gXMLWriter.AddAttribute('currencyID', 'SEK');
+      gXMLWriter.AddElementAbsNS(3, 'cac:Item', '', gNScac);
+      gXMLWriter.AddElementAbsNS(4, 'cbc:Description', SalesReportTextLineLineText, gNScbc);
+      gXMLWriter.AddElementAbsNS(4, 'cbc:Name', SalesReportTextLineLineText, gNScbc);
+      gXMLWriter.AddElementAbsNS(4, 'cac:ClassifiedTaxCategory', '', gNScac);
+      gXMLWriter.AddElementAbsNS(5, 'cbc:ID', 'Z', gNScbc);
+      gXMLWriter.AddAttribute('schemeID', 'UNCL5305');
+      gXMLWriter.AddElementAbsNS(5, 'cbc:Percent', 0, gNScbc);
+      gXMLWriter.AddElementAbsNS(5, 'cac:TaxScheme', '', gNScac);
+      gXMLWriter.AddElementAbsNS(6, 'cbc:ID', 'VAT', gNScbc);
+      gXMLWriter.AddElementAbsNS(3, 'cac:Price', '', gNScac);
+      gXMLWriter.AddElementAbsNS(4, 'cbc:PriceAmount', 0, gNScbc);
+      gXMLWriter.AddAttribute('currencyID', 'SEK');
+    END;
+
+    LOCAL PROCEDURE ExportLineToXML@1100285112(VAR SalesHeader@1100285101 : Record 36;VAR lSalesLine@1100285102 : Record 37;isCredit@1100285100 : Boolean;SalesLines@1100285116 : Boolean;ReportLinesBefore@1100285115 : Boolean;ReportLinesAfter@1100285114 : Boolean;ReachedLineEnd@1100285113 : Boolean;ShowDiscount@1100285112 : Boolean;InvoiceExtraLine@1100285111 : Boolean;StrippedView@1100285142 : Boolean;custBuyersID@1100285140 : Boolean;HideItemNo@1100285141 : Boolean);
+    VAR
+      InvoiceLineID@1100285110 : Text;
+      InvoiceLineNote@1100285109 : Text;
+      InvoicedQuantity@1100285108 : Text;
+      InvoiceLineExtensionAmount@1100285107 : Text;
+      LineExtensionAmountCurrencyID@1100285106 : Text;
+      InvoiceLineAccountingCost@1100285105 : Text;
+      unitCode@1100285104 : Text;
+      unitCodeListID@1100285103 : Text;
+      OrderLineReferenceLineID@1100285139 : Text;
+      InvLnAllowanceChargeIndicator@1100285138 : Text;
+      InvLnAllowanceChargeReason@1100285137 : Text;
+      InvLnAllowanceChargeAmount@1100285136 : Text;
+      InvLnAllowanceChargeAmtCurrID@1100285135 : Text;
+      AllowanceChargeOnLine@1100285134 : Decimal;
+      Description@1100285133 : Text;
+      Name@1100285132 : Text;
+      SellersItemIdentificationID@1100285131 : Text;
+      StandardItemIdentificationID@1100285130 : Text;
+      StdItemIdIDSchemeID@1100285129 : Text;
+      OriginCountryIdCode@1100285128 : Text;
+      OriginCountryIdCodeListID@1100285127 : Text;
+      ClassifiedTaxCategoryID@1100285126 : Text;
+      ItemSchemeID@1100285125 : Text;
+      InvoiceLineTaxPercent@1100285124 : Text;
+      ClassifiedTaxCategorySchemeID@1100285123 : Text;
+      AdditionalItemPropertyName@1100285122 : Text;
+      AdditionalItemPropertyValue@1100285121 : Text;
+      InvoiceLinePriceAmount@1100285120 : Text;
+      InvLinePriceAmountCurrencyID@1100285119 : Text;
+      BaseQuantity@1100285118 : Text;
+      UnitCodeBaseQty@1100285117 : Text;
+    BEGIN
+      PEPPOLMgt.GetLineGeneralInfo(
+        lSalesLine,
+        SalesHeader,
+        InvoiceLineID,
+        InvoiceLineNote,
+        InvoicedQuantity,
+        InvoiceLineExtensionAmount,
+        LineExtensionAmountCurrencyID,
+        InvoiceLineAccountingCost,
+        SalesLines,ReportLinesBefore,ReportLinesAfter,ShowDiscount);
+
+      PEPPOLMgt.GetLineUnitCodeInfo(gSalesLine,unitCode,unitCodeListID,SalesLines);
+
+      // PEPPOLMgt.GetLineInvoicePeriodInfo(
+      //  InvLineInvoicePeriodStartDate,
+      //  InvLineInvoicePeriodEndDate);
+
+      OrderLineReferenceLineID := SalesHeader."Principal Reference";
+      IF custBuyersID THEN
+        OrderLineReferenceLineID := SalesHeader."Order No. Customer";
+
+      IF isCredit THEN
+        gXMLWriter.AddElementAbsNS(2, 'cac:CreditNoteLine', '', gNScac)
+      ELSE
+        gXMLWriter.AddElementAbsNS(2, 'cac:InvoiceLine', '', gNScac);
+      IF InvoiceLineID<>'' THEN gXMLWriter.AddElementAbsNS(3, 'cbc:ID', InvoiceLineID, gNScbc);
+      IF InvoiceLineNote<>'' THEN gXMLWriter.AddElementAbsNS(3, 'cbc:Note', InvoiceLineNote, gNScbc);
+      IF InvoicedQuantity<>'' THEN
+        IF isCredit THEN
+          gXMLWriter.AddElementAbsNS(3, 'cbc:CreditedQuantity', InvoicedQuantity, gNScbc)
+        ELSE
+          gXMLWriter.AddElementAbsNS(3, 'cbc:InvoicedQuantity', InvoicedQuantity, gNScbc);
+
+      IF unitCode<>'' THEN BEGIN
+        gXMLWriter.AddAttribute('unitCode', unitCode);
+        IF unitCodeListID<>'' THEN gXMLWriter.AddAttribute('unitCodeListID', unitCodeListID);
+      END;
+      IF InvoiceLineExtensionAmount<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(3, 'cbc:LineExtensionAmount', InvoiceLineExtensionAmount, gNScbc);
+        IF LineExtensionAmountCurrencyID<>'' THEN gXMLWriter.AddAttribute('currencyID', LineExtensionAmountCurrencyID);
+      END;
+      IF InvoiceLineAccountingCost<>'' THEN gXMLWriter.AddElementAbsNS(3, 'cbc:AccountingCost', InvoiceLineAccountingCost, gNScbc);
+      //  IF (InvLineInvoicePeriodStartDate <> '') or (InvLineInvoicePeriodEndDate <> '') THEN BEGIN
+      //    gXMLWriter.AddElementAbsNS(3, 'cac:InvoicePeriod', InvoiceLineInvoicePeriod, gNScac);
+      //    IF InvLineInvoicePeriodStartDate<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cbc:StartDate', InvLineInvoicePeriodStartDate, gNScbc);
+      //    IF InvLineInvoicePeriodEndDate<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cbc:EndDate', InvLineInvoicePeriodEndDate, gNScbc);
+      //  END;
+      IF OrderLineReferenceLineID<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(3, 'cac:OrderLineReference', '', gNScac);
+        gXMLWriter.AddElementAbsNS(4, 'cbc:LineID', OrderLineReferenceLineID, gNScbc);
+      END;
+
+      //  PEPPOLMgt.GetLineDeliveryInfo(
+      //    InvoiceLineActualDeliveryDate,
+      //    InvoiceLineDeliveryID,
+      //    InvoiceLineDeliveryIDSchemeID);
+      //
+      //  PEPPOLMgt.GetLineDeliveryPostalAddr(
+      //    InvoiceLineDeliveryStreetName,
+      //    InvLineDeliveryAddStreetName,
+      //    InvoiceLineDeliveryCityName,
+      //    InvoiceLineDeliveryPostalZone,
+      //    InvLnDeliveryCountrySubentity,
+      //    InvLnDeliveryCountryIdCode,
+      //    InvLineDeliveryCountryListID);
+      //
+      //  IF (InvoiceLineDeliveryID <> '') OR
+      //     (InvoiceLineDeliveryStreetName <> '') OR
+      //     (InvoiceLineActualDeliveryDate <> '')
+      //  THEN BEGIN
+      //
+      //    IF InvoiceLineDelivery<>'' THEN gXMLWriter.AddElementAbsNS(3, 'cac:Delivery', InvoiceLineDelivery, gNScac);
+      //    IF InvoiceLineActualDeliveryDate<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cbc:ActualDeliveryDate', InvoiceLineActualDeliveryDate, gNScbc);
+      //    IF InvoiceLineDeliveryLocation<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cac:DeliveryLocation', InvoiceLineDeliveryLocation, gNScac);
+      //    IF InvoiceLineDeliveryID<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:ID', InvoiceLineDeliveryID, gNScbc);
+      //    IF InvoiceLineDeliveryIDSchemeID<>'' THEN gXMLWriter.AddAttribute('schemeID', InvoiceLineDeliveryIDSchemeID);
+      //    IF InvoiceLineDeliveryAddress<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cac:Address', InvoiceLineDeliveryAddress, gNScac);
+      //    IF InvoiceLineDeliveryStreetName<>'' THEN gXMLWriter.AddElementAbsNS(6, 'cbc:StreetName', InvoiceLineDeliveryStreetName, gNScbc);
+      //    IF InvLineDeliveryAddStreetName<>'' THEN gXMLWriter.AddElementAbsNS(6, 'cbc:AdditionalStreetName', InvLineDeliveryAddStreetName, gNScbc);
+      //    IF InvoiceLineDeliveryCityName<>'' THEN gXMLWriter.AddElementAbsNS(6, 'cbc:CityName', InvoiceLineDeliveryCityName, gNScbc);
+      //    IF InvoiceLineDeliveryPostalZone<>'' THEN gXMLWriter.AddElementAbsNS(6, 'cbc:PostalZone', InvoiceLineDeliveryPostalZone, gNScbc);
+      //    IF InvLnDeliveryCountrySubentity<>'' THEN gXMLWriter.AddElementAbsNS(6, 'cbc:CountrySubentity', InvLnDeliveryCountrySubentity, gNScbc);
+      //    IF InvoiceLineDeliveryCountry<>'' THEN gXMLWriter.AddElementAbsNS(6, 'cac:Country', InvoiceLineDeliveryCountry, gNScac);
+      //    IF InvLnDeliveryCountryIdCode<>'' THEN gXMLWriter.AddElementAbsNS(7, 'cbc:IdentificationCode', InvLnDeliveryCountryIdCode, gNScbc);
+      //  END;
+
+      PEPPOLMgt.GetLineAllowanceChargeInfo(
+        lSalesLine,
+        SalesHeader,
+        InvLnAllowanceChargeIndicator,
+        InvLnAllowanceChargeReason,
+        InvLnAllowanceChargeAmount,
+        InvLnAllowanceChargeAmtCurrID,SalesLines,ShowDiscount,AllowanceChargeOnLine);
+      IF InvLnAllowanceChargeIndicator<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(3, 'cac:AllowanceCharge', '',gNScac);
+        IF InvLnAllowanceChargeIndicator<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cbc:ChargeIndicator', InvLnAllowanceChargeIndicator, gNScbc);
+        IF InvLnAllowanceChargeReason<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cbc:AllowanceChargeReason', InvLnAllowanceChargeReason, gNScbc);
+        IF InvLnAllowanceChargeAmount<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cbc:Amount', InvLnAllowanceChargeAmount, gNScbc);
+        IF InvLnAllowanceChargeAmtCurrID<>'' THEN gXMLWriter.AddAttribute('currencyID', InvLnAllowanceChargeAmtCurrID);
+      END;
+
+      PEPPOLMgt.GetLineItemInfo(
+        SalesHeader,
+        lSalesLine,
+        Description,
+        Name,
+        SellersItemIdentificationID,
+        StandardItemIdentificationID,
+        StdItemIdIDSchemeID,
+        OriginCountryIdCode,
+        OriginCountryIdCodeListID,SalesLines,ReportLinesBefore,ReportLinesAfter,HideItemNo);
+      gXMLWriter.AddElementAbsNS(3, 'cac:Item', '', gNScac);
+      IF Description<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cbc:Description', Description, gNScbc);
+      IF Name<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cbc:Name', Name, gNScbc);
+
+      IF NOT HideItemNo THEN
+        SellersItemIdentificationID := gSalesLine."Trade Item";
+      IF SellersItemIdentificationID<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(4, 'cac:SellersItemIdentification', '', gNScac);
+        gXMLWriter.AddElementAbsNS(5, 'cbc:ID', SellersItemIdentificationID, gNScbc);
+      END;
+      IF StandardItemIdentificationID<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(4, 'cac:StandardItemIdentification', '', gNScac);
+        gXMLWriter.AddElementAbsNS(5, 'cbc:ID', StandardItemIdentificationID, gNScbc);
+        IF StdItemIdIDSchemeID<>'' THEN gXMLWriter.AddAttribute('schemeID', StdItemIdIDSchemeID);
+      END;
+      IF OriginCountryIdCode<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(4, 'cac:OriginCountry', '', gNScac);
+        gXMLWriter.AddElementAbsNS(5, 'cbc:IdentificationCode', OriginCountryIdCode, gNScbc);
+        IF OriginCountryIdCodeListID<>'' THEN gXMLWriter.AddAttribute('listID', OriginCountryIdCodeListID);
+      END;
+      // PEPPOLMgt.GetLineItemCommodityClassficationInfo(
+      //  CommodityCode,
+      //  CommodityCodeListID,
+      //  ItemClassificationCode,
+      //  ItemClassificationCodeListID);
+      // IF (CommodityCode <> '') or (ItemClassificationCode <> '') THEN BEGIN
+      //
+      // IF CommodityClassificationLoop(Integer)<>'' THEN gXMLWriter.AddElementAbsNS(4, 'cac:CommodityClassification', CommodityClassificationLoop(Integer), gNScac);
+      // IF CommodityCode<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:CommodityCode', CommodityCode, gNScbc);
+      // IF CommodityCodeListID<>'' THEN gXMLWriter.AddAttribute('listID', CommodityCodeListID);
+      // IF ItemClassificationCode<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:ItemClassificationCode', ItemClassificationCode, gNScbc);
+      // IF ItemClassificationCodeListID<>'' THEN gXMLWriter.AddAttribute('listID', ItemClassificationCodeListID);
+      // END;
+
+      PEPPOLMgt.GetLineItemClassfiedTaxCategoryBIS(
+        lSalesLine,
+        ClassifiedTaxCategoryID,
+        ItemSchemeID,
+        InvoiceLineTaxPercent,
+        ClassifiedTaxCategorySchemeID,SalesLines);
+      gXMLWriter.AddElementAbsNS(4, 'cac:ClassifiedTaxCategory', '', gNScac);
+      IF ClassifiedTaxCategoryID<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:ID', ClassifiedTaxCategoryID, gNScbc);
+      IF (ItemSchemeID<>'') AND NOT isCredit THEN gXMLWriter.AddAttribute('schemeID', ItemSchemeID);
+      IF InvoiceLineTaxPercent<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:Percent', InvoiceLineTaxPercent, gNScbc);
+      IF ClassifiedTaxCategorySchemeID<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(5, 'cac:TaxScheme', '', gNScac);
+        gXMLWriter.AddElementAbsNS(6, 'cbc:ID', ClassifiedTaxCategorySchemeID, gNScbc);
+      END;
+
+      PEPPOLMgt.GetLineAdditionalItemPropertyInfo(
+        lSalesLine,
+        AdditionalItemPropertyName,
+        AdditionalItemPropertyValue);
+      IF AdditionalItemPropertyName <> '' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(4, 'cac:AdditionalItemProperty', '', gNScac);
+        IF AdditionalItemPropertyName<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:Name', AdditionalItemPropertyName, gNScbc);
+        IF AdditionalItemPropertyValue<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:Value', AdditionalItemPropertyValue, gNScbc);
+      END;
+
+      PEPPOLMgt.GetLinePriceInfo(
+        lSalesLine,
+        SalesHeader,
+        InvoiceLinePriceAmount,
+        InvLinePriceAmountCurrencyID,
+        BaseQuantity,
+        UnitCodeBaseQty,SalesLines,ShowDiscount,AllowanceChargeOnLine);
+      gXMLWriter.AddElementAbsNS(3, 'cac:Price', '', gNScac);
+      gXMLWriter.AddElementAbsNS(4, 'cbc:PriceAmount', InvoiceLinePriceAmount, gNScbc);
+      IF InvLinePriceAmountCurrencyID<>'' THEN gXMLWriter.AddAttribute('currencyID', InvLinePriceAmountCurrencyID);
+      IF BaseQuantity<>'' THEN BEGIN
+        gXMLWriter.AddElementAbsNS(4, 'cbc:BaseQuantity', BaseQuantity, gNScbc);
+        IF UnitCodeBaseQty<>'' THEN gXMLWriter.AddAttribute('unitCode', UnitCodeBaseQty);
+        IF unitCodeListID<>'' THEN gXMLWriter.AddAttribute('unitCodeListID', unitCodeListID);
+      END;
+      // PEPPOLMgt.GetLinePriceAllowanceChargeInfo(
+      //  PriceChargeIndicator,
+      //  PriceAllowanceChargeAmount,
+      //  PriceAllowanceAmountCurrencyID,
+      //  PriceAllowanceChargeBaseAmount,
+      //  PriceAllowChargeBaseAmtCurrID);
+      // IF PriceChargeIndicator <> '' THEN BEGIN
+      //  gXMLWriter.AddElementAbsNS(4, 'cac:AllowanceCharge', '', gNScac);
+      //  IF PriceChargeIndicator<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:ChargeIndicator', PriceChargeIndicator, gNScbc);
+      //  IF PriceAllowanceChargeAmount<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:Amount', PriceAllowanceChargeAmount, gNScbc);
+      //  IF PriceAllowanceAmountCurrencyID<>'' THEN gXMLWriter.AddAttribute('currencyID', PriceAllowanceAmountCurrencyID);
+      //  IF PriceAllowanceChargeBaseAmount<>'' THEN gXMLWriter.AddElementAbsNS(5, 'cbc:BaseAmount', PriceAllowanceChargeBaseAmount, gNScbc);
+      //  IF PriceAllowChargeBaseAmtCurrID<>'' THEN gXMLWriter.AddAttribute('currencyID', PriceAllowChargeBaseAmtCurrID);
+      // END;
+    END;
+
+    LOCAL PROCEDURE GetSalesInvoiceLines@1100285117(VAR lSalesLine@1100285103 : Record 37;VAR SalesReportTextLine@1100285112 : Record 11071912;Position@1100285100 : Integer;VAR CurrentLineNo@1100285101 : Integer;VAR NewLine@1100285102 : Boolean;VAR ReachedLineEnd@1100285106 : Boolean;VAR LineChange@1100285107 : Boolean;VAR ReportLinesBefore@1100285108 : Boolean;VAR ReportLinesAfter@1100285109 : Boolean;VAR InvoiceExtraLine@1100285111 : Boolean;VAR SalesLines@1100285104 : Boolean;VAR LineNoWithData@1100285110 : Integer) : Boolean;
+    VAR
+      Found@1100285105 : Boolean;
+      CustomerPostingGroup@1100285113 : Record 92;
+      RoundOffAmount@1100285114 : Decimal;
+    BEGIN
+      IF Position > 1000 THEN
+        EXIT(FALSE);
+
+      IF CurrentLineNo = 0 THEN BEGIN
+        // ********* FIRST ROW!
+        CurrentLineNo := lSalesLine."Line No.";
+        NewLine := TRUE;
+      END ELSE BEGIN
+        // ********** SECOND ROW or more.
+        IF SalesLines THEN BEGIN  // IF NOT TRUE you should not move in SalesLine!
+      //    IF Position = 1 THEN
+      //      Found := gSalesLine.FIND('-')
+      //    ELSE
+      //      Found := gSalesLine.NEXT <> 0;
+      //    IF Found THEN
+      //      lSalesLine.TRANSFERFIELDS(gSalesLine);
+
+          IF gSalesLine.NEXT = 0 THEN
+            ReachedLineEnd := TRUE
+          ELSE
+            lSalesLine.TRANSFERFIELDS(gSalesLine);
+
+          LineChange := TRUE;
+        END;
+      END;
+
+      IF LineChange THEN BEGIN
+        ReportLinesBefore := FALSE;
+        ReportLinesAfter := FALSE;
+        SalesLines := FALSE;
+        CurrentLineNo := lSalesLine."Line No.";
+        NewLine := TRUE;
+        IF ReachedLineEnd THEN BEGIN
+      //      InvoiceLineLoop.SETRECFILTER;
+          EXIT(FALSE); // Cancels out the InvoiceLine loop when lines are finished
+        END;
+      END;
+
+      IF (NOT NewLine) AND ReportLinesAfter AND (CurrentLineNo = LineNoWithData) AND InvoiceExtraLine THEN BEGIN
+        InvoiceExtraLine := FALSE;
+        EXIT(FALSE);
+      END;
+      // // //  //>> 160919 ITERO.AC IME484 Moved some code here to avoid infinite loop, and avoid counting Group Footers (exists as MARKED invoice lines)
+      IF NewLine THEN BEGIN
+        ReportLinesBefore := FALSE;
+        ReportLinesAfter := FALSE;
+        SalesLines := TRUE;
+        NewLine := FALSE;
+      END
+      ELSE
+        IF ReportLinesBefore THEN BEGIN
+          IF SalesReportTextLine.NEXT = 0 THEN BEGIN
+            ReportLinesBefore := FALSE;
+            ReportLinesAfter := FALSE;
+            SalesLines := TRUE;
+          END;
+        END;
+
+      IF (ABS(gSalesLine.Amount) < 1) AND (gSalesLine.Amount <> 0) AND (gSalesLine."VAT %" = 0)
+          AND (gSalesLine."System-Created Entry" = TRUE)
+          AND (gSalesLine.Type = gSalesLine.Type::"G/L Account")
+          AND (gSalesLine."No." = CustomerPostingGroup."Invoice Rounding Account") THEN BEGIN
+        RoundOffAmount := gSalesLine.Amount;
+      //  RoundOffVATRateIndex := Index;
+      END;
+
+      // // //  // ************************************ onAfterGetCurrentRecord ************************************
+      IF gStrippedView AND (NOT SalesLines) THEN
+        EXIT(FALSE);
+      // // //    currXMLport.SKIP; // Skips additional lines
+
+      IF SalesLines AND (RoundOffAmount = lSalesLine.Amount) AND (RoundOffAmount <> 0) THEN
+        EXIT(FALSE);
+
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE GetTotals@20();
+    VAR
+      ProjectInstallment@111280006 : Record 11012018;
+      MinusAmount@111280005 : Decimal;
+      SalesReportTextValueMgt@111280004 : Codeunit 11012371;
+      VATPostingSetup@111280003 : Record 325;
+      lvGenericSalesHeaderRec@111280002 : Record 11071888;
+      lvProjectInstallmentSum@111280001 : Decimal;
+      lvOriginalWasCredit@111280000 : Boolean;
+      SalesInvoiceLine@111280007 : Record 113;
+      SalesInvoiceLineTEMP2@1100285104 : TEMPORARY Record 113;
+      ServiceInvoiceLine@111280009 : Record 5993;
+      lvSalesReportTextLineRec@1100285100 : Record 11071912;
+      InvoiceExtraLine@1100285101 : Boolean;
+      MaxLineNo@1100285102 : Integer;
+      SalesCrMemoLine@1100285103 : Record 115;
+    BEGIN
+      IF NOT gSalesLine.ISEMPTY THEN
+        EXIT;
+
+      IF SalesInvoiceLineTEMP2.FINDLAST THEN
+        MaxLineNo := SalesInvoiceLineTEMP."Line No.";
+      IF gSalesHeader."Document Type"=gSalesHeader."Document Type"::"Credit Memo" THEN BEGIN
+        SalesCrMemoLine.SETRANGE("Document No.",gSalesHeader."No.");
+        IF SalesCrMemoLine.FINDSET THEN REPEAT
+          SalesInvoiceLineTEMP2.TRANSFERFIELDS(SalesCrMemoLine);
+          MaxLineNo += 10000;
+          SalesInvoiceLineTEMP2."Line No." := MaxLineNo;
+          SalesInvoiceLineTEMP2.INSERT(FALSE);
+        UNTIL SalesCrMemoLine.NEXT=0;
+      END
+      ELSE BEGIN
+        SalesInvoiceLine.SETRANGE("Document No.",gSalesHeader."No.");
+        IF SalesInvoiceLine.FINDSET THEN REPEAT
+          SalesInvoiceLineTEMP2.TRANSFERFIELDS(SalesInvoiceLine);
+          MaxLineNo += 10000;
+          SalesInvoiceLineTEMP2."Line No." := MaxLineNo;
+          SalesInvoiceLineTEMP2.INSERT(FALSE);
+        UNTIL SalesInvoiceLine.NEXT=0;
+      END;
+
+      MaxLineNo := SalesInvoiceLine."Line No.";
+      MinusAmount := 0;
+
+      lvGenericSalesHeaderRec.INIT;
+      lvGenericSalesHeaderRec.TRANSFERFIELDS(gSalesHeader);
+      lvGenericSalesHeaderRec."Document Type" := lvGenericSalesHeaderRec."Document Type"::"Posted Invoice";
+      IF gSalesHeader."Document Type" = gSalesHeader."Document Type"::"Credit Memo" THEN
+        lvGenericSalesHeaderRec."Document Type" := lvGenericSalesHeaderRec."Document Type"::"Posted Credit Memo";
+      MinusAmount := -lvGenericSalesHeaderRec.GetInstallmentAmount;
+
+      InvoiceExtraLine := FALSE;
+      IF SalesInvoiceLineTEMP2.FINDSET THEN REPEAT
+        gSalesLine.TRANSFERFIELDS(SalesInvoiceLineTEMP2);
+        gSalesLine."Document Type":=gSalesHeader."Document Type";
+        PEPPOLMgt.GetTotals(gSalesLine,TempVATAmtLine);
+        PEPPOLMgt.GetTaxCategories(gSalesLine,TempVATProductPostingGroup);
+
+        IF (gSalesLine."Line Amount" <> 0) AND (gSalesLine."Installment No." <> '') THEN BEGIN
+          IF ProjectInstallment.GET(SalesInvoiceLineTEMP2."Job No.",SalesInvoiceLineTEMP2."Sell-to Customer No.",SalesInvoiceLineTEMP2."Plot No.",SalesInvoiceLineTEMP2."Installment No.") THEN BEGIN
+
+            IF gSalesHeader."Document Type"<>gSalesHeader."Document Type"::"Credit Memo" THEN BEGIN
+              gSalesLine."Unit Price" := SalesInvoiceLineTEMP2."Line Amount" + SalesInvoiceLineTEMP2."Withheld Amount";
+              gSalesLine."Line Amount" := SalesInvoiceLineTEMP2."Line Amount" + SalesInvoiceLineTEMP2."Withheld Amount";
+              gSalesLine.Amount := SalesInvoiceLineTEMP2."Line Amount" + SalesInvoiceLineTEMP2."Withheld Amount";
+            END ELSE BEGIN
+              gSalesLine."Unit Price" := SalesInvoiceLineTEMP2."Line Amount" + (-1* SalesInvoiceLineTEMP2."Withheld Amount");
+              gSalesLine."Line Amount" := SalesInvoiceLineTEMP2."Line Amount" + (-1*SalesInvoiceLineTEMP2."Withheld Amount");
+              gSalesLine.Amount := SalesInvoiceLineTEMP2."Line Amount" + (-1*SalesInvoiceLineTEMP2."Withheld Amount");
+            END;
+
+            VATPostingSetup.GET(gSalesHeader."VAT Bus. Posting Group", SalesInvoiceLineTEMP2."VAT Prod. Posting Group");
+            gSalesLine."VAT Bus. Posting Group" := VATPostingSetup."VAT Bus. Posting Group";
+            gSalesLine."VAT Prod. Posting Group" := SalesInvoiceLineTEMP2."VAT Prod. Posting Group";
+            gSalesLine."VAT Calculation Type" := VATPostingSetup."VAT Calculation Type";
+            // IME461A ITERO.MH 160622 Reverse VAT 25% problem <<
+            IF VATPostingSetup."VAT Calculation Type" <> VATPostingSetup."VAT Calculation Type"::"Reverse Charge VAT" THEN
+              gSalesLine."VAT %" := VATPostingSetup."VAT %"
+            ELSE
+              gSalesLine."VAT %" := 0;
+            // "Applies-to Doc. No." is blank when Credit Memo is created fr†n Installment Plan
+            IF gSalesHeader."Document Type"<>gSalesHeader."Document Type"::"Credit Memo" THEN BEGIN
+              gSalesLine."Amount Including VAT" := ((SalesInvoiceLineTEMP2."Line Amount" + SalesInvoiceLineTEMP2."Withheld Amount") * (1 + gSalesLine."VAT %"/100));
+            END ELSE BEGIN
+              gSalesLine."Amount Including VAT" := ((SalesInvoiceLineTEMP2."Line Amount" + (-1*SalesInvoiceLineTEMP2."Withheld Amount")) * (1 + gSalesLine."VAT %"/100));
+            END;
+            //<< 170830 ITERO.FH IME511
+
+            LineNoWithData := SalesInvoiceLineTEMP2."Line No.";
+          END;
+        END;
+        gSalesLine.MARK(SalesInvoiceLineTEMP2.MARK);       // 160919 ITERO.AC IME484 Marked Invoice Lines are use for group headers and group footers
+        gSalesLine."Document Type":=gSalesHeader."Document Type";
+        IF gSalesLine.ISTEMPORARY THEN gSalesLine.INSERT;
+
+        IF (MinusAmount <> 0) AND (LineNoWithData<>0) THEN BEGIN
+            SalesInvoiceLineTEMP2.GET(gSalesHeader."No.", LineNoWithData);
+            gSalesLine.COPY(SalesInvoiceLineTEMP2);
+            gSalesLine."Document Type":=gSalesHeader."Document Type";
+            gSalesLine."Line No." := LineNoWithData + 1;
+            gSalesLine.Description := txtInvoiceAmount; //
+            gSalesLine."Unit Price" := ABS(MinusAmount);
+            gSalesLine.Quantity := -gSalesLine.Quantity;
+            gSalesLine."Line Amount" := MinusAmount;
+            gSalesLine.Amount := MinusAmount;
+            gSalesLine."VAT Bus. Posting Group" := VATPostingSetup."VAT Bus. Posting Group";
+            gSalesLine."VAT Prod. Posting Group" := SalesInvoiceLineTEMP2."VAT Prod. Posting Group";
+            gSalesLine."VAT Calculation Type" := VATPostingSetup."VAT Calculation Type";
+            IF VATPostingSetup."VAT Calculation Type" <> VATPostingSetup."VAT Calculation Type"::"Reverse Charge VAT" THEN
+              gSalesLine."VAT %" := VATPostingSetup."VAT %"
+            ELSE
+              gSalesLine."VAT %" := 0;
+            gSalesLine."Amount Including VAT" := (MinusAmount * (1 + gSalesLine."VAT %"/100));
+            IF gSalesLine.ISTEMPORARY THEN gSalesLine.INSERT;
+            InvoiceExtraLine := TRUE;
+        END;
+
+        IF SalesInvoiceLineTEMP2.Type = SalesInvoiceLineTEMP2.Type::" " THEN
+
+          IF NOT TempVATAmtLine.GET('Z') THEN BEGIN
+            TempVATAmtLine.INIT;
+            TempVATAmtLine."VAT Identifier" := 'Z';
+            TempVATAmtLine.INSERT(FALSE);
+          END;
+
+      UNTIL SalesInvoiceLineTEMP2.NEXT = 0;
+      MaxLineNo := gSalesLine."Line No.";
+
+      lvSalesReportTextLineRec.RESET;
+      lvSalesReportTextLineRec.SETRANGE("Document Type", lvGenericSalesHeaderRec."Document Type");
+      lvSalesReportTextLineRec.SETRANGE("Document No.", lvGenericSalesHeaderRec."No.");
+      lvSalesReportTextLineRec.SETRANGE("Text Line Type", SalesReportTextLineRec."Text Line Type"::Footer);
+      lvSalesReportTextLineRec.SETFILTER(Text, '<>%1', '');
+      IF gStrippedView THEN
+        lvSalesReportTextLineRec.SETFILTER(Text, '-o-');
+      IF NOT lvSalesReportTextLineRec.ISEMPTY THEN BEGIN
+        IF NOT TempVATAmtLine.GET('Z') THEN BEGIN
+          TempVATAmtLine.INIT;
+          TempVATAmtLine."VAT Identifier" := 'Z';
+          TempVATAmtLine.INSERT(FALSE);
+        END;
+      END;
+    END;
+
+    BEGIN
+    {
+      190904 ORANGO.DL support for Svefatura 3 (PEPPOL Biz 3.0) with code from NAV2018
+      cod1610,1611,11128033,11128034
+    }
+    END.
+  }
+}
+

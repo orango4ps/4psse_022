@@ -1,0 +1,908 @@
+OBJECT Codeunit 11020363 Generate SAF-T File
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVNO14.04 (10673);
+  }
+  PROPERTIES
+  {
+    TableNo=11128519;
+    OnRun=VAR
+            SAFTExportHeader@1100285100 : Record 11128518;
+            GLEntry@1100285101 : Record 17;
+          BEGIN
+            LOCKTABLE;
+            VALIDATE("Server Instance ID", SERVICEINSTANCEID);
+            VALIDATE("Session ID", SESSIONID);
+            VALIDATE("Created Date/Time", 0DT);
+            VALIDATE("No. Of Retries", 3);
+            MODIFY;
+            COMMIT;
+
+            IF GUIALLOWED THEN
+                Window.OPEN(
+                    '#1#################################\\' +
+                    '@2@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@');
+            SAFTExportHeader.GET(ID);
+            IF "Master Data" THEN BEGIN
+                ExportHeaderWithMasterFiles(SAFTExportHeader);
+                IF GUIALLOWED THEN
+                    Window.CLOSE;
+                FinalizeExport(Rec, SAFTExportHeader);
+                EXIT;
+            END;
+            ExportHeader(SAFTExportHeader);
+            GLEntry.SETRANGE("Posting Date", "Starting Date", "Ending Date");
+            ExportGeneralLedgerEntries(GLEntry, Rec);
+            IF GUIALLOWED THEN
+                Window.CLOSE;
+            FinalizeExport(Rec, SAFTExportHeader);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      SAFTXMLHelper@1100285101 : Codeunit 11020364;
+      Window@1100285102 : Dialog;
+      GeneratingHeaderTxt@1100285103 : TextConst 'ENU=Generating header...;NOR=Genererer hodetekst...';
+      ExportingGLAccountsTxt@1100285104 : TextConst 'ENU=Exporting g/l Accounts...;NOR=Eksporterer finanskonti...';
+      ExportingCustomersTxt@1100285105 : TextConst 'ENU=Exporting customers...;NOR=Eksporterer kunder...';
+      ExportingVendorsTxt@1100285106 : TextConst 'ENU=Exporting vendors...;NOR=Eksporterer leverand›rer...';
+      ExportingVATPostingSetupTxt@1100285107 : TextConst 'ENU=Exporting VAT Posting Setup...;NOR=Eksporterer mva-bokf›ringsoppsett...';
+      ExportingDimensionsTxt@1100285108 : TextConst 'ENU=Exporting Dimensions...;NOR=Eksporterer dimensjoner...';
+      ExportingGLEntriesTxt@1100285109 : TextConst 'ENU=Exporting G/L entries...;NOR=Eksporterer finansposter...';
+      SkatteetatenMsg@1100285110 : TextConst '@@@={Locked};ENU=Skatteetaten';
+
+    LOCAL PROCEDURE ExportHeaderWithMasterFiles@1100285100(SAFTExportHeader@1100285100 : Record 11128518);
+    BEGIN
+      ExportHeader(SAFTExportHeader);
+      ExportMasterFiles(SAFTExportHeader);
+    END;
+
+    LOCAL PROCEDURE ExportHeader@1100285101(SAFTExportHeader@1100285100 : Record 11128518);
+    VAR
+      GeneralLedgerSetup@1100285101 : Record 98;
+      CompanyInformation@1101285000 : Record 79;
+    BEGIN
+      SAFTXMLHelper.Initialize;
+      IF GUIALLOWED THEN
+          Window.UPDATE(1, GeneratingHeaderTxt);
+      CompanyInformation.GET;
+      SAFTXMLHelper.AddNewXMLNode('Header', '');
+      SAFTXMLHelper.AppendXMLNode('AuditFileVersion', '1.0');
+      SAFTXMLHelper.AppendXMLNode('AuditFileCountry', CompanyInformation."Country/Region Code");
+      SAFTXMLHelper.AppendXMLNode('AuditFileDateCreated', FormatDate(TODAY));
+      SAFTXMLHelper.AppendXMLNode('SoftwareCompanyName', 'Microsoft');
+      SAFTXMLHelper.AppendXMLNode('SoftwareID', 'Microsoft Dynamics 365 Business Central');
+      SAFTXMLHelper.AppendXMLNode('SoftwareVersion', '14.0');
+      ExportCompanyInfo('Company');
+      GeneralLedgerSetup.GET;
+      SAFTXMLHelper.AppendXMLNode('DefaultCurrencyCode', GeneralLedgerSetup."LCY Code");
+
+      SAFTXMLHelper.AddNewXMLNode('SelectionCriteria', '');
+      SAFTXMLHelper.AppendXMLNode('PeriodStart', FORMAT(DATE2DMY(SAFTExportHeader."Starting Date", 2)));
+      SAFTXMLHelper.AppendXMLNode('PeriodStartYear', FORMAT(DATE2DMY(SAFTExportHeader."Starting Date", 3)));
+      SAFTXMLHelper.AppendXMLNode('PeriodEnd', FORMAT(DATE2DMY(SAFTExportHeader."Ending Date", 2)));
+      SAFTXMLHelper.AppendXMLNode('PeriodEndYear', FORMAT(DATE2DMY(SAFTExportHeader."Ending Date", 3)));
+      SAFTXMLHelper.FinalizeXMLNode;
+
+      SAFTXMLHelper.AppendXMLNode('HeaderComment', SAFTExportHeader."Header Comment");
+      SAFTXMLHelper.AppendXMLNode('TaxAccountingBasis', 'A');
+      SAFTXMLHelper.AppendXMLNode('UserID', USERID);
+      SAFTXMLHelper.FinalizeXMLNode;
+    END;
+
+    LOCAL PROCEDURE ExportCompanyInfo@1100285102(ParentNodeName@1100285100 : Text);
+    VAR
+      CompanyInformation@1100285101 : Record 79;
+      Employee@1100285102 : Record 5200;
+    BEGIN
+      SAFTXMLHelper.AddNewXMLNode(ParentNodeName, '');
+      CompanyInformation.GET;
+      SAFTXMLHelper.AppendXMLNode('RegistrationNumber', CompanyInformation."VAT Registration No.");
+      SAFTXMLHelper.AppendXMLNode('Name', CombineWithSpace(CompanyInformation.Name, CompanyInformation."Name 2"));
+      ExportAddress(
+        CombineWithSpace(CompanyInformation.Address, CompanyInformation."Address 2"), CompanyInformation.City, CompanyInformation."Post Code",
+        CompanyInformation."Country/Region Code", 'StreetAddress');
+      Employee.GET(CompanyInformation."SAF-T Contact No.");
+      ExportContact(
+        Employee."First Name", Employee."Last Name", Employee."Phone No.", Employee."Fax No.", Employee."E-Mail",
+        '', Employee."Mobile Phone No.");
+      ExportTaxRegistration(CompanyInformation."VAT Registration No.");
+      ExportBankAccount(
+        CompanyInformation."Country/Region Code", CompanyInformation."Bank Name", CompanyInformation."Bank Account No.", CompanyInformation.IBAN,
+        CompanyInformation."Bank Branch No.", '');
+      SAFTXMLHelper.FinalizeXMLNode;
+    END;
+
+    LOCAL PROCEDURE ExportAddress@1100285103(StreetName@1100285100 : Text;City@1100285101 : Text;PostalCode@1100285102 : Text;Country@1100285103 : Text;AddressType@1100285104 : Text);
+    BEGIN
+      SAFTXMLHelper.AddNewXMLNode('Address', '');
+      SAFTXMLHelper.AppendXMLNode('StreetName', StreetName);
+      SAFTXMLHelper.AppendXMLNode('City', City);
+      SAFTXMLHelper.AppendXMLNode('PostalCode', PostalCode);
+      SAFTXMLHelper.AppendXMLNode('Country', Country);
+      SAFTXMLHelper.AppendXMLNode('AddressType', AddressType);
+      SAFTXMLHelper.FinalizeXMLNode;
+    END;
+
+    LOCAL PROCEDURE ExportContact@1100285104(FirstName@1100285100 : Text;LastName@1100285101 : Text;Telephone@1100285102 : Text;Fax@1100285103 : Text;Email@1100285104 : Text;Website@1100285105 : Text;MobilePhone@1100285106 : Text);
+    BEGIN
+      IF (DELCHR(FirstName) = '') OR (DELCHR(LastName) = '') THEN
+        EXIT;
+
+      SAFTXMLHelper.AddNewXMLNode('Contact', '');
+      SAFTXMLHelper.AddNewXMLNode('ContactPerson', '');
+      SAFTXMLHelper.AppendXMLNode('FirstName', FirstName);
+      SAFTXMLHelper.AppendXMLNode('LastName', LastName);
+      SAFTXMLHelper.FinalizeXMLNode;
+
+      SAFTXMLHelper.AppendXMLNode('Telephone', Telephone);
+      SAFTXMLHelper.AppendXMLNode('Fax', Fax);
+      SAFTXMLHelper.AppendXMLNode('Email', Email);
+      SAFTXMLHelper.AppendXMLNode('Website', Website);
+      SAFTXMLHelper.AppendXMLNode('MobilePhone', MobilePhone);
+      SAFTXMLHelper.FinalizeXMLNode;
+    END;
+
+    LOCAL PROCEDURE ExportTaxRegistration@1100285105(VATRegistrationNo@1100285100 : Text[20]);
+    BEGIN
+      SAFTXMLHelper.AddNewXMLNode('TaxRegistration', '');
+      SAFTXMLHelper.AppendXMLNode('TaxRegistrationNumber', VATRegistrationNo);
+      SAFTXMLHelper.AppendXMLNode('TaxAuthority', SkatteetatenMsg);
+      SAFTXMLHelper.FinalizeXMLNode;
+    END;
+
+    LOCAL PROCEDURE ExportMasterFiles@1100285106(SAFTExportHeader@1100285100 : Record 11128518);
+    BEGIN
+      SAFTXMLHelper.AddNewXMLNode('MasterFiles', '');
+      IF GUIALLOWED THEN
+        Window.UPDATE(1, ExportingGLAccountsTxt);
+      ExportGeneralLedgerAccounts(SAFTExportHeader);
+      ExportCustomers(SAFTExportHeader);
+      ExportVendors(SAFTExportHeader);
+      ExportTaxTable;
+      ExportAnalysisTypeTable;
+      SAFTXMLHelper.FinalizeXMLNode;
+    END;
+
+    LOCAL PROCEDURE ExportGeneralLedgerAccounts@1100285107(SAFTExportHeader@1100285100 : Record 11128518);
+    VAR
+      SAFTMappingRange@1100285101 : Record 11072496;
+      SAFTGLAccountMapping@1100285102 : Record 11072494;
+      TotalNumberOfAccounts@1100285103 : Integer;
+      CountOfAccounts@1100285104 : Integer;
+    BEGIN
+      SAFTMappingRange.GET(SAFTExportHeader."Mapping Range Code");
+      SAFTGLAccountMapping.SETRANGE("Mapping Range Code", SAFTExportHeader."Mapping Range Code");
+      SAFTGLAccountMapping.SETFILTER("No.", '<>%1', '');
+      // It's up to date by VerifyMappingIsDone function called from SAFTExportCheck.Codeunit.al right before the actual export
+      SAFTGLAccountMapping.SETRANGE("G/L Entries Exists", TRUE);
+      IF NOT SAFTGLAccountMapping.FINDSET THEN
+        EXIT;
+
+      SAFTXMLHelper.AddNewXMLNode('GeneralLedgerAccounts', '');
+      IF GUIALLOWED THEN
+        TotalNumberOfAccounts := SAFTGLAccountMapping.COUNT;
+      REPEAT
+        IF GUIALLOWED THEN BEGIN
+            CountOfAccounts += 1;
+            Window.UPDATE(2, ROUND(100 * (CountOfAccounts / TotalNumberOfAccounts * 100), 1));
+        END;
+        ExportGLAccount(
+            SAFTGLAccountMapping."G/L Account No.", SAFTGLAccountMapping."No.", '', '',
+            SAFTExportHeader."Starting Date", SAFTExportHeader."Ending Date");
+      UNTIL SAFTGLAccountMapping.NEXT = 0;
+      SAFTXMLHelper.FinalizeXMLNode;
+    END;
+
+    LOCAL PROCEDURE ExportGLAccount@1100285108(GLAccNo@1100285100 : Code[20];StandardAccNo@1100285101 : Text[4];GroupingCategory@1100285102 : Code[20];GroupingNo@1100285103 : Code[20];StartingDate@1100285104 : Date;EndingDate@1100285105 : Date);
+    VAR
+      GLAccount@1100285106 : Record 15;
+      OpeningDebitBalance@1100285107 : Decimal;
+      OpeningCreditBalance@1100285108 : Decimal;
+      ClosingDebitBalance@1100285109 : Decimal;
+      ClosingCreditBalance@1100285110 : Decimal;
+    BEGIN
+      GLAccount.GET(GLAccNo);
+      // Opening balance always zero for income statement
+      IF GLAccount."Income/Balance" <> GLAccount."Income/Balance"::"Income Statement" THEN BEGIN
+        GLAccount.SETRANGE("Date Filter", 0D, CLOSINGDATE(StartingDate - 1));
+        GLAccount.CALCFIELDS("Net Change");
+        IF GLAccount."Net Change" > 0 THEN
+            OpeningDebitBalance := GLAccount."Net Change"
+        ELSE
+            OpeningCreditBalance := -GLAccount."Net Change";
+      END;
+
+      IF GLAccount."Income/Balance" = GLAccount."Income/Balance"::"Income Statement" THEN
+        GLAccount.SETRANGE("Date Filter", StartingDate, EndingDate)
+      ELSE
+        GLAccount.SETRANGE("Date Filter", 0D, CLOSINGDATE(EndingDate));
+      GLAccount.CALCFIELDS("Net Change");
+      IF GLAccount."Net Change" > 0 THEN
+        ClosingDebitBalance := GLAccount."Net Change"
+      ELSE
+        ClosingCreditBalance := -GLAccount."Net Change";
+      IF (ClosingDebitBalance = 0) AND (ClosingCreditBalance = 0) THEN
+        EXIT;
+
+      SAFTXMLHelper.AddNewXMLNode('Account', '');
+      SAFTXMLHelper.AppendXMLNode('AccountID', GLAccount."No.");
+      SAFTXMLHelper.AppendXMLNode('AccountDescription', GLAccount.Name);
+      SAFTXMLHelper.AppendXMLNode('StandardAccountID', StandardAccNo);
+      SAFTXMLHelper.AppendXMLNode('GroupingCategory', GroupingCategory);
+      SAFTXMLHelper.AppendXMLNode('GroupingCode', GroupingNo);
+      SAFTXMLHelper.AppendXMLNode('AccountType', 'GL');
+      IF GLAccount."Income/Balance" = GLAccount."Income/Balance"::"Income Statement" THEN BEGIN
+        // For income statement the opening balance is always zero but it's more preferred to have same type of balance (Debit or Credit) to match opening and closing XML nodes.
+        IF ClosingDebitBalance = 0 THEN
+            SAFTXMLHelper.AppendXMLNode('OpeningCreditBalance', FormatAmount(0))
+        ELSE
+            SAFTXMLHelper.AppendXMLNode('OpeningDebitBalance', FormatAmount(0))
+      END ELSE
+        IF OpeningDebitBalance = 0 THEN
+            SAFTXMLHelper.AppendXMLNode('OpeningCreditBalance', FormatAmount(OpeningCreditBalance))
+        ELSE
+            SAFTXMLHelper.AppendXMLNode('OpeningDebitBalance', FormatAmount(OpeningDebitBalance));
+      IF ClosingDebitBalance = 0 THEN
+        SAFTXMLHelper.AppendXMLNode('ClosingCreditBalance', FormatAmount(ClosingCreditBalance))
+      ELSE
+        SAFTXMLHelper.AppendXMLNode('ClosingDebitBalance', FormatAmount(ClosingDebitBalance));
+      SAFTXMLHelper.FinalizeXMLNode;
+    END;
+
+    LOCAL PROCEDURE ExportCustomers@1100285109(SAFTExportHeader@1100285100 : Record 11128518);
+    VAR
+      Customer@1100285101 : Record 18;
+      TotalNumberOfCustomers@1100285102 : Integer;
+      CountOfCustomers@1100285103 : Integer;
+    BEGIN
+      IF NOT Customer.FINDSET THEN
+        EXIT;
+
+      SAFTXMLHelper.AddNewXMLNode('Customers', '');
+      IF GUIALLOWED THEN BEGIN
+        Window.UPDATE(1, ExportingCustomersTxt);
+        TotalNumberOfCustomers := Customer.COUNT;
+      END;
+      REPEAT
+        IF GUIALLOWED THEN BEGIN
+            CountOfCustomers += 1;
+            Window.UPDATE(2, ROUND(100 * (CountOfCustomers / TotalNumberOfCustomers * 100), 1));
+        END;
+        ExportCustomer(Customer, SAFTExportHeader);
+      UNTIL Customer.NEXT = 0;
+      SAFTXMLHelper.FinalizeXMLNode;
+    END;
+
+    LOCAL PROCEDURE ExportCustomer@1100285110(Customer@1100285100 : Record 18;SAFTExportHeader@1100285101 : Record 11128518);
+    VAR
+      CustomerPostingGroup@1100285102 : Record 92;
+      CustomerBankAccount@1100285103 : Record 287;
+      OpeningDebitBalance@1100285104 : Decimal;
+      ClosingDebitBalance@1100285105 : Decimal;
+      OpeningCreditBalance@1100285106 : Decimal;
+      ClosingCreditBalance@1100285107 : Decimal;
+      Handled@1100285108 : Boolean;
+      FirstName@1100285109 : Text;
+      LastName@1100285110 : Text;
+    BEGIN
+      Customer.SETRANGE("Date Filter", 0D, CLOSINGDATE(SAFTExportHeader."Starting Date" - 1));
+      Customer.CALCFIELDS("Net Change (LCY)");
+      IF Customer."Net Change (LCY)" > 0 THEN
+        OpeningDebitBalance := Customer."Net Change (LCY)"
+      ELSE
+        OpeningCreditBalance := -Customer."Net Change (LCY)";
+      Customer.SETRANGE("Date Filter", 0D, CLOSINGDATE(SAFTExportHeader."Ending Date"));
+      Customer.CALCFIELDS("Net Change (LCY)");
+      IF Customer."Net Change (LCY)" > 0 THEN
+        ClosingDebitBalance := Customer."Net Change (LCY)"
+      ELSE
+        ClosingCreditBalance := -Customer."Net Change (LCY)";
+      IF (ClosingDebitBalance = 0) AND (ClosingCreditBalance = 0) THEN
+        EXIT;
+
+      SAFTXMLHelper.AddNewXMLNode('Customer', '');
+      SAFTXMLHelper.AppendXMLNode('RegistrationNumber', Customer."VAT Registration No.");
+      SAFTXMLHelper.AppendXMLNode('Name', CombineWithSpace(Customer.Name, Customer."Name 2"));
+      ExportAddress(CombineWithSpace(Customer.Address, Customer."Address 2"), Customer.City, Customer."Post Code", Customer."Country/Region Code", 'StreetAddress');
+      OnBeforeGetFirstAndLastNameFromCustomer(Handled, FirstName, LastName, Customer);
+      IF NOT Handled THEN
+        GetFirstAndLastNameFromContactName(FirstName, LastName, Customer.Contact);
+      ExportContact(FirstName, LastName, Customer."Phone No.", Customer."Fax No.", Customer."E-Mail", Customer."Home Page", '');
+      IF Customer."Preferred Bank Account Code" = '' THEN BEGIN
+        CustomerBankAccount.SETRANGE("Customer No.", Customer."No.");
+        IF NOT CustomerBankAccount.FINDFIRST THEN
+            CLEAR(CustomerBankAccount);
+      END ELSE
+        CustomerBankAccount.GET(Customer."No.", Customer."Preferred Bank Account Code");
+      ExportBankAccount(
+        Customer."Country/Region Code", CombineWithSpace(CustomerBankAccount.Name, CustomerBankAccount."Name 2"),
+        CustomerBankAccount."Bank Account No.", CustomerBankAccount.IBAN,
+        CustomerBankAccount."Bank Branch No.", CustomerBankAccount."Currency Code");
+      SAFTXMLHelper.AppendXMLNode('CustomerID', Customer."No.");
+      CustomerPostingGroup.GET(Customer."Customer Posting Group");
+      SAFTXMLHelper.AppendXMLNode('AccountID', CustomerPostingGroup."Receivables Account");
+      IF OpeningDebitBalance = 0 THEN
+        SAFTXMLHelper.AppendXMLNode('OpeningCreditBalance', FormatAmount(OpeningCreditBalance))
+      ELSE
+        SAFTXMLHelper.AppendXMLNode('OpeningDebitBalance', FormatAmount(OpeningDebitBalance));
+      IF ClosingDebitBalance = 0 THEN
+        SAFTXMLHelper.AppendXMLNode('ClosingCreditBalance', FormatAmount(ClosingCreditBalance))
+      ELSE
+        SAFTXMLHelper.AppendXMLNode('ClosingDebitBalance', FormatAmount(ClosingDebitBalance));
+      ExportPartyInfo(DATABASE::Customer, Customer."No.", Customer."Currency Code", Customer."Payment Terms Code");
+      SAFTXMLHelper.FinalizeXMLNode;
+    END;
+
+    LOCAL PROCEDURE ExportVendors@1100285111(SAFTExportHeader@1100285100 : Record 11128518);
+    VAR
+      Vendor@1100285101 : Record 23;
+      TotalNumberOfVendors@1100285102 : Integer;
+      CountOfVendors@1100285103 : Integer;
+    BEGIN
+      IF NOT Vendor.FINDSET THEN
+        EXIT;
+
+      SAFTXMLHelper.AddNewXMLNode('Suppliers', '');
+      IF GUIALLOWED THEN BEGIN
+        Window.UPDATE(1, ExportingVendorsTxt);
+        TotalNumberOfVendors := Vendor.COUNT;
+      END;
+      REPEAT
+        IF GUIALLOWED THEN BEGIN
+            CountOfVendors += 1;
+            Window.UPDATE(2, ROUND(100 * (CountOfVendors / TotalNumberOfVendors * 100), 1));
+        END;
+        ExportVendor(Vendor, SAFTExportHeader);
+      UNTIL Vendor.NEXT = 0;
+      SAFTXMLHelper.FinalizeXMLNode;
+    END;
+
+    LOCAL PROCEDURE ExportVendor@1100285112(Vendor@1100285100 : Record 23;SAFTExportHeader@1100285101 : Record 11128518);
+    VAR
+      VendorPostingGroup@1100285102 : Record 93;
+      VendorBankAccount@1100285103 : Record 288;
+      OpeningDebitBalance@1100285104 : Decimal;
+      ClosingDebitBalance@1100285105 : Decimal;
+      OpeningCreditBalance@1100285106 : Decimal;
+      ClosingCreditBalance@1100285107 : Decimal;
+      Handled@1100285108 : Boolean;
+      FirstName@1100285109 : Text;
+      LastName@1100285110 : Text;
+    BEGIN
+      Vendor.SETRANGE("Date Filter", 0D, CLOSINGDATE(SAFTExportHeader."Starting Date" - 1));
+      Vendor.CALCFIELDS("Net Change (LCY)");
+      IF Vendor."Net Change (LCY)" > 0 THEN
+        OpeningDebitBalance := Vendor."Net Change (LCY)"
+      ELSE
+        OpeningCreditBalance := -Vendor."Net Change (LCY)";
+      Vendor.SETRANGE("Date Filter", 0D, CLOSINGDATE(SAFTExportHeader."Ending Date"));
+      Vendor.CALCFIELDS("Net Change (LCY)");
+      IF Vendor."Net Change (LCY)" > 0 THEN
+        ClosingDebitBalance := Vendor."Net Change (LCY)"
+      ELSE
+        ClosingCreditBalance := -Vendor."Net Change (LCY)";
+      IF (ClosingDebitBalance = 0) AND (ClosingCreditBalance = 0) THEN
+        EXIT;
+
+      SAFTXMLHelper.AddNewXMLNode('Supplier', '');
+      SAFTXMLHelper.AppendXMLNode('RegistrationNumber', Vendor."VAT Registration No.");
+      SAFTXMLHelper.AppendXMLNode('Name', CombineWithSpace(Vendor.Name, Vendor."Name 2"));
+      ExportAddress(CombineWithSpace(Vendor.Address, Vendor."Address 2"), Vendor.City, Vendor."Post Code", Vendor."Country/Region Code", 'StreetAddress');
+      OnBeforeGetFirstAndLastNameFromVendor(Handled, FirstName, LastName, Vendor);
+      IF NOT Handled THEN
+        GetFirstAndLastNameFromContactName(FirstName, LastName, Vendor.Contact);
+      ExportContact(FirstName, LastName, Vendor."Phone No.", Vendor."Fax No.", Vendor."E-Mail", Vendor."Home Page", '');
+      IF Vendor."Preferred Bank Account Code" = '' THEN BEGIN
+        VendorBankAccount.SETRANGE("Vendor No.", Vendor."No.");
+        IF NOT VendorBankAccount.FINDFIRST THEN
+            CLEAR(VendorBankAccount);
+      END ELSE
+        VendorBankAccount.GET(Vendor."No.", Vendor."Preferred Bank Account Code");
+      ExportBankAccount(
+        Vendor."Country/Region Code", CombineWithSpace(VendorBankAccount.Name, VendorBankAccount."Name 2"),
+        VendorBankAccount."Bank Account No.", VendorBankAccount.IBAN,
+        VendorBankAccount."Bank Branch No.", VendorBankAccount."Currency Code");
+      SAFTXMLHelper.AppendXMLNode('SupplierID', Vendor."No.");
+      VendorPostingGroup.GET(Vendor."Vendor Posting Group");
+      SAFTXMLHelper.AppendXMLNode('AccountID', VendorPostingGroup."Payables Account");
+      IF OpeningDebitBalance = 0 THEN
+        SAFTXMLHelper.AppendXMLNode('OpeningCreditBalance', FormatAmount(OpeningCreditBalance))
+      ELSE
+        SAFTXMLHelper.AppendXMLNode('OpeningDebitBalance', FormatAmount(OpeningDebitBalance));
+      IF ClosingDebitBalance = 0 THEN
+        SAFTXMLHelper.AppendXMLNode('ClosingCreditBalance', FormatAmount(ClosingCreditBalance))
+      ELSE
+        SAFTXMLHelper.AppendXMLNode('ClosingDebitBalance', FormatAmount(ClosingDebitBalance));
+      ExportPartyInfo(DATABASE::Vendor, Vendor."No.", Vendor."Currency Code", Vendor."Payment Terms Code");
+      SAFTXMLHelper.FinalizeXMLNode;
+    END;
+
+    LOCAL PROCEDURE ExportTaxTable@1100285113();
+    BEGIN
+      IF GUIALLOWED THEN
+        Window.UPDATE(1, ExportingVATPostingSetupTxt);
+      SAFTXMLHelper.AddNewXMLNode('TaxTable', '');
+      SAFTXMLHelper.AddNewXMLNode('TaxTableEntry', '');
+      SAFTXMLHelper.AppendXMLNode('TaxType', 'MVA');
+      SAFTXMLHelper.AppendXMLNode('Description', 'Merverdiavgift');
+      ExportTaxCodeDetails;
+      SAFTXMLHelper.FinalizeXMLNode;
+      SAFTXMLHelper.FinalizeXMLNode;
+    END;
+
+    LOCAL PROCEDURE ExportTaxCodeDetails@1100285114();
+    VAR
+      VATPostingSetup@1100285100 : Record 325;
+      VATCode@1100285101 : Record 11128501;
+      SAFTExportMgt@1100285102 : Codeunit 11020365;
+      NotApplicableVATCode@1100285103 : Code[10];
+      SalesCompensation@1100285104 : Boolean;
+      PurchaseCompensation@1100285105 : Boolean;
+    BEGIN
+      IF NOT VATPostingSetup.FINDSET THEN
+        EXIT;
+
+      NotApplicableVATCode := SAFTExportMgt.GetNotApplicationVATCode;
+      REPEAT
+        IF NOT VATPostingSetup."Calc. Prop. Deduction VAT" THEN
+            VATPostingSetup."Proportional Deduction VAT %" := 0;
+        IF VATPostingSetup."Sales SAF-T Standard Tax Code" = '' THEN
+            VATPostingSetup."Sales SAF-T Standard Tax Code" := NotApplicableVATCode
+        ELSE BEGIN
+            VATCode.GET(VATPostingSetup."Sales SAF-T Standard Tax Code");
+            SalesCompensation := VATCode.Compensation;
+        END;
+        IF VATPostingSetup."Purch. SAF-T Standard Tax Code" = '' THEN
+            VATPostingSetup."Purch. SAF-T Standard Tax Code" := NotApplicableVATCode
+        ELSE BEGIN
+            VATCode.GET(VATPostingSetup."Purch. SAF-T Standard Tax Code");
+            PurchaseCompensation := VATCode.Compensation;
+        END;
+
+        IF VATPostingSetup."Sales VAT Account" <> '' THEN
+            ExportTaxCodeDetail(
+                VATPostingSetup."Sales SAF-T Tax Code", VATPostingSetup."Sales SAF-T Standard Tax Code",
+                VATPostingSetup.Description, VATPostingSetup."VAT %",
+                SalesCompensation, VATPostingSetup."Proportional Deduction VAT %");
+        IF VATPostingSetup."Purchase VAT Account" <> '' THEN
+            ExportTaxCodeDetail(
+                VATPostingSetup."Purchase SAF-T Tax Code", VATPostingSetup."Purch. SAF-T Standard Tax Code",
+                VATPostingSetup.Description, VATPostingSetup."VAT %",
+                PurchaseCompensation, VATPostingSetup."Proportional Deduction VAT %");
+      UNTIL VATPostingSetup.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ExportTaxCodeDetail@1100285115(SAFTTaxCode@1100285100 : Integer;StandardTaxCode@1100285101 : Code[10];Description@1100285102 : Text;VATRate@1100285103 : Decimal;Compensation@1100285104 : Boolean;VATDeductionRate@1100285105 : Decimal);
+    VAR
+      CompanyInformation@1101285000 : Record 79;
+    BEGIN
+      CompanyInformation.GET;
+      SAFTXMLHelper.AddNewXMLNode('TaxCodeDetails', '');
+      SAFTXMLHelper.AppendXMLNode('TaxCode', FORMAT(SAFTTaxCode));
+      SAFTXMLHelper.AppendXMLNode('Description', Description);
+      SAFTXMLHelper.AppendXMLNode('TaxPercentage', FormatAmount(VATRate));
+      SAFTXMLHelper.AppendXMLNode('Country', CompanyInformation."Country/Region Code");
+      SAFTXMLHelper.AppendXMLNode('StandardTaxCode', StandardTaxCode);
+      SAFTXMLHelper.AppendXMLNode('Compensation', FORMAT(Compensation, 0, 9));
+      IF VATDeductionRate = 0 THEN
+        VATDeductionRate := 100;
+      SAFTXMLHelper.AppendXMLNode('BaseRate', FormatAmount(VATDeductionRate));
+      SAFTXMLHelper.FinalizeXMLNode;
+    END;
+
+    LOCAL PROCEDURE ExportAnalysisTypeTable@1100285116();
+    VAR
+      Dimension@1100285100 : Record 348;
+      DimensionValue@1100285101 : Record 349;
+      LastDimensionCode@1100285102 : Code[20];
+    BEGIN
+      IF NOT DimensionValue.FINDSET THEN
+        EXIT;
+
+      IF GUIALLOWED THEN
+        Window.UPDATE(1, ExportingDimensionsTxt);
+      SAFTXMLHelper.AddNewXMLNode('AnalysisTypeTable', '');
+      REPEAT
+        IF LastDimensionCode <> DimensionValue."Dimension Code" THEN BEGIN
+            Dimension.GET(DimensionValue."Dimension Code");
+            LastDimensionCode := Dimension.Code;
+        END;
+        IF Dimension."Export to SAF-T" THEN BEGIN
+            SAFTXMLHelper.AddNewXMLNode('AnalysisTypeTableEntry', '');
+            SAFTXMLHelper.AppendXMLNode('AnalysisType', Dimension."SAF-T Analysis Type");
+            SAFTXMLHelper.AppendXMLNode('AnalysisTypeDescription', Dimension.Name);
+            SAFTXMLHelper.AppendXMLNode('AnalysisID', DimensionValue.Code);
+            SAFTXMLHelper.AppendXMLNode('AnalysisIDDescription', DimensionValue.Name);
+            SAFTXMLHelper.FinalizeXMLNode;
+        END;
+      UNTIL DimensionValue.NEXT = 0;
+      SAFTXMLHelper.FinalizeXMLNode;
+    END;
+
+    LOCAL PROCEDURE ExportGeneralLedgerEntries@1100285117(VAR GLEntry@1100285106 : Record 17;VAR SAFTExportLine@1100285107 : Record 11128519);
+    VAR
+      SAFTSourceCode@1100285100 : Record 11128517;
+      TempSourceCode@1100285101 : TEMPORARY Record 230;
+      SourceCode@1100285102 : Record 230;
+      SAFTMappingHelper@1100285103 : Codeunit 11020362;
+      GLEntryProgressStep@1100285104 : Decimal;
+      GLEntryProgress@1100285105 : Decimal;
+    BEGIN
+      GLEntry.CALCSUMS("Debit Amount", "Credit Amount");
+      SAFTXMLHelper.AddNewXMLNode('GeneralLedgerEntries', '');
+      SAFTXMLHelper.AppendXMLNode('NumberOfEntries', FORMAT(GLEntry.COUNT));
+      SAFTXMLHelper.AppendXMLNode('TotalDebit', FormatAmount(GLEntry."Debit Amount"));
+      SAFTXMLHelper.AppendXMLNode('TotalCredit', FormatAmount(GLEntry."Credit Amount"));
+      IF GLEntry.ISEMPTY THEN BEGIN
+        SAFTXMLHelper.FinalizeXMLNode;
+        EXIT;
+      END;
+
+      IF GUIALLOWED THEN
+        Window.UPDATE(1, ExportingGLEntriesTxt);
+      IF SAFTSourceCode.FINDSET THEN
+        GLEntryProgressStep := ROUND(10000 / SAFTSourceCode.COUNT, 1, '<')
+      ELSE
+        GLEntryProgressStep := 10000;
+      REPEAT
+        TempSourceCode.RESET;
+        TempSourceCode.DELETEALL;
+        IF SAFTSourceCode.Code = '' THEN BEGIN
+            SAFTSourceCode.INIT;
+            SAFTSourceCode.Code := SAFTMappingHelper.GetARSAFTSourceCode;
+            SAFTSourceCode.Description := SAFTMappingHelper.GetASAFTSourceCodeDescription;
+        END ELSE
+            SourceCode.SETRANGE("SAF-T Source Code", SAFTSourceCode.Code);
+        IF SourceCode.FINDSET THEN
+            REPEAT
+                TempSourceCode := SourceCode;
+                TempSourceCode.INSERT;
+            UNTIL SourceCode.NEXT = 0;
+        IF SAFTSourceCode."Includes No Source Code" THEN BEGIN
+            TempSourceCode.INIT;
+            TempSourceCode.Code := '';
+            TempSourceCode.INSERT;
+        END;
+        GLEntryProgress += GLEntryProgressStep;
+        IF GUIALLOWED THEN
+            Window.UPDATE(2, GLEntryProgress);
+        IF ExportGLEntriesBySourceCodeBuffer(TempSourceCode, GLEntry, SAFTSourceCode) THEN BEGIN
+            SAFTExportLine.GET(SAFTExportLine.ID, SAFTExportLine."Line No.");
+            SAFTExportLine.LOCKTABLE;
+            SAFTExportLine.VALIDATE(Progress, GLEntryProgress);
+            SAFTExportLine.MODIFY(TRUE);
+            COMMIT;
+        END;
+      UNTIL SAFTSourceCode.NEXT = 0;
+
+      SAFTXMLHelper.FinalizeXMLNode;
+    END;
+
+    LOCAL PROCEDURE ExportGLEntriesBySourceCodeBuffer@1100285118(VAR TempSourceCode@1100285100 : TEMPORARY Record 230;VAR GLEntry@1100285101 : Record 17;SAFTSourceCode@1100285102 : Record 11128517) : Boolean;
+    VAR
+      SourceCodeFilter@1100285103 : Text;
+      GLEntriesExists@1100285104 : Boolean;
+    BEGIN
+      IF NOT TempSourceCode.FINDSET THEN
+        EXIT(FALSE);
+
+      REPEAT
+        IF SourceCodeFilter <> '' THEN
+            SourceCodeFilter += '|';
+        SourceCodeFilter += TempSourceCode.Code;
+      UNTIL TempSourceCode.NEXT = 0;
+      GLEntry.SETFILTER("Source Code", SourceCodeFilter);
+      GLEntriesExists := GLEntry.FINDSET;
+      IF NOT GLEntriesExists THEN
+        EXIT(FALSE);
+
+      SAFTXMLHelper.AddNewXMLNode('Journal', '');
+      SAFTXMLHelper.AppendXMLNode('JournalID', SAFTSourceCode.Code);
+      SAFTXMLHelper.AppendXMLNode('Description', SAFTSourceCode.Description);
+      SAFTXMLHelper.AppendXMLNode('Type', SAFTSourceCode.Code);
+      ExportGLEntriesByTransaction(GLEntry);
+      IF SAFTSourceCode.Code <> '' THEN
+        SAFTXMLHelper.FinalizeXMLNode;
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE ExportGLEntriesByTransaction@1100285119(VAR GLEntry@1100285100 : Record 17);
+    VAR
+      TempDimCodeAmountBuffer@1100285101 : TEMPORARY Record 375;
+      VATEntry@1100285102 : Record 254;
+      SAFTExportMgt@1100285103 : Codeunit 11020365;
+      AmountXMLNode@1100285104 : Text;
+      Amount@1100285105 : Decimal;
+      LastTransactionNo@1100285106 : Integer;
+    BEGIN
+      REPEAT
+        IF LastTransactionNo <> GLEntry."Transaction No." THEN BEGIN
+            IF LastTransactionNo <> 0 THEN
+                SAFTXMLHelper.FinalizeXMLNode;
+            ExportGLEntryTransactionInfo(GLEntry);
+            LastTransactionNo := GLEntry."Transaction No.";
+        END;
+        SAFTXMLHelper.AddNewXMLNode('Line', '');
+        SAFTXMLHelper.AppendXMLNode('RecordID', FORMAT(GLEntry."Entry No."));
+        SAFTXMLHelper.AppendXMLNode('AccountID', GLEntry."G/L Account No.");
+        CopyDimeSetIDToDimCodeAmountBuffer(TempDimCodeAmountBuffer, GLEntry."Dimension Set ID");
+        ExportAnalysisInfo(TempDimCodeAmountBuffer);
+        SAFTXMLHelper.AppendXMLNode('SourceDocumentID', GLEntry."Document No.");
+        CASE GLEntry."Source Type" OF
+            GLEntry."Source Type"::Customer:
+                SAFTXMLHelper.AppendXMLNode('CustomerID', GLEntry."Source No.");
+            GLEntry."Source Type"::Vendor:
+                SAFTXMLHelper.AppendXMLNode('SupplierID', GLEntry."Source No.");
+        END;
+        SAFTXMLHelper.AppendXMLNode('Description', GLEntry.Description);
+        SAFTExportMgt.GetAmountInfoFromGLEntry(AmountXMLNode, Amount, GLEntry);
+        ExportAmountInfo(AmountXMLNode, Amount);
+        SAFTXMLHelper.AppendXMLNode('ReferenceNumber', GLEntry."External Document No.");
+        IF (GLEntry."VAT Bus. Posting Group" <> '') OR (GLEntry."VAT Prod. Posting Group" <> '') THEN BEGIN
+            VATEntry.SETCURRENTKEY("Document No.", "Posting Date");
+            VATEntry.SETRANGE("Document No.", GLEntry."Document No.");
+            VATEntry.SETRANGE("Posting Date", GLEntry."Posting Date");
+            VATEntry.SETRANGE("Transaction No.", GLEntry."Transaction No.");
+            IF VATEntry.FINDFIRST THEN
+                ExportTaxInformation(VATEntry);
+        END;
+        SAFTXMLHelper.FinalizeXMLNode;
+      UNTIL GLEntry.NEXT = 0;
+      SAFTXMLHelper.FinalizeXMLNode;
+    END;
+
+    LOCAL PROCEDURE ExportGLEntryTransactionInfo@1100285120(GLEntry@1100285100 : Record 17);
+    BEGIN
+      SAFTXMLHelper.AddNewXMLNode('Transaction', '');
+      SAFTXMLHelper.AppendXMLNode('TransactionID', FORMAT(GLEntry."Transaction No."));
+      SAFTXMLHelper.AppendXMLNode('Period', FORMAT(DATE2DMY(GLEntry."Posting Date", 2)));
+      SAFTXMLHelper.AppendXMLNode('PeriodYear', FORMAT(DATE2DMY(GLEntry."Posting Date", 3)));
+      SAFTXMLHelper.AppendXMLNode('TransactionDate', FormatDate(GLEntry."Document Date"));
+      SAFTXMLHelper.AppendXMLNode('SourceID', GLEntry."User ID");
+      SAFTXMLHelper.AppendXMLNode('Description', GLEntry.Description);
+      SAFTXMLHelper.AppendXMLNode('SystemEntryDate', FormatDate(GLEntry."Document Date"));
+      SAFTXMLHelper.AppendXMLNode('GLPostingDate', FormatDate(GLEntry."Posting Date"));
+    END;
+
+    LOCAL PROCEDURE ExportTaxInformation@1100285122(VATEntry@1100285100 : Record 254);
+    VAR
+      VATPostingSetup@1100285101 : Record 325;
+    BEGIN
+      IF NOT (VATEntry.Type IN [VATEntry.Type::Sale, VATEntry.Type::Sale]) THEN
+        EXIT;
+
+      VATPostingSetup.GET(VATEntry."VAT Bus. Posting Group", VATEntry."VAT Prod. Posting Group");
+      SAFTXMLHelper.AddNewXMLNode('TaxInformation', '');
+      SAFTXMLHelper.AppendXMLNode('TaxType', 'MVA');
+      IF VATEntry.Type = VATEntry.Type::Sale THEN
+        SAFTXMLHelper.AppendXMLNode('TaxCode', FORMAT(VATPostingSetup."Sales SAF-T Tax Code"))
+      ELSE
+        SAFTXMLHelper.AppendXMLNode('TaxCode', FORMAT(VATPostingSetup."Purchase SAF-T Tax Code"));
+      SAFTXMLHelper.AppendXMLNode('TaxPercentage', FormatAmount(VATPostingSetup."VAT %"));
+      SAFTXMLHelper.AppendXMLNode('TaxBase', FormatAmount(ABS(VATEntry.Base)));
+      ExportAmountInfo('TaxAmount', ABS(VATEntry.Amount));
+      SAFTXMLHelper.FinalizeXMLNode;
+    END;
+
+    LOCAL PROCEDURE ExportAmountInfo@1100285123(ParentNodeName@1100285100 : Text;Amount@1100285101 : Decimal);
+    BEGIN
+      SAFTXMLHelper.AddNewXMLNode(ParentNodeName, '');
+      SAFTXMLHelper.AppendXMLNode('Amount', FormatAmount(Amount));
+      SAFTXMLHelper.FinalizeXMLNode;
+    END;
+
+    LOCAL PROCEDURE ExportBankAccount@1100285124(CountryCode@1100285100 : Code[10];BankName@1100285101 : Text;BankNumber@1100285102 : Text;IBAN@1100285103 : Text;BranchNo@1100285104 : Text;CurrencyCode@1100285105 : Code[10]);
+    VAR
+      TempNameValueBuffer@1100285106 : TEMPORARY Record 823;
+      SAFTExportMgt@1100285107 : Codeunit 11020365;
+      Exported@1100285108 : Boolean;
+    BEGIN
+      IF (IBAN = '') AND (BankNumber = '') AND (BankName = '') AND (BranchNo = '') THEN
+        EXIT;
+
+
+      GetBankAccInfo(TempNameValueBuffer, CountryCode, BankName, BankNumber, IBAN, BranchNo);
+      Exported := FALSE;
+      IF NOT TempNameValueBuffer.FINDSET THEN
+        EXIT;
+
+      SAFTXMLHelper.AddNewXMLNode('BankAccount', '');
+      REPEAT
+        IF TempNameValueBuffer.Value <> '' THEN BEGIN
+            SAFTXMLHelper.AppendXMLNode(TempNameValueBuffer.Name, TempNameValueBuffer.Value);
+            Exported := TRUE;
+        END;
+      UNTIL (TempNameValueBuffer.NEXT = 0) OR Exported;
+      SAFTXMLHelper.AppendXMLNode('CurrencyCode', SAFTExportMgt.GetISOCurrencyCode(CurrencyCode));
+      SAFTXMLHelper.FinalizeXMLNode;
+    END;
+
+    LOCAL PROCEDURE GetBankAccInfo@1100285125(VAR TempNameValueBuffer@1100285100 : TEMPORARY Record 823;CountryCode@1100285101 : Code[10];BankName@1100285102 : Text;BankNumber@1100285103 : Text;IBAN@1100285104 : Text;BranchNo@1100285105 : Text);
+    VAR
+      CompanyInformation@1100285106 : Record 79;
+    BEGIN
+      TempNameValueBuffer.RESET;
+      TempNameValueBuffer.DELETEALL;
+      CompanyInformation.GET;
+      IF CountryCode = CompanyInformation."Country/Region Code" THEN BEGIN
+        InsertTempNameValueBuffer(TempNameValueBuffer, 'BankAccountNumber', BankNumber);
+        InsertTempNameValueBuffer(TempNameValueBuffer, 'IBANNumber', IBAN);
+      END ELSE BEGIN
+        InsertTempNameValueBuffer(TempNameValueBuffer, 'IBANNumber', IBAN);
+        InsertTempNameValueBuffer(TempNameValueBuffer, 'BankAccountNumber', BankNumber);
+      END;
+      InsertTempNameValueBuffer(TempNameValueBuffer, 'BankAccountName', BankName);
+      InsertTempNameValueBuffer(TempNameValueBuffer, 'SortCode', BranchNo);
+    END;
+
+    LOCAL PROCEDURE InsertTempNameValueBuffer@1100285126(VAR TempNameValueBuffer@1100285100 : TEMPORARY Record 823;Name@1100285101 : Text;Value@1100285102 : Text);
+    BEGIN
+      TempNameValueBuffer.ID += 1;
+      TempNameValueBuffer.Name := COPYSTR(Name, 1, MAXSTRLEN(TempNameValueBuffer.Name));
+      TempNameValueBuffer.Value := COPYSTR(Value, 1, MAXSTRLEN(TempNameValueBuffer.Value));
+      IF NOT TempNameValueBuffer.INSERT THEN
+        TempNameValueBuffer.MODIFY;
+    END;
+
+    LOCAL PROCEDURE ExportPaymentTerms@1100285127(PaymentTermsCode@1100285100 : Code[10]);
+    VAR
+      PaymentTerms@1100285101 : Record 3;
+    BEGIN
+      IF PaymentTermsCode = '' THEN
+        EXIT;
+
+      PaymentTerms.GET(PaymentTermsCode);
+      SAFTXMLHelper.AddNewXMLNode('PaymentTerms', '');
+      SAFTXMLHelper.AppendXMLNode('Days', FORMAT(CALCDATE(PaymentTerms."Due Date Calculation", WORKDATE) - WORKDATE));
+      IF FORMAT(PaymentTerms."Discount Date Calculation") <> '' THEN
+        SAFTXMLHelper.AppendXMLNode('CashDiscountDays', FORMAT(CALCDATE(PaymentTerms."Discount Date Calculation", WORKDATE) - WORKDATE));
+      SAFTXMLHelper.AppendXMLNode('CashDiscountRate', FormatAmount(PaymentTerms."Discount %"));
+      SAFTXMLHelper.FinalizeXMLNode;
+    END;
+
+    LOCAL PROCEDURE ExportPartyInfo@1100285128(SourceID@1100285103 : Integer;SourceNo@1100285104 : Code[20];CurrencyCode@1100285105 : Code[10];PaymentTermsCode@1100285106 : Code[10]);
+    VAR
+      DefaultDimension@1100285100 : Record 352;
+      TempDimCodeAmountBuffer@1100285101 : TEMPORARY Record 375;
+      SAFTExportMgt@1100285102 : Codeunit 11020365;
+    BEGIN
+      SAFTXMLHelper.AddNewXMLNode('PartyInfo', '');
+      ExportPaymentTerms(PaymentTermsCode);
+      SAFTXMLHelper.AppendXMLNode('CurrencyCode', SAFTExportMgt.GetISOCurrencyCode(CurrencyCode));
+      DefaultDimension.SETRANGE("Table ID", SourceID);
+      DefaultDimension.SETRANGE("No.", SourceNo);
+      CopyDefaultDimToDimCodeAmountBuffer(TempDimCodeAmountBuffer, DefaultDimension);
+      ExportAnalysisInfo(TempDimCodeAmountBuffer);
+      SAFTXMLHelper.FinalizeXMLNode;
+    END;
+
+    LOCAL PROCEDURE ExportAnalysisInfo@1100285129(VAR TempDimCodeAmountBuffer@1100285100 : TEMPORARY Record 375);
+    BEGIN
+      IF TempDimCodeAmountBuffer.FINDSET THEN
+        REPEAT
+            SAFTXMLHelper.AddNewXMLNode('Analysis', '');
+            SAFTXMLHelper.AppendXMLNode('AnalysisType', TempDimCodeAmountBuffer."Line Code");
+            SAFTXMLHelper.AppendXMLNode('AnalysisID', TempDimCodeAmountBuffer."Column Code");
+            SAFTXMLHelper.FinalizeXMLNode;
+        UNTIL TempDimCodeAmountBuffer.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CopyDefaultDimToDimCodeAmountBuffer@1100285130(VAR TempDimCodeAmountBuffer@1100285101 : TEMPORARY Record 375;VAR DefaultDimension@1100285102 : Record 352);
+    VAR
+      Dimension@1100285100 : Record 348;
+    BEGIN
+      TempDimCodeAmountBuffer.RESET;
+      TempDimCodeAmountBuffer.DELETEALL;
+      IF DefaultDimension.FINDSET THEN
+        REPEAT
+            Dimension.GET(DefaultDimension."Dimension Code");
+            TempDimCodeAmountBuffer."Line Code" := Dimension."SAF-T Analysis Type";
+            TempDimCodeAmountBuffer."Column Code" := DefaultDimension."Dimension Value Code";
+            TempDimCodeAmountBuffer.INSERT;
+        UNTIL DefaultDimension.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CopyDimeSetIDToDimCodeAmountBuffer@1100285131(VAR TempDimCodeAmountBuffer@1100285103 : TEMPORARY Record 375;DimSetID@1100285104 : Integer);
+    VAR
+      TempDimSetEntry@1100285100 : TEMPORARY Record 480;
+      Dimension@1100285101 : Record 348;
+      DimensionManagement@1100285102 : Codeunit 408;
+    BEGIN
+      TempDimCodeAmountBuffer.RESET;
+      TempDimCodeAmountBuffer.DELETEALL;
+      IF DimSetID = 0 THEN
+        EXIT;
+
+      DimensionManagement.GetDimensionSet(TempDimSetEntry, DimSetID);
+      IF NOT TempDimSetEntry.FINDSET THEN
+        EXIT;
+
+      REPEAT
+        Dimension.GET(TempDimSetEntry."Dimension Code");
+        TempDimCodeAmountBuffer."Line Code" := Dimension."SAF-T Analysis Type";
+        TempDimCodeAmountBuffer."Column Code" := TempDimSetEntry."Dimension Value Code";
+        TempDimCodeAmountBuffer.INSERT;
+      UNTIL TempDimSetEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE GetFirstAndLastNameFromContactName@1100285132(VAR FirstName@1100285101 : Text;VAR LastName@1100285102 : Text;ContactName@1100285103 : Text);
+    VAR
+      SpacePos@1100285100 : Integer;
+    BEGIN
+      SpacePos := STRPOS(ContactName, ' ');
+      IF SpacePos = 0 THEN BEGIN
+        FirstName := ContactName;
+        LastName := '-';
+      END ELSE BEGIN
+        FirstName := COPYSTR(ContactName, 1, SpacePos - 1);
+        LastName := COPYSTR(ContactName, SpacePos + 1, STRLEN(ContactName) - SpacePos);
+      END;
+    END;
+
+    LOCAL PROCEDURE FinalizeExport@1100285133(VAR SAFTExportLine@1100285102 : Record 11128519;SAFTExportHeader@1100285103 : Record 11128518);
+    VAR
+      SAFTExportMgt@1100285100 : Codeunit 11020365;
+      TypeHelper@1100285101 : Codeunit 10;
+    BEGIN
+      SAFTExportLine.GET(SAFTExportLine.ID, SAFTExportLine."Line No.");
+      SAFTExportLine.LOCKTABLE;
+      SAFTXMLHelper.ExportXMLDocument(SAFTExportLine, SAFTExportHeader);
+      SAFTExportLine.VALIDATE(Status, SAFTExportLine.Status::Completed);
+      SAFTExportLine.VALIDATE(Progress, 10000);
+      SAFTExportLine.VALIDATE("Created Date/Time", CURRENTDATETIME);//TypeHelper.GetCurrentDateTimeInUserTimeZone);
+      SAFTExportLine.MODIFY(TRUE);
+      COMMIT;
+      SAFTExportMgt.UpdateExportStatus(SAFTExportHeader);
+      SAFTExportMgt.LogSuccess(SAFTExportLine);
+      SAFTExportMgt.StartExportLinesNotStartedYet(SAFTExportHeader);
+      SAFTExportHeader.GET(SAFTExportHeader.ID);
+      IF SAFTExportHeader.Status = SAFTExportHeader.Status::Completed THEN
+        IF SAFTExportHeader.AllowedToExportIntoFolder THEN
+            SAFTExportMgt.GenerateZipFileFromSavedFiles(SAFTExportHeader)
+        ELSE
+            SAFTExportMgt.BuildZipFilesWithAllRelatedXmlFiles(SAFTExportHeader);
+    END;
+
+    LOCAL PROCEDURE CombineWithSpace@1100285134(FirstString@1100285100 : Text;SecondString@1100285101 : Text) Result : Text;
+    BEGIN
+      Result := FirstString;
+      IF (Result <> '') AND (SecondString <> '') THEN
+        Result += ' ';
+      EXIT(Result + SecondString);
+    END;
+
+    LOCAL PROCEDURE FormatDate@1100285135(DateToFormat@1100285100 : Date) : Text;
+    BEGIN
+      EXIT(FORMAT(DateToFormat, 0, 9));
+    END;
+
+    LOCAL PROCEDURE FormatAmount@1100285136(AmountToFormat@1100285100 : Decimal) : Text;
+    BEGIN
+      EXIT(FORMAT(AmountToFormat, 0, 9))
+    END;
+
+    [Integration(FALSE,FALSE)]
+    LOCAL PROCEDURE OnBeforeGetFirstAndLastNameFromCustomer@1100285137(VAR Handled@1100285100 : Boolean;VAR FirstName@1100285101 : Text;VAR LastName@1100285102 : Text;Customer@1100285103 : Record 18);
+    BEGIN
+    END;
+
+    [Integration(FALSE,FALSE)]
+    LOCAL PROCEDURE OnBeforeGetFirstAndLastNameFromVendor@1100285138(VAR Handled@1100285100 : Boolean;VAR FirstName@1100285101 : Text;VAR LastName@1100285102 : Text;Vendor@1100285103 : Record 23);
+    BEGIN
+    END;
+
+    BEGIN
+    {
+      191003 ORANGO.DL RFC194 implement SAF-T from BC14 CU04 (NAVNO14.04) NorwegianSAFT-extension
+      191112 ORANGO.DL updates from BC14.CU06
+    }
+    END.
+  }
+}
+

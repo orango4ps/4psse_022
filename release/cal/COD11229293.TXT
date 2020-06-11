@@ -1,0 +1,369 @@
+OBJECT Codeunit 11229293 CFW File Interface CSV
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    TableNo=11229460;
+    OnRun=VAR
+            NextStatus@1100525002 : Integer;
+            NextStatusText@1100525001 : Text;
+            Processing@1100525000 : Text;
+          BEGIN
+            Processing :=  Rec.InterfaceDataGetProcessing;
+            CASE Processing OF
+              'PROCESSWEBDOCUMENT':BEGIN
+                NextStatus := Rec.InterfaceDataGetNextStatus;
+                NextStatusText := Rec.InterfaceDataGetNextStatusText;
+                ProcessWebDocumentSTUB(Rec,NextStatus,NextStatusText);
+              END;
+            ELSE
+              ProcessConnectorDataLine(Rec);
+            END;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      CFWSetup@1100528303 : Record 11229895;
+      CFWConnector@1100528302 : Record 11229353;
+      CFWConnectorManagement@1100528301 : Codeunit 11229291;
+      CFWDotNetManagement@1100528300 : Codeunit 11125363;
+      Text001@1100528304 : TextConst 'ENU=This interface cannot be used for %1 %2.';
+      Extension@1100528305 : TextConst 'ENU=.csv';
+
+    LOCAL PROCEDURE ProcessConnectorDataLine@1100528309(CFWConnectorDataLine@1100528300 : Record 11229460);
+    BEGIN
+      SetGlobalVars(CFWConnectorDataLine."Service Code", CFWConnectorDataLine."Connector Code");
+      CASE CFWConnector.Direction OF
+        CFWConnector.Direction::Inbound:  ProcessConnectorDataLineInbound(CFWConnectorDataLine);
+        CFWConnector.Direction::Outbound: ProcessConnectorDataLineOutbound(CFWConnectorDataLine);
+        ELSE
+          ERROR(Text001, CFWConnector.FIELDCAPTION(Direction), CFWConnector.Direction);
+      END;
+    END;
+
+    LOCAL PROCEDURE ProcessConnectorDataLineInbound@1100528314(CFWConnectorDataLine@1100528300 : Record 11229460);
+    VAR
+      StopLoop@1100525000 : Boolean;
+    BEGIN
+      StopLoop := CFWConnectorDataLine."Single Step";
+      REPEAT
+        CASE CFWConnectorDataLine.Status OF
+          CFWConnectorDataLine.Status::New        :OnNewInbound(CFWConnectorDataLine,CFWConnectorDataLine.Status::Available,'');
+          CFWConnectorDataLine.Status::Available  :OnAvailableInbound(CFWConnectorDataLine,CFWConnectorDataLine.Status::Fetched,'');
+          CFWConnectorDataLine.Status::Fetched    :OnFetchedInbound(CFWConnectorDataLine,CFWConnectorDataLine.Status::Extracted,'');
+          CFWConnectorDataLine.Status::Extracted  :OnExtractedInbound(CFWConnectorDataLine,CFWConnectorDataLine.Status::Processed,'');
+          CFWConnectorDataLine.Status::Processed  :OnProcessedInbound(CFWConnectorDataLine,CFWConnectorDataLine.Status::Finished,'');
+        ELSE
+          StopLoop := TRUE;
+        END;
+        COMMIT;
+        CFWConnectorDataLine.ReRead;
+        UNTIL StopLoop;
+    END;
+
+    LOCAL PROCEDURE ProcessConnectorDataLineOutbound@1100528303(CFWConnectorDataLine@1100528300 : Record 11229460);
+    VAR
+      StopLoop@1100525000 : Boolean;
+    BEGIN
+      StopLoop := CFWConnectorDataLine."Single Step";
+      REPEAT
+        CASE CFWConnectorDataLine.Status OF
+          CFWConnectorDataLine.Status::New        :OnNewOutbound(CFWConnectorDataLine,CFWConnectorDataLine.Status::Available,'');
+          CFWConnectorDataLine.Status::Available  :OnAvailableOutbound(CFWConnectorDataLine,CFWConnectorDataLine.Status::PreProcess,'');
+          CFWConnectorDataLine.Status::PreProcess :OnPreProcessOutbound(CFWConnectorDataLine,CFWConnectorDataLine.Status::Put,'');
+          CFWConnectorDataLine.Status::Put        :OnPutOutbound(CFWConnectorDataLine,CFWConnectorDataLine.Status::Processed,'');
+          CFWConnectorDataLine.Status::Processed  :OnProcessedOutbound(CFWConnectorDataLine,CFWConnectorDataLine.Status::Finished,'');
+        ELSE
+          StopLoop := TRUE;
+        END;
+        COMMIT;
+        CFWConnectorDataLine.ReRead;
+        UNTIL StopLoop;
+    END;
+
+    LOCAL PROCEDURE OnNewInbound@1100528306(VAR CFWConnectorDataLine@1100528300 : Record 11229460;NextStatus@1100525000 : Integer;NextStatusText@1100525001 : Text) : Integer;
+    BEGIN
+      CFWConnectorDataLine.TESTFIELD(Status, CFWConnectorDataLine.Status::New);
+      CFWConnectorDataLine.UploadFileToBlob(CFWConnectorDataLine.FIELDNO("Inbound Data External"),CFWConnectorDataLine.FIELDCAPTION("Inbound Data External"), Extension);
+      CFWConnectorDataLine.SetStatus(NextStatus,NextStatusText);
+      EXIT(CFWConnectorDataLine.Status);
+    END;
+
+    LOCAL PROCEDURE OnAvailableInbound@1100528305(VAR CFWConnectorDataLine@1100528300 : Record 11229460;NextStatus@1100525001 : Integer;NextStatusText@1100525000 : Text) : Integer;
+    VAR
+      DataStringExternal@1100528302 : Text;
+      DataXmlString@1100528301 : Text;
+    BEGIN
+      CFWConnectorDataLine.TESTFIELD(Status, CFWConnectorDataLine.Status::Available);
+      DataStringExternal := CFWConnectorDataLine.ReadStringFromBlob(CFWConnectorDataLine.FIELDNO("Inbound Data External"));
+      DataXmlString := CFWConnectorManagement.ConvertCsvToXml(DataStringExternal, ';', CFWConnectorDataLine."Connector Code");
+      CFWConnectorDataLine.SaveStringToBlob(CFWConnectorDataLine.FIELDNO("Inbound Data"), DataXmlString);
+      CFWConnectorDataLine.SetStatus(NextStatus,NextStatusText);
+      EXIT(CFWConnectorDataLine.Status);
+    END;
+
+    LOCAL PROCEDURE OnFetchedInbound@1100528311(VAR CFWConnectorDataLine@1100528300 : Record 11229460;NextStatus@1100525001 : Integer;NextStatusText@1100525000 : Text) : Integer;
+    BEGIN
+      CFWConnectorDataLine.TESTFIELD(Status, CFWConnectorDataLine.Status::Fetched);
+      CFWConnectorDataLine.ExtractDocument(CFWConnector.DocumentElementGetXpath);
+      CFWConnectorDataLine.ReRead;
+      CFWConnectorDataLine.SetStatus(NextStatus,NextStatusText);
+      EXIT(CFWConnectorDataLine.Status);
+    END;
+
+    LOCAL PROCEDURE OnExtractedInbound@1100528302(VAR CFWConnectorDataLine@1100528300 : Record 11229460;NextStatus@1100525001 : Integer;NextStatusText@1100525000 : Text) : Integer;
+    VAR
+      ChildCFWConnectorDataLine@1100528301 : Record 11229460;
+      LastStatus@1100525003 : Integer;
+      LastStatusText@1100525002 : Text;
+    BEGIN
+      CFWConnectorDataLine.TESTFIELD(Status, CFWConnectorDataLine.Status::Extracted);
+      IF CFWConnectorDataLine.IsChild THEN BEGIN
+        CFWConnectorManagement.FunctionRunnerHandle(CFWConnectorDataLine,NextStatus,NextStatusText);
+      END ELSE BEGIN
+        IF CFWConnectorDataLine.ChildsGet(ChildCFWConnectorDataLine,FALSE) THEN BEGIN
+          OnExtractedInboundChilds(ChildCFWConnectorDataLine,NextStatus,NextStatusText,LastStatus,LastStatusText);
+          CFWConnectorDataLine.ReRead;
+          CFWConnectorDataLine.SetStatus(LastStatus, LastStatusText);
+        END ELSE BEGIN;
+          CFWConnectorDataLine.ReRead;
+          CFWConnectorDataLine.SetStatus(NextStatus, NextStatusText);
+        END;
+      END;
+      CFWConnectorDataLine.ReRead;
+      EXIT(CFWConnectorDataLine.Status);
+    END;
+
+    LOCAL PROCEDURE OnExtractedInboundChilds@1100528316(VAR ChildCFWConnectorDataLine@1100528302 : Record 11229460;NextStatus@1100528301 : Integer;NextStatusText@1100528300 : Text;VAR LastStatus@1100525001 : Integer;VAR LastStatusText@1100525000 : Text);
+    VAR
+      Counter@1100528306 : Integer;
+      LineCount@1100528305 : Integer;
+      StartTime@1100528304 : Time;
+      Window@1100528303 : Dialog;
+    BEGIN
+      LineCount := ChildCFWConnectorDataLine.COUNT;
+      CFWConnectorManagement.WindowOpen(Window);
+      StartTime := TIME;
+      Counter := 0;
+      REPEAT
+        OnExtractedInbound(ChildCFWConnectorDataLine,NextStatus,NextStatusText);
+        ChildCFWConnectorDataLine.CheckStatus(NextStatus,NextStatusText,LastStatus,LastStatusText);
+        COMMIT;
+        Counter +=1;
+        CFWConnectorManagement.WindowUpdate(Window,Counter,LineCount,StartTime,TIME);
+        UNTIL (ChildCFWConnectorDataLine.NEXT = 0);
+      Window.CLOSE;
+    END;
+
+    [External]
+    PROCEDURE OnProcessedInbound@1100525005(VAR CFWConnectorDataLine@1100525013 : Record 11229460;NextStatus@1100525012 : Integer;NextStatusText@1100525015 : Text) : Integer;
+    VAR
+      ChildCFWConnectorDataLine@1100525002 : Record 11229460;
+      LastStatus@1100525001 : Integer;
+      LastStatusText@1100525000 : Text;
+    BEGIN
+      CFWConnectorDataLine.TESTFIELD(Status,CFWConnectorDataLine.Status::Processed);
+      IF CFWConnectorDataLine.IsChild THEN BEGIN
+      END ELSE BEGIN
+        IF CFWConnectorDataLine.ChildsGet(ChildCFWConnectorDataLine,FALSE) THEN BEGIN
+          OnProcessedInboundChilds(ChildCFWConnectorDataLine,NextStatus,NextStatusText,LastStatus,LastStatusText);
+          CFWConnectorDataLine.SetStatus(LastStatus, LastStatusText);
+        END ELSE BEGIN
+          CFWConnectorDataLine.SetStatus(NextStatus, NextStatusText);
+        END;
+      END;
+      CFWConnectorDataLine.ReRead;
+      //na afloop van "Processing van dit record de subconnectors van dit record doen, kan dus ook zonder 'childrecords '"
+      IF ProcessSubconnectorsInbound(CFWConnectorDataLine) THEN
+        CFWConnectorDataLine.SetStatus(NextStatus, NextStatusText);
+      EXIT(CFWConnectorDataLine.Status);
+    END;
+
+    LOCAL PROCEDURE OnProcessedInboundChilds@1100528310(VAR ChildCFWConnectorDataLine@1100528302 : Record 11229460;NextStatus@1100528301 : Integer;NextStatustext@1100528300 : Text;VAR LastStatus@1100525001 : Integer;VAR LastStatusText@1100525000 : Text);
+    VAR
+      Counter@1100528306 : Integer;
+      LineCount@1100528305 : Integer;
+      StartTime@1100528304 : Time;
+      Window@1100528303 : Dialog;
+    BEGIN
+      LineCount := ChildCFWConnectorDataLine.COUNT;
+      CFWConnectorManagement.WindowOpen(Window);
+      StartTime := TIME;
+      Counter := 0;
+      REPEAT
+        OnProcessedInbound(ChildCFWConnectorDataLine,NextStatus,NextStatustext);
+        ChildCFWConnectorDataLine.CheckStatus(NextStatus,NextStatustext,LastStatus,LastStatusText);
+        COMMIT;
+        Counter +=1;
+        CFWConnectorManagement.WindowUpdate(Window,Counter,LineCount,StartTime,TIME);
+        UNTIL (ChildCFWConnectorDataLine.NEXT = 0);
+      Window.CLOSE;
+    END;
+
+    LOCAL PROCEDURE OnNewOutbound@1100528313(VAR CFWConnectorDataLine@1100528300 : Record 11229460;NextStatus@1100525001 : Integer;NextStatusText@1100525000 : Text) : Integer;
+    BEGIN
+      CFWConnectorDataLine.TESTFIELD(Status, CFWConnectorDataLine.Status::New);
+      CFWConnectorManagement.ProcessSubconnectors(CFWConnectorDataLine);
+      CFWConnectorDataLine.ReRead;
+      CFWConnectorDataLine.SetStatus(NextStatus,NextStatusText);
+      EXIT(CFWConnectorDataLine.Status);
+    END;
+
+    LOCAL PROCEDURE OnAvailableOutbound@1100528304(VAR CFWConnectorDataLine@1100528300 : Record 11229460;NextStatus@1100525001 : Integer;NextStatusText@1100525000 : Text) : Integer;
+    VAR
+      DataCsvString@1100528302 : Text;
+      DataXmlString@1100528301 : Text;
+      XmlNode@1100528303 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      XmlDoc@1100528304 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      i@1100528305 : Integer;
+    BEGIN
+      CFWConnectorDataLine.TESTFIELD(Status, CFWConnectorDataLine.Status::Available);
+
+      DataXmlString := CFWConnector.ReadStringFromBlob(CFWConnector.FIELDNO(Template));
+      XmlDoc := XmlDoc.XmlDocument;
+      XmlNode := XmlDoc.CreateElement(CFWConnector."Document Element");
+      XmlDoc.AppendChild(XmlNode);
+
+      //add parts for loop
+      FOR i := 1 TO 1 DO
+        AddPartToDoc(CFWConnectorDataLine,i,DataXmlString,XmlNode,XmlDoc);
+      CFWConnectorDataLine.SaveXmlToBlob(CFWConnectorDataLine.FIELDNO("Outbound Data"), XmlDoc);
+
+      CFWConnectorDataLine.SetStatus(NextStatus,NextStatusText);
+      EXIT(CFWConnectorDataLine.Status);
+    END;
+
+    LOCAL PROCEDURE OnPreProcessOutbound@1100528317(VAR CFWConnectorDataLine@1100528300 : Record 11229460;NextStatus@1100525002 : Integer;NextStatusText@1100525001 : Text) : Integer;
+    VAR
+      DataStringExternal@1100528303 : Text;
+      DataXmlString@1100528302 : Text;
+    BEGIN
+      CFWConnectorDataLine.TESTFIELD(Status, CFWConnectorDataLine.Status::PreProcess);
+      DataStringExternal := CFWConnectorDataLine.ReadStringFromBlob(CFWConnectorDataLine.FIELDNO("Outbound Data"));
+      DataXmlString:= DataStringExternal;
+      CFWConnectorDataLine.SaveStringToBlob(CFWConnectorDataLine.FIELDNO("Outbound Data External"), DataXmlString);
+      CFWConnectorDataLine.SetStatus(NextStatus,NextStatusText);
+      EXIT(CFWConnectorDataLine.Status);
+    END;
+
+    LOCAL PROCEDURE OnPutOutbound@1100528307(VAR CFWConnectorDataLine@1100528300 : Record 11229460;NextStatus@1100525002 : Integer;NextStatusText@1100525001 : Text) : Integer;
+    VAR
+      ResultText@1100528301 : Text;
+    BEGIN
+      CFWConnectorDataLine.TESTFIELD(Status, CFWConnectorDataLine.Status::Put);
+      CFWConnectorDataLine.WriteBlobToFile(CFWConnectorDataLine.FIELDNO("Outbound Data External"),'xml');
+      CFWConnectorDataLine.SetStatus(NextStatus,NextStatusText);
+      EXIT(CFWConnectorDataLine.Status);
+    END;
+
+    LOCAL PROCEDURE OnProcessedOutbound@1100528315(VAR CFWConnectorDataLine@1100528300 : Record 11229460;NextStatus@1100525001 : Integer;NextStatusText@1100525000 : Text) : Integer;
+    BEGIN
+      CFWConnectorDataLine.TESTFIELD(Status, CFWConnectorDataLine.Status::Processed);
+      CFWConnectorDataLine.SetStatus(NextStatus,NextStatusText);
+      EXIT(CFWConnectorDataLine.Status);
+    END;
+
+    LOCAL PROCEDURE SetGlobalVars@1100528300(ConsumedWebServiceCode@1100528301 : Code[20];ConnectorCode@1100528300 : Code[20]);
+    BEGIN
+      CFWSetup.GET;
+      CFWConnector.GET(ConsumedWebServiceCode, ConnectorCode);
+    END;
+
+    LOCAL PROCEDURE AddPartToDoc@1100528331(CFWConnectorDataLine@1100528300 : Record 11229460;PartCounter@1100528306 : Integer;PartXmlString@1100528307 : Text;XmlNode@1100528305 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";VAR XmlDoc@1100528304 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument");
+    VAR
+      CFWConnectorMapping@1100528302 : Record 11229354;
+      Fieldvalue@1100528308 : Text;
+      DnHttpUtility@1100528309 : DotNet "'System.Web, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Web.HttpUtility";
+      XmlExtraFieldsDoc@1100528303 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      DocFragment@1100528310 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocumentFragment";
+    BEGIN
+      CASE TRUE OF
+        (PartCounter=1):;//do nothing. just framework for adding multiple parts
+        ELSE
+          EXIT;
+      END;
+      CFWConnectorMapping.GetMapping(CFWConnectorDataLine."Service Code",CFWConnectorDataLine."Connector Code");
+      CFWConnectorMapping.SETFILTER(CFWConnectorMapping."Data Type", '<>%1', '' );
+      IF (NOT CFWConnectorMapping.FINDSET) THEN
+        EXIT;
+
+      REPEAT
+        PartXmlString := CFWConnectorManagement.AddPartToDoc(CFWConnectorMapping, CFWConnectorDataLine, PartXmlString);
+      UNTIL (CFWConnectorMapping.NEXT = 0);
+
+      PartXmlString := CFWConnectorManagement.DN_REPLSTR(PartXmlString, '%COMPANYNAME%', CFWConnectorDataLine."Company Name");
+      DocFragment := XmlDoc.CreateDocumentFragment();
+      DocFragment.InnerXml :=PartXmlString ;
+      XmlNode.AppendChild(DocFragment);
+    END;
+
+    LOCAL PROCEDURE ProcessWebDocumentSTUB@1100528312(VAR CFWConnectorDataLine@1100528300 : Record 11229460;NextStatus@1100528302 : Integer;NextStatusText@1100528301 : Text) returntext : Text;
+    BEGIN
+      CFWConnectorDataLine.ProcessWebDocumentOLD191023(NextStatus,NextStatusText);
+      EXIT(FORMAT(CFWConnectorDataLine.Status));
+    END;
+
+    [External]
+    PROCEDURE ProcessSubconnectorsInbound@1100528338(VAR CFWConnectorDataLine@1100528300 : Record 11229460) Errorstatus : Boolean;
+    VAR
+      CFWSubConnectorDataLine@1100528314 : Record 11229460;
+      CFWConnectorMapping@1100528303 : Record 11229354;
+      CFWSubConnector@1100528301 : Record 11229353;
+      CFWConnectorManagement@1100528304 : Codeunit 11229291;
+      XMLDOMManagement4PS@1100528312 : Codeunit 11020220;
+      PrimKey@1100528313 : ARRAY [20] OF Text;
+      SourceRecRef@1100528302 : RecordRef;
+      TargetRecRef@1100528305 : RecordRef;
+      SubConnectorXmlDoc@1100528311 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      SubConnectorNode@1100528309 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      XMLDoc@1100528310 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      xpath@1100525000 : Text;
+      LocalName@1100525001 : TextConst;
+      ExtraFieldsDoc@1100525002 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      ErrorText@1100528306 : Text;
+    BEGIN
+      IF (NOT CFWConnectorMapping.GetMappingByAction(CFWConnectorDataLine."Service Code",CFWConnectorDataLine."Connector Code", 'SUBCONNECTOR'))
+      THEN
+        EXIT(TRUE);
+
+      CFWConnectorDataLine.ReadXmlDocFromBlob(CFWConnectorDataLine.FIELDNO("Inbound Data"), XMLDoc);
+      CFWConnectorDataLine.ReadXmlDocFromBlob(CFWConnectorDataLine.FIELDNO("Extra Fields"), ExtraFieldsDoc);
+      CFWConnectorDataLine.CopyDataToExtraFields(ExtraFieldsDoc,XMLDoc);
+      REPEAT
+        CFWConnectorMapping.TESTFIELD("Formatting String");
+        CFWSubConnector.GET(CFWConnectorMapping."Service Code",CFWConnectorMapping."Target Connector Code");
+        xpath := CFWConnectorManagement.LocalName(CFWConnectorMapping."Formatting String");
+        SubConnectorNode := XMLDoc.SelectSingleNode(xpath);
+        IF NOT(ISNULL(SubConnectorNode)) THEN BEGIN
+          CFWSubConnectorDataLine.GetInitRecordWithGuid(CFWSubConnector."Service Code",CFWSubConnector.Code,'',PrimKey,CFWConnectorDataLine."Record Guid");//niet met company, rec word dan weer gedelete bij status=fetched!!!
+          SubConnectorXmlDoc := SubConnectorXmlDoc.XmlDocument;
+          SubConnectorXmlDoc.LoadXml(SubConnectorNode.OuterXml);
+          CFWSubConnectorDataLine.SaveXmlToBlob((CFWSubConnectorDataLine.FIELDNO("Inbound Data")),SubConnectorXmlDoc);
+          CFWSubConnectorDataLine.SetStatus(CFWSubConnectorDataLine.Status::Fetched,'');
+          CFWSubConnectorDataLine.SaveXmlToBlob(CFWSubConnectorDataLine.FIELDNO("Extra Fields"), ExtraFieldsDoc);
+          COMMIT;
+          CFWSubConnectorDataLine.ProcessRecord();
+          CFWSubConnectorDataLine.ReRead();
+          IF CFWSubConnectorDataLine.Status=CFWSubConnectorDataLine.Status::Error THEN
+            ErrorText += STRSUBSTNO('%1:%2',CFWSubConnector.Code,CFWSubConnectorDataLine."Status Text");//statustext holds error of processed record!
+          END;
+      UNTIL (CFWConnectorMapping.NEXT = 0);
+      IF ErrorText <> '' THEN BEGIN
+        CFWConnectorDataLine.SetStatus(CFWConnectorDataLine.Status::Error,COPYSTR(ErrorText,1,250));
+        EXIT(FALSE);
+      END;
+      EXIT(TRUE);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

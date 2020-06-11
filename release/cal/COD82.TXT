@@ -1,0 +1,456 @@
+OBJECT Codeunit 82 Sales-Post + Print
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.03,4PS14.00,NAVDK;
+  }
+  PROPERTIES
+  {
+    TableNo=36;
+    Permissions=TableData 112=rimd,
+                TableData 114=rimd;
+    OnRun=VAR
+            SalesHeader@1000 : Record 36;
+          BEGIN
+            SkipPrintingAttachmentsAfterPostingInvoice := GetSkipPrintingAttachmentsAfterPostingInvoice; //**4PS.n
+
+            SalesHeader.COPY(Rec);
+            Code(SalesHeader);
+            Rec := SalesHeader;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ShipInvoiceQst@1000 : TextConst 'ENU=&Ship,&Invoice,Ship &and Invoice;NOR=&Lever,F&akturer,Lever &og fakturer;SVE=&Leverera,&Fakturera,Leverera &och fakturera';
+      PostAndPrintQst@1001 : TextConst 'ENU=Do you want to post and print/mail the %1?;NOR=Vil du bokf›re og skrive ut %1?;SVE=Vill du bokf”ra och skriva ut %1?';
+      PostAndEmailQst@1016 : TextConst '@@@="%1 = Document Type";ENU=Do you want to post and email the %1?;NOR=Vil du bokf›re og sende %1 som e-post?;SVE=Vill du bokf”ra och skicka %1 via e-post?';
+      ReceiveInvoiceQst@1002 : TextConst 'ENU=&Receive,&Invoice,Receive &and Invoice;NOR=&Motta,F&akturer,Motta &og fakturer;SVE=&Inleverera,&Fakturera,Inleverera &och fakturera';
+      SendReportAsEmail@1009 : Boolean;
+      Text11012002@1100528800 : TextConst 'ENU="It is only possible to post released Invoices ";NOR=Det er kun mulig † bokf›re frigitte fakturaer;SVE="Det „r endast m”jligt att bokf”ra sl„ppta fakturor "';
+      Text11012003@1100528801 : TextConst 'ENU=It is only possible to post released Orders;NOR=Det er kun mulig † bokf›re frigitte ordre;SVE=Det „r bara m”jligt att bokf”ra sl„ppta ordrar';
+      SkipPrintingAttachmentsAfterPostingInvoice@1100528400 : Boolean;
+      OIOUBLExportSalesInvoice@1100285001 : Codeunit 11128579;
+      OIOUBLExportSalesCrMemo@1100285000 : Codeunit 11128580;
+      PostingType@1060001 : Integer;
+      InvNo@1060002 : Code[20];
+      OIOXMLExportSalesInvoice@1060003 : Codeunit 11128579;
+      OIOXMLExportSalesCrMemo@1060004 : Codeunit 11128580;
+      SetupOIOUBLQst@1060000 : TextConst 'ENU=OIOUBL path of the OIOMXL file is missing. Do you want to update it now?';
+      MissingSetupOIOUBLErr@1060005 : TextConst 'ENU=OIOUBL path of the OIOMXL file is missing. Please Correct it.';
+      GLSetup@1101285000 : Record 98;
+
+    [Internal]
+    PROCEDURE PostAndEmail@10(VAR ParmSalesHeader@1000 : Record 36);
+    VAR
+      SalesHeader@1001 : Record 36;
+    BEGIN
+      SkipPrintingAttachmentsAfterPostingInvoice := ParmSalesHeader.GetSkipPrintingAttachmentsAfterPostingInvoice; //**4PS.n
+      SendReportAsEmail := TRUE;
+      SalesHeader.COPY(ParmSalesHeader);
+      Code(SalesHeader);
+      ParmSalesHeader := SalesHeader;
+    END;
+
+    LOCAL PROCEDURE Code@2(VAR SalesHeader@1002 : Record 36);
+    VAR
+      SalesSetup@1001 : Record 311;
+      SalesPostViaJobQueue@1000 : Codeunit 88;
+      OIOUBLsetupPage@1060000 : Page 11128571;
+      HideDialog@1003 : Boolean;
+      IsHandled@1004 : Boolean;
+      DefaultOption@1005 : Integer;
+    BEGIN
+      HideDialog := FALSE;
+      IsHandled := FALSE;
+      DefaultOption := 3;
+      OnBeforeConfirmPost(SalesHeader,HideDialog,IsHandled,SendReportAsEmail,DefaultOption);
+      IF IsHandled THEN
+        EXIT;
+
+      IF NOT HideDialog THEN
+        IF NOT ConfirmPost(SalesHeader,DefaultOption) THEN
+          EXIT;
+
+      OnAfterConfirmPost(SalesHeader);
+
+      SalesSetup.GET;
+      IF SalesSetup."Post & Print with Job Queue" AND NOT SendReportAsEmail THEN
+        SalesPostViaJobQueue.EnqueueSalesDoc(SalesHeader)
+      ELSE BEGIN
+        //>>NAVDK
+        IF (SalesHeader."EAN No." <> '') AND GLSetup."Danish Localization Active" THEN  //NAVDK
+          SalesSetup.VerifyAndSetOIOUBLPathSetup(SalesHeader."Document Type");
+        //<<NAVDK
+        CODEUNIT.RUN(CODEUNIT::"Sales-Post",SalesHeader);
+        COMMIT; //**4PS.n
+        GetReport(SalesHeader);
+      END;
+
+      OnAfterPost(SalesHeader);
+      COMMIT;
+    END;
+
+    [External]
+    PROCEDURE GetReport@3(VAR SalesHeader@1000 : Record 36);
+    VAR
+      IsHandled@1001 : Boolean;
+    BEGIN
+      IsHandled := FALSE;
+      OnBeforeGetReport(SalesHeader,IsHandled,SendReportAsEmail);
+      IF IsHandled THEN
+        EXIT;
+
+      WITH SalesHeader DO
+        CASE "Document Type" OF
+          "Document Type"::Order:
+            BEGIN
+              IF Ship THEN
+                PrintShip(SalesHeader);
+              IF Invoice THEN
+                PrintInvoice(SalesHeader);
+            END;
+          "Document Type"::Invoice:
+            PrintInvoice(SalesHeader);
+          "Document Type"::"Return Order":
+            BEGIN
+              IF Receive THEN
+                PrintReceive(SalesHeader);
+              IF Invoice THEN
+                PrintCrMemo(SalesHeader);
+            END;
+          "Document Type"::"Credit Memo":
+            PrintCrMemo(SalesHeader);
+        END;
+    END;
+
+    LOCAL PROCEDURE ConfirmPost@9(VAR SalesHeader@1000 : Record 36;DefaultOption@1003 : Integer) : Boolean;
+    VAR
+      ConfirmManagement@1002 : Codeunit 27;
+      Selection@1001 : Integer;
+      SalesSetup@11012000 : Record 311;
+    BEGIN
+      IF DefaultOption > 3 THEN
+        DefaultOption := 3;
+      IF DefaultOption <= 0 THEN
+        DefaultOption := 1;
+
+      SalesSetup.GET; //**4PS.n
+
+      WITH SalesHeader DO BEGIN
+        CASE "Document Type" OF
+          //**4PS.sn
+          "Document Type"::"Invoice Proposal":
+            BEGIN
+              SalesHeader.SETRECFILTER;
+              IF "Plant Invoice" THEN
+                PrintReport(1559,SalesHeader);
+              IF "Service Invoice" THEN
+                PrintReport(3017,SalesHeader);
+            END;
+          //**4PS.en
+          "Document Type"::Order:
+            BEGIN
+              //Selection := STRMENU(ShipInvoiceQst,DefaultOption); //**4PS.o
+
+              //**4PS.sn
+              IF SalesSetup."Release Sales Orders Required" THEN BEGIN
+                IF SalesHeader.Status = SalesHeader.Status::Open THEN BEGIN
+                  MESSAGE(Text11012003);
+                  EXIT(FALSE);
+                END;
+              END;
+              IF SalesSetup."Invoice Sales Orders" <> SalesSetup."Invoice Sales Orders"::No THEN
+                Selection := STRMENU(ShipInvoiceQst,1)
+              ELSE BEGIN
+                IF NOT CONFIRM(PostAndPrintQst,FALSE,"Document Type") THEN
+                  EXIT(FALSE)
+                ELSE
+                  Selection := 1;
+              END;
+              //**4PS.en
+
+              IF Selection = 0 THEN
+                EXIT(FALSE);
+
+              Ship := Selection IN [1,3];
+              Invoice := Selection IN [2,3];
+
+              UpdatePostingAndDocDateFromSetup(WORKDATE); //**4PS.n
+            END;
+          "Document Type"::"Return Order":
+            BEGIN
+              //Selection := STRMENU(ReceiveInvoiceQst,DefaultOption);  //**4PS.o
+
+              //**4PS.sn
+              IF SalesSetup."Invoice Return Orders" <> SalesSetup."Invoice Return Orders"::No THEN
+                Selection := STRMENU(ReceiveInvoiceQst,1)
+              ELSE BEGIN
+                IF NOT CONFIRM(ReceiveInvoiceQst, FALSE, "Document Type") THEN
+                  EXIT(FALSE)
+                ELSE
+                  Selection := 1;
+              END;
+              //**4PS.en
+
+              IF Selection = 0 THEN
+                EXIT(FALSE);
+              Receive := Selection IN [1,3];
+              Invoice := Selection IN [2,3];
+            END
+          ELSE
+          BEGIN //**4PS.n
+            IF NOT ConfirmManagement.ConfirmProcess(
+                 STRSUBSTNO(ConfirmationMessage,"Document Type"),TRUE)
+            THEN
+              EXIT(FALSE);
+          //**4PS.sn
+            IF "Document Type" IN ["Document Type"::Invoice, "Document Type"::"Credit Memo"] THEN BEGIN
+              IF SalesSetup."Post only released Invoices" THEN BEGIN
+                IF SalesHeader.Status = SalesHeader.Status::Open THEN BEGIN
+                  MESSAGE(Text11012002);
+                  EXIT(FALSE);
+                END;
+              END;
+              UpdatePostingAndDocDateFromSetup(WORKDATE);
+            END;
+          END;
+          //**4PS.en
+        END;
+        "Print Posted Documents" := TRUE;
+      END;
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE ConfirmationMessage@4() : Text;
+    BEGIN
+      IF SendReportAsEmail THEN
+        EXIT(PostAndEmailQst);
+      EXIT(PostAndPrintQst);
+    END;
+
+    LOCAL PROCEDURE PrintReceive@1(SalesHeader@1001 : Record 36);
+    VAR
+      ReturnRcptHeader@1000 : Record 6660;
+      IsHandled@1002 : Boolean;
+    BEGIN
+      IsHandled := FALSE;
+      OnBeforePrintReceive(SalesHeader,SendReportAsEmail,IsHandled);
+      IF IsHandled THEN
+        EXIT;
+
+      ReturnRcptHeader."No." := SalesHeader."Last Return Receipt No.";
+      IF ReturnRcptHeader.FIND THEN;
+      ReturnRcptHeader.SETRECFILTER;
+
+      IF SendReportAsEmail THEN
+        ReturnRcptHeader.EmailRecords(TRUE)
+      ELSE
+        //ReturnRcptHeader.PrintRecords(FALSE); //**4PS.o
+        ReturnRcptHeader.PrintRecords(TRUE); //**4PS.n
+    END;
+
+    LOCAL PROCEDURE PrintInvoice@5(SalesHeader@1000 : Record 36);
+    VAR
+      SalesInvHeader@1003 : Record 112;
+      IsHandled@1001 : Boolean;
+    BEGIN
+      IsHandled := FALSE;
+      OnBeforePrintInvoice(SalesHeader,SendReportAsEmail,IsHandled);
+      IF IsHandled THEN
+        EXIT;
+
+      IF SalesHeader."Last Posting No." = '' THEN
+        SalesInvHeader."No." := SalesHeader."No."
+      ELSE
+        SalesInvHeader."No." := SalesHeader."Last Posting No.";
+      SalesInvHeader.FIND;
+      SalesInvHeader.SETRECFILTER;
+      //**4PS.sn
+      IF SendSalesInvoice(SalesInvHeader) THEN
+        EXIT;
+      //**4PS.en
+
+      IF SendReportAsEmail THEN
+        SalesInvHeader.EmailRecords(TRUE)
+      ELSE
+        //SalesInvHeader.PrintRecords(FALSE); //**4PS.o
+        SalesInvHeader.PrintRecords(TRUE,TRUE); //**4PS.n
+      //>>NAVDK
+      COMMIT;
+      IF (SalesHeader."EAN No." <> '') AND GLSetup."Danish Localization Active" THEN BEGIN
+        SalesInvHeader.FIND;
+        OIOXMLExportSalesInvoice.ExportXML(SalesInvHeader);
+      END;
+      COMMIT;
+      //<<NAVDK
+    END;
+
+    LOCAL PROCEDURE PrintShip@7(SalesHeader@1000 : Record 36);
+    VAR
+      SalesShptHeader@1001 : Record 110;
+      IsHandled@1002 : Boolean;
+    BEGIN
+      IsHandled := FALSE;
+      OnBeforePrintShip(SalesHeader,SendReportAsEmail,IsHandled);
+      IF IsHandled THEN
+        EXIT;
+
+      SalesShptHeader."No." := SalesHeader."Last Shipping No.";
+      IF SalesShptHeader.FIND THEN;
+      SalesShptHeader.SETRECFILTER;
+
+      IF SendReportAsEmail THEN
+        SalesShptHeader.EmailRecords(TRUE)
+      ELSE
+        //SalesShptHeader.PrintRecords(FALSE); //**4PS.o
+        SalesShptHeader.PrintRecords(TRUE,TRUE); //**4PS.n
+    END;
+
+    LOCAL PROCEDURE PrintCrMemo@8(SalesHeader@1000 : Record 36);
+    VAR
+      SalesCrMemoHeader@1003 : Record 114;
+      IsHandled@1001 : Boolean;
+    BEGIN
+      IsHandled := FALSE;
+      OnBeforePrintCrMemo(SalesHeader,SendReportAsEmail,IsHandled);
+      IF IsHandled THEN
+        EXIT;
+
+      IF SalesHeader."Last Posting No." = '' THEN
+        SalesCrMemoHeader."No." := SalesHeader."No."
+      ELSE
+        SalesCrMemoHeader."No." := SalesHeader."Last Posting No.";
+      SalesCrMemoHeader.FIND;
+      SalesCrMemoHeader.SETRECFILTER;
+      //**4PS.sn
+      IF SendSalesCrMemo(SalesCrMemoHeader) THEN
+        EXIT;
+      //**4PS.en
+
+      IF SendReportAsEmail THEN
+        SalesCrMemoHeader.EmailRecords(TRUE)
+      ELSE
+        //SalesCrMemoHeader.PrintRecords(FALSE); //**4PS.o
+        SalesCrMemoHeader.PrintRecords(TRUE); //**4PS.n
+      //>>NAVDK
+      COMMIT;
+      IF SalesHeader."EAN No." <> '' THEN BEGIN
+        SalesCrMemoHeader.FIND;
+        OIOXMLExportSalesCrMemo.ExportXML(SalesCrMemoHeader);
+      END;
+      COMMIT;
+      //<<NAVDK
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterPost@11(VAR SalesHeader@1000 : Record 36);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterConfirmPost@12(VAR SalesHeader@1000 : Record 36);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeConfirmPost@6(VAR SalesHeader@1000 : Record 36;VAR HideDialog@1001 : Boolean;VAR IsHandled@1002 : Boolean;VAR SendReportAsEmail@1003 : Boolean;VAR DefaultOption@1004 : Integer);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeGetReport@13(VAR SalesHeader@1000 : Record 36;VAR IsHandled@1001 : Boolean;SendReportAsEmail@1002 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforePrintInvoice@17(VAR SalesHeader@1000 : Record 36;SendReportAsEmail@1001 : Boolean;VAR IsHandled@1002 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforePrintCrMemo@18(VAR SalesHeader@1000 : Record 36;SendReportAsEmail@1001 : Boolean;VAR IsHandled@1002 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforePrintReceive@14(VAR SalesHeader@1000 : Record 36;SendReportAsEmail@1001 : Boolean;VAR IsHandled@1002 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforePrintShip@16(VAR SalesHeader@1000 : Record 36;SendReportAsEmail@1001 : Boolean;VAR IsHandled@1002 : Boolean);
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE SendSalesInvoice@1100528403(VAR SalesInvHeader@1100525000 : Record 112) ReportSent : Boolean;
+    VAR
+      SalesInvoiceHeader2@1100528400 : Record 112;
+    BEGIN
+      //**4PS
+      SalesInvHeader.FINDFIRST;
+      IF SendReportAsEmail THEN BEGIN
+        SalesInvoiceHeader2.COPY(SalesInvHeader);
+        SalesInvoiceHeader2.SETRECFILTER;
+        SalesInvoiceHeader2.EmailRecords(TRUE);
+        ReportSent := TRUE;
+      END;
+
+      IF NOT ReportSent AND
+         (SalesInvHeader."Electronic Invoicing" <> SalesInvHeader."Electronic Invoicing"::Print)
+      THEN BEGIN
+        SalesInvHeader.SendInvoiceElectronic(FALSE,FALSE);
+        ReportSent := TRUE;
+      END;
+
+      IF NOT ReportSent AND
+         NOT SkipPrintingAttachmentsAfterPostingInvoice AND
+         SalesInvHeader.AttachmentsMustBePrinted
+      THEN BEGIN
+        SalesInvHeader.PrintInvoiceIncludingAttachments(FALSE);
+        ReportSent := TRUE;
+      END;
+    END;
+
+    LOCAL PROCEDURE SendSalesCrMemo@1100528408(VAR SalesCrMemoHeader@1100525000 : Record 114) ReportSent : Boolean;
+    VAR
+      SalesCrMemoHeader2@1100528400 : Record 114;
+    BEGIN
+      //**4PS
+      SalesCrMemoHeader.FINDFIRST;
+      IF SendReportAsEmail THEN BEGIN
+        SalesCrMemoHeader2.COPY(SalesCrMemoHeader);
+        SalesCrMemoHeader2.SETRECFILTER;
+        SalesCrMemoHeader2.EmailRecords(TRUE);
+        ReportSent := TRUE;
+      END;
+
+      IF NOT ReportSent AND
+        (SalesCrMemoHeader."Electronic Invoicing" <> SalesCrMemoHeader."Electronic Invoicing"::Print)
+      THEN BEGIN
+        SalesCrMemoHeader.SendCreditMemoElectronic(FALSE,FALSE);
+        ReportSent := TRUE;
+      END;
+    END;
+
+    LOCAL PROCEDURE PrintReport@1100525000(ReportUsage@1100525001 : Integer;SalesHeader@1100525002 : Record 36);
+    VAR
+      DocumentSendingProfile@1100525000 : Record 60;
+    BEGIN
+      //**4PS
+      DocumentSendingProfile.TrySendToPrinter(
+        ReportUsage,SalesHeader,SalesHeader.FIELDNO("Bill-to Customer No."),TRUE,TRUE);
+    END;
+
+    BEGIN
+    {
+      dbeekman, 22-10-2008:
+            - Report selection handled by cod229.GetReportSelection
+    }
+    END.
+  }
+}
+

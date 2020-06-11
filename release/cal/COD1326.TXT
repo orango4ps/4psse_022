@@ -1,0 +1,142 @@
+OBJECT Codeunit 1326 Top Five Customers Chart Mgt.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.00;
+  }
+  PROPERTIES
+  {
+    SingleInstance=Yes;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      CustomerXCaptionTxt@1002 : TextConst 'ENU=Customer Name;NOR=Kundenavn;SVE=Kundens namn';
+      SalesLCYYCaptionTxt@1001 : TextConst 'ENU=Sales (LCY);NOR=Salg (NOK);SVE=F”rs„ljning (BVA)';
+      AllOtherCustomersTxt@1000 : TextConst 'ENU=All Other Customers;NOR=Alle andre kunder;SVE=Alla andra kunder';
+      IdentityManagement@1006 : Codeunit 9801;
+      SalesAmountCaptionTxt@1008 : TextConst '@@@="%1=Currency Symbol (e.g. $)";ENU=Amount Excl. VAT (%1);NOR=Bel›p eks. mva (%1)';
+
+    [External]
+    PROCEDURE UpdateChart@3(VAR BusChartBuf@1000 : Record 485);
+    VAR
+      GLSetup@1004 : Record 98;
+      ColumnIndex@1003 : Integer;
+      CustomerName@1002 : ARRAY [11] OF Text[100];
+      SalesLCY@1001 : ARRAY [11] OF Decimal;
+    BEGIN
+      WITH BusChartBuf DO BEGIN
+        Initialize;
+        IF GLSetup.GET THEN;
+        IF IdentityManagement.IsInvAppId THEN
+          AddMeasure(STRSUBSTNO(SalesAmountCaptionTxt,GLSetup.GetCurrencySymbol),1,"Data Type"::Decimal,"Chart Type"::Doughnut)
+        ELSE
+          AddMeasure(SalesLCYYCaptionTxt,1,"Data Type"::Decimal,"Chart Type"::Doughnut);
+        SetXAxis(CustomerXCaptionTxt,"Data Type"::String);
+        CalcTopSalesCustomers(CustomerName,SalesLCY);
+        FOR ColumnIndex := 1 TO 6 DO BEGIN
+          IF SalesLCY[ColumnIndex] = 0 THEN
+            EXIT;
+          AddColumn(CustomerName[ColumnIndex]);
+          SetValueByIndex(0,ColumnIndex - 1,SalesLCY[ColumnIndex]);
+        END;
+      END;
+    END;
+
+    [External]
+    PROCEDURE DrillDown@5(VAR BusChartBuf@1000 : Record 485);
+    VAR
+      CustomerName@1001 : Variant;
+    BEGIN
+      BusChartBuf.GetXValue(BusChartBuf."Drill-Down X Index",CustomerName);
+      // drill down only for top 5 customers
+      // for the 6th column "all other customers", it drills down to customer list of all other customers
+      IF (BusChartBuf."Drill-Down Measure Index" = 0) AND (BusChartBuf."Drill-Down X Index" < 5) THEN
+        DrillDownCust(FORMAT(CustomerName));
+      IF (BusChartBuf."Drill-Down Measure Index" = 0) AND (BusChartBuf."Drill-Down X Index" = 5) THEN
+        DrillDownOtherCustList;
+    END;
+
+    LOCAL PROCEDURE CalcTopSalesCustomers@9(VAR CustomerName@1002 : ARRAY [6] OF Text[100];VAR SalesLCY@1000 : ARRAY [6] OF Decimal);
+    VAR
+      TopCustomersBySalesBuffer@1005 : Record 1328;
+      TopCustomersBySalesJob@1004 : Codeunit 1328;
+      ChartManagement@1003 : Codeunit 1315;
+      ColumnIndex@1001 : Integer;
+      OtherCustomersSalesLCY@1006 : Decimal;
+    BEGIN
+      IF TopCustomersBySalesBuffer.ISEMPTY THEN
+        TopCustomersBySalesJob.UpdateCustomerTopList;
+
+      IF TopCustomersBySalesBuffer.FINDSET THEN BEGIN
+        REPEAT
+          ColumnIndex += 1;
+          IF ColumnIndex <= 5 THEN BEGIN
+            CustomerName[TopCustomersBySalesBuffer.Ranking] := TopCustomersBySalesBuffer.CustomerName;
+            SalesLCY[TopCustomersBySalesBuffer.Ranking] := TopCustomersBySalesBuffer.SalesLCY
+          END ELSE
+            OtherCustomersSalesLCY += TopCustomersBySalesBuffer.SalesLCY;
+        UNTIL TopCustomersBySalesBuffer.NEXT = 0;
+
+        IF OtherCustomersSalesLCY <> 0 THEN BEGIN
+          CustomerName[6] := AllOtherCustomersTxt;
+          SalesLCY[6] := OtherCustomersSalesLCY
+        END;
+
+        ChartManagement.ScheduleTopCustomerListRefreshTask
+      END;
+    END;
+
+    LOCAL PROCEDURE DrillDownCust@1(DrillDownName@1000 : Text[100]);
+    VAR
+      Customer@1001 : Record 18;
+    BEGIN
+      Customer.SETRANGE(Name,DrillDownName);
+      Customer.FINDFIRST;
+      IF IdentityManagement.IsInvAppId THEN
+        PAGE.RUN(PAGE::"BC O365 Sales Customer Card",Customer)
+      ELSE
+        PAGE.RUN(PAGE::"Customer Card",Customer);
+    END;
+
+    LOCAL PROCEDURE DrillDownOtherCustList@8();
+    VAR
+      Customer@1001 : Record 18;
+    BEGIN
+      Customer.SETFILTER("No.",GetFilterToExcludeTopFiveCustomers);
+      Customer.SETCURRENTKEY(Name);
+      Customer.ASCENDING(TRUE);
+      IF IdentityManagement.IsInvAppId THEN
+        PAGE.RUN(PAGE::"BC O365 Customer List",Customer)
+      ELSE
+        PAGE.RUN(PAGE::"Customer List",Customer);
+    END;
+
+    LOCAL PROCEDURE GetFilterToExcludeTopFiveCustomers@11() : Text;
+    VAR
+      TopCustomersBySalesBuffer@1002 : Record 1328;
+      CustomerCounter@1001 : Integer;
+      FilterToExcludeTopFiveCustomers@1000 : Text;
+    BEGIN
+      CustomerCounter := 1;
+      IF TopCustomersBySalesBuffer.FINDSET THEN
+        REPEAT
+          IF CustomerCounter = 1 THEN
+            FilterToExcludeTopFiveCustomers := STRSUBSTNO('<>%1',TopCustomersBySalesBuffer.CustomerNo)
+          ELSE
+            FilterToExcludeTopFiveCustomers += STRSUBSTNO('&<>%1',TopCustomersBySalesBuffer.CustomerNo);
+          CustomerCounter += 1;
+        UNTIL (TopCustomersBySalesBuffer.NEXT = 0) OR (CustomerCounter = 6);
+      EXIT(FilterToExcludeTopFiveCustomers);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

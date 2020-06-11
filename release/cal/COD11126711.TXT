@@ -1,0 +1,240 @@
+OBJECT Codeunit 11126711 Generic Web Service Functions
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      GenericWebserviceSetup@1100525003 : Record 11126728;
+
+    PROCEDURE AddGenericWebServiceMethod@1100528802(MethodName@1100528303 : Text[50];ConnectorType@1100528302 : Code[10];CodeunitNo@1100528301 : Integer;Priority@1100528300 : Integer);
+    VAR
+      GenericWebServiceMethod@1100528304 : Record 11126716;
+    BEGIN
+      IF (NOT GenericWebServiceMethod.GET(MethodName)) THEN BEGIN
+        GenericWebServiceMethod.INIT;
+        GenericWebServiceMethod."Method Name" := MethodName;
+        GenericWebServiceMethod.Manual := TRUE;
+        GenericWebServiceMethod."Connector Type" := ConnectorType;
+        GenericWebServiceMethod.Codeunit := CodeunitNo;
+        GenericWebServiceMethod.Priority := Priority;
+        GenericWebServiceMethod.INSERT(TRUE);
+      END;
+    END;
+
+    PROCEDURE AddGenericWebServiceNamespace@1100528305();
+    VAR
+      GenericWebServiceNamespace@1100528300 : Record 11229383;
+    BEGIN
+      GenericWebServiceNamespace.AddNamespace('', 'soapenv', 'http://schemas.xmlsoap.org/soap/envelope/');
+      GenericWebServiceNamespace.AddNamespace('', 'xsi', 'http://www.w3.org/2001/XMLSchema-instance');
+      GenericWebServiceNamespace.AddNamespace('', 'xsd', 'http://www.w3.org/2001/XMLSchema');
+    END;
+
+    PROCEDURE DeleteCompletedTasks@1100528304();
+    VAR
+      GenericWebserviceQueue@1100525000 : Record 11126715;
+    BEGIN
+      LoadGenericWebserviceSetup(GenericWebserviceSetup);
+      IF (GenericWebserviceSetup."Delete Completed Tasks(days)" <= 1) THEN
+        EXIT;
+
+      GenericWebserviceQueue.SETRANGE(Status,GenericWebserviceQueue.Status::Processed);
+      GenericWebserviceQueue.SETRANGE("Modified On",0DT,CREATEDATETIME(CALCDATE(STRSUBSTNO('<-%1D>',GenericWebserviceSetup."Delete Completed Tasks(days)"),TODAY),TIME));
+      IF GenericWebserviceQueue.FINDSET THEN BEGIN
+        GenericWebserviceQueue.DELETEALL;
+      END;
+    END;
+
+    PROCEDURE LoadGenericWebserviceSetup@1100525007(VAR GenericWebserviceSetup@1100525000 : Record 11126728);
+    BEGIN
+      GenericWebserviceSetup.GET;
+    END;
+
+    PROCEDURE ProcessQueueEntry@1100525000(EntryNo@1100525000 : BigInteger);
+    VAR
+      GenericWebserviceQueue@1100528300 : Record 11126715;
+    BEGIN
+      IF (NOT GenericWebserviceQueue.GET(EntryNo)) THEN
+        EXIT;
+      IF (GenericWebserviceQueue.Status = GenericWebserviceQueue.Status::Cancelled) OR
+         (GenericWebserviceQueue.Status = GenericWebserviceQueue.Status::Processed)
+      THEN
+        EXIT;
+      GenericWebserviceQueue.TESTFIELD("Method Name");
+
+      CLEARLASTERROR;
+      COMMIT;
+      IF (CODEUNIT.RUN(GetCodeUnit(GenericWebserviceQueue), GenericWebserviceQueue)) THEN BEGIN
+        GenericWebserviceQueue.GET(EntryNo);
+        ProcessLogEntry(GenericWebserviceQueue, 1); //Processed
+      END ELSE BEGIN
+        GenericWebserviceQueue.GET(EntryNo);
+        ProcessLogEntry(GenericWebserviceQueue, 2); //Failed
+      END;
+
+      GenericWebserviceQueue."Try No." += 1;
+      GenericWebserviceQueue.MODIFY(TRUE);
+      COMMIT;
+    END;
+
+    PROCEDURE SetJobQueue@1100528300(Parameter@1100528303 : Text;MinutesBetweenRuns@1100528301 : Integer;CodeunitId@1100528304 : Integer);
+    VAR
+      GenericWebServiceQueue@1100528300 : Record 11126715;
+      JobQueueCategory@1100529900 : Record 471;
+      JobQueueCode@1100528302 : Text;
+    BEGIN
+      JobQueueCode := COPYSTR(DELCHR(GenericWebServiceQueue.TABLENAME, '<=>'), 1, MAXSTRLEN(JobQueueCategory.Code));
+      IF (NOT JobQueueCategory.GET(JobQueueCode)) THEN BEGIN
+        JobQueueCategory.INIT;
+        JobQueueCategory.Code := JobQueueCode;
+        JobQueueCategory.Description := GenericWebServiceQueue.TABLECAPTION;
+        JobQueueCategory.INSERT(TRUE);
+      END;
+
+      InitJobQueueEntry(JobQueueCode, Parameter, MinutesBetweenRuns, CodeunitId);
+    END;
+
+    PROCEDURE ShowRelatedInformation@1100528303(RecordID@1100528800 : RecordID);
+    VAR
+      DSPOrder@1100528801 : Record 11126740;
+      RecRef@1100528802 : RecordRef;
+      RecRefVariant@1100528803 : Variant;
+    BEGIN
+      RecRef := RecordID.GETRECORD;
+      RecRef.SETRECFILTER;
+      RecRefVariant := RecRef;
+      PAGE.RUNMODAL(0, RecRefVariant);
+    END;
+
+    LOCAL PROCEDURE "---Locals---"@1100528302();
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE AddGenericWebServiceLogEntry@1100525005(LastErrorText@1100525000 : Text;GenericWebserviceQueue@1100525001 : Record 11126715);
+    VAR
+      GenericWebserviceErrorLog@1100525004 : Record 11126717;
+      OStream@1100528300 : OutStream;
+    BEGIN
+      IF LastErrorText = '' THEN
+        EXIT;
+
+      GenericWebserviceErrorLog.INIT;
+      GenericWebserviceErrorLog."Queue Entry No." := GenericWebserviceQueue."Entry No.";
+      GenericWebserviceErrorLog.Error := COPYSTR(LastErrorText, 1, MAXSTRLEN(GenericWebserviceErrorLog.Error));
+      GenericWebserviceErrorLog."Full Error".CREATEOUTSTREAM(OStream);
+      OStream.WRITETEXT(LastErrorText);
+      GenericWebserviceErrorLog.INSERT(TRUE);
+    END;
+
+    LOCAL PROCEDURE GetCodeUnit@1100525001(GenericWebserviceQueue@1100525001 : Record 11126715) : Integer;
+    VAR
+      GenericWebServiceMethod@1100525000 : Record 11126716;
+    BEGIN
+      GenericWebServiceMethod.GET(GenericWebserviceQueue."Method Name");
+      EXIT(GenericWebServiceMethod.Codeunit);
+    END;
+
+    PROCEDURE MethodIsManual@1100529900(MethodName@1100529901 : Text) : Boolean;
+    VAR
+      GenericWebServiceMethod@1100529900 : Record 11126716;
+    BEGIN
+      IF (GenericWebServiceMethod.GET(MethodName)) THEN
+        EXIT(GenericWebServiceMethod.Manual);
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE ProcessLogEntry@1100525002(VAR GenericWebserviceQueue@1100525000 : Record 11126715;StatusOption@1100525001 : Option);
+    BEGIN
+      CASE StatusOption OF
+        1: BEGIN //Processed:
+          GenericWebserviceQueue.Status := StatusOption;
+          UpdateNotifyUsers(GenericWebserviceQueue, 1);
+        END;
+        2: BEGIN //Failed:
+          AddGenericWebServiceLogEntry(GETLASTERRORTEXT, GenericWebserviceQueue);
+          GenericWebserviceQueue.Status := StatusOption;
+          UpdateNotifyUsers(GenericWebserviceQueue, 2);
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE InitJobQueueEntry@1100529910(JobQueueCode@1100528301 : Text;Parameter@1100528302 : Text;MinutesBetweenRuns@1100529902 : Integer;CodeunitId@1100528303 : Integer);
+    VAR
+      JobQueueEntry@1100529900 : Record 472;
+      GenericWebServiceQueue@1100528300 : Record 11126715;
+    BEGIN
+      JobQueueEntry.SETRANGE("Job Queue Category Code", JobQueueCode);
+      IF (Parameter <> '') THEN
+        JobQueueEntry.SETFILTER("Parameter String", '%1', '*'+Parameter+'*');
+      IF (NOT JobQueueEntry.ISEMPTY) THEN
+        EXIT;
+
+      JobQueueEntry.INIT;
+      JobQueueEntry.Description := GenericWebServiceQueue.TABLECAPTION;
+      JobQueueEntry."Ending Time" := 173000T;
+      JobQueueEntry."Job Queue Category Code" := JobQueueCode;
+      JobQueueEntry."Maximum No. of Attempts to Run" := 999;
+      IF (CodeunitId <> 0) THEN
+        JobQueueEntry."Object ID to Run" := CodeunitId
+      ELSE
+        JobQueueEntry."Object ID to Run" := CODEUNIT::"Generic Web Service Job Queue";
+      JobQueueEntry."Object Type to Run" := JobQueueEntry."Object Type to Run"::Codeunit;
+      IF (Parameter <> '') THEN
+        JobQueueEntry."Parameter String" := UPPERCASE(COPYSTR(Parameter, 1, MAXSTRLEN(JobQueueEntry."Parameter String")));
+      JobQueueEntry."Recurring Job" := TRUE;
+      JobQueueEntry."No. of Minutes between Runs" := MinutesBetweenRuns;
+      JobQueueEntry."Run on Fridays" := TRUE;
+      JobQueueEntry."Run on Mondays" := TRUE;
+      JobQueueEntry."Run on Thursdays" := TRUE;
+      JobQueueEntry."Run on Tuesdays" := TRUE;
+      JobQueueEntry."Run on Wednesdays" := TRUE;
+      JobQueueEntry."Starting Time" := 073000T;
+      JobQueueEntry.Status := JobQueueEntry.Status::"On Hold";
+      JobQueueEntry.INSERT(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateNotifyUsers@1100528500(GenericWebServiceQueue@1100528500 : Record 11126715;StatusOption@1100528503 : Option);
+    VAR
+      GenWebServMethNotifyUser@1100528501 : Record 11229442;
+      GenericWebServiceMethod@1100528300 : Record 11126716;
+      RecordLink@1100528505 : Record 2000000068;
+      GenericWebServiceQueuePage@1100528504 : Page 11126906;
+      RecordLinkManagement@1100528502 : Codeunit 447;
+      RecRef@1100528506 : RecordRef;
+    BEGIN
+      GenericWebServiceMethod.GET(GenericWebServiceQueue."Method Name");
+      GenWebServMethNotifyUser.SETRANGE("Method Name", GenericWebServiceQueue."Method Name");
+      IF (NOT GenWebServMethNotifyUser.FINDSET) THEN
+        EXIT;
+
+      REPEAT
+        RecRef.GETTABLE(GenericWebServiceQueue);
+        CASE StatusOption OF
+          1: BEGIN
+            RecordLink.SETRANGE("Record ID", GenericWebServiceQueue.RECORDID);
+            RecordLink.DELETEALL;
+          END;
+          2: BEGIN
+            IF (GenericWebServiceMethod."Notify Users On Error") THEN
+              RecordLinkManagement.CreateNote(RecRef, GenericWebServiceQueuePage.OBJECTID(FALSE), GETLASTERRORTEXT, GenWebServMethNotifyUser."User ID");
+          END;
+        END;
+      UNTIL (GenWebServMethNotifyUser.NEXT = 0);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

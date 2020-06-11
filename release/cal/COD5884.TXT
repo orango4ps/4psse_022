@@ -1,0 +1,533 @@
+OBJECT Codeunit 5884 Phys. Invt. Order-Post
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.04;
+  }
+  PROPERTIES
+  {
+    TableNo=5875;
+    Permissions=TableData 6507=ri,
+                TableData 5879=rimd,
+                TableData 5880=rimd,
+                TableData 5881=rimd,
+                TableData 5882=rimd,
+                TableData 5884=rimd,
+                TableData 5887=rimd;
+    OnRun=BEGIN
+            PhysInvtOrderHeader.COPY(Rec);
+            Code;
+            Rec := PhysInvtOrderHeader;
+
+            OnAfterOnRun(Rec,PstdPhysInvtOrderHdr);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      CheckingLinesMsg@1000 : TextConst '@@@="%2 = counter";ENU=Checking lines        #2######\;NOR=Kontrollerer linjer        #2######\;SVE=Kontrollerar rader    #2######\';
+      PostingLinesMsg@1001 : TextConst '@@@="%3 = counter";ENU=Posting lines         #3######;NOR=Bokf›rer linjer            #3######';
+      HeaderDimCombBlockedErr@1002 : TextConst '@@@="%1 = Order No. %2 = error message";ENU=The combination of dimensions used in phys. inventory order %1 is blocked. %2.;NOR=Kombinasjonen av dimensjonene som brukes vareopptellingsordren %1 er sperret. %2.';
+      LineDimCombBlockedErr@1003 : TextConst '@@@="%1 = Order No. %2 = line no. %3 = error message";ENU=The combination of dimensions used in  phys. inventory order %1, line no. %2 is blocked. %3.;NOR=Kombinasjonen av dimensjonene som brukes i vareopptellingsordren %1 med linjenr. %2 er sperret. %3.';
+      InvalidDimErr@1004 : TextConst '@@@="%1 = Order No. %2 = line no. %3 = error message";ENU=The dimensions used in phys. inventory order %1, line no. %2 are invalid. %3.;NOR=Dimensjonene som brukes i vareopptellingsordren %1 med linjenr. %2 er ugyldige. %3.';
+      DifferenceErr@1005 : TextConst '@@@="%1,%2,%3 - quantities, %4 = text";ENU=There is a difference between the values of the fields %1, %2 and %3. \Identified values in the line: %4 %5 %6 %7.;NOR=Det er en differanse mellom verdiene i feltene %1, %2 og %3. \Identifiserte verdier p† linjen: %4 %5 %6 %7.';
+      NothingToPostErr@1007 : TextConst 'ENU=There is nothing to post.;NOR=Det finnes ingenting † bokf›re.;SVE=Det finns inget att bokf”ra.';
+      CopyFromToMsg@1008 : TextConst '@@@="%1,%2 = table captions, %2,%4 = Order No.";ENU=%1 %2 -> %3 %4;NOR=%1 %2 -> %3 %4';
+      PhysInvtOrderHeader@1009 : Record 5875;
+      PhysInvtOrderLine@1010 : Record 5876;
+      PhysInvtOrderLine2@1011 : Record 5876;
+      PstdPhysInvtOrderHdr@1012 : Record 5879;
+      PstdPhysInvtOrderLine@1013 : Record 5880;
+      ExpPhysInvtTracking@1014 : Record 5886;
+      PstdExpPhysInvtTrack@1015 : Record 5887;
+      PhysInvtRecordHeader@1016 : Record 5877;
+      PhysInvtRecordLine@1017 : Record 5878;
+      PhysInvtCommentLine@1020 : Record 5883;
+      PostedPhysInvtCommentLine@1021 : Record 5883;
+      Item@1040 : Record 27;
+      ItemJnlLine@1025 : Record 83;
+      Location@1026 : Record 14;
+      TempWhseTrackingSpecification@1027 : TEMPORARY Record 336;
+      DimManagement@1028 : Codeunit 408;
+      PhysInvtTrackingMgt@1029 : Codeunit 5889;
+      NoSeriesMgt@1030 : Codeunit 396;
+      ItemJnlPostLine@1031 : Codeunit 22;
+      Window@1032 : Dialog;
+      ErrorText@1033 : Text[250];
+      SourceCode@1034 : Code[10];
+      LineCount@1035 : Integer;
+      ModifyHeader@1036 : Boolean;
+      LinesToPost@1037 : Boolean;
+      WhsePosting@1038 : Boolean;
+      OriginalQuantityBase@1039 : Decimal;
+
+    [External]
+    PROCEDURE Code@1000();
+    VAR
+      SourceCodeSetup@1000 : Record 242;
+      InventorySetup@1001 : Record 313;
+      PhysInvtCountMgt@1002 : Codeunit 7380;
+    BEGIN
+      WITH PhysInvtOrderHeader DO BEGIN
+        TESTFIELD(Status,Status::Finished);
+        TESTFIELD("Posting Date");
+
+        Window.OPEN(
+          '#1################################\\' +
+          CheckingLinesMsg + PostingLinesMsg);
+        Window.UPDATE(1,STRSUBSTNO('%1 %2',TABLECAPTION,"No."));
+
+        LOCKTABLE;
+        PhysInvtOrderLine.LOCKTABLE;
+
+        ModifyHeader := FALSE;
+        IF "Posting No." = '' THEN BEGIN
+          IF "No. Series" <> '' THEN
+            TESTFIELD("Posting No. Series");
+          IF "No. Series" <> "Posting No. Series" THEN BEGIN
+            "Posting No." := NoSeriesMgt.GetNextNo("Posting No. Series","Posting Date",TRUE);
+            ModifyHeader := TRUE;
+          END;
+        END;
+
+        IF ModifyHeader THEN BEGIN
+          MODIFY;
+          COMMIT;
+        END;
+
+        CheckDim;
+
+        // Check phys. inventory order lines
+        LinesToPost := FALSE;
+        LineCount := 0;
+        PhysInvtOrderLine.RESET;
+        PhysInvtOrderLine.SETRANGE("Document No.","No.");
+        IF PhysInvtOrderLine.FIND('-') THEN
+          REPEAT
+            LineCount := LineCount + 1;
+            Window.UPDATE(2,LineCount);
+            IF NOT PhysInvtOrderLine.EmptyLine THEN BEGIN
+              CheckOrderLine(PhysInvtOrderHeader,PhysInvtOrderLine,Item);
+
+              PhysInvtOrderLine.TESTFIELD("Entry Type");
+              IF ((PhysInvtOrderLine."Entry Type" = PhysInvtOrderLine."Entry Type"::"Positive Adjmt.") AND
+                  (PhysInvtOrderLine."Quantity (Base)" <>
+                   PhysInvtOrderLine."Pos. Qty. (Base)" - PhysInvtOrderLine."Neg. Qty. (Base)")) OR
+                 ((PhysInvtOrderLine."Entry Type" = PhysInvtOrderLine."Entry Type"::"Negative Adjmt.") AND
+                  (-PhysInvtOrderLine."Quantity (Base)" <>
+                   PhysInvtOrderLine."Pos. Qty. (Base)" - PhysInvtOrderLine."Neg. Qty. (Base)"))
+              THEN
+                ERROR(
+                  DifferenceErr,
+                  PhysInvtOrderLine.FIELDCAPTION("Pos. Qty. (Base)"),
+                  PhysInvtOrderLine.FIELDCAPTION("Neg. Qty. (Base)"),
+                  PhysInvtOrderLine.FIELDCAPTION("Quantity (Base)"),
+                  PhysInvtOrderLine."Item No.",
+                  PhysInvtOrderLine."Variant Code",
+                  PhysInvtOrderLine."Location Code",
+                  PhysInvtOrderLine."Bin Code");
+
+              IF NOT LinesToPost THEN
+                LinesToPost := TRUE;
+              IF (PhysInvtOrderLine."Phys Invt Counting Period Type" <> PhysInvtOrderLine."Phys Invt Counting Period Type"::" ") AND
+                 (PhysInvtOrderLine."Phys Invt Counting Period Code" <> '')
+              THEN BEGIN
+                PhysInvtCountMgt.InitTempItemSKUList;
+                PhysInvtCountMgt.AddToTempItemSKUList(PhysInvtOrderLine."Item No.",PhysInvtOrderLine."Location Code",
+                  PhysInvtOrderLine."Variant Code",PhysInvtOrderLine."Phys Invt Counting Period Type");
+                PhysInvtCountMgt.UpdateItemSKUListPhysInvtCount;
+              END;
+            END;
+          UNTIL PhysInvtOrderLine.NEXT = 0;
+        IF NOT LinesToPost THEN
+          ERROR(NothingToPostErr);
+
+        SourceCodeSetup.GET;
+        SourceCode := SourceCodeSetup."Phys. Invt. Orders";
+
+        InventorySetup.GET;
+
+        // Insert posted order header
+        InsertPostedHeader(PhysInvtOrderHeader);
+
+        // Insert posted order lines
+        LineCount := 0;
+        PhysInvtOrderLine.RESET;
+        PhysInvtOrderLine.SETRANGE("Document No.","No.");
+        PhysInvtOrderLine.SETRANGE("Entry Type",PhysInvtOrderLine."Entry Type"::"Negative Adjmt.");
+        IF PhysInvtOrderLine.FINDSET THEN
+          REPEAT
+            PostPhysInventoryOrderLine;
+          UNTIL PhysInvtOrderLine.NEXT = 0;
+        PhysInvtOrderLine.SETFILTER("Entry Type",'<>%1',PhysInvtOrderLine."Entry Type"::"Negative Adjmt.");
+        IF PhysInvtOrderLine.FINDSET THEN
+          REPEAT
+            PostPhysInventoryOrderLine;
+          UNTIL PhysInvtOrderLine.NEXT = 0;
+
+        // Insert posted expected phys. invt. tracking Lines
+        ExpPhysInvtTracking.RESET;
+        ExpPhysInvtTracking.SETRANGE("Order No","No.");
+        IF ExpPhysInvtTracking.FIND('-') THEN
+          REPEAT
+            PstdExpPhysInvtTrack.INIT;
+            PstdExpPhysInvtTrack.TRANSFERFIELDS(ExpPhysInvtTracking);
+            PstdExpPhysInvtTrack."Order No" := PstdPhysInvtOrderHdr."No.";
+            PstdExpPhysInvtTrack.INSERT;
+          UNTIL ExpPhysInvtTracking.NEXT = 0;
+
+        // Insert posted recording header and lines
+        InsertPostedRecordings("No.",PstdPhysInvtOrderHdr."No.");
+
+        // Insert posted comment Lines
+        PhysInvtCommentLine.RESET;
+        PhysInvtCommentLine.SETRANGE("Document Type",PhysInvtCommentLine."Document Type"::Order);
+        PhysInvtCommentLine.SETRANGE("Order No.","No.");
+        PhysInvtCommentLine.SETRANGE("Recording No.",0);
+        IF PhysInvtCommentLine.FIND('-') THEN
+          REPEAT
+            InsertPostedCommentLine(
+              PhysInvtCommentLine,PhysInvtCommentLine."Document Type"::"Posted Order",PstdPhysInvtOrderHdr."No.");
+          UNTIL PhysInvtCommentLine.NEXT = 0;
+        PhysInvtCommentLine.DELETEALL;
+
+        PhysInvtCommentLine.RESET;
+        PhysInvtCommentLine.SETRANGE("Document Type",PhysInvtCommentLine."Document Type"::Recording);
+        PhysInvtCommentLine.SETRANGE("Order No.","No.");
+        IF PhysInvtCommentLine.FIND('-') THEN
+          REPEAT
+            InsertPostedCommentLine(
+              PhysInvtCommentLine,PhysInvtCommentLine."Document Type"::"Posted Recording",PstdPhysInvtOrderHdr."No.");
+          UNTIL PhysInvtCommentLine.NEXT = 0;
+        PhysInvtCommentLine.DELETEALL;
+
+        "Last Posting No." := "Posting No.";
+
+        FinalizePost("No.");
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckOrderLine@108(PhysInvtOrderHeader@1002 : Record 5875;PhysInvtOrderLine@1000 : Record 5876;VAR Item@1001 : Record 27);
+    BEGIN
+      WITH PhysInvtOrderLine DO BEGIN
+        CheckLine;
+        Item.GET("Item No.");
+        Item.TESTFIELD(Blocked,FALSE);
+        IF PhysInvtOrderHeader.GetSamePhysInvtOrderLine(
+             "Item No.","Variant Code","Location Code","Bin Code",ErrorText,PhysInvtOrderLine2) > 1
+        THEN
+          ERROR(ErrorText);
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckDim@1001();
+    BEGIN
+      PhysInvtOrderLine."Line No." := 0;
+      CheckDimValuePosting(PhysInvtOrderLine);
+      CheckDimComb(PhysInvtOrderLine);
+
+      PhysInvtOrderLine.SETRANGE("Document No.",PhysInvtOrderHeader."No.");
+      IF PhysInvtOrderLine.FINDSET THEN
+        REPEAT
+          CheckDimComb(PhysInvtOrderLine);
+          CheckDimValuePosting(PhysInvtOrderLine);
+        UNTIL PhysInvtOrderLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CheckDimComb@1002(PhysInvtOrderLine@1000 : Record 5876);
+    BEGIN
+      IF PhysInvtOrderLine."Line No." = 0 THEN
+        IF NOT DimManagement.CheckDimIDComb(PhysInvtOrderHeader."Dimension Set ID") THEN
+          ERROR(
+            HeaderDimCombBlockedErr,
+            PhysInvtOrderHeader."No.",DimManagement.GetDimCombErr);
+
+      IF PhysInvtOrderLine."Line No." <> 0 THEN
+        IF NOT DimManagement.CheckDimIDComb(PhysInvtOrderLine."Dimension Set ID") THEN
+          ERROR(
+            LineDimCombBlockedErr,
+            PhysInvtOrderHeader."No.",PhysInvtOrderLine."Line No.",DimManagement.GetDimCombErr);
+    END;
+
+    LOCAL PROCEDURE CheckDimValuePosting@1003(PhysInvtOrderLine@1004 : Record 5876);
+    VAR
+      TableIDArr@1002 : ARRAY [10] OF Integer;
+      NumberArr@1003 : ARRAY [10] OF Code[20];
+    BEGIN
+      TableIDArr[1] := DATABASE::Item;
+      NumberArr[1] := PhysInvtOrderLine."Item No.";
+      IF NOT DimManagement.CheckDimValuePosting(TableIDArr,NumberArr,PhysInvtOrderLine."Dimension Set ID") THEN
+        ERROR(
+          InvalidDimErr,
+          PhysInvtOrderHeader."No.",PhysInvtOrderLine."Line No.",DimManagement.GetDimValuePostingErr);
+    END;
+
+    LOCAL PROCEDURE PostItemJnlLine@1004(Positive@1000 : Boolean;Qty@1001 : Decimal);
+    BEGIN
+      WITH ItemJnlLine DO BEGIN
+        INIT;
+        "Posting Date" := PstdPhysInvtOrderHdr."Posting Date";
+        "Document Date" := PstdPhysInvtOrderHdr."Posting Date";
+        "Document No." := PstdPhysInvtOrderHdr."No.";
+        IF Positive THEN
+          "Entry Type" := "Entry Type"::"Positive Adjmt."
+        ELSE
+          "Entry Type" := "Entry Type"::"Negative Adjmt.";
+        "Item No." := PhysInvtOrderLine."Item No.";
+        "Variant Code" := PhysInvtOrderLine."Variant Code";
+        Description := PhysInvtOrderLine.Description;
+        "Item Category Code" := PhysInvtOrderLine."Item Category Code";
+        "Location Code" := PhysInvtOrderLine."Location Code";
+        "Bin Code" := PhysInvtOrderLine."Bin Code";
+        "Shortcut Dimension 1 Code" := PhysInvtOrderLine."Shortcut Dimension 1 Code";
+        "Shortcut Dimension 2 Code" := PhysInvtOrderLine."Shortcut Dimension 2 Code";
+        "Dimension Set ID" := PhysInvtOrderLine."Dimension Set ID";
+        Quantity := Qty;
+        "Invoiced Quantity" := Quantity;
+        "Quantity (Base)" := Quantity;
+        "Invoiced Qty. (Base)" := Quantity;
+        "Unit of Measure Code" := PhysInvtOrderLine."Base Unit of Measure Code";
+        "Qty. per Unit of Measure" := 1;
+        "Source Code" := SourceCode;
+        "Gen. Prod. Posting Group" := PhysInvtOrderLine."Gen. Prod. Posting Group";
+        "Gen. Bus. Posting Group" := PhysInvtOrderLine."Gen. Bus. Posting Group";
+        "Inventory Posting Group" := PhysInvtOrderLine."Inventory Posting Group";
+        "Qty. (Calculated)" := PhysInvtOrderLine."Qty. Expected (Base)";
+        IF Positive THEN
+          "Qty. (Phys. Inventory)" :=
+            PhysInvtOrderLine."Qty. Recorded (Base)" + PhysInvtOrderLine."Neg. Qty. (Base)"
+        ELSE
+          "Qty. (Phys. Inventory)" :=
+            PhysInvtOrderLine."Qty. Recorded (Base)" - PhysInvtOrderLine."Pos. Qty. (Base)";
+        "Last Item Ledger Entry No." := PhysInvtOrderLine."Last Item Ledger Entry No.";
+        "Phys. Inventory" := TRUE;
+        VALIDATE("Unit Amount",PhysInvtOrderLine."Unit Amount");
+        VALIDATE("Unit Cost",PhysInvtOrderLine."Unit Cost");
+        "Phys Invt Counting Period Code" := PhysInvtOrderLine."Phys Invt Counting Period Code";
+        "Phys Invt Counting Period Type" := PhysInvtOrderLine."Phys Invt Counting Period Type";
+        PhysInvtTrackingMgt.TransferResEntryToItemJnlLine(PhysInvtOrderLine,ItemJnlLine,Qty,Positive);
+
+        OnBeforeItemJnlPostLine(ItemJnlLine,PhysInvtOrderLine);
+        ItemJnlPostLine.RunWithCheck(ItemJnlLine);
+      END;
+    END;
+
+    LOCAL PROCEDURE InsertPostedHeader@2(PhysInvtOrderHeader@1000 : Record 5875);
+    BEGIN
+      WITH PstdPhysInvtOrderHdr DO BEGIN
+        LOCKTABLE;
+        INIT;
+        TRANSFERFIELDS(PhysInvtOrderHeader);
+        "Pre-Assigned No." := PhysInvtOrderHeader."No.";
+        IF PhysInvtOrderHeader."Posting No." <> '' THEN BEGIN
+          "No." := PhysInvtOrderHeader."Posting No.";
+          Window.UPDATE(
+            1,STRSUBSTNO(CopyFromToMsg,PhysInvtOrderHeader.TABLECAPTION,PhysInvtOrderHeader."No.",TABLECAPTION,"No."));
+        END;
+        "Source Code" := SourceCode;
+        "User ID" := USERID;
+        INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE InsertPostedLine@3(PstdPhysInvtOrderHdr@1001 : Record 5879;PhysInvtOrderLine@1000 : Record 5876);
+    BEGIN
+      PstdPhysInvtOrderLine.INIT;
+      PstdPhysInvtOrderLine.TRANSFERFIELDS(PhysInvtOrderLine);
+      PstdPhysInvtOrderLine."Document No." := PstdPhysInvtOrderHdr."No.";
+      PstdPhysInvtOrderLine.INSERT;
+    END;
+
+    LOCAL PROCEDURE InsertPostedCommentLine@7(PhysInvtCommentLine@1000 : Record 5883;DocType@1001 : Option;DocNo@1002 : Code[20]);
+    BEGIN
+      WITH PostedPhysInvtCommentLine DO BEGIN
+        INIT;
+        TRANSFERFIELDS(PhysInvtCommentLine);
+        "Document Type" := DocType;
+        "Order No." := DocNo;
+        INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE InsertPostedRecordings@10(DocNo@1000 : Code[20];PostedDocNo@1001 : Code[20]);
+    VAR
+      PstdPhysInvtRecordHdr@1003 : Record 5881;
+      PstdPhysInvtRecordLine@1002 : Record 5882;
+    BEGIN
+      PhysInvtRecordHeader.RESET;
+      PhysInvtRecordHeader.SETRANGE("Order No.",DocNo);
+      IF PhysInvtRecordHeader.FIND('-') THEN
+        REPEAT
+          PstdPhysInvtRecordHdr.INIT;
+          PstdPhysInvtRecordHdr.TRANSFERFIELDS(PhysInvtRecordHeader);
+          PstdPhysInvtRecordHdr."Order No." := PostedDocNo;
+          PstdPhysInvtRecordHdr.INSERT;
+
+          PhysInvtRecordLine.RESET;
+          PhysInvtRecordLine.SETRANGE("Order No.",PhysInvtRecordHeader."Order No.");
+          PhysInvtRecordLine.SETRANGE("Recording No.",PhysInvtRecordHeader."Recording No.");
+          IF PhysInvtRecordLine.FIND('-') THEN
+            REPEAT
+              PstdPhysInvtRecordLine.INIT;
+              PstdPhysInvtRecordLine.TRANSFERFIELDS(PhysInvtRecordLine);
+              PstdPhysInvtRecordLine."Order No." := PostedDocNo;
+              PstdPhysInvtRecordLine.INSERT;
+            UNTIL PhysInvtRecordLine.NEXT = 0;
+          PhysInvtRecordLine.DELETEALL;
+        UNTIL PhysInvtRecordHeader.NEXT = 0;
+      PhysInvtRecordHeader.DELETEALL;
+    END;
+
+    LOCAL PROCEDURE InsertEntryRelation@1005();
+    VAR
+      TempTrackingSpecification@1000 : TEMPORARY Record 336;
+      ItemEntryRelation@1001 : Record 6507;
+    BEGIN
+      IF WhsePosting THEN BEGIN
+        TempWhseTrackingSpecification.RESET;
+        TempWhseTrackingSpecification.DELETEALL;
+      END;
+
+      TempTrackingSpecification.RESET;
+      IF ItemJnlPostLine.CollectTrackingSpecification(TempTrackingSpecification) THEN BEGIN
+        IF TempTrackingSpecification.FIND('-') THEN
+          REPEAT
+            IF WhsePosting THEN BEGIN
+              TempWhseTrackingSpecification.INIT;
+              TempWhseTrackingSpecification := TempTrackingSpecification;
+              TempWhseTrackingSpecification."Source Type" := DATABASE::"Phys. Invt. Order Line";
+              TempWhseTrackingSpecification."Source Subtype" := 0;
+              TempWhseTrackingSpecification."Source ID" := PhysInvtOrderLine."Document No.";
+              TempWhseTrackingSpecification."Source Ref. No." := PhysInvtOrderLine."Line No.";
+              TempWhseTrackingSpecification.INSERT;
+            END;
+
+            ItemEntryRelation.INIT;
+            ItemEntryRelation."Item Entry No." := TempTrackingSpecification."Entry No.";
+            ItemEntryRelation."Serial No." := TempTrackingSpecification."Serial No.";
+            ItemEntryRelation."Lot No." := TempTrackingSpecification."Lot No.";
+            ItemEntryRelation."Source Type" := DATABASE::"Pstd. Phys. Invt. Order Line";
+            ItemEntryRelation."Source Subtype" := 0;
+            ItemEntryRelation."Source ID" := PstdPhysInvtOrderLine."Document No.";
+            ItemEntryRelation."Source Batch Name" := '';
+            ItemEntryRelation."Source Prod. Order Line" := 0;
+            ItemEntryRelation."Source Ref. No." := PstdPhysInvtOrderLine."Line No.";
+            ItemEntryRelation."Order No." := PstdPhysInvtOrderLine."Document No.";
+            ItemEntryRelation."Order Line No." := PstdPhysInvtOrderLine."Line No.";
+            OnInsertEntryRelationOnBeforeInsert(ItemEntryRelation,TempTrackingSpecification,PstdPhysInvtOrderLine);
+            ItemEntryRelation.INSERT;
+          UNTIL TempTrackingSpecification.NEXT = 0;
+      END;
+      TempTrackingSpecification.DELETEALL;
+    END;
+
+    LOCAL PROCEDURE FinalizePost@9(DocNo@1000 : Code[20]);
+    BEGIN
+      ExpPhysInvtTracking.RESET;
+      ExpPhysInvtTracking.SETRANGE("Order No",DocNo);
+      ExpPhysInvtTracking.DELETEALL;
+      PhysInvtOrderLine.RESET;
+      PhysInvtOrderLine.SETRANGE("Document No.",DocNo);
+      PhysInvtOrderLine.DELETEALL;
+      PhysInvtOrderHeader.DELETE;
+    END;
+
+    LOCAL PROCEDURE PostWhseJnlLine@1006(ItemJnlLine@1000 : Record 83;OriginalQuantity@1001 : Decimal;OriginalQuantityBase@1002 : Decimal;Positive@1003 : Boolean);
+    VAR
+      WhseJnlLine@1004 : Record 7311;
+      TempWhseJnlLine2@1005 : TEMPORARY Record 7311;
+      ItemTrackingMgt@1006 : Codeunit 6500;
+      WMSMgt@1007 : Codeunit 7302;
+      WhseJnlRegisterLine@1008 : Codeunit 7301;
+    BEGIN
+      WITH ItemJnlLine DO BEGIN
+        Quantity := OriginalQuantity;
+        "Quantity (Base)" := OriginalQuantityBase;
+        IF WMSMgt.CreateWhseJnlLine(ItemJnlLine,1,WhseJnlLine,FALSE) THEN BEGIN
+          WhseJnlLine.SetSource(
+            DATABASE::"Phys. Invt. Order Line",0,PhysInvtOrderLine."Document No.",PhysInvtOrderLine."Line No.",0);
+          WhseJnlLine."Reference No." := PstdPhysInvtOrderHdr."No.";
+          IF Positive THEN
+            WhseJnlLine."Entry Type" := WhseJnlLine."Entry Type"::"Positive Adjmt."
+          ELSE
+            WhseJnlLine."Entry Type" := WhseJnlLine."Entry Type"::"Negative Adjmt.";
+
+          ItemTrackingMgt.SplitWhseJnlLine(
+            WhseJnlLine,TempWhseJnlLine2,TempWhseTrackingSpecification,FALSE);
+          IF TempWhseJnlLine2.FIND('-') THEN
+            REPEAT
+              WMSMgt.CheckWhseJnlLine(TempWhseJnlLine2,1,0,FALSE);
+              WhseJnlRegisterLine.RUN(TempWhseJnlLine2);
+              CLEAR(WhseJnlRegisterLine);
+            UNTIL TempWhseJnlLine2.NEXT = 0;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE PostPhysInventoryOrderLine@107();
+    BEGIN
+      LineCount := LineCount + 1;
+      Window.UPDATE(3,LineCount);
+
+      InsertPostedLine(PstdPhysInvtOrderHdr,PhysInvtOrderLine);
+
+      IF NOT PhysInvtOrderLine.EmptyLine THEN BEGIN
+        IF (PhysInvtOrderLine."Location Code" = '') OR
+           ((PhysInvtOrderLine."Pos. Qty. (Base)" = 0) AND (PhysInvtOrderLine."Neg. Qty. (Base)" = 0))
+        THEN BEGIN
+          WhsePosting := FALSE
+        END ELSE BEGIN
+          Location.GET(PhysInvtOrderLine."Location Code");
+          Location.TESTFIELD("Directed Put-away and Pick",FALSE);
+          WhsePosting := Location."Bin Mandatory";
+        END;
+
+        IF (PhysInvtOrderLine."Pos. Qty. (Base)" <> 0) OR
+           (PhysInvtOrderLine."Neg. Qty. (Base)" = 0)
+        THEN BEGIN
+          OriginalQuantityBase := PhysInvtOrderLine."Pos. Qty. (Base)";
+          PostItemJnlLine(
+            TRUE,// Positive
+            PhysInvtOrderLine."Pos. Qty. (Base)");
+          InsertEntryRelation;
+          IF WhsePosting THEN
+            PostWhseJnlLine(
+              ItemJnlLine,OriginalQuantityBase,OriginalQuantityBase,TRUE); // Positive
+        END;
+
+        IF PhysInvtOrderLine."Neg. Qty. (Base)" <> 0 THEN BEGIN
+          OriginalQuantityBase := PhysInvtOrderLine."Neg. Qty. (Base)";
+          PostItemJnlLine(
+            FALSE,// Negative
+            PhysInvtOrderLine."Neg. Qty. (Base)");
+          InsertEntryRelation;
+          IF WhsePosting THEN
+            PostWhseJnlLine(
+              ItemJnlLine,OriginalQuantityBase,OriginalQuantityBase,FALSE); // Negative
+        END;
+      END;
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterOnRun@5(VAR PhysInvtOrderHeader@1000 : Record 5875;VAR PstdPhysInvtOrderHdr@1001 : Record 5879);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeItemJnlPostLine@4(VAR ItemJournalLine@1000 : Record 83;PhysInvtOrderLine@1001 : Record 5876);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnInsertEntryRelationOnBeforeInsert@1(VAR ItemEntryRelation@1000 : Record 6507;TrackingSpecification@1001 : Record 336;PstdPhysInvtOrderLine@1002 : Record 5880);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

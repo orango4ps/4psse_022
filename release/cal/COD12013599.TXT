@@ -1,0 +1,461 @@
+OBJECT Codeunit 12013599 Ex Periodic Mgt.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=EXF501000,NAV2016+;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text002@1100285001 : TextConst 'ENU=%1 %2 %3 does not exist.;SVE=%1 %2 %3 finns inte.';
+      Text003@1100285000 : TextConst 'ENU=%1 does not exist.;SVE=%1 finns inte.';
+      Text004@1100285002 : TextConst 'ENU=You must select a Deferrals start date for line no. %1;SVE=Du m†ste v„lja ett periodiskt startdatum f”r radnr %1';
+      Text005@1100285003 : TextConst 'ENU=Not Supported Document Type;SVE=Dokumenttyp st”djs ej.';
+
+    PROCEDURE PerCodeLookup@1100285000(VAR ExCodingRuleLine@1100285002 : Record 12013663;VAR Text@1100285003 : Text[1024]) : Boolean;
+    VAR
+      PerCodeList@1100285001 : Page 1701;
+      PeriodicTemplate@1100285000 : Record 1700;
+    BEGIN
+      WITH ExCodingRuleLine DO BEGIN
+        CLEAR(PerCodeList);
+        PerCodeList.LOOKUPMODE(TRUE);
+        PeriodicTemplate.RESET;
+        PerCodeList.SETTABLEVIEW(PeriodicTemplate);
+        IF PerCodeList.RUNMODAL = ACTION::LookupOK THEN
+          BEGIN
+            PerCodeList.GETRECORD(PeriodicTemplate);
+            Text := Text + PeriodicTemplate."Deferral Code";
+            "Text Range" := "Text Range" + PeriodicTemplate."Deferral Code";
+
+            EXIT(TRUE);
+          END
+        ELSE
+          EXIT(FALSE);
+      END;
+    END;
+
+    PROCEDURE GetNoPeriods@1100285005(TemplateCode@1100285000 : Code[20]) : Integer;
+    VAR
+      PeriodicTemplate@1100285001 : Record 1700;
+    BEGIN
+      IF PeriodicTemplate.GET(TemplateCode) THEN
+        EXIT(PeriodicTemplate."No. of Periods")
+      ELSE
+        EXIT(0);
+    END;
+
+    PROCEDURE GetPerCodeDesc@1100285041(ExColumn@1100285001 : Record 12013661;ColValue@1100285002 : Text;CompName@1100285003 : Text[50]) : Text;
+    VAR
+      PerTempl@1100285000 : Record 1700;
+    BEGIN
+      WITH PerTempl DO BEGIN
+        CHANGECOMPANY(CompName);
+        IF GET(ColValue) THEN
+          EXIT(Description)
+        ELSE
+          EXIT('');
+      END;
+    END;
+
+    PROCEDURE GetPerCodes@1100285042(VAR TempData@1100285000 : TEMPORARY Record 12013609;VAR TempID@1100285003 : BigInteger;CompName@1100285002 : Text[50]);
+    VAR
+      PeriodicTemplate@1100285001 : Record 1700;
+    BEGIN
+      WITH PeriodicTemplate DO BEGIN
+        RESET;
+        CHANGECOMPANY(CompName);
+        SETFILTER("Deferral Code",'<>%1', '');
+        IF FINDSET THEN
+          REPEAT
+            TempData.ID := TempID;
+            TempData."No." := "Deferral Code";
+            TempData.Description := Description;
+            TempData.INSERT;
+            TempID := TempID + 1;
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE ApprovalStatusReport_CheckPerCode@1100285013(VAR PrintTempPurchLine@1100285000 : TEMPORARY Record 39;VAR PostingDate@1100285001 : Date;VAR PostRemPeriodBal@1100285002 : Boolean) : Boolean;
+    BEGIN
+      IF PrintTempPurchLine."Deferral Code" <> '' THEN BEGIN
+        IF (PrintTempPurchLine."Returns Deferral Start Date" > PostingDate) AND NOT PostRemPeriodBal THEN
+          EXIT(TRUE);
+      END;
+
+      EXIT(FALSE)
+    END;
+
+    PROCEDURE ExFlowCodeunit_UpdatePeriodicDocLine@1100285015(VAR DocLine@1100285000 : Record 12013609;VAR PurchLine@1100285001 : Record 39);
+    BEGIN
+      DocLine."Periodic Template Code" := PurchLine."Deferral Code";
+      DocLine."Periodic Starting Date" := PurchLine."Returns Deferral Start Date";
+    END;
+
+    PROCEDURE ExFlowCodeunit_UpdatePerDocLineDim@1100285016(VAR InCode@1100285002 : Code[50];VAR PurchLine@1100285000 : Record 39;VAR DocLineDim@1100285001 : Record 12013611) : Boolean;
+    VAR
+      ExFWorkFlowMgt@1100285003 : Codeunit 12013593;
+    BEGIN
+      IF InCode = 'PERCODE' THEN
+        IF PurchLine."Deferral Code" <> '' THEN
+          DocLineDim."Dimension Value" := PurchLine."Deferral Code"
+        ELSE
+          EXIT(TRUE);
+
+      IF InCode = 'PERDATE' THEN
+        IF PurchLine."Returns Deferral Start Date" <> 0D THEN
+          DocLineDim."Dimension Value" := ExFWorkFlowMgt.TransformDateToText(PurchLine."Returns Deferral Start Date")
+        ELSE
+          EXIT(TRUE);
+
+      EXIT(FALSE);
+    END;
+
+    PROCEDURE ExFlowCodeunit_CreateJnlLinePer@1100285017(VAR PurchaseLine@1100285000 : Record 39;VAR RemPeriodicBalance@1100285003 : Decimal;VAR OriginalAmtLCY@1100285002 : Decimal;VAR NoOfPeriods@1100285001 : Integer;VAR TempAmountLCY@1100285004 : Decimal;VAR PostingDate@1100285005 : Date;VAR GLSetup@1100285006 : Record 98;VAR PostRemPeriodBal@1100285007 : Boolean);
+    BEGIN
+      IF PurchaseLine."Deferral Code" <> '' THEN BEGIN
+        NoOfPeriods := GetNoPeriods(PurchaseLine."Deferral Code");
+        OriginalAmtLCY := TempAmountLCY;
+        IF (PurchaseLine."Returns Deferral Start Date" <= PostingDate) AND (NoOfPeriods <> 0) THEN
+          TempAmountLCY := ROUND(TempAmountLCY / NoOfPeriods, GLSetup."Amount Rounding Precision")
+        ELSE
+          TempAmountLCY := 0;
+
+        IF PostRemPeriodBal THEN
+          RemPeriodicBalance := OriginalAmtLCY - TempAmountLCY;
+      END;
+    END;
+
+    PROCEDURE UpdatePurchLineCodeunit_UpdatePerPurch@1100285018(VAR ChangeJournalLine@1100285000 : Record 12013618;VAR PurchLine@1100285001 : Record 39;VAR DocLine@1100285002 : Record 12013609);
+    VAR
+      DocLineDim@1100285003 : Record 12013611;
+      ExWorkFlowMgt@1100285004 : Codeunit 12013593;
+    BEGIN
+      //New line
+      IF ChangeJournalLine."New Periodic Template Code" <> '' THEN BEGIN
+        PurchLine.VALIDATE("Deferral Code", ChangeJournalLine."New Periodic Template Code");
+
+        IF ChangeJournalLine."New Periodic Starting Date" <> 0D THEN
+          PurchLine.VALIDATE("Returns Deferral Start Date", ChangeJournalLine."New Periodic Starting Date");
+        //ELSE Check Create Perdate column
+
+        //Update dim if manual changeed in changjnl
+        IF DocLineDim.RetrieveRecord(DocLineDim, PurchLine."Document Type", PurchLine."Document No.",PurchLine."Line No.",'PERCODE') THEN BEGIN
+          DocLineDim."Dimension Value" := ChangeJournalLine."New Periodic Template Code";
+          DocLineDim.MODIFY;
+        END;
+
+        IF DocLineDim.RetrieveRecord(DocLineDim, PurchLine."Document Type", PurchLine."Document No.",PurchLine."Line No.",'PERDATE') THEN BEGIN
+          DocLineDim."Dimension Value" := ExWorkFlowMgt.TransformDateToText(PurchLine."Returns Deferral Start Date");
+          DocLineDim.MODIFY;
+        END;
+      END ELSE BEGIN
+        //Clear docdims
+        IF DocLineDim.RetrieveRecord(DocLineDim, PurchLine."Document Type", PurchLine."Document No.",PurchLine."Line No.",'PERDATE') THEN
+          DocLineDim.DELETE;
+        IF DocLineDim.RetrieveRecord(DocLineDim, PurchLine."Document Type", PurchLine."Document No.",PurchLine."Line No.",'PERCODE') THEN
+          DocLineDim.DELETE;
+      END;
+
+      DocLine."Periodic Template Code" := PurchLine."Deferral Code";
+      DocLine."Periodic Starting Date" := PurchLine."Returns Deferral Start Date";
+      DocLine.MODIFY(FALSE);
+    END;
+
+    PROCEDURE UpdatePurchLineCodeunit_UpdatePerPurchFromDoc@1100285019(VAR ChangeJournalLine@1100285000 : Record 12013618;VAR PurchLine@1100285002 : Record 39;VAR DocLine@1100285004 : Record 12013609);
+    VAR
+      ExWorkFlowMgt@1100285005 : Codeunit 12013593;
+      DocLineDim@1100285001 : Record 12013611;
+    BEGIN
+      //Changed line
+      IF (ChangeJournalLine."New Periodic Template Code" <> PurchLine."Deferral Code") AND (ChangeJournalLine."New Periodic Template Code" <> '') THEN BEGIN
+        //new non empty deferral code
+        PurchLine.VALIDATE("Deferral Code", ChangeJournalLine."New Periodic Template Code");
+        DocLine."Periodic Template Code" := ChangeJournalLine."New Periodic Template Code";
+
+        IF DocLineDim.RetrieveRecord(DocLineDim, PurchLine."Document Type", PurchLine."Document No.",PurchLine."Line No.",'PERCODE') THEN BEGIN
+          DocLineDim."Dimension Value" := ChangeJournalLine."New Periodic Template Code";
+          DocLineDim.MODIFY;
+        END;
+
+        IF ChangeJournalLine."New Periodic Starting Date" <> 0D THEN BEGIN
+          //Force Validating deferral start date to recalc schedule
+          PurchLine.VALIDATE("Returns Deferral Start Date", ChangeJournalLine."New Periodic Starting Date");
+          DocLine."Periodic Starting Date" := ChangeJournalLine."New Periodic Starting Date";
+          IF DocLineDim.RetrieveRecord(DocLineDim, PurchLine."Document Type", PurchLine."Document No.",PurchLine."Line No.",'PERDATE') THEN BEGIN
+            DocLineDim."Dimension Value" := ExWorkFlowMgt.TransformDateToText(ChangeJournalLine."New Periodic Starting Date");
+            DocLineDim.MODIFY;
+          END;
+        END ELSE BEGIN
+          //Updated form validating new deferral code above
+          DocLine."Periodic Starting Date" := PurchLine."Returns Deferral Start Date";
+          IF DocLineDim.RetrieveRecord(DocLineDim, PurchLine."Document Type", PurchLine."Document No.",PurchLine."Line No.",'PERDATE') THEN
+            DocLineDim.DELETE
+        END;
+        EXIT;
+      END;
+
+      IF (ChangeJournalLine."New Periodic Template Code" <> PurchLine."Deferral Code") AND (ChangeJournalLine."New Periodic Template Code" = '') THEN BEGIN
+        //Clear deferals if no Template
+        PurchLine.VALIDATE("Deferral Code", ChangeJournalLine."New Periodic Template Code");
+        DocLine."Periodic Template Code" := ChangeJournalLine."New Periodic Template Code";
+        PurchLine."Returns Deferral Start Date" := 0D;
+        DocLine."Periodic Starting Date" := 0D;
+        IF DocLineDim.RetrieveRecord(DocLineDim, PurchLine."Document Type", PurchLine."Document No.",PurchLine."Line No.",'PERDATE') THEN
+          DocLineDim.DELETE;
+        IF DocLineDim.RetrieveRecord(DocLineDim, PurchLine."Document Type", PurchLine."Document No.",PurchLine."Line No.",'PERCODE') THEN
+          DocLineDim.DELETE;
+        EXIT;
+      END;
+
+      IF (ChangeJournalLine."New Periodic Starting Date" <> PurchLine."Returns Deferral Start Date") AND (ChangeJournalLine."New Periodic Template Code" = PurchLine."Deferral Code")  THEN BEGIN
+        //Same def code but changed date
+        IF ChangeJournalLine."New Periodic Starting Date" = 0D THEN
+          ERROR(Text004,ChangeJournalLine."Line No.");
+        PurchLine.VALIDATE("Returns Deferral Start Date", ChangeJournalLine."New Periodic Starting Date");
+        DocLine."Periodic Starting Date" := ChangeJournalLine."New Periodic Starting Date";
+        IF DocLineDim.RetrieveRecord(DocLineDim, PurchLine."Document Type", PurchLine."Document No.",PurchLine."Line No.",'PERDATE') THEN BEGIN
+          DocLineDim."Dimension Value" := ExWorkFlowMgt.TransformDateToText(ChangeJournalLine."New Periodic Starting Date");
+          DocLineDim.MODIFY;
+        END;
+        EXIT;
+      END;
+    END;
+
+    PROCEDURE UpdatePurchLineCodeunit_UpdatePerChangeJnl@1100285020(VAR ChangeJournalLine2@1100285000 : Record 12013618;VAR PurchLine@1100285001 : Record 39);
+    BEGIN
+      ChangeJournalLine2."Periodic Template Code" := PurchLine."Deferral Code";
+      ChangeJournalLine2."Periodic Starting Date" := PurchLine."Returns Deferral Start Date";
+    END;
+
+    PROCEDURE UpdatePurchLineCodeunit_UpdateNewPerChangeJnl@1100285025(VAR ChangeJournalLine2@1100285000 : Record 12013618;VAR PurchLine@1100285001 : Record 39);
+    BEGIN
+      ChangeJournalLine2."New Periodic Template Code" := PurchLine."Deferral Code";
+      ChangeJournalLine2."New Periodic Starting Date" := PurchLine."Returns Deferral Start Date";
+    END;
+
+    PROCEDURE QuoteFromRecCodeunit_UpdatePerPurch@1100285021(DimCode@1100285003 : Code[50];VAR PurchLine@1100285000 : Record 39;VAR DocLineDim@1100285001 : Record 12013611);
+    VAR
+      ExQuoteFromReq@1100285002 : Codeunit 12013614;
+    BEGIN
+      CASE DimCode OF
+        'PERCODE':
+          PurchLine."Deferral Code" := DocLineDim."Dimension Value";
+
+        'PERDATE':
+          PurchLine."Returns Deferral Start Date" := ExQuoteFromReq.DateField(DocLineDim."Dimension Value");
+      END;
+    END;
+
+    PROCEDURE QuoteFromRecCodeunit_UpdatePerDocLine@1100285022(VAR DocLine@1100285000 : Record 12013609;VAR PurchLine@1100285001 : Record 39);
+    BEGIN
+      DocLine."Periodic Template Code" := PurchLine."Deferral Code";
+      DocLine."Periodic Starting Date" := PurchLine."Returns Deferral Start Date";
+    END;
+
+    PROCEDURE ValidatePurchDocCodeunit_InsertProp@1100285024(VAR ExPurchCodeLine@1100285000 : Record 12013683;VAR ExfPurchDocLine@1100285001 : Record 12013588;VAR precExfPurchDocHead@1100285002 : Record 12013587);
+    BEGIN
+      IF ExPurchCodeLine."Deferral Code" <> '' THEN BEGIN
+        ExfPurchDocLine.VALIDATE("Deferral Code", ExPurchCodeLine."Deferral Code");
+      END;
+    END;
+
+    PROCEDURE ExFlowToInvoiceCodeunit_ValidatePer@1100285026(VAR PurchLine@1100285000 : Record 39;VAR ExFPurchDocLine@1100285002 : Record 12013588;UpdateDeferals@1100285007 : Boolean;NewPostingDate@1100285008 : Date);
+    VAR
+      DeferralHeader@1100285003 : Record 1701;
+      DeferralLine@1100285004 : Record 1702;
+      NewDeferralHeader@1100285006 : Record 1701;
+      NewDeferralLine@1100285005 : Record 1702;
+      DeferralUtilities@1100285001 : Codeunit 1720;
+    BEGIN
+      IF PurchLine."Deferral Code" = '' THEN
+        EXIT;
+
+      IF UpdateDeferals THEN BEGIN
+        ExFPurchDocLine.VALIDATE("Returns Deferral Start Date",NewPostingDate);
+        PurchLine."Returns Deferral Start Date" := NewPostingDate;
+      END;
+
+      DeferralHeader.RESET;
+      DeferralHeader.SETRANGE("Document Type", ExFPurchDocLine."Document Type");
+      DeferralHeader.SETRANGE("Document No.", FORMAT(ExFPurchDocLine."Inbound Document No."));
+      DeferralHeader.SETRANGE("Line No.", ExFPurchDocLine."Line No.");
+      IF DeferralHeader.FINDFIRST THEN BEGIN
+        NewDeferralHeader.INIT;
+        NewDeferralHeader.TRANSFERFIELDS(DeferralHeader);
+        NewDeferralHeader."Document Type" := PurchLine."Document Type";
+        NewDeferralHeader."Document No." := PurchLine."Document No.";
+        NewDeferralHeader."Line No." := PurchLine."Line No.";
+        NewDeferralHeader.INSERT;
+
+        DeferralLine.RESET;
+        DeferralLine.SETRANGE("Document Type", ExFPurchDocLine."Document Type");
+        DeferralLine.SETRANGE("Document No.", FORMAT(ExFPurchDocLine."Inbound Document No."));
+        DeferralLine.SETRANGE("Line No.", ExFPurchDocLine."Line No.");
+        IF DeferralLine.FINDSET THEN
+          REPEAT
+            NewDeferralLine.INIT;
+            NewDeferralLine.TRANSFERFIELDS(DeferralLine);
+            NewDeferralLine."Document Type" := PurchLine."Document Type";
+            NewDeferralLine."Document No." := PurchLine."Document No.";
+            NewDeferralLine."Line No." := PurchLine."Line No.";
+            NewDeferralLine.INSERT;
+          UNTIL DeferralLine.NEXT = 0;
+      END;
+
+      DeferralUtilities.DeferralCodeOnDelete(
+        DeferralUtilities.GetPurchDeferralDocType,'','',
+        ExFPurchDocLine."Document Type",FORMAT(ExFPurchDocLine."Inbound Document No."),ExFPurchDocLine."Line No.");
+    END;
+
+    PROCEDURE DeferralHeadersExist@38("Document Type"@1100285000 : 'Quote,Order,Invoice,Credit Memo,Blanket Order,Return Order';"Inbound Document No."@1100285001 : Integer) : Boolean;
+    VAR
+      DeferralHeader@1000 : Record 1701;
+      DeferralUtilities@1001 : Codeunit 1720;
+    BEGIN
+      DeferralHeader.SETRANGE("Deferral Doc. Type",DeferralUtilities.GetPurchDeferralDocType);
+      DeferralHeader.SETRANGE("Gen. Jnl. Template Name",'');
+      DeferralHeader.SETRANGE("Gen. Jnl. Batch Name",'');
+      DeferralHeader.SETRANGE("Document Type","Document Type");
+      DeferralHeader.SETRANGE("Document No.",FORMAT("Inbound Document No."));
+      EXIT(NOT DeferralHeader.ISEMPTY);
+    END;
+
+    PROCEDURE GetDeferralTableNo@1100285001() TableNo : Integer;
+    BEGIN
+      EXIT(DATABASE::"Deferral Template");
+    END;
+
+    PROCEDURE UpdatePerdateForExDoc@1100285002(VAR DocLine@1100285000 : Record 12013609;PurchLine@1100285005 : Record 39);
+    VAR
+      ExWorkflowMgt@1100285003 : Codeunit 12013593;
+      DocLineDim@1100285006 : Record 12013611;
+      Column@1100285007 : Record 12013661;
+    BEGIN
+      DocLine.TESTFIELD(ID);
+
+      DocLine."Periodic Starting Date" := PurchLine."Returns Deferral Start Date";
+      DocLine.MODIFY(FALSE);
+
+      Column.RESET;
+      Column.SETRANGE(Source,'PERDATE');
+      IF NOT Column.FINDFIRST THEN
+        EXIT;
+
+      DocLineDim.RESET;
+      DocLineDim.SETRANGE("Document Line ID", DocLine.ID);
+      DocLineDim.SETRANGE("Column ID",Column.ID);
+      DocLineDim.DELETEALL;
+      IF DocLine."Periodic Starting Date" <> 0D THEN BEGIN
+        DocLineDim.RESET;
+        DocLineDim.INIT;
+        DocLineDim.ID := 0;
+        DocLineDim."Document Type" := PurchLine."Document Type";
+        DocLineDim."Document No." := PurchLine."Document No.";
+        DocLineDim."Line No." := PurchLine."Line No.";
+        DocLineDim."Dimension Code" := Column.Code;
+        DocLineDim."Dimension Value" := ExWorkflowMgt.TransformDateToText(DocLine."Periodic Starting Date");
+        DocLineDim."Column ID" := Column.ID;
+        DocLineDim."Document Line ID" := DocLine.ID;
+        DocLineDim."Document ID" := DocLine."Document ID";
+        DocLineDim.INSERT;
+      END;
+    END;
+
+    PROCEDURE ShowDeferralsExPostedDoc@13(ExPostedDocLine@1100285000 : Record 12013627);
+    VAR
+      DeferralUtilities@1100285001 : Codeunit 1720;
+    BEGIN
+      WITH ExPostedDocLine DO BEGIN
+        DeferralUtilities.OpenLineScheduleView(
+          "Periodic Template Code",DeferralUtilities.GetPurchDeferralDocType,'','',
+          GetDocumentType(ExPostedDocLine),"Document No.","Line No.");
+      END;
+    END;
+
+    LOCAL PROCEDURE GetDocumentType@14(ExPostedDocLine@1100285000 : Record 12013627) : Integer;
+    VAR
+      PurchCommentLine@1000 : Record 43;
+    BEGIN
+      CASE ExPostedDocLine."Document Type" OF
+        ExPostedDocLine."Document Type"::"Posted Invoice" : EXIT(PurchCommentLine."Document Type"::"Posted Invoice");
+        ExPostedDocLine."Document Type"::"Posted Credit Memo": EXIT(PurchCommentLine."Document Type"::"Posted Credit Memo");
+      END;
+      ERROR(Text005);
+    END;
+
+    PROCEDURE StoreDefDates@1100285004(PurchaseHeader@1100285001 : Record 38;VAR TempPurchLine@1100285002 : TEMPORARY Record 39);
+    VAR
+      PurchLine@1100285000 : Record 39;
+    BEGIN
+      TempPurchLine.DELETEALL;
+      PurchLine.RESET;
+      PurchLine.SETRANGE("Document Type", PurchaseHeader."Document Type");
+      PurchLine.SETRANGE("Document No.",PurchaseHeader."No.");
+      PurchLine.SETFILTER("Deferral Code", '<>%1','');
+      PurchLine.SETFILTER("Returns Deferral Start Date",'<>%1',0D);
+      IF PurchLine.FINDSET THEN
+        REPEAT
+          TempPurchLine.INIT;
+          TempPurchLine.TRANSFERFIELDS(PurchLine);
+          TempPurchLine.INSERT;
+        UNTIL PurchLine.NEXT = 0;
+    END;
+
+    PROCEDURE ReValidateDefDates@1100285003(VAR TempPurchLine@1100285001 : TEMPORARY Record 39;UpdateDeferalsReq@1100285003 : Boolean;UpdateToDate@1100285004 : Date);
+    VAR
+      PurchLine@1100285000 : Record 39;
+      ExDocLine@1100285002 : Record 12013609;
+    BEGIN
+      IF TempPurchLine.ISEMPTY THEN
+        EXIT;
+
+      TempPurchLine.FINDSET;
+      REPEAT
+        PurchLine.GET(TempPurchLine."Document Type",TempPurchLine."Document No.",TempPurchLine."Line No.");
+        PurchLine.SuspendStatusCheck(TRUE);
+        IF UpdateDeferalsReq THEN
+          PurchLine.VALIDATE("Returns Deferral Start Date",UpdateToDate)
+        ELSE
+          PurchLine.VALIDATE("Returns Deferral Start Date",TempPurchLine."Returns Deferral Start Date");
+        PurchLine.MODIFY(FALSE);
+
+        IF ExDocLine.RetrieveRecord(ExDocLine,PurchLine."Document Type",PurchLine."Document No.",PurchLine."Line No.") THEN
+          UpdatePerdateForExDoc(ExDocLine,PurchLine);
+      UNTIL TempPurchLine.NEXT = 0;
+    END;
+
+    PROCEDURE PurchDeferralHeadersExist@1100285006(VAR PurchHeader@1100285000 : Record 38) : Boolean;
+    VAR
+      DeferralHeader@1000 : Record 1701;
+      DeferralUtilities@1001 : Codeunit 1720;
+    BEGIN
+      WITH PurchHeader DO BEGIN
+        DeferralHeader.SETRANGE("Deferral Doc. Type",DeferralUtilities.GetPurchDeferralDocType);
+        DeferralHeader.SETRANGE("Gen. Jnl. Template Name",'');
+        DeferralHeader.SETRANGE("Gen. Jnl. Batch Name",'');
+        DeferralHeader.SETRANGE("Document Type","Document Type");
+        DeferralHeader.SETRANGE("Document No.","No.");
+        EXIT(NOT DeferralHeader.ISEMPTY);
+      END;
+    END;
+
+    BEGIN
+    {
+      This codeunit handels Defereals / periodics
+      This version requires NAV 2016 or newer.
+      In older versions this codeunit should be replaced.
+    }
+    END.
+  }
+}
+

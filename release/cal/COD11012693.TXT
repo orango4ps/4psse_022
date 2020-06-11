@@ -1,0 +1,231 @@
+OBJECT Codeunit 11012693 Barcode Hrs Acc. Process
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+            IF NOT BarcodeHourAccountingSetup.GET THEN
+              EXIT;
+
+            BarcodeHourAccounting.RESET;
+            BarcodeHourAccounting.SETFILTER("Start Date", '..%1', TODAY - BarcodeHourAccountingSetup."Buffer Days Process Lines");
+            BarcodeHourAccounting.SETRANGE("Start Time",0T);
+            IF BarcodeHourAccounting.FINDSET THEN
+              REPEAT
+                BarcodeHourAccounting.DELETE;
+              UNTIL BarcodeHourAccounting.NEXT = 0;
+
+            FillEndDateTime;
+
+            BarcodeHourAccounting.RESET;
+            BarcodeHourAccounting.SETFILTER("Start Date", '..%1', TODAY - BarcodeHourAccountingSetup."Buffer Days Process Lines");
+
+            IF NOT BarcodeHourAccounting.FINDSET THEN
+              EXIT;
+
+            REPEAT
+              IF (BarcodeHourAccounting."Start Time" = 0T)  THEN BEGIN
+                BarcodeHourAccounting.DELETE;
+              END ELSE BEGIN
+                Year := DATE2DWY(BarcodeHourAccounting."Start Date", 3);
+                WeekNo := DATE2DWY(BarcodeHourAccounting."Start Date", 2);
+                DayOfTheWeek := DATE2DWY(BarcodeHourAccounting."Start Date", 1);
+
+                IF BarcodeHourAccountingSetup."Process to" = BarcodeHourAccountingSetup."Process to"::"Hour Accounting" THEN BEGIN
+                  IF NOT HourAccounting.GET(Year, WeekNo, BarcodeHourAccounting."Employee No.") THEN
+                    CreateHourAccountingRecord;
+                  FillHourAccountingLine;
+                  BarcodeHourAccounting.DELETE;
+                END;
+                IF BarcodeHourAccountingSetup."Process to" = BarcodeHourAccountingSetup."Process to"::"Site Management Hour" THEN BEGIN
+                  IF NOT SiteMngmntHoursHeader.GET(Year, WeekNo, COMPANYNAME, BarcodeHourAccounting."Employee No.") THEN
+                    CreateSiteMngmntHoursRecord;
+                  FillSiteMngmntHoursLine;
+                  BarcodeHourAccounting.DELETE;
+                END;
+              END;
+
+            UNTIL BarcodeHourAccounting.NEXT = 0;
+
+            IF GUIALLOWED THEN
+              MESSAGE(Text001);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      BarcodeHourAccounting@1100528500 : Record 11128530;
+      HourAccountingLine@1100528501 : Record 11012039;
+      StartDateTime@1100528502 : DateTime;
+      EndDateTime@1100528503 : DateTime;
+      Year@1100528504 : Integer;
+      WeekNo@1100528505 : Integer;
+      DayOfTheWeek@1100528506 : Integer;
+      Text001@1100528509 : TextConst 'ENU=Hours processed to hour accounting.';
+      HourAccounting@1100528507 : Record 11012038;
+      BarcodeHourAccountingSetup@1100528508 : Record 11128531;
+      SiteMngmntHoursHeader@1100528510 : Record 11012360;
+      SiteMngmntHoursLine@1100528511 : Record 11012361;
+
+    LOCAL PROCEDURE FillEndDateTime@1100528504();
+    VAR
+      DailyWorkedHours@1100528500 : Decimal;
+      NormHours@1100528201 : Decimal;
+      Loops@1100528200 : Integer;
+    BEGIN
+      BarcodeHourAccounting.RESET;
+      BarcodeHourAccounting.SETFILTER("Start Date", '..%1', TODAY - BarcodeHourAccountingSetup."Buffer Days Process Lines");
+      BarcodeHourAccounting.SETRANGE("End Date", 0D);
+
+      IF BarcodeHourAccounting.FINDSET(TRUE, TRUE) THEN
+        REPEAT
+          StartDateTime := CREATEDATETIME(BarcodeHourAccounting."Start Date", BarcodeHourAccounting."Start Time");
+          DailyWorkedHours := BarcodeHourAccounting.CalcDailyWorkedHoursPerEmployee(BarcodeHourAccounting."Employee No.", BarcodeHourAccounting."Start Date");
+          NormHours := BarcodeHourAccounting.CalculateNormHours(BarcodeHourAccounting."Employee No.",BarcodeHourAccounting."Start Date");
+          Loops := 0;
+          REPEAT
+            IF Loops = 0 THEN BEGIN
+              IF DailyWorkedHours >= NormHours THEN
+                EndDateTime := StartDateTime
+              ELSE
+                EndDateTime := StartDateTime + ((NormHours-DailyWorkedHours)*3600000);
+            END ELSE BEGIN
+              EndDateTime := EndDateTime + ((NormHours-DailyWorkedHours)*3600000);
+            END;
+            IF EndDateTime < StartDateTime THEN
+              EndDateTime := StartDateTime;
+            BarcodeHourAccounting."End Date" := DT2DATE(EndDateTime);
+            BarcodeHourAccounting.VALIDATE("End Time", DT2TIME(EndDateTime));
+            BarcodeHourAccounting.MODIFY;
+            DailyWorkedHours := BarcodeHourAccounting.CalcDailyWorkedHoursPerEmployee(BarcodeHourAccounting."Employee No.", BarcodeHourAccounting."Start Date");
+            Loops += 1;
+          UNTIL (DailyWorkedHours >= NormHours) OR (Loops>4);
+        UNTIL BarcodeHourAccounting.NEXT = 0;
+
+      BarcodeHourAccounting.RESET;
+    END;
+
+    LOCAL PROCEDURE FillHourAccountingLine@1100528514();
+    BEGIN
+      IF ROUND(BarcodeHourAccounting.Hours,0.01) = 0 THEN
+        EXIT;
+
+      HourAccountingLine.INIT;
+      HourAccountingLine.VALIDATE(Year, Year);
+      HourAccountingLine.VALIDATE(Week, WeekNo);
+      HourAccountingLine.VALIDATE("Employee No.", BarcodeHourAccounting."Employee No.");
+      HourAccountingLine."Line No." := HourAccountingLine.GetLastLineNo + 1;
+      HourAccountingLine.INSERT(TRUE);
+
+      IF BarcodeHourAccounting."Receiving Company" <> '' THEN
+        HourAccountingLine.VALIDATE("Receiving Company",BarcodeHourAccounting."Receiving Company");
+
+      IF BarcodeHourAccounting."Project No." <> '' THEN BEGIN
+        HourAccountingLine.VALIDATE(Type, HourAccountingLine.Type::Project);
+        HourAccountingLine.VALIDATE("Project No.", BarcodeHourAccounting."Project No.");
+        HourAccountingLine.VALIDATE(Element, BarcodeHourAccounting.Element);
+        HourAccountingLine.VALIDATE("Cost Object", BarcodeHourAccounting."Cost Object");
+      END;
+
+      IF BarcodeHourAccounting."Cost Code" <> '' THEN BEGIN
+        HourAccountingLine.VALIDATE(Type, HourAccountingLine.Type::Indirect);
+        HourAccountingLine.VALIDATE("Cost Code", BarcodeHourAccounting."Cost Code");
+      END;
+
+      CASE DayOfTheWeek OF
+        1 : HourAccountingLine.VALIDATE(Monday, ROUND(BarcodeHourAccounting.Hours,0.01));
+        2 : HourAccountingLine.VALIDATE(Tuesday, ROUND(BarcodeHourAccounting.Hours,0.01));
+        3 : HourAccountingLine.VALIDATE(Wednesday, ROUND(BarcodeHourAccounting.Hours,0.01));
+        4 : HourAccountingLine.VALIDATE(Thursday, ROUND(BarcodeHourAccounting.Hours,0.01));
+        5 : HourAccountingLine.VALIDATE(Friday, ROUND(BarcodeHourAccounting.Hours,0.01));
+        6 : HourAccountingLine.VALIDATE(Saturday, ROUND(BarcodeHourAccounting.Hours,0.01));
+        7 : HourAccountingLine.VALIDATE(Sunday, ROUND(BarcodeHourAccounting.Hours,0.01));
+      END;
+
+      HourAccountingLine."Start Time" := BarcodeHourAccounting."Start Time";
+      HourAccountingLine."End Time" := BarcodeHourAccounting."End Time";
+
+      HourAccountingLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateHourAccountingRecord@1100528516();
+    BEGIN
+      HourAccounting.INIT;
+      HourAccounting.VALIDATE(Year, Year);
+      HourAccounting.VALIDATE(Week, WeekNo);
+      HourAccounting.VALIDATE("Employee No.", BarcodeHourAccounting."Employee No.");
+      HourAccounting.INSERT(TRUE);
+    END;
+
+    LOCAL PROCEDURE FillSiteMngmntHoursLine@1100528500();
+    BEGIN
+      IF ROUND(BarcodeHourAccounting.Hours,0.01) = 0 THEN
+        EXIT;
+
+      SiteMngmntHoursLine.INIT;
+      SiteMngmntHoursLine.VALIDATE(Year, Year);
+      SiteMngmntHoursLine.VALIDATE(Week, WeekNo);
+      SiteMngmntHoursLine."Supplying Company" :=  COMPANYNAME;
+      SiteMngmntHoursLine.VALIDATE("Employee No.", BarcodeHourAccounting."Employee No.");
+      SiteMngmntHoursLine."Line No." := SiteMngmntHoursLine.GetLastLineNo + 1;
+      SiteMngmntHoursLine.INSERT(TRUE);
+
+      IF BarcodeHourAccounting."Receiving Company" <> '' THEN
+        SiteMngmntHoursLine.VALIDATE("Receiving Company",BarcodeHourAccounting."Receiving Company")
+      ELSE
+        SiteMngmntHoursLine.VALIDATE("Receiving Company", COMPANYNAME);
+
+      SiteMngmntHoursLine."Line Template Code" := BarcodeHourAccounting."Hour Line Template Code";
+
+      IF BarcodeHourAccounting."Project No." <> '' THEN BEGIN
+        SiteMngmntHoursLine.VALIDATE(Type, SiteMngmntHoursLine.Type::Project); //Type = Project
+        SiteMngmntHoursLine.VALIDATE("Object No.", BarcodeHourAccounting."Project No."); //Column objectnr.
+        SiteMngmntHoursLine.VALIDATE(Element, BarcodeHourAccounting.Element);
+        SiteMngmntHoursLine.VALIDATE("Cost Object", BarcodeHourAccounting."Cost Object");
+      END;
+
+      IF BarcodeHourAccounting."Cost Code" <> '' THEN BEGIN
+        SiteMngmntHoursLine.VALIDATE(Type, SiteMngmntHoursLine.Type::Indirect); //Type = Indirect
+        SiteMngmntHoursLine.VALIDATE("Object No.", BarcodeHourAccounting."Cost Code"); //Column objectnr.
+      END;
+
+      CASE DayOfTheWeek OF
+        1 : SiteMngmntHoursLine.VALIDATE(Monday, ROUND(BarcodeHourAccounting.Hours,0.01));
+        2 : SiteMngmntHoursLine.VALIDATE(Tuesday, ROUND(BarcodeHourAccounting.Hours,0.01));
+        3 : SiteMngmntHoursLine.VALIDATE(Wednesday, ROUND(BarcodeHourAccounting.Hours,0.01));
+        4 : SiteMngmntHoursLine.VALIDATE(Thursday, ROUND(BarcodeHourAccounting.Hours,0.01));
+        5 : SiteMngmntHoursLine.VALIDATE(Friday, ROUND(BarcodeHourAccounting.Hours,0.01));
+        6 : SiteMngmntHoursLine.VALIDATE(Saturday, ROUND(BarcodeHourAccounting.Hours,0.01));
+        7 : SiteMngmntHoursLine.VALIDATE(Sunday, ROUND(BarcodeHourAccounting.Hours,0.01));
+      END;
+
+      SiteMngmntHoursLine."Start Time" := BarcodeHourAccounting."Start Time";
+      SiteMngmntHoursLine."End Time" := BarcodeHourAccounting."End Time";
+
+      SiteMngmntHoursLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSiteMngmntHoursRecord@1100528501();
+    VAR
+      CurrentCompany@1100528500 : Text;
+    BEGIN
+      CurrentCompany := COMPANYNAME;
+      SiteMngmntHoursHeader.INIT;
+      SiteMngmntHoursHeader.VALIDATE(Year, Year);
+      SiteMngmntHoursHeader.VALIDATE(Week, WeekNo);
+      SiteMngmntHoursHeader."Supplying Company" := CurrentCompany;
+      SiteMngmntHoursHeader.VALIDATE("Employee No.",BarcodeHourAccounting."Employee No."); // := BarcodeHourAccounting."Employee No.";
+      SiteMngmntHoursHeader.INSERT(TRUE);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

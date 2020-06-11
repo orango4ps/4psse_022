@@ -1,0 +1,741 @@
+OBJECT Codeunit 11012206 Hours Consent Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      DimensionManagement@1100528401 : Codeunit 408;
+      TempTableBuild@1100528403 : Boolean;
+      TempHourConsentRule@1100528402 : TEMPORARY Record 11229805;
+      Text012@1100528405 : TextConst 'DEU=Es kann keinen %1 gefunden werden. öberprÅfen Sie den %2.;ENU=No %1 can be found. Please check %2 %3.;NLD=Er kan geen %1 gevonden worden. Controleer %2 %3.;SVE=Ingen %1 kan hittas. GÑrna kontrollera %2 %3.';
+
+    PROCEDURE BuildFilterString@1100485012(VAR ConsentFilterString@1100485000 : Text[1000]);
+    VAR
+      Approver@1100528400 : Record 11012229;
+    BEGIN
+      ConsentFilterString := USERID;
+      Approver.SETRANGE("Substitute Approver", USERID);
+      Approver.SETRANGE("Substitution Active", TRUE);
+      IF Approver.FINDSET THEN
+        REPEAT
+          ConsentFilterString := ConsentFilterString + '|' + Approver."User ID";
+        UNTIL Approver.NEXT=0;
+    END;
+
+    PROCEDURE MakeApprovalLines@1100528442(HourAccounting@1100485000 : Record 11012038;WorkflowStepInstance@1100528403 : Record 1504);
+    VAR
+      HourAccountingLine@1100528407 : Record 11012039;
+    BEGIN
+      HourAccountingLine.SETRANGE(Year,HourAccounting.Year);
+      HourAccountingLine.SETRANGE(Week,HourAccounting.Week);
+      HourAccountingLine.SETRANGE("Employee No.",HourAccounting."Employee No.");
+      HourAccountingLine.SETFILTER(Status,'%1|%2',HourAccountingLine.Status::Open, HourAccountingLine.Status::Rejected);
+      IF HourAccountingLine.FINDSET(FALSE,FALSE) THEN BEGIN
+        REPEAT
+          HandleHourAccountingLine(WorkflowStepInstance,HourAccountingLine,HourAccounting,0,'');
+        UNTIL HourAccountingLine.NEXT = 0
+      END;
+    END;
+
+    PROCEDURE MakeApprovalLinesSiteMgt@1100528404(SiteMngmntHoursHeader@1100485000 : Record 11012360;WorkflowStepInstance@1100528403 : Record 1504);
+    VAR
+      SiteMngmntHoursLine@1100528407 : Record 11012361;
+    BEGIN
+      SiteMngmntHoursLine.SETRANGE(Year,SiteMngmntHoursHeader.Year);
+      SiteMngmntHoursLine.SETRANGE(Week,SiteMngmntHoursHeader.Week);
+      SiteMngmntHoursLine.SETRANGE("Supplying Company", SiteMngmntHoursHeader."Supplying Company");
+      SiteMngmntHoursLine.SETRANGE("Employee No.",SiteMngmntHoursHeader."Employee No.");
+      SiteMngmntHoursLine.SETFILTER(Status,'%1|%2',SiteMngmntHoursLine.Status::Open, SiteMngmntHoursLine.Status::Rejected);
+      IF SiteMngmntHoursLine.FINDSET(FALSE,FALSE) THEN BEGIN
+        REPEAT
+          HandleSiteMngmntHoursLine(WorkflowStepInstance,SiteMngmntHoursLine,SiteMngmntHoursHeader,0,'');
+        UNTIL SiteMngmntHoursLine.NEXT = 0
+      END;
+    END;
+
+    PROCEDURE HandleHourAccountingLine@1100485004(WorkflowStepInstance@1100528400 : Record 1504;VAR HourAccountingLine@1100485000 : Record 11012039;HourAccounting@1100528402 : Record 11012038;DocType@1100485005 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote';DocNo@1100485006 : Code[20]);
+    VAR
+      RecRef@1100528401 : RecordRef;
+      DimArrayCde@1100525000 : ARRAY [8] OF Code[20];
+      ConsentProcess@1100525001 : 'Hour Accounting,Site Management Hour Accounting';
+      HourLineType@1100528200 : 'Project,Service,Indirect,,Plant,Unmanned Plant - Project,Unmanned Plant - Service,,,ResourceRequest';
+    BEGIN
+      ConsentProcess := ConsentProcess::"Hour Accounting";
+
+      WITH HourAccountingLine DO BEGIN
+        DimensionManagement.UpdateGlobalDimFromDimSetID("Dimension Set ID", DimArrayCde[1], DimArrayCde[2]);
+        DimensionManagement.GetShortcutDimensions("Dimension Set ID", DimArrayCde);
+        RecRef.GETTABLE(HourAccounting);
+        FillHourLineType(HourAccountingLine, HourLineType);
+        CreateConsentLines(HourLineType,RecRef,WorkflowStepInstance,
+          DocType,ConsentProcess,1,DocNo,"Line No.",DimArrayCde,"Project No.",Element,"Service Order No.",
+          "Service Contract No.","Cost Code",HourAccountingLine.RECORDID,'',
+          '','',"Plant Type","Plant Location","Receiving Company",
+          "Employee No.",
+          "Amount (LCY)",0,0);
+      END;
+    END;
+
+    PROCEDURE HandleSiteMngmntHoursLine@1100528407(WorkflowStepInstance@1100528400 : Record 1504;VAR SiteMngmntHoursLine@1100485000 : Record 11012361;SiteMngmntHoursHeader@1100528402 : Record 11012360;DocType@1100485005 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote';DocNo@1100485006 : Code[20]);
+    VAR
+      RecRef@1100528401 : RecordRef;
+      DimArrayCde@1100525000 : ARRAY [8] OF Code[20];
+      ConsentProcess@1100525001 : 'Hour Accounting,Site Management Hour Accounting';
+      lvJobNo@1100528403 : Code[20];
+      lvServiceOrderNo@1100528404 : Code[20];
+      HourLineType@1100528200 : 'Project,Service,Indirect,,Plant,Unmanned Plant - Project,Unmanned Plant - Service,,,ResourceRequest';
+      ServiceOrder@1100525002 : Record 11012823;
+      lvServiceContractNo@1100525003 : Code[20];
+      lvCostCode@1100525004 : Code[10];
+      PlantLocation@1100528201 : Record 11012554;
+    BEGIN
+      ConsentProcess := ConsentProcess::"Site Management Hour Accounting";
+
+      WITH SiteMngmntHoursLine DO BEGIN
+        DimArrayCde[1] := SiteMngmntHoursLine."Department Code";
+        DimArrayCde[2] := SiteMngmntHoursLine."Cost Object";
+        RecRef.GETTABLE(SiteMngmntHoursHeader);
+
+        CASE Type OF
+          Type::Project:
+            lvJobNo := "Object No.";
+          Type::Service:
+            BEGIN
+              lvServiceOrderNo := SiteMngmntHoursLine."Object No.";
+              IF ServiceOrder.GET(lvServiceOrderNo) THEN
+                lvServiceContractNo := ServiceOrder."Service Contract No.";
+            END;
+          Type::Indirect:
+            lvCostCode := COPYSTR("Object No.", MAXSTRLEN(lvCostCode));
+          Type::UnmannedPlant:
+            BEGIN
+              IF (SiteMngmntHoursLine."Plant Company" = '') OR (SiteMngmntHoursLine."Plant Company" = COMPANYNAME) THEN BEGIN
+                IF PlantLocation.GET(SiteMngmntHoursLine."Plant Location") THEN BEGIN
+                  IF PlantLocation."Project No." <> '' THEN
+                    lvJobNo := PlantLocation."Project No.";
+                  IF PlantLocation."Service Order No." <> '' THEN BEGIN
+                    lvServiceOrderNo := PlantLocation."Service Order No." ;
+                    IF ServiceOrder.GET(lvServiceOrderNo) THEN
+                      lvServiceContractNo := ServiceOrder."Service Contract No.";
+                  END;
+                END;
+              END;
+            END;
+        END;
+        FillHourLineType(SiteMngmntHoursLine, HourLineType);
+        CreateConsentLines(HourLineType,RecRef,WorkflowStepInstance,
+          DocType,ConsentProcess,1,DocNo,"Line No.",DimArrayCde,lvJobNo,Element,lvServiceOrderNo,
+          lvServiceContractNo,lvCostCode,SiteMngmntHoursLine.RECORDID,'',
+          '','',"Plant Type","Plant Location","Receiving Company",
+          "Employee No.",
+          Amount,0,0);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateConsentLines@1100525000(HourLineType@1100528200 : 'Project,Service,Indirect,,Plant,Unmanned Plant - Project,Unmanned Plant - Service,,,ResourceRequest';RecRef@1100528409 : RecordRef;WorkflowStepInstance@1100528410 : Record 1504;DocType@1100525014 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote';ConsentProcess@1100525000 : 'Hour Accounting,Site Management Hour Accounting';lvRecordTypeOpt@1100525001 : 'Header,Line';lvDocNoCde@1100525015 : Code[20];lvDocLineNoInt@1100525016 : Integer;lvDimValueCde@1100525003 : ARRAY [8] OF Code[20];lvProjCde@1100525004 : Code[20];ProjectElement@1100528401 : Code[20];lvServOrderCde@1100525012 : Code[20];lvServContrCde@1100525002 : Code[20];lvCostCode@1100525010 : Code[10];lvRecordID@1100525013 : RecordID;lvAccountNoCde@1100525005 : Code[20];lvVendorCde@1100525006 : Code[20];ItemNo@1100528402 : Code[20];PlantTypeCode@1100528403 : Code[20];lvLocationCde@1100525022 : Code[20];ReceivingCompany@1100528405 : Text[30];lvEmployeeNo@1100528201 : Code[20];lvAmountDec@1100525007 : Decimal;lvDifferDec@1100525008 : Decimal;lvPercentageDec@1100525009 : Decimal);
+    VAR
+      ReceiptLineFound@1100528400 : Boolean;
+      BudgetFound@1100528408 : Boolean;
+      ConsentRuleHasBeenFound@1100528404 : Boolean;
+      Type2@1100528407 : ' ,Project,Service Order';
+      TypeNo@1100528406 : Code[20];
+    BEGIN
+      IF NOT TempTableBuild THEN BEGIN
+        TempTableBuild := BuildTempHourConsentRuleTable;
+        IF NOT TempTableBuild THEN
+          EXIT;
+      END;
+
+      IF lvProjCde <> '' THEN BEGIN
+        Type2 := Type2::Project;
+        TypeNo := lvProjCde;
+      END ELSE
+        IF lvServOrderCde <> '' THEN BEGIN
+          Type2 := Type2::"Service Order";
+          TypeNo := lvServOrderCde;
+        END ELSE BEGIN
+          Type2 := Type2::" ";
+          TypeNo := '';
+        END;
+
+      WITH TempHourConsentRule DO BEGIN
+        SETRANGE(Process, ConsentProcess);
+        IF FINDSET THEN BEGIN
+          REPEAT
+            IF ConsentLineMustBeCreated(HourLineType,
+              TempHourConsentRule,ReceivingCompany,lvDimValueCde,lvProjCde,ProjectElement,lvServOrderCde,lvServContrCde,lvCostCode,lvRecordID,lvAccountNoCde,lvVendorCde,
+              ItemNo,PlantTypeCode,lvLocationCde,lvEmployeeNo,lvAmountDec,BudgetFound,ReceiptLineFound,lvDifferDec,lvPercentageDec,
+              DocType,lvDocNoCde,ConsentRuleHasBeenFound)
+            THEN BEGIN
+              TempHourConsentRule.Approver := DetermineApprover(RecRef,
+                TempHourConsentRule, lvProjCde, lvServOrderCde, ReceivingCompany);
+              CreateConsentLine(RecRef,WorkflowStepInstance,
+                ConsentProcess,DocType,lvDocNoCde,lvDocLineNoInt,lvAmountDec,
+                lvVendorCde,Type2,TypeNo,TempHourConsentRule);
+            END;
+          UNTIL NEXT = 0;
+        END;
+      END;
+
+      IF NOT ConsentRuleHasBeenFound THEN
+        CreateConsentLineForSuperApproverDeniedLines(RecRef,WorkflowStepInstance,
+          ConsentProcess,DocType,lvDocNoCde,lvDocLineNoInt,
+          lvAmountDec,lvVendorCde,Type2,TypeNo);
+    END;
+
+    LOCAL PROCEDURE BuildTempHourConsentRuleTable@1100525007() Present : Boolean;
+    VAR
+      HourConsentRule@1100525001 : Record 11229805;
+    BEGIN
+      TempHourConsentRule.DELETEALL;
+      IF HourConsentRule.FINDSET(FALSE,FALSE) THEN BEGIN
+        REPEAT
+          TempHourConsentRule := HourConsentRule;
+          TempHourConsentRule.INSERT;
+        UNTIL HourConsentRule.NEXT = 0;
+        TempHourConsentRule.SETCURRENTKEY("Consent Level");
+        EXIT(TRUE);
+      END ELSE
+        EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE ConsentLineMustBeCreated@1100525001(HourLineType@1100528201 : 'Project,Service,Indirect,,Plant,Unmanned Plant - Project,Unmanned Plant - Service,,,ResourceRequest';HourConsentRule@1100525000 : Record 11229805;ReceivingCompany@1100528203 : Text[30];DimValueCodes@1100525007 : ARRAY [8] OF Code[20];JobNo@1100525011 : Code[20];ProjectElement@1100528401 : Code[20];ServiceOrderNo@1100525010 : Code[20];ServContrCde@1100525006 : Code[20];CostCode@1100525008 : Code[10];lvRecordID@1100525009 : RecordID;AccountNo@1100525005 : Code[20];VendorNo@1100525004 : Code[20];ItemNo@1100528402 : Code[20];PlantTypeCode@1100528403 : Code[20];LocationCode@1100525018 : Code[20];EmployeeNo@1100528202 : Code[20];Amount@1100525003 : Decimal;BudgetFound@1100528405 : Boolean;ReceiptLineFound@1100528400 : Boolean;Difference@1100525002 : Decimal;Percentage@1100525001 : Decimal;DocumentType@1100528000 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote';DocumentNo@1100528001 : Code[20];VAR ConsentRuleHasBeenFound@1100528404 : Boolean) : Boolean;
+    VAR
+      FilterResult@1100528200 : 'NoFilter,InFilter,OutOfFilter';
+    BEGIN
+      CASE HourConsentRule.Type OF
+        HourConsentRule.Type::Project: IF HourLineType <> HourLineType::Project THEN EXIT(FALSE);
+        HourConsentRule.Type::Service: IF HourLineType <> HourLineType::Service THEN EXIT(FALSE);
+        HourConsentRule.Type::Plant: IF HourLineType <> HourLineType::Plant THEN EXIT(FALSE);
+        HourConsentRule.Type::ResourceRequest: IF HourLineType <> HourLineType::ResourceRequest THEN EXIT(FALSE);
+        HourConsentRule.Type::Indirect: IF HourLineType <> HourLineType::Indirect THEN EXIT(FALSE);
+        HourConsentRule.Type::"Unmanned Plant - Project": IF HourLineType <> HourLineType::"Unmanned Plant - Project" THEN EXIT(FALSE);
+        HourConsentRule.Type::"Unmanned Plant - Service": IF HourLineType <> HourLineType::"Unmanned Plant - Service" THEN EXIT(FALSE);
+      END;
+
+      FilterResult := RecordWithinConsentRuleFilters(
+        HourConsentRule,ReceivingCompany, DimValueCodes, JobNo, ProjectElement, ServiceOrderNo,ServContrCde,CostCode,lvRecordID,
+        AccountNo, VendorNo, ItemNo, PlantTypeCode, LocationCode, EmployeeNo,
+        DocumentType, DocumentNo);
+
+      IF FilterResult = FilterResult::OutOfFilter THEN
+        EXIT(FALSE);
+
+      ConsentRuleHasBeenFound := TRUE;
+
+      IF HourConsentRule."No Consent" THEN
+        EXIT(FALSE);
+
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE DetermineApprover@1100528414(RecRef@1100528202 : RecordRef;HourConsentRule@1100525000 : Record 11229805;JobNo@1100525011 : Code[20];ServiceOrderNo@1100525010 : Code[20];ReceivingCompany@1100528400 : Text[30]) ApproverUserID : Code[50];
+    VAR
+      HourAccounting@1100528201 : Record 11012038;
+      SiteMngmntHoursHeader@1100528200 : Record 11012360;
+      Employee@1100528205 : Record 5200;
+      HoursConsentSetup@1100528206 : Record 11020436;
+      EmployeeNo@1100528204 : Code[20];
+      SupplyingCompany@1100528203 : Text[30];
+    BEGIN
+      IF HourConsentRule."Approver Group Code" <> '' THEN
+        EXIT; //When Approver group code has been specified, Approver user id must be empty.
+
+      ApproverUserID := HourConsentRule.Approver;
+      IF ApproverUserID <> '' THEN
+        EXIT;
+
+      IF HourConsentRule.Manager THEN BEGIN
+        CASE RecRef.NUMBER OF
+          DATABASE::"Hour Accounting":
+            BEGIN
+              RecRef.SETTABLE(HourAccounting);
+              SupplyingCompany := HourAccounting."Supplying Company";
+              EmployeeNo := HourAccounting."Employee No.";
+            END;
+        DATABASE::"Site Mngmnt. Hours Header":
+            BEGIN
+              RecRef.SETTABLE(SiteMngmntHoursHeader);
+              SupplyingCompany := SiteMngmntHoursHeader."Supplying Company";
+              EmployeeNo := SiteMngmntHoursHeader."Employee No.";
+            END;
+        END;
+
+        IF (SupplyingCompany = '') OR (SupplyingCompany = COMPANYNAME) THEN BEGIN
+          //Approver (manager of employee) should be employee of current company.
+          Employee.GET(EmployeeNo);
+          Employee.TESTFIELD("Manager No.");
+          ApproverUserID := HoursConsentSetup.GetUserIDOfEmployee(Employee."Manager No.");
+        END;
+
+        IF ApproverUserID <> '' THEN
+          EXIT;
+
+      END;
+
+      //IF (ReceivingCompany = '') OR
+      //   (ReceivingCompany = COMPANYNAME)
+      //THEN BEGIN
+      CASE HourConsentRule.Type OF
+        HourConsentRule.Type::Project,
+        HourConsentRule.Type::"Unmanned Plant - Project":
+          ApproverUserID := DetermineApproverForProject(HourConsentRule, JobNo, ReceivingCompany);
+        HourConsentRule.Type::Service,
+        HourConsentRule.Type::"Unmanned Plant - Service":
+          ApproverUserID := DetermineApproverForServiceOrder(HourConsentRule, ServiceOrderNo, ReceivingCompany);
+      END;
+      //END ELSE
+      IF ApproverUserID = '' THEN
+        HourConsentRule.TESTFIELD(Approver);
+    END;
+
+    PROCEDURE CreateConsentLine@1100525003(RecRef@1100528401 : RecordRef;WorkflowStepInstance@1100528400 : Record 1504;ConsentProcess@1100525010 : 'Hour Accounting,Site Management Hour Accounting';DocType@1100525007 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote';DocNo@1100525006 : Code[20];DocLineNo@1100525005 : Integer;Amount@1100525004 : Decimal;VendorNo@1100525003 : Code[20];Type@1100525002 : ' ,Project,Service Order';TypeNo@1100525001 : Code[20];HourConsentRule@1100525011 : Record 11229805);
+    VAR
+      ApprovalsMgmt@1100528202 : Codeunit 1535;
+      Approver@1210190000 : Record 11012229;
+      EmptyGuid@1100528201 : GUID;
+    BEGIN
+      IF (HourConsentRule.Approver = '') AND (HourConsentRule."Approver Group Code" = '') THEN
+        ERROR(Text012, Approver.TABLECAPTION, HourConsentRule.TABLECAPTION, HourConsentRule."Line No.");
+
+      IF WorkflowStepInstance.ID <> EmptyGuid THEN
+        ApprovalsMgmt.InsertApprovalEntryForHourConsentRule(RecRef, WorkflowStepInstance, HourConsentRule, DocLineNo,
+          Type, TypeNo);
+    END;
+
+    LOCAL PROCEDURE CreateConsentLineForSuperApproverDeniedLines@1100528418(RecRef@1100528412 : RecordRef;WorkflowStepInstance@1100528411 : Record 1504;ConsentProcess@1100528409 : 'Hour Accounting,Site Management Hour Accounting';DocType@1100528408 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote';DocNo@1100528407 : Code[20];DocLineNo@1100528406 : Integer;Amount@1100528405 : Decimal;VendorNo@1100528404 : Code[20];Type@1100528403 : ' ,Project,Service Order';TypeNo@1100528402 : Code[20]);
+    VAR
+      HumanResourcesSetup@1100528410 : Record 5218;
+      HourConsentRule@1100528401 : Record 11229805;
+    BEGIN
+      HumanResourcesSetup.GET;
+      HumanResourcesSetup.TESTFIELD("Sup. Approver Den. Hour Lines");
+      HourConsentRule.Approver := HumanResourcesSetup."Sup. Approver Den. Hour Lines";
+      HourConsentRule."Consent Level" := 0;
+      CreateConsentLine(RecRef,WorkflowStepInstance,
+        ConsentProcess, DocType, DocNo, DocLineNo, Amount,
+        VendorNo, Type, TypeNo, HourConsentRule);
+    END;
+
+    LOCAL PROCEDURE RecordWithinConsentRuleFilters@1000000003(HourConsentRule@1000000000 : Record 11229805;ReceivingCompany@1100528201 : Text[30];DimValueCodes@1000000008 : ARRAY [8] OF Code[20];JobNo@1000000007 : Code[20];ProjectElement@1100528400 : Code[20];ServiceOrderNo@1000000006 : Code[20];ServContrCde@1100525000 : Code[20];CostCode@1100525001 : Code[10];lvRecordID@1100525002 : RecordID;AccountNo@1000000004 : Code[20];VendorNo@1000000003 : Code[20];ItemNo@1100528401 : Code[20];PlantTypeCode@1100528402 : Code[20];LocationCode@1000000002 : Code[20];EmployeeNo@1100528200 : Code[20];DocumentType@1100528000 : 'Order,Invoice,Posted Invoice,Credit Memo,Posted Credit Memo,Advice Order,Purchase Action,Purchase Quote';DocumentNo@1100528001 : Code[20]) : Integer;
+    VAR
+      HourConsentRuleFilter@1000000001 : Record 11229806;
+      AllObjWithCaption@1100528403 : Record 2000000058;
+      I@1000000013 : Integer;
+      DimensionCode@1100528407 : Code[20];
+      FilterResult@1100528404 : 'NoFilter,InFilter,OutOfFilter';
+    BEGIN
+      HourConsentRuleFilter.SETRANGE("Hour Consent Rule Line No.", HourConsentRule."Line No.");
+      IF HourConsentRuleFilter.ISEMPTY THEN
+        EXIT(FilterResult::NoFilter);
+      HourConsentRuleFilter.GetApplicableTables(AllObjWithCaption);
+      IF NOT AllObjWithCaption.FINDSET THEN
+        EXIT(FilterResult::NoFilter);
+      REPEAT
+        HourConsentRuleFilter.SETRANGE("Table No.",AllObjWithCaption."Object ID");
+        IF NOT HourConsentRuleFilter.ISEMPTY THEN
+          CASE TRUE OF
+            AllObjWithCaption."Object ID" = DATABASE::Employee:
+              IF NOT FieldsAreWithinFilters(HourConsentRuleFilter,'',AllObjWithCaption."Object ID", EmployeeNo, 1, '', 0, lvRecordID) THEN
+                EXIT(FilterResult::OutOfFilter);
+            AllObjWithCaption."Object ID" = DATABASE::Job:
+              IF NOT FieldsAreWithinFilters(HourConsentRuleFilter,ReceivingCompany,AllObjWithCaption."Object ID", JobNo, 1, '', 0, lvRecordID) THEN
+                EXIT(FilterResult::OutOfFilter);
+            AllObjWithCaption."Object ID" = DATABASE::"Service Order":
+              IF NOT FieldsAreWithinFilters(HourConsentRuleFilter,ReceivingCompany,AllObjWithCaption."Object ID", ServiceOrderNo, 10, '', 0, lvRecordID) THEN
+                EXIT(FilterResult::OutOfFilter);
+            AllObjWithCaption."Object ID" = DATABASE::"Service-Contract":
+              IF NOT FieldsAreWithinFilters(HourConsentRuleFilter,ReceivingCompany,AllObjWithCaption."Object ID", ServContrCde, 10, '', 0, lvRecordID) THEN
+                EXIT(FilterResult::OutOfFilter);
+            AllObjWithCaption."Object ID" = DATABASE::"Cost Code":
+              IF NOT FieldsAreWithinFilters(HourConsentRuleFilter,ReceivingCompany,AllObjWithCaption."Object ID", CostCode, 10, '', 0, lvRecordID) THEN
+                EXIT(FilterResult::OutOfFilter);
+            AllObjWithCaption."Object ID" = DATABASE::"Plant Type":
+              IF NOT FieldsAreWithinFilters(HourConsentRuleFilter,'',AllObjWithCaption."Object ID", PlantTypeCode, 10, '', 0, lvRecordID) THEN
+                EXIT(FilterResult::OutOfFilter);
+            AllObjWithCaption."Object ID" = DATABASE::"Hour Accounting Line":
+              IF NOT FieldsAreWithinFilters(HourConsentRuleFilter,'',AllObjWithCaption."Object ID", '', 0, '', 0, lvRecordID) THEN
+                EXIT(FilterResult::OutOfFilter);
+            AllObjWithCaption."Object ID" = DATABASE::"Site Mngmnt. Hours Line":
+              IF NOT FieldsAreWithinFilters(HourConsentRuleFilter,'',AllObjWithCaption."Object ID", '', 0, '', 0, lvRecordID) THEN
+                EXIT(FilterResult::OutOfFilter);
+
+            AllObjWithCaption."Object ID" = DATABASE::Vendor:
+              IF NOT FieldsAreWithinFilters(HourConsentRuleFilter,'',AllObjWithCaption."Object ID", VendorNo, 1, '', 0, lvRecordID) THEN
+                EXIT(FilterResult::OutOfFilter);
+            AllObjWithCaption."Object ID" = DATABASE::"Dimension Value":
+              FOR I := 1 TO 8 DO BEGIN
+                DimensionCode := GetShortcutDimensionCode(I);
+                IF DimensionCode <> '' THEN BEGIN
+                  HourConsentRuleFilter.SETRANGE("Dimension Code", DimensionCode);
+                  IF NOT FieldsAreWithinFilters(
+                    HourConsentRuleFilter,'',AllObjWithCaption."Object ID", DimensionCode, 1, DimValueCodes[I], 2, lvRecordID)
+                  THEN
+                    EXIT(FilterResult::OutOfFilter);
+                  HourConsentRuleFilter.SETRANGE("Dimension Code");
+                END;
+              END;
+            AllObjWithCaption."Object ID" = DATABASE::Location:
+              IF NOT FieldsAreWithinFilters(HourConsentRuleFilter,'',AllObjWithCaption."Object ID", LocationCode, 1, '', 0, lvRecordID) THEN
+                EXIT(FilterResult::OutOfFilter);
+            AllObjWithCaption."Object ID" = DATABASE::"Project Element":
+              IF NOT FieldsAreWithinFilters(HourConsentRuleFilter,ReceivingCompany,AllObjWithCaption."Object ID", JobNo, 10, ProjectElement, 20, lvRecordID) THEN
+                EXIT(FilterResult::OutOfFilter);
+            AllObjWithCaption."Object ID" = DATABASE::"G/L Account":
+              IF NOT FieldsAreWithinFilters(HourConsentRuleFilter,'',AllObjWithCaption."Object ID", AccountNo, 1, '', 0, lvRecordID) THEN
+                EXIT(FilterResult::OutOfFilter);
+            AllObjWithCaption."Object ID" = DATABASE::Item:
+              IF NOT FieldsAreWithinFilters(HourConsentRuleFilter,'',AllObjWithCaption."Object ID", ItemNo, 1, '', 0, lvRecordID) THEN
+                EXIT(FilterResult::OutOfFilter);
+
+          END;
+      UNTIL AllObjWithCaption.NEXT = 0;
+      EXIT(FilterResult::InFilter);
+    END;
+
+    LOCAL PROCEDURE DetermineApproverForProject@1100528422(HourConsentRule@1100525000 : Record 11229805;JobNo@1100525011 : Code[20];ReceivingCompany@1100528400 : Text[30]) ApproverUserID : Code[50];
+    VAR
+      Job@1100525014 : Record 11072003;
+    BEGIN
+      IF (ReceivingCompany <> '') AND (ReceivingCompany <> COMPANYNAME) THEN
+        Job.CHANGECOMPANY(ReceivingCompany);
+
+      IF Job.GET(JobNo) THEN
+        CASE HourConsentRule."Project Role" OF
+          HourConsentRule."Project Role"::"Project Manager":
+            IF Job."Project Manager" <> '' THEN
+              ApproverUserID := GetApproverBasedOnRole('', Job."Project Manager",ReceivingCompany)
+            ELSE
+              Job.TESTFIELD("Project Manager");
+          HourConsentRule."Project Role"::"Project Engineer":
+            IF Job."Project Engineer" <> '' THEN
+              ApproverUserID := GetApproverBasedOnRole('', Job."Project Engineer",ReceivingCompany)
+            ELSE
+              Job.TESTFIELD("Project Engineer");
+          HourConsentRule."Project Role"::Purchaser:
+            IF Job."Purchaser Code" <> '' THEN
+              ApproverUserID := GetApproverBasedOnRole(Job."Purchaser Code", '',ReceivingCompany)
+            ELSE
+              Job.TESTFIELD("Purchaser Code");
+          HourConsentRule."Project Role"::"Site Manager":
+            IF Job."Site Manager" <> '' THEN
+              ApproverUserID := GetApproverBasedOnRole('', Job."Site Manager",ReceivingCompany)
+            ELSE
+              Job.TESTFIELD("Site Manager");
+          HourConsentRule."Project Role"::Administrator:
+            IF Job."Project Administrator" <> '' THEN
+              ApproverUserID := GetApproverBasedOnRole('', Job."Project Administrator",ReceivingCompany)
+            ELSE
+              Job.TESTFIELD("Project Administrator");
+          HourConsentRule."Project Role"::Estimator:
+            IF Job.Estimator <> '' THEN
+              ApproverUserID := GetApproverBasedOnRole('', Job.Estimator,ReceivingCompany)
+            ELSE
+              Job.TESTFIELD(Estimator);
+        END;
+    END;
+
+    LOCAL PROCEDURE DetermineApproverForServiceOrder@1100528423(HourConsentRule@1100525000 : Record 11229805;ServiceOrderNo@1100525010 : Code[20];ReceivingCompany@1100528402 : Text[30]) ApproverUserID : Code[50];
+    VAR
+      ServiceOrder@1100528600 : Record 11012823;
+      ResourceWOP@1100528403 : Record 11229278;
+      ServiceLocation@1100528400 : Record 11012801;
+      ServiceContract@1100528401 : Record 11012812;
+    BEGIN
+      IF (ReceivingCompany <> '') AND (ReceivingCompany <> COMPANYNAME) THEN BEGIN
+        ServiceOrder.CHANGECOMPANY(ReceivingCompany);
+        ResourceWOP.CHANGECOMPANY(ReceivingCompany);
+        ServiceLocation.CHANGECOMPANY(ReceivingCompany);
+        ServiceContract.CHANGECOMPANY(ReceivingCompany);
+      END;
+
+      IF ServiceOrder.GET(ServiceOrderNo) THEN
+        CASE HourConsentRule."Service Role" OF
+          HourConsentRule."Service Role"::"Order Manager":
+            IF ServiceOrder."Order Manager" <> '' THEN
+              ApproverUserID := GetApproverBasedOnRole(ServiceOrder."Order Manager", '',ReceivingCompany)
+            ELSE
+              ServiceOrder.TESTFIELD("Order Manager");
+          HourConsentRule."Service Role"::"Assigned to":
+            IF ServiceOrder."Assigned to" <> '' THEN
+              ApproverUserID := GetApproverBasedOnRole('', ServiceOrder."Assigned to",ReceivingCompany)
+            ELSE
+              ServiceOrder.TESTFIELD("Assigned to");
+          HourConsentRule."Service Role"::Employee:
+            IF ServiceOrder."Employee No." <> '' THEN BEGIN
+              IF ResourceWOP.GET(ServiceOrder."Employee No.") THEN BEGIN
+                ResourceWOP.TESTFIELD(Type, ResourceWOP.Type::Employee);
+                IF ResourceWOP."Source No." <> '' THEN
+                  ApproverUserID := GetApproverBasedOnRole('', ResourceWOP."Source No.",ReceivingCompany)
+                END ELSE
+                  ResourceWOP.TESTFIELD("Source No.");
+            END ELSE
+              ServiceOrder.TESTFIELD("Employee No.");
+          HourConsentRule."Service Role"::"Location Manager":
+            IF ServiceOrder."Service Location No." <> '' THEN BEGIN
+              IF ServiceLocation.GET(ServiceOrder."Service Location No.") THEN
+                IF ServiceLocation."Location Manager" <> '' THEN
+                  ApproverUserID := GetApproverBasedOnRole(ServiceLocation."Location Manager", '',ReceivingCompany)
+                ELSE
+                  ServiceLocation.TESTFIELD("Location Manager");
+            END ELSE
+              ServiceOrder.TESTFIELD("Service Location No.");
+          HourConsentRule."Service Role"::"Contract Manager":
+            IF ServiceOrder."Service Contract No." <> '' THEN BEGIN
+              IF ServiceContract.GET(ServiceOrder."Service Contract No.") THEN
+                IF ServiceContract."Contract Manager" <> '' THEN
+                  ApproverUserID := GetApproverBasedOnRole(ServiceContract."Contract Manager", '',ReceivingCompany)
+                ELSE
+                  ServiceContract.TESTFIELD("Contract Manager");
+            END ELSE
+              ServiceOrder.TESTFIELD("Service Contract No.");
+        END;
+    END;
+
+    LOCAL PROCEDURE FieldsAreWithinFilters@1100528428(VAR HourConsentRuleFilter@1100528401 : Record 11229806;ReceivingCompany@1100528200 : Text[30];TableID@1100528403 : Integer;PrimaryKeyValue1@1100528400 : Text;PrimaryKeyFieldNo1@1100528406 : Integer;PrimaryKeyValue2@1100528409 : Text;PrimaryKeyFieldNo2@1100528408 : Integer;lvRecordID@1100525000 : RecordID) WithinFilter : Boolean;
+    VAR
+      HourConsentRuleFilter2@1100528402 : Record 11229806;
+      RecRef@1100528404 : RecordRef;
+      FieldRef@1100528405 : FieldRef;
+    BEGIN
+      WithinFilter := TRUE;
+      HourConsentRuleFilter2.COPYFILTERS(HourConsentRuleFilter);
+      IF NOT HourConsentRuleFilter2.FINDSET THEN
+        EXIT; // No filter specified, so within filter.
+
+      IF (ReceivingCompany <> '') AND (ReceivingCompany <> HourConsentRuleFilter2.CURRENTCOMPANY) THEN
+        RecRef.OPEN(TableID,FALSE,ReceivingCompany)
+      ELSE
+        RecRef.OPEN(TableID);
+      RecRef.FILTERGROUP(9);
+
+      IF (TableID = DATABASE::"Hour Accounting Line") OR
+         (TableID = DATABASE::"Site Mngmnt. Hours Line") THEN BEGIN
+        RecRef := lvRecordID.GETRECORD;
+        RecRef.SETRECFILTER;
+      END;
+
+      IF PrimaryKeyFieldNo1 > 0 THEN BEGIN
+        FieldRef := RecRef.FIELD(PrimaryKeyFieldNo1);
+        FieldRef.SETFILTER('%1', PrimaryKeyValue1);
+      END;
+      IF PrimaryKeyFieldNo2 > 0 THEN BEGIN
+        FieldRef := RecRef.FIELD(PrimaryKeyFieldNo2);
+        FieldRef.SETFILTER('%1', PrimaryKeyValue2);
+      END;
+      RecRef.FILTERGROUP(0);
+
+      REPEAT
+        FieldRef := RecRef.FIELD(HourConsentRuleFilter2."Field No.");
+        IF FORMAT(FieldRef.TYPE) = 'Option' THEN
+          SetOptionFilter(FieldRef, HourConsentRuleFilter2.Filter, HourConsentRuleFilter2."Filter Language Code")
+        ELSE
+          FieldRef.SETFILTER(HourConsentRuleFilter2.Filter);
+      UNTIL HourConsentRuleFilter2.NEXT = 0;
+
+      IF RecRef.ISEMPTY THEN
+        WithinFilter := FALSE;
+      RecRef.CLOSE;
+    END;
+
+    LOCAL PROCEDURE GetShortcutDimensionCode@1100528406(I@1100528400 : Integer) DimensionCode : Code[20];
+    VAR
+      GeneralLedgerSetup@1100528401 : Record 98;
+    BEGIN
+      GeneralLedgerSetup.GET;
+      CASE I OF
+        1:
+          DimensionCode := GeneralLedgerSetup."Shortcut Dimension 1 Code";
+        2:
+          DimensionCode := GeneralLedgerSetup."Shortcut Dimension 2 Code";
+        3:
+          DimensionCode := GeneralLedgerSetup."Shortcut Dimension 3 Code";
+        4:
+          DimensionCode := GeneralLedgerSetup."Shortcut Dimension 4 Code";
+        5:
+          DimensionCode := GeneralLedgerSetup."Shortcut Dimension 5 Code";
+        6:
+          DimensionCode := GeneralLedgerSetup."Shortcut Dimension 6 Code";
+        7:
+          DimensionCode := GeneralLedgerSetup."Shortcut Dimension 7 Code";
+        8:
+          DimensionCode := GeneralLedgerSetup."Shortcut Dimension 8 Code";
+      END;
+    END;
+
+    LOCAL PROCEDURE GetApproverBasedOnRole@1100528405(PurchaserCode@1100528403 : Code[10];EmployeeNo@1100528404 : Code[20];ReceivingCompany@1100528200 : Text[30]) ApproverUserID : Code[50];
+    VAR
+      UserSetup@1100528400 : Record 91;
+      Approver@1100528401 : Record 11012229;
+    BEGIN
+      IF (ReceivingCompany <> '') AND (ReceivingCompany <> COMPANYNAME) THEN
+        UserSetup.CHANGECOMPANY(ReceivingCompany);
+
+      IF PurchaserCode <> '' THEN BEGIN
+        UserSetup.SETCURRENTKEY("Salespers./Purch. Code");
+        UserSetup.SETRANGE("Salespers./Purch. Code", PurchaserCode);
+      END ELSE
+        UserSetup.SETRANGE("Employee No.", EmployeeNo);
+
+      UserSetup.FINDFIRST;
+      Approver.GET(UserSetup."User ID");
+      ApproverUserID := UserSetup."User ID";
+    END;
+
+    PROCEDURE CurrentUserCanConsentThisLine@1100528413(HourConsentRule@1100528400 : Record 11229805;Type@1100528402 : ' ,Project,Service Order';TypeNo@1100528401 : Code[20]) : Boolean;
+    BEGIN
+      IF NOT HourConsentRule."Autom. Consent Own Lines" THEN
+        EXIT(FALSE);
+
+      IF HourConsentRule.Approver = USERID THEN
+        EXIT(TRUE);
+
+      IF CurrentUserIsApproverGroupMember(HourConsentRule) THEN
+        EXIT(TRUE);
+
+      IF (Type = Type::Project) THEN
+        IF CurrentUserHasProjectRole(HourConsentRule, TypeNo) THEN
+          EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE CurrentUserIsApproverGroupMember@1100528415(HourConsentRule@1100528400 : Record 11229805) : Boolean;
+    VAR
+      ApproverGroupMember@1100528401 : Record 11012232;
+    BEGIN
+      IF HourConsentRule."Approver Group Code" = '' THEN
+        EXIT(FALSE);
+
+      IF ApproverGroupMember.GET(HourConsentRule."Approver Group Code", USERID) THEN
+        EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE CurrentUserHasProjectRole@1100528416(HourConsentRule@1100528400 : Record 11229805;ProjectNo@1100528401 : Code[20]) : Boolean;
+    VAR
+      JobsSetup@1100528403 : Record 315;
+      UserSetup@1100528405 : Record 91;
+      ProjectResponsiblePerson@1100528402 : Record 11012040;
+      ResponsibilityCode@1100528404 : Code[10];
+    BEGIN
+      IF ProjectNo = '' THEN
+        EXIT(FALSE);
+      IF NOT JobsSetup.GET THEN
+        EXIT(FALSE);
+      IF NOT UserSetup.GET(USERID) THEN
+        EXIT(FALSE);
+
+      CASE HourConsentRule."Project Role" OF
+        HourConsentRule."Project Role"::" ":
+          ResponsibilityCode := '';
+        HourConsentRule."Project Role"::"Project Manager":
+          ResponsibilityCode := JobsSetup."Responsibility Project Manager";
+        HourConsentRule."Project Role"::"Project Engineer":
+          ResponsibilityCode := JobsSetup."Responsibility ProjectEngineer";
+        HourConsentRule."Project Role"::Purchaser:
+          ResponsibilityCode := '';
+        HourConsentRule."Project Role"::"Site Manager":
+          ResponsibilityCode := JobsSetup."Responsibility Site Manager";
+        HourConsentRule."Project Role"::Administrator:
+          ResponsibilityCode := '';
+        HourConsentRule."Project Role"::Estimator:
+          ResponsibilityCode := JobsSetup."Responsibility Estimator";
+      END;
+
+      IF ResponsibilityCode <> '' THEN BEGIN
+        ProjectResponsiblePerson.SETCURRENTKEY("Employee No.", Responsibility, "Project No.");
+        ProjectResponsiblePerson.SETRANGE("Employee No.", UserSetup."Employee No.");
+        ProjectResponsiblePerson.SETRANGE(Responsibility, ResponsibilityCode);
+        ProjectResponsiblePerson.SETRANGE("Project No.", ProjectNo);
+        IF NOT ProjectResponsiblePerson.ISEMPTY THEN
+          EXIT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE FillHourLineType@1100528201(Variant@1100528200 : Variant;VAR HourLineType@1100528201 : 'Project,Service,Indirect,,Plant,Unmanned Plant - Project,Unmanned Plant - Service,,,ResourceRequest');
+    VAR
+      RecRef@1100528206 : RecordRef;
+      HourAccountingLine@1100528203 : Record 11012039;
+      SiteMngmntHoursLine@1100528205 : Record 11012361;
+      PlantLocation@1100528202 : Record 11012554;
+    BEGIN
+      RecRef.GETTABLE(Variant);
+      CASE RecRef.NUMBER OF
+        DATABASE::"Hour Accounting Line":
+          BEGIN
+            RecRef.SETTABLE(HourAccountingLine);
+            HourLineType := HourAccountingLine.Type;
+          END;
+      DATABASE::"Site Mngmnt. Hours Line":
+          BEGIN
+            RecRef.SETTABLE(SiteMngmntHoursLine);
+            CASE SiteMngmntHoursLine.Type OF
+              SiteMngmntHoursLine.Type::Project: HourLineType := HourLineType::Project;
+              SiteMngmntHoursLine.Type::Service: HourLineType := HourLineType::Service;
+              SiteMngmntHoursLine.Type::Indirect: HourLineType := HourLineType::Indirect;
+              SiteMngmntHoursLine.Type::Plant: HourLineType := HourLineType::Plant;
+              SiteMngmntHoursLine.Type::UnmannedPlant:
+                BEGIN
+                  HourLineType := HourLineType::"Unmanned Plant - Project";
+                  IF (SiteMngmntHoursLine."Plant Company" = '') OR (SiteMngmntHoursLine."Plant Company" = COMPANYNAME) THEN BEGIN
+                    IF PlantLocation.GET(SiteMngmntHoursLine."Plant Location") THEN BEGIN
+                      IF PlantLocation."Project No." <> '' THEN
+                        HourLineType := HourLineType::"Unmanned Plant - Project";
+                      IF PlantLocation."Service Order No." <> '' THEN
+                        HourLineType := HourLineType::"Unmanned Plant - Service";
+                    END;
+                  END;
+                END;
+            END;
+          END;
+      END;
+    END;
+
+    LOCAL PROCEDURE SetOptionFilter@1100527650(FieldRef@1100527650 : FieldRef;Value@1100527651 : Text;LangCode@1100527652 : Code[10]);
+    VAR
+      Language@1100527655 : Record 8;
+      RunningLangID@1100527653 : Integer;
+      FilterLangID@1100527656 : Integer;
+      ErrorText@1100527654 : Text;
+    BEGIN
+      IF NOT TrySetFilter(FieldRef, Value) THEN BEGIN
+        RunningLangID := GLOBALLANGUAGE;
+        ErrorText := GETLASTERRORTEXT;
+
+        IF Language.GET(LangCode) THEN
+          FilterLangID := Language."Windows Language ID"
+        ELSE
+          FilterLangID := 1043; //NLD
+
+        IF RunningLangID <> FilterLangID THEN BEGIN
+          GLOBALLANGUAGE(FilterLangID);
+          IF NOT TrySetFilter(FieldRef, Value) THEN BEGIN
+            GLOBALLANGUAGE(RunningLangID);
+            ERROR(ErrorText);
+          END ELSE
+            GLOBALLANGUAGE(RunningLangID);
+        END ELSE
+          ERROR(ErrorText);
+      END;
+    END;
+
+    [TryFunction]
+    PROCEDURE TrySetFilter@1100527651(FieldRef@1100527650 : FieldRef;Value@1100527651 : Text);
+    BEGIN
+      FieldRef.SETFILTER(Value);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

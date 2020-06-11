@@ -1,0 +1,207 @@
+OBJECT Table 11124914 Resource Req. Plant Location
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnInsert=BEGIN
+               ReadAndCheckRequest;
+             END;
+
+    OnModify=BEGIN
+               ReadAndCheckRequest;
+             END;
+
+    CaptionML=ENU=Resource Request Plant Location;
+  }
+  FIELDS
+  {
+    { 10  ;   ;Request No.         ;Code20        ;TableRelation="Resource Request";
+                                                   OnValidate=BEGIN
+                                                                ReadAndCheckRequest;
+                                                              END;
+
+                                                   CaptionML=[ENU=Request No.;
+                                                              NOR=Foresp›rselnr.;
+                                                              SVE=Nr f”r f”rfr†gan];
+                                                   NotBlank=Yes;
+                                                   Editable=No }
+    { 20  ;   ;Plant Company       ;Text30        ;TableRelation=Company;
+                                                   OnValidate=BEGIN
+                                                                IF "Plant Company" = COMPANYNAME THEN //Only for plant locations of other companies, for current (PRJ/SO) company plant location on request
+                                                                  FIELDERROR("Plant Company", STRSUBSTNO(Text001, "Plant Company", FIELDCAPTION("Plant Location"), ResourceRequest.TABLECAPTION));
+                                                                IF ("Plant Company" <> xRec."Plant Company") THEN
+                                                                  "Plant Location" := '';
+                                                                IF "Plant Location" = '' THEN
+                                                                  FillDefaultPlantLocation;
+                                                              END;
+
+                                                   CaptionML=[ENU=Plant Company;
+                                                              NOR=Maskinselskap;
+                                                              SVE=Maskinf”retag];
+                                                   NotBlank=Yes }
+    { 30  ;   ;Plant Location      ;Code20        ;OnValidate=VAR
+                                                                PlantLocation@1100529000 : Record 11012554;
+                                                              BEGIN
+                                                                IF "Plant Location" <> '' THEN BEGIN
+                                                                  TESTFIELD("Plant Company");
+                                                                  ReadAndCheckRequest;
+                                                                  PlantLocation.CHANGECOMPANY("Plant Company");
+                                                                  PlantLocation.GET("Plant Location");
+                                                                  CASE ResourceRequest."Source Type" OF
+                                                                    ResourceRequest."Source Type"::Project:
+                                                                      PlantLocation.TESTFIELD("Project No.", ResourceRequest."Source No.");
+                                                                    ResourceRequest."Source Type"::ServiceOrder:
+                                                                      PlantLocation.TESTFIELD("Service Order No.", ResourceRequest."Source No.");
+                                                                  END;
+                                                                  ResourceRequest.CheckReceivingCompany(
+                                                                    PlantLocation."Company Name", PlantLocation.CURRENTCOMPANY,
+                                                                    PlantLocation.FIELDCAPTION("Company Name"), PlantLocation.TABLECAPTION, PlantLocation.Code);
+                                                                END;
+                                                              END;
+
+                                                   OnLookup=VAR
+                                                              PlantLocation@1100529000 : Record 11012554;
+                                                            BEGIN
+                                                              TESTFIELD("Plant Company");
+                                                              ReadAndCheckRequest;
+                                                              PlantLocation.CHANGECOMPANY("Plant Company");
+                                                              PlantLocation.SETCURRENTKEY("Company Name", "Project No.", "Service Order No.", "Employee No.");
+                                                              PlantLocation.FILTERGROUP(9);
+                                                              PlantLocation.SetFilterOnCompanyName(ResourceRequest."Receiving Company", ResourceRequest.CURRENTCOMPANY);
+                                                              CASE ResourceRequest."Source Type" OF
+                                                                ResourceRequest."Source Type"::Project:
+                                                                  PlantLocation.SETRANGE("Project No.", ResourceRequest."Source No.");
+                                                                ResourceRequest."Source Type"::ServiceOrder:
+                                                                  BEGIN
+                                                                    PlantLocation.SETRANGE("Project No.", '');
+                                                                    PlantLocation.SETRANGE("Service Order No.", ResourceRequest."Source No.");
+                                                                  END;
+                                                              END;
+                                                              PlantLocation.FILTERGROUP(0);
+                                                              IF PAGE.RUNMODAL(0, PlantLocation) = ACTION::LookupOK THEN
+                                                                VALIDATE("Plant Location", PlantLocation.Code);
+                                                            END;
+
+                                                   CaptionML=[ENU=Plant Location;
+                                                              NOR=Maskinplassering;
+                                                              SVE=Maskinutplacering] }
+  }
+  KEYS
+  {
+    {    ;Request No.,Plant Company               ;Clustered=Yes }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+    VAR
+      ResourceRequest@1100528500 : Record 11124901;
+      Text001@1100528501 : TextConst 'ENU="''%1'' (current company) not allowed. %2 must be entered on the %3 "';
+
+    LOCAL PROCEDURE ReadAndCheckRequest@1100528500();
+    BEGIN
+      ResourceRequest.GET("Request No.");
+      IF NOT (ResourceRequest."Source Type" IN [ResourceRequest."Source Type"::Project, ResourceRequest."Source Type"::ServiceOrder]) THEN
+        ResourceRequest.FIELDERROR("Source Type");
+      ResourceRequest.TESTFIELD("Source No.");
+    END;
+
+    LOCAL PROCEDURE FillDefaultPlantLocation@1100529008();
+    VAR
+      PlantLocation@1100529000 : Record 11012554;
+    BEGIN
+      IF "Plant Company" = '' THEN
+        EXIT;
+      ReadAndCheckRequest;
+      PlantLocation.CHANGECOMPANY("Plant Company");
+      PlantLocation.SETCURRENTKEY("Company Name", "Project No.", "Service Order No.", "Employee No.");
+      PlantLocation.SetFilterOnCompanyName(ResourceRequest."Receiving Company", ResourceRequest.CURRENTCOMPANY);
+      CASE ResourceRequest."Source Type" OF
+        ResourceRequest."Source Type"::Project:
+          PlantLocation.SETRANGE("Project No.", ResourceRequest."Source No.");
+        ResourceRequest."Source Type"::ServiceOrder:
+          BEGIN
+            PlantLocation.SETRANGE("Service Order No.", ResourceRequest."Source No.");
+            PlantLocation.SETRANGE("Project No.", '');
+          END;
+      END;
+      IF PlantLocation.FINDFIRST THEN BEGIN
+        IF PlantLocation.NEXT = 0 THEN
+          "Plant Location" := PlantLocation.Code;
+      END;
+    END;
+
+    PROCEDURE UpdatePlantLocationsForOtherCompanies@1100528501(RequestNo@1100528501 : Code[20]);
+    VAR
+      WorkOrder@1100528500 : Record 11229279;
+      TransportCostRequestWO@1100528502 : Record 11124913;
+      AdditionalInfoRequestWO@1100528503 : Record 11124915;
+      ResourceReqPlantLocation@1100528505 : Record 11124914;
+      TmpResourceReqPlantLocation@1100528506 : TEMPORARY Record 11124914;
+      PlantLocationNeeded@1100528504 : Boolean;
+    BEGIN
+      WorkOrder.SETCURRENTKEY("Source Type", "Source No.");
+      WorkOrder.SETRANGE("Source Type", WorkOrder."Source Type"::Request);
+      WorkOrder.SETRANGE("Source No.", RequestNo);
+      WorkOrder.SETRANGE("Resource Type", WorkOrder."Resource Type"::Plant);
+      WorkOrder.SETFILTER("Resource Company", '<>%1', COMPANYNAME);
+      IF WorkOrder.FINDSET THEN BEGIN
+        REPEAT
+          WorkOrder.CALCFIELDS("Resource Company");
+          IF NOT TmpResourceReqPlantLocation.GET(RequestNo, WorkOrder."Resource Company") THEN BEGIN
+            TransportCostRequestWO.SETRANGE("Request No.", RequestNo);
+            TransportCostRequestWO.SETRANGE("Work Order No.", WorkOrder."No.");
+            PlantLocationNeeded := (NOT TransportCostRequestWO.ISEMPTY);
+            IF NOT PlantLocationNeeded THEN BEGIN
+              IF AdditionalInfoRequestWO.GET(WorkOrder."No.") THEN
+                PlantLocationNeeded := (AdditionalInfoRequestWO."Actual Hours" <> 0);
+            END;
+            IF PlantLocationNeeded THEN BEGIN
+              CheckInsertPlantCompanyAndFillPlantLocation(RequestNo, WorkOrder."Resource Company");
+              TmpResourceReqPlantLocation."Request No." := RequestNo;
+              TmpResourceReqPlantLocation."Plant Company" := WorkOrder."Resource Company";
+              TmpResourceReqPlantLocation.INSERT;
+            END;
+          END;
+        UNTIL WorkOrder.NEXT = 0;
+      END;
+      ResourceReqPlantLocation.RESET;
+      ResourceReqPlantLocation.SETRANGE("Request No.", RequestNo);
+      ResourceReqPlantLocation.SETRANGE("Plant Location", '');
+      IF ResourceReqPlantLocation.FINDSET THEN BEGIN
+        REPEAT
+          IF NOT TmpResourceReqPlantLocation.GET(RequestNo, ResourceReqPlantLocation."Plant Company") THEN
+            ResourceReqPlantLocation.DELETE;
+        UNTIL ResourceReqPlantLocation.NEXT = 0;
+      END;
+      TmpResourceReqPlantLocation.DELETEALL;
+    END;
+
+    PROCEDURE CheckInsertPlantCompanyAndFillPlantLocation@1100528502(RequestNo@1100528500 : Code[20];PlantCompany@1100528501 : Text);
+    VAR
+      ResourceReqPlantLocation@1100528502 : Record 11124914;
+    BEGIN
+      IF NOT ResourceReqPlantLocation.GET(RequestNo, PlantCompany) THEN BEGIN
+        ResourceReqPlantLocation.INIT;
+        ResourceReqPlantLocation."Request No." := RequestNo;
+        ResourceReqPlantLocation."Plant Company" := PlantCompany;
+        ResourceReqPlantLocation.INSERT;
+      END;
+      IF ResourceReqPlantLocation."Plant Location" = '' THEN BEGIN
+        ResourceReqPlantLocation.VALIDATE("Plant Company");
+        IF ResourceReqPlantLocation."Plant Location" <> '' THEN
+          ResourceReqPlantLocation.MODIFY;
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

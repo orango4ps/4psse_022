@@ -1,0 +1,640 @@
+OBJECT Codeunit 9510 Document Service Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.00,4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      NoConfigErr@1000 : TextConst 'ENU=No online document configuration was found.;NOR=Finner ingen online-dokumentkonfigurasjon.;SVE=Hittade ingen onlinedokumentkonfiguration.';
+      MultipleConfigsErr@1001 : TextConst 'ENU=More than one online document configuration was found.;NOR=Finner mer enn ‚n online-dokumentkonfigurasjon.;SVE=Hittade mer „n en onlinedokumentkonfiguration.';
+      SourceFileNotFoundErr@1002 : TextConst '@@@="%1=Full path to the file on disk;%2=the detailed error describing why the document could not be accessed.";ENU=Cannot open the specified document from the following location: %1 due to the following error: %2.;NOR=Kan ikke †pne det angitte dokumentet fra f›lgende plassering: %1 p† grunn av f›lgende feil: %2.;SVE=Det g†r inte att ”ppna det angivna dokumentet fr†n platsen %1 p† grund av f”ljande fel: %2.';
+      RequiredSourceNameErr@1004 : TextConst 'ENU=You must specify a source path for the document.;NOR=Du m† angi en kildebane for dokumentet.;SVE=Du m†ste ange en k„lls”kv„g till dokumentet.';
+      DocumentService@1007 : DotNet "'Microsoft.Dynamics.Nav.DocumentService.Types, Version=14.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.DocumentService.Types.IDocumentService";
+      DocumentServiceFactory@1008 : DotNet "'Microsoft.Dynamics.Nav.DocumentService, Version=14.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.DocumentService.DocumentServiceFactory";
+      FileManagement@1100528701 : Codeunit 419;
+      ServiceType@1006 : Text;
+      LastServiceType@1009 : Text;
+      RequiredTargetNameErr@1005 : TextConst 'ENU=You must specify a name for the document.;NOR=Du m† angi et navn for dokumentet.;SVE=Du m†ste ange ett namn p† dokumentet.';
+      RequiredTargetURIErr@1011 : TextConst 'ENU=You must specify the URI that you want to open.;NOR=Du m† angi URIen som du vil †pne.;SVE=Du m†ste ange den URI som du vill ”ppna.';
+      ValidateConnectionErr@1003 : TextConst 'ENU=Cannot connect because the user name and password have not been specified, or because the connection was canceled.;NOR=Kan ikke koble til fordi brukernavnet og passordet ikke er angitt, eller fordi tilkoblingen ble avbrutt.;SVE=Det gick inte att ansluta eftersom anv„ndarnamnet och l”senordet inte angavs, eller p† grund av att anslutningen avbr”ts.';
+      UseDocumentService4PS@1100528400 : Boolean;
+      DoNotShowError@1100529600 : Boolean;
+
+    [Internal]
+    PROCEDURE TestConnection@9();
+    VAR
+      DocumentServiceHelper@1000 : DotNet "'Microsoft.Dynamics.Nav.NavUserAccount, Version=14.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.NavDocumentService.NavDocumentServiceHelper";
+    BEGIN
+      // Tests connectivity to the Document Service using the current configuration in Dynamics NAV.
+      // An error occurrs if unable to successfully connect.
+      IF NOT IsConfigured THEN
+        ERROR(NoConfigErr);
+      DocumentServiceHelper.Reset;
+      SetDocumentService;
+      SetProperties;
+      //**4PS.so
+      //IF ISNULL(DocumentService.Credentials) THEN
+      //  ERROR(ValidateConnectionErr);
+      //**4PS.eo
+      //**4PS.sn
+      IF NOT UseDocumentService4PS THEN
+        IF ISNULL(DocumentService.Credentials) THEN
+          ERROR(ValidateConnectionErr);
+      //**4PS.en
+      DocumentService.ValidateConnection();
+      CheckError;
+    END;
+
+    [Internal]
+    PROCEDURE SaveFile@10(SourcePath@1000 : Text;TargetName@1002 : Text;Overwrite@1001 : Boolean) : Text;
+    VAR
+      SourceFile@1003 : File;
+      SourceStream@1004 : InStream;
+    BEGIN
+      // Saves a file to the Document Service using the configured location specified in Dynamics NAV.
+      // SourcePath: The path to a physical file on the Dynamics NAV server.
+      // TargetName: The name which will be given to the file saved to the Document Service.
+      // Overwrite: TRUE if the target file should be overwritten.
+      // - An error is shown if Overwrite is FALSE and a file with that name already exists.
+      // Returns: A URI to the file on the Document Service.
+
+      IF SourcePath = '' THEN
+        ERROR(RequiredSourceNameErr);
+
+      IF TargetName = '' THEN
+        ERROR(RequiredTargetNameErr);
+
+      IF NOT IsConfigured THEN
+        ERROR(NoConfigErr);
+
+      IF NOT SourceFile.OPEN(SourcePath) THEN
+        ERROR(SourceFileNotFoundErr,SourcePath,GETLASTERRORTEXT);
+
+      SourceFile.CREATEINSTREAM(SourceStream);
+
+      EXIT(SaveStream(SourceStream,TargetName,Overwrite));
+    END;
+
+    [External]
+    PROCEDURE IsConfigured@2() : Boolean;
+    VAR
+      DocumentServiceRec@1000 : Record 2000000114;
+      DocumentServiceSetup4PS@1100528400 : Record 11071832;
+    BEGIN
+      // Returns TRUE if Dynamics NAV has been configured with a Document Service.
+
+      //**4PS.sn
+      IF UseDocumentService4PS THEN BEGIN
+        IF NOT DocumentServiceSetup4PS.GET THEN
+          EXIT(FALSE);
+        IF (DocumentServiceSetup4PS."SharePoint Site URL" = '') OR
+           (DocumentServiceSetup4PS."Document Library" = '') OR    //**4PS.n mvdbovenkamp
+           (DocumentServiceSetup4PS.Folder = '')
+        THEN
+          EXIT(FALSE);
+        EXIT(TRUE);
+      END;
+      //**4PS.en
+
+      WITH DocumentServiceRec DO BEGIN
+        IF COUNT > 1 THEN
+          ERROR(MultipleConfigsErr);
+
+        IF NOT FINDFIRST THEN
+          EXIT(FALSE);
+
+        IF (Location = '') OR (Folder = '') THEN
+          EXIT(FALSE);
+      END;
+
+      EXIT(TRUE);
+    END;
+
+    [Internal]
+    PROCEDURE IsServiceUri@3(TargetURI@1000 : Text) : Boolean;
+    VAR
+      DocumentServiceRec@1001 : Record 2000000114;
+      IsValid@1002 : Boolean;
+      DocumentServiceSetup4PS@1100528400 : Record 11071832;
+    BEGIN
+      // Returns TRUE if the TargetURI points to a location on the currently-configured Document Service.
+
+      IF TargetURI = '' THEN
+        EXIT(FALSE);
+
+      //**4PS.sn
+      IF UseDocumentService4PS THEN BEGIN
+        IF DocumentServiceSetup4PS.GET THEN
+          IF DocumentServiceSetup4PS."SharePoint Site URL" <> '' THEN BEGIN
+            SetDocumentService;
+            SetProperties;
+            IsValid := DocumentService.IsValidUri(TargetURI);
+            IF DoNotShowError THEN BEGIN
+              IF HasError THEN
+                EXIT(FALSE);
+            END ELSE
+              CheckError;
+            EXIT(IsValid);
+          END;
+        EXIT(FALSE);
+      END;
+      //**4PS.en
+
+      WITH DocumentServiceRec DO BEGIN
+        IF FINDLAST THEN
+          IF Location <> '' THEN BEGIN
+            SetDocumentService;
+            SetProperties;
+            IsValid := DocumentService.IsValidUri(TargetURI);
+            CheckError;
+            EXIT(IsValid);
+          END
+      END;
+
+      EXIT(FALSE);
+    END;
+
+    [Internal]
+    PROCEDURE SetServiceType@6(RequestedServiceType@1000 : Text);
+    VAR
+      DocumentServiceHelper@1001 : DotNet "'Microsoft.Dynamics.Nav.NavUserAccount, Version=14.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.NavDocumentService.NavDocumentServiceHelper";
+    BEGIN
+      // Sets the type name of the Document Service.
+      // The type must match the DocumentServiceMetadata attribute value on the IDocumentServiceHandler interface
+      // exposed by at least one assembly in the Server installation folder.
+      // By default, Dynamics NAV uses the SharePoint Online Document Service with type named 'SHAREPOINTONLINE'.
+      ServiceType := RequestedServiceType;
+      DocumentServiceHelper.SetDocumentServiceType(RequestedServiceType);
+    END;
+
+    [External]
+    PROCEDURE GetServiceType@7() : Text;
+    BEGIN
+      // Gets the name of the current Document Service.
+
+      EXIT(ServiceType);
+    END;
+
+    PROCEDURE OpenDocument@8(TargetURI@1000 : Text);
+    BEGIN
+      // Navigates to the specified URI on the Document Service from the client device.
+
+      IF TargetURI = '' THEN
+        ERROR(RequiredTargetURIErr);
+
+      IF NOT IsConfigured THEN
+        ERROR(NoConfigErr);
+
+      SetDocumentService;
+      HYPERLINK(DocumentService.GenerateViewableDocumentAddress(TargetURI));
+      CheckError;
+    END;
+
+    LOCAL PROCEDURE SetProperties@34();
+    VAR
+      DocumentServiceRec@1000 : Record 2000000114;
+      DocumentServiceHelper@1001 : DotNet "'Microsoft.Dynamics.Nav.NavUserAccount, Version=14.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.NavDocumentService.NavDocumentServiceHelper";
+      DocumentServiceSetup4PS@1100528400 : Record 11071832;
+    BEGIN
+      //**4PS.sn
+      IF UseDocumentService4PS THEN BEGIN
+        DocumentServiceSetup4PS.GET;
+        DocumentService.Properties.SetProperty(
+          DocumentServiceRec.FIELDNAME(Location),DocumentServiceSetup4PS."SharePoint Site URL");
+        DocumentService.Properties.SetProperty(
+          DocumentServiceRec.FIELDNAME("User Name"),DocumentServiceSetup4PS."User Name");
+        DocumentService.Properties.SetProperty(
+          DocumentServiceRec.FIELDNAME(Password),DocumentServiceSetup4PS.Password);
+        DocumentService.Properties.SetProperty(
+          DocumentServiceRec.FIELDNAME("Document Repository"),DocumentServiceSetup4PS."Document Library");
+        DocumentService.Properties.SetProperty(
+          DocumentServiceRec.FIELDNAME(Folder),DocumentServiceSetup4PS.Folder);
+        EXIT;
+      END;
+      //**4PS.en
+      WITH DocumentServiceRec DO BEGIN
+        IF NOT FINDFIRST THEN
+          ERROR(NoConfigErr);
+
+        // The Document Service will throw an exception if the property is not known to the service type provider.
+        DocumentService.Properties.SetProperty(FIELDNAME(Description),Description);
+        DocumentService.Properties.SetProperty(FIELDNAME(Location),Location);
+        DocumentService.Properties.SetProperty(FIELDNAME("User Name"),"User Name");
+        DocumentService.Properties.SetProperty(FIELDNAME(Password),Password);
+        DocumentService.Properties.SetProperty(FIELDNAME("Document Repository"),"Document Repository");
+        DocumentService.Properties.SetProperty(FIELDNAME(Folder),Folder);
+
+        DocumentService.Credentials := DocumentServiceHelper.ProvideCredentials();
+        IF NOT (DocumentServiceHelper.LastErrorMessage = '') THEN
+          ERROR(DocumentServiceHelper.LastErrorMessage);
+      END;
+    END;
+
+    LOCAL PROCEDURE SetDocumentService@5();
+    VAR
+      RequestedServiceType@1000 : Text;
+    BEGIN
+      // Sets the Document Service for the current Service Type, reusing an existing service if possible.
+
+      RequestedServiceType := GetServiceType;
+
+      IF RequestedServiceType = '' THEN
+        RequestedServiceType := 'SHAREPOINTONLINE';
+
+      IF LastServiceType <> RequestedServiceType THEN BEGIN
+        DocumentService := DocumentServiceFactory.CreateService(RequestedServiceType);
+        LastServiceType := RequestedServiceType;
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckError@12();
+    BEGIN
+      // Checks whether the Document Service received an error and displays that error to the user.
+
+      IF NOT ISNULL(DocumentService.LastError) AND (DocumentService.LastError.Message <> '') THEN
+        ERROR(DocumentService.LastError.Message);
+    END;
+
+    PROCEDURE SaveStream@13(Stream@1000 : InStream;TargetName@1002 : Text;Overwrite@1001 : Boolean) : Text;
+    VAR
+      DocumentURI@1003 : Text;
+      FileManagement@1100528700 : Codeunit 419;
+    BEGIN
+      // Saves a stream to the Document Service using the configured location specified in Dynamics NAV.
+      SetDocumentService;
+      SetProperties;
+
+      //**4PS.sn
+      IF UseDocumentService4PS THEN BEGIN
+        SetSubfolder(TargetName);
+        TargetName := FileManagement.GetFileName(TargetName);
+      END;
+      //**4PS.en
+
+      DocumentURI := DocumentService.Save(Stream,TargetName,Overwrite);
+      CheckError;
+
+      EXIT(DocumentURI);
+    END;
+
+    PROCEDURE SaveStreamByOutputStream@1100527701(Stream@1000 : OutStream;TargetName@1002 : Text;Overwrite@1001 : Boolean) : Text;
+    VAR
+      DocumentURI@1003 : Text;
+      FileManagement@1100528700 : Codeunit 419;
+    BEGIN
+      //**4PS
+      SetDocumentService;
+      SetProperties;
+
+      IF UseDocumentService4PS THEN BEGIN
+        SetSubfolder(TargetName);
+        TargetName := FileManagement.GetFileName(TargetName);
+      END;
+
+      DocumentURI := DocumentService.Save(Stream,TargetName,Overwrite);
+      CheckError;
+
+      EXIT(DocumentURI);
+    END;
+
+    LOCAL PROCEDURE SetSubfolder@1100528403(TargetName@1100528400 : Text);
+    VAR
+      DocumentServiceSetup4PS@1100528403 : Record 11071832;
+      DocumentService2@1100528404 : Record 2000000114;
+      FileManagement@1100528401 : Codeunit 419;
+      Subfolder@1100528402 : Text;
+    BEGIN
+      //**4PS
+      DocumentServiceSetup4PS.GET;
+      Subfolder := FileManagement.GetDirectoryName(TargetName);
+      IF (Subfolder <> '') THEN BEGIN
+        IF (COPYSTR(Subfolder, 1, 1) = '\') THEN
+          Subfolder := COPYSTR(Subfolder, 2);
+        DocumentService.Properties.SetProperty(
+          DocumentService2.FIELDNAME(Folder), DocumentServiceSetup4PS.Folder + '\' + Subfolder);
+      END;
+    END;
+
+    PROCEDURE DownloadFileFromCloudToServerSilent@1100528700(DocumentURI@1100528700 : Text) ServerFileName : Text;
+    VAR
+      WebClient@1100528703 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.WebClient";
+      SecureString@1100528702 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Security.SecureString";
+      Uri@1100528706 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Uri";
+      SharePointOnlineCredentials@1100528711 : DotNet "'Microsoft.SharePoint.Client.Runtime, Version=16.1.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.SharePoint.Client.SharePointOnlineCredentials";
+      HttpRequestHeader@1100528712 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpRequestHeader";
+      FileHelper@1100528407 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.File";
+      DateTimeHelper@1100528404 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.DateTime";
+      DocumentServiceRec@1100528705 : Record 2000000114;
+      DocumentServiceSetup4PS@1100528400 : Record 11071832;
+      FileManagement@1100528709 : Codeunit 419;
+      LastModifiedDateTime@1100528405 : DateTime;
+      PassWord@1100528401 : Text;
+      UserName@1100528402 : Text;
+      LastModifiedText@1100528403 : Text;
+      I@1100528704 : Integer;
+    BEGIN
+      //**4PS
+      IF DocumentURI = '' THEN
+        ERROR(RequiredTargetURIErr);
+
+      IF NOT IsConfigured THEN
+        ERROR(NoConfigErr);
+
+      IF UseDocumentService4PS THEN BEGIN
+        DocumentServiceSetup4PS.GET;
+        PassWord := DocumentServiceSetup4PS.Password;
+        UserName := DocumentServiceSetup4PS."User Name";
+      END ELSE BEGIN
+        DocumentServiceRec.FINDFIRST;
+        PassWord := DocumentServiceRec.Password;
+        UserName := DocumentServiceRec."User Name";
+      END;
+
+      SecureString := SecureString.SecureString;
+      WHILE (I < STRLEN(PassWord)) DO BEGIN
+        SecureString.AppendChar(PassWord[I + 1]);
+        I += 1;
+      END;
+
+      Uri := Uri.Uri(DocumentURI);
+      SharePointOnlineCredentials := SharePointOnlineCredentials.SharePointOnlineCredentials(
+        UserName, SecureString);
+      WebClient := WebClient.WebClient;
+      WebClient.Headers.Add(
+        HttpRequestHeader.Cookie, SharePointOnlineCredentials.GetAuthenticationCookie(Uri));
+      ServerFileName := FileManagement.ServerTempFileName(FileManagement.GetExtension(DocumentURI));
+      WebClient.DownloadFile(DocumentURI, ServerFileName);
+      //Last modified date of server file is set, to make sure that
+      //DocumentProperties.GetPropertiesFromFile returns the correct ModifyDateTime.
+      LastModifiedText := WebClient.ResponseHeaders.Get('Last-Modified');
+      IF DateTimeHelper.TryParse(LastModifiedText, LastModifiedDateTime) THEN
+        FileHelper.SetLastWriteTime(ServerFileName, LastModifiedDateTime);
+    END;
+
+    PROCEDURE DownloadFileFromCloudToClientSilent@1100528702(DocumentURI@1100528700 : Text) ClientFileName : Text;
+    VAR
+      FileManagement@1100528709 : Codeunit 419;
+      TempServerFileName@1100528701 : Text;
+    BEGIN
+      //**4PS
+      TempServerFileName := DownloadFileFromCloudToServerSilent(DocumentURI);
+      ClientFileName := FileManagement.DownloadTempFile(TempServerFileName);
+      ERASE(TempServerFileName);
+    END;
+
+    PROCEDURE DownloadFileFromCloudStreamed@1100525004(DocumentURI@1100525000 : Text;VAR Base64@1100525001 : BigText) : Boolean;
+    VAR
+      WebClient@1100525002 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.WebClient";
+      MemoryStream@1100525003 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.MemoryStream";
+      Stream@1100525004 : DotNet "'mscorlib'.System.IO.Stream";
+      Bytes@1100525007 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Array";
+      Convert@1100525009 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Convert";
+    BEGIN
+      //**4PS
+      WebClient := WebClient.WebClient;
+      SetWebClientCredentials(WebClient, DocumentURI);
+      Stream := WebClient.OpenRead(DocumentURI);
+      MemoryStream := MemoryStream.MemoryStream;
+      Stream.CopyTo(MemoryStream);
+      Bytes := MemoryStream.ToArray;
+      Base64.ADDTEXT(Convert.ToBase64String(Bytes));
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE DownloadFileFromCloudToMemoryStream@1100527800(DocumentURI@1100527800 : Text;VAR MemoryStream@1100527802 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.MemoryStream");
+    VAR
+      WebClient@1100527803 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.WebClient";
+      Stream@1100527801 : DotNet "'mscorlib'.System.IO.Stream";
+    BEGIN
+      //**4PS
+      WebClient := WebClient.WebClient;
+      SetWebClientCredentials(WebClient, DocumentURI);
+      Stream := WebClient.OpenRead(DocumentURI);
+      Stream.CopyTo(MemoryStream);
+    END;
+
+    PROCEDURE UploadFileFromServerToCloudSilent@1100528704(ServerFileName@1100528700 : Text;TargetFolder@1100528701 : Text;ShortFileName@1100528702 : Text) DocumentURI : Text;
+    BEGIN
+      //**4PS
+      FileManagement.AddBackSlashToDirectoryName(TargetFolder);
+      TestIsConfigured;
+      DocumentURI := SaveFile(ServerFileName, TargetFolder + ShortFileName, TRUE);
+    END;
+
+    PROCEDURE UploadFileFromClientToCloudSilent@1100528711(ClientFileName@1100528706 : Text;TargetFolder@1100528704 : Text) DocumentURI : Text;
+    VAR
+      ShortFileName@1100528700 : Text;
+      ServerFileName@1100528703 : Text;
+    BEGIN
+      //**4PS
+      ShortFileName := FileManagement.GetFileName(ClientFileName);
+      ServerFileName := FileManagement.UploadFileSilent(ClientFileName);
+      DocumentURI := UploadFileFromServerToCloudSilent(ServerFileName, TargetFolder, ShortFileName);
+      ERASE(ServerFileName);
+    END;
+
+    PROCEDURE UploadFileFromClientToCloud@1100528703(TargetFolder@1100528704 : Text;Extension@1100528705 : Text) DocumentURI : Text;
+    VAR
+      ServerFileName@1100528400 : Text;
+      ShortFileName@1100528700 : Text;
+    BEGIN
+      //**4PS
+      IF Extension <> '' THEN
+        ServerFileName := FileManagement.UploadFile('', '*.' + Extension)
+      ELSE
+        ServerFileName := FileManagement.UploadFile('', '');
+      IF ServerFileName = '' THEN
+        EXIT;
+      ShortFileName := FileManagement.GetFileName(ServerFileName);
+      DocumentURI := UploadFileFromServerToCloudSilent(ServerFileName, TargetFolder, ShortFileName);
+      ERASE(ServerFileName);
+    END;
+
+    PROCEDURE TestIsConfigured@1100528701();
+    BEGIN
+      //**4PS
+      IF NOT IsConfigured THEN
+        ERROR(NoConfigErr);
+    END;
+
+    PROCEDURE SetUseDocumentService4PS@1100528400(UseDocumentService4PS2@1100528400 : Boolean);
+    BEGIN
+      //**4PS
+      UseDocumentService4PS := UseDocumentService4PS2;
+    END;
+
+    PROCEDURE SetDoNotShowError@1100529600(DoNotShowErrorNew@1100529600 : Boolean);
+    BEGIN
+      //**4PS
+      DoNotShowError := DoNotShowErrorNew;
+    END;
+
+    LOCAL PROCEDURE HasError@1100529602() : Boolean;
+    BEGIN
+      //**4PS
+      IF NOT ISNULL(DocumentService.LastError) AND (DocumentService.LastError.Message <> '') THEN
+        EXIT(TRUE);
+
+      EXIT(FALSE);
+    END;
+
+    PROCEDURE CanConnect@1100529601() : Boolean;
+    VAR
+      DocumentServiceHelper@1000 : DotNet "'Microsoft.Dynamics.Nav.NavUserAccount, Version=14.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'.Microsoft.Dynamics.Nav.NavDocumentService.NavDocumentServiceHelper";
+    BEGIN
+      //**4PS
+      IF NOT IsConfigured THEN
+        EXIT(FALSE);
+      DocumentServiceHelper.Reset;
+      SetDocumentService;
+      SetProperties;
+
+      IF NOT UseDocumentService4PS THEN
+        IF ISNULL(DocumentService.Credentials) THEN
+          EXIT(FALSE);
+
+      DocumentService.ValidateConnection();
+      EXIT(NOT HasError);
+    END;
+
+    PROCEDURE GetDocumentServiceURL@1100529603() DocumentServiceURL : Text;
+    VAR
+      DocumentServiceSetup4PS@1100529600 : Record 11071832;
+    BEGIN
+      //**4PS
+      DocumentServiceURL := '';
+      IF NOT UseDocumentService4PS THEN
+        EXIT;
+      IF NOT CanConnect THEN
+        EXIT;
+      DocumentServiceSetup4PS.GET;
+      DocumentServiceURL := DocumentServiceSetup4PS."SharePoint Site URL";
+      IF (COPYSTR(DocumentServiceSetup4PS."SharePoint Site URL", STRLEN(DocumentServiceSetup4PS."SharePoint Site URL")) <> '/') AND
+         (COPYSTR(DocumentServiceSetup4PS."Document Library", 1, 1) <> '/')
+      THEN
+        DocumentServiceURL := DocumentServiceURL + '/';
+      DocumentServiceURL := DocumentServiceURL + DocumentServiceSetup4PS."Document Library";
+      IF DocumentServiceSetup4PS.Folder = '' THEN
+        EXIT;
+      IF (COPYSTR(DocumentServiceSetup4PS."Document Library", STRLEN(DocumentServiceSetup4PS."Document Library")) <> '/') AND
+         (COPYSTR(DocumentServiceSetup4PS.Folder, 1, 1) <> '/')
+      THEN
+        DocumentServiceURL := DocumentServiceURL + '/';
+      DocumentServiceURL := DocumentServiceURL + DocumentServiceSetup4PS.Folder;
+    END;
+
+    LOCAL PROCEDURE SetSecureString@1100525001(VAR SecureString@1100525000 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Security.SecureString";PassWord@1100525001 : Text);
+    VAR
+      I@1100525002 : Integer;
+    BEGIN
+      //**4PS
+      WHILE (I < STRLEN(PassWord)) DO BEGIN
+        SecureString.AppendChar(PassWord[I + 1]);
+        I += 1;
+      END;
+    END;
+
+    LOCAL PROCEDURE SetWebClientCredentials@1100525006(VAR WebClient@1100525000 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.WebClient";DocumentURI@1100525009 : Text);
+    VAR
+      Uri@1100525004 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Uri";
+      SharePointOnlineCredentials@1100525003 : DotNet "'Microsoft.SharePoint.Client.Runtime, Version=16.1.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.SharePoint.Client.SharePointOnlineCredentials";
+      HttpRequestHeader@1100525002 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpRequestHeader";
+      SecureString@1100525001 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Security.SecureString";
+      DocumentServiceSetup4PS@1100525005 : Record 11071832;
+      PassWord@1100525007 : Text;
+      UserName@1100525006 : Text;
+      DocumentServiceRec@1100525008 : Record 2000000114;
+    BEGIN
+      //**4PS
+      IF NOT IsConfigured THEN
+        ERROR(NoConfigErr);
+
+      IF UseDocumentService4PS THEN BEGIN
+        DocumentServiceSetup4PS.GET;
+        PassWord := DocumentServiceSetup4PS.Password;
+        UserName := DocumentServiceSetup4PS."User Name";
+      END ELSE BEGIN
+        DocumentServiceRec.FINDFIRST;
+        PassWord := DocumentServiceRec.Password;
+        UserName := DocumentServiceRec."User Name";
+      END;
+
+      Uri := Uri.Uri(DocumentURI);
+      SecureString := SecureString.SecureString;
+      SetSecureString(SecureString,PassWord);
+      SharePointOnlineCredentials := SharePointOnlineCredentials.SharePointOnlineCredentials(UserName, SecureString);
+      WebClient.Headers.Add(HttpRequestHeader.Cookie, SharePointOnlineCredentials.GetAuthenticationCookie(Uri));
+    END;
+
+    PROCEDURE UploadDocumentStreamed@1100525000(VAR Content@1100525000 : InStream;TargetName@1100525002 : Text;Overwrite@1100525001 : Boolean) : Text;
+    BEGIN
+      //**4PS
+      IF NOT IsConfigured THEN
+        ERROR(NoConfigErr);
+
+      EXIT(SaveStream(Content,TargetName,Overwrite));
+    END;
+
+    PROCEDURE DeleteFile@1100527803(DocumentURI@1100527801 : Text) : Boolean;
+    VAR
+      ClientContext@1100527811 : DotNet "'Microsoft.SharePoint.Client, Version=16.1.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.SharePoint.Client.ClientContext";
+      Web@1100527810 : DotNet "'Microsoft.SharePoint.Client, Version=16.1.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.SharePoint.Client.Web";
+      File@1100527809 : DotNet "'Microsoft.SharePoint.Client, Version=16.1.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.SharePoint.Client.File";
+      SharePointOnlineCredentials@1100527803 : DotNet "'Microsoft.SharePoint.Client.Runtime, Version=16.1.0.0, Culture=neutral, PublicKeyToken=71e9bce111e9429c'.Microsoft.SharePoint.Client.SharePointOnlineCredentials";
+      SecureString@1100527800 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Security.SecureString";
+      DocumentServiceSetup4PS@1100527802 : Record 11071832;
+      PassWord@1100527806 : Text;
+      UserName@1100527805 : Text;
+      Site@1100527807 : Text;
+      RelativePath@1100527808 : Text;
+      URI@1100527813 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Uri";
+      Pos@1100527814 : Integer;
+    BEGIN
+      //**4PS
+      DocumentServiceSetup4PS.GET;
+      PassWord := DocumentServiceSetup4PS.Password;
+      UserName := DocumentServiceSetup4PS."User Name";
+      Site := DocumentServiceSetup4PS."SharePoint Site URL";
+
+      IF STRPOS(DocumentURI, Site) <= 0 THEN
+        EXIT(FALSE); //File can only be deleted when URI is complete.
+
+      URI := URI.Uri(DocumentURI);
+      Pos := STRPOS(DocumentURI,URI.Host);
+      Pos +=  STRLEN(URI.Host);
+      RelativePath := COPYSTR(DocumentURI,Pos);
+
+      SecureString := SecureString.SecureString;
+      SetSecureString(SecureString,PassWord);
+
+      SharePointOnlineCredentials := SharePointOnlineCredentials.SharePointOnlineCredentials(UserName, SecureString);
+      ClientContext := ClientContext.ClientContext(Site);
+
+      Web := ClientContext.Web;
+      ClientContext.Credentials := SharePointOnlineCredentials.SharePointOnlineCredentials(UserName, SecureString);
+      ClientContext.Web.Context.Credentials := SharePointOnlineCredentials.SharePointOnlineCredentials(UserName, SecureString);
+      File := Web.GetFileByServerRelativeUrl(RelativePath);
+      File.Recycle;
+      ClientContext.ExecuteQuery();
+      ClientContext.Dispose;
+      EXIT(TRUE);
+    END;
+
+    BEGIN
+    {
+      Provides functions for the storage of documents to online services such as O365 (Office 365).
+    }
+    END.
+  }
+}
+

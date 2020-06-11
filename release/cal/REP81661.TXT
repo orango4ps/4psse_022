@@ -1,0 +1,1690 @@
+OBJECT Report 81661 ReleaseHourAccounting_GUI
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=RFC-002;
+  }
+  PROPERTIES
+  {
+    ProcessingOnly=No;
+    OnInitReport=BEGIN
+                   CurrReport.USEREQUESTPAGE := TRUE;
+                   // CurrReport.PREVIEW;
+                 END;
+
+    PreviewMode=Normal;
+    UseRequestPage=No;
+  }
+  DATASET
+  {
+    { 81660;   ;DataItem;Hour Accounting     ;
+               DataItemTable=Table11012038;
+               OnPreDataItem=BEGIN
+                               //xRec.SETRANGE("Employee No.", 'ANST10322');
+                               JobsSetup.GET;
+                               HumanResourcesSetup.GET;
+
+                               lvDateExpr1 := '<-WD7>';
+                               //lvToday := 20150614D;
+                               lvToday := TODAY;
+
+                               lvDatePreviousWeek := CALCDATE(lvDateExpr1, lvToday);
+                               lvLatestYearToProcess := DATE2DWY(lvDatePreviousWeek, 3);
+                               lvLatestWeekToProcess := DATE2DWY(lvDatePreviousWeek, 2);
+
+                               "Hour Accounting".SETRANGE(Status, Status::Open);
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  lControllerNo@1100285000 : Code[20];
+                                  lvDoNotRelease@1100285001 : Boolean;
+                                BEGIN
+
+                                  lvYearWeek := FORMAT("Hour Accounting".Year, 4) + FORMAT("Hour Accounting".Week, 2);
+                                  lvEmplNo := "Hour Accounting"."Employee No.";
+                                  lvDoNotRelease := FALSE;
+                                  PossibleToRelease := FALSE;     // Only used as a displayed value in the report
+
+                                  IF lvYearWeek <= FORMAT(lvLatestYearToProcess, 4) + FORMAT(lvLatestWeekToProcess, 2) THEN BEGIN
+
+                                    // Logic for checking (if its OK to Release)
+
+                                    // Copy logic from Table Hour Accounting, function SetStatus()
+                                    lHourControllerRec.SETRANGE("Employee No.", "Employee No.");
+                                    IF NOT lHourControllerRec.ISEMPTY THEN BEGIN
+                                      IF lControllerNo = '' THEN BEGIN
+                                        ErrMsg := STRSUBSTNO(Text1008, FIELDNAME("Employee No."), USERID);
+                                        lvDoNotRelease := TRUE;
+                                      END;
+                                      lHourControllerRec.SETRANGE("Controller No.", lControllerNo);
+                                      IF lHourControllerRec.ISEMPTY THEN BEGIN
+                                        ErrMsg := STRSUBSTNO(Text1009, "Employee No.");
+                                        lvDoNotRelease := TRUE;
+                                      END;
+                                    END;
+
+                                    CLEAR(HourAccountingLine);
+                                    HourAccountingLine.SETRANGE(Year, Year);
+                                    HourAccountingLine.SETRANGE(Week, Week);
+                                    HourAccountingLine.SETRANGE("Employee No.", "Employee No.");
+
+                                    IF HourAccountingLine.FINDSET THEN REPEAT
+                                      IF JobsSetup."Team Code mandatory for Hours" THEN BEGIN
+                                        IF Employee.GET(HourAccountingLine."Employee No.") THEN BEGIN
+                                          IF NOT Employee.UTA THEN
+                                            IF WageComponent.GET(HourAccountingLine."Wage Component") THEN BEGIN
+                                              IF (WageComponent."Component Type" = WageComponent."Component Type"::Hours) OR (WageComponent."Component Type" = WageComponent."Component Type"::"Expense hours") THEN
+                                                IF (HourAccountingLine.Type = HourAccountingLine.Type::Project) OR (HourAccountingLine.Type = HourAccountingLine.Type::Service) THEN
+                                                  IF HourAccountingLine."Team Code" = '' THEN BEGIN
+                                                    ErrMsg := Text11128000;
+                                                    lvDoNotRelease := TRUE;
+                                                 END;
+                                          END;
+                                        END;
+                                      END;
+                                      //>> 151015 ITERO.AC Check to avoid error that occurred 151013 due to existsing Hour Consent Lines
+                                      HourConsentLineRec.SETRANGE(Year, Year);
+                                      HourConsentLineRec.SETRANGE(Week, Week);
+                                      HourConsentLineRec.SETRANGE(Employee, HourAccountingLine."Employee No.");
+                                      HourConsentLineRec.SETRANGE(LineType, HourConsentLineRec.LineType::Normal);
+                                      HourConsentLineRec.SETRANGE("Line No.", HourAccountingLine."Line No.");
+                                      HourConsentLineRec.SETRANGE(HourConsentLineRec."Serial Number", 1);
+                                      IF NOT HourConsentLineRec.ISEMPTY THEN BEGIN
+                                        ErrMsg := STRSUBSTNO( Text115, Year, Week, HourAccountingLine."Employee No.");
+                                        lvDoNotRelease := TRUE;
+                                      END;
+                                      //<< 151015 ITERO.AC
+                                    UNTIL (HourAccountingLine.NEXT=0) OR lvDoNotRelease;
+
+                                    // Modified Copy of Update Function in Table 11012038 Hour Accounting, Function SetStatus
+                                    IF (Status <> Status::Released) AND (lvDoNotRelease = FALSE) THEN BEGIN
+                                      CLEAR(HourAccountingLine);
+                                      HourAccountingLine.SETRANGE(Year, Year);
+                                      HourAccountingLine.SETRANGE(Week, Week);
+                                      HourAccountingLine.SETRANGE("Employee No.", "Employee No.");
+                                      IF NOT HourAccountingLine.FINDFIRST THEN BEGIN
+                                        ErrMsg := Text010;
+                                        lvDoNotRelease := TRUE;
+                                      END;
+
+                                      //Status := Status::Released;
+                                      //"Released by" := USERID;
+
+                                      // SESB.031 VKO 26.07.2013 >>
+                                      //Consented := FALSE;
+                                      //MODIFY(TRUE);
+                                      // SESB.031 VKO 26.07.2013 <<
+                                      // SESB.I031 ASH 11.07.2013 >>
+                                      // IF JobsSetup."Explode Hour Lines at Release" THEN
+                                      //  ExplodeLines;
+
+                                      // SESB.I031 ASH 11.07.2013 <<
+
+                                      IF (lvDoNotRelease = FALSE) AND (HumanResourcesSetup."Check Hours on Release") THEN
+                                        IF CheckLines(Year, Week, "Employee No.") = FALSE THEN
+                                          lvDoNotRelease := TRUE;
+
+                                  //    IF HumanResourcesSetup."Consent Hours" THEN BEGIN
+                                  //      //aanmaken fiatteringsposten uren
+                                  //      CreateConsentLines(lHourAccLineRec);
+                                  //    END;
+
+                                      IF NOT Employee.GET("Employee No.") THEN BEGIN
+                                        lvDoNotRelease := TRUE;
+                                      END ELSE BEGIN
+                                        IF (Employee."Manager No." = '0') OR (Employee."Manager No." = '') THEN BEGIN
+                                          lvDoNotRelease := TRUE;
+                                          ErrMsg := STRSUBSTNO( Text112, Employee."No.");
+                                        END;
+                                      END;
+
+                                      IF lvDoNotRelease = FALSE THEN BEGIN
+                                        IF Employee.Status <> Employee.Status::Active THEN BEGIN
+                                          ErrMsg := STRSUBSTNO(Text107, "Employee No.", Employee.Status);
+                                          lvDoNotRelease := TRUE;
+                                        END;
+                                      END;
+
+                                      IF (lvDoNotRelease = FALSE) AND (HumanResourcesSetup."Norm Check") THEN BEGIN
+                                        //EmployeeRec.GET("Employee No.");
+                                        IF Employee."Account Hours" = Employee."Account Hours"::"Required according to Norm" THEN
+                                          IF NOT CheckNormHoursConsentEx(HourAccountingLine) THEN BEGIN
+                                            //ERROR(Text025,TotalNormHours,EmployeeRec."Norm Hours"); //40 uurs controle
+                                            //ErrMsg := STRSUBSTNO(Text025,TotalNormHours,EmployeeRec."Norm Hours");
+                                            lvDoNotRelease := TRUE;
+                                          END;
+                                      END;
+
+                                      IF (lvDoNotRelease = FALSE) AND HumanResourcesSetup."Check Hours" AND ("Supplying Company" = '') THEN BEGIN
+                                        IF Employee."Check Hours" THEN BEGIN
+                                          IF "Date Checked" = 0D THEN
+                                            lvDoNotRelease := TRUE;
+                                        END;
+                                      END;
+
+                                      // Test Only
+                                      IF lvDoNotRelease = FALSE THEN BEGIN
+                                        ErrMsg := '';
+                                        PossibleToRelease := TRUE;      // Only used as a diplayed value in the report
+                                      END ELSE BEGIN
+                                        PossibleToRelease := FALSE;
+                                      END;
+
+                                    END;
+
+                                  END ELSE BEGIN
+                                    ErrMsg := Text108;
+                                  END;
+                                END;
+                                 }
+
+    { 1100409000;1;Column;Year_HourAccounting;
+               IncludeCaption=Yes;
+               SourceExpr="Hour Accounting".Year }
+
+    { 1100409001;1;Column;Week_HourAccounting;
+               IncludeCaption=Yes;
+               SourceExpr="Hour Accounting".Week }
+
+    { 1100409002;1;Column;EmployeeNo_HourAccounting;
+               OptionCaptionML=[ENU=Employee No.;
+                                SVE=AnstÑllningsnummer];
+               IncludeCaption=Yes;
+               SourceExpr="Hour Accounting"."Employee No." }
+
+    { 1100409003;1;Column;Status_HourAccounting;
+               IncludeCaption=Yes;
+               SourceExpr="Hour Accounting".Status }
+
+    { 1100285000;1;Column;FullName           ;
+               IncludeCaption=Yes;
+               SourceExpr="Hour Accounting"."Full Name" }
+
+    { 1100285001;1;Column;Error_Message      ;
+               SourceExpr=ErrMsg }
+
+    { 1100285002;1;Column;PossibleToRelease  ;
+               SourceExpr=PossibleToRelease }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+    }
+    CONTROLS
+    {
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      lvPeriodFilter@1100409000 : Text;
+      lvDatePreviousWeek@1100409001 : Date;
+      lvToday@1100409005 : Date;
+      lvDateExpr1@1100409002 : Text;
+      lvLatestYearToProcess@1100409003 : Integer;
+      lvLatestWeekToProcess@1100409004 : Integer;
+      lvYearWeek@1100409006 : Text;
+      lvEmplNo@1100409007 : Text;
+      JobsSetup@1100285000 : Record 315;
+      ServiceSetup@1100285059 : Record 11012800;
+      ICProjSetup@1100285040 : Record 315;
+      HumanResourcesSetup@1100285001 : Record 5218;
+      HourAccountingLine@1100285002 : Record 11012039;
+      HourConsentLineRec@1100285065 : Record 11020437;
+      lHourControllerRec@1100285003 : Record 11012008;
+      Employee@1100285004 : Record 5200;
+      WageComponent@1100285005 : Record 11012014;
+      CheckHourLine@1100285006 : Codeunit 11012003;
+      PlantSetup@1100285007 : Record 11012550;
+      PlantLocationRec@1100285008 : Record 11012554;
+      PlantTypeRec@1100285009 : Record 11012551;
+      PlantNoRec@1100285010 : Record 11012552;
+      PlantRateCodeRec@1100285011 : Record 11020502;
+      PlantCostCompRec@1100285012 : Record 11012575;
+      WageComponentRec@1100285013 : Record 11012014;
+      EmplRec@1100285014 : Record 5200;
+      DimMgt@1100285015 : Codeunit 408;
+      DimValRec@1100285016 : Record 349;
+      CostCodeRec@1100285017 : Record 11012083;
+      TradeGroupRec@1100285018 : Record 11012015;
+      RentalUnitRec@1100285019 : Record 11012940;
+      UserSetupRec@1100285020 : Record 91;
+      AllowPostingFrom@1100285022 : Date;
+      AllowPostingTo@1100285021 : Date;
+      UserSetup@1100285023 : Record 91;
+      GLSetup@1100285024 : Record 98;
+      PossibleToRelease@1100285045 : Boolean;
+      ErrMsg@1100285025 : Text[1024];
+      Text000@1100285033 : TextConst 'ENU=Number of hours (%1) is not equal to norm hours (%2).;NOR=Antall timer (%1) stemmer ikke i forhold til normert tid (%2).;SVE=Antal timmar (%1) Ñr inte lika med normtiden (%2).';
+      Text002@1100285032 : TextConst 'ENU=cannot be a closing date;NOR=kan ikke vëre en sluttdato;SVE=kan inte vara ett avslutsdatum';
+      Text003@1100285031 : TextConst 'ENU=is not within your range of allowed posting dates;NOR=er ikke i ditt tillatte intervall for bokfõringsdatoer;SVE=Ñr inte i ditt tillÜtna intervall fîr bokfîringsdatum';
+      Text004@1100285030 : TextConst 'ENU=may not be filled if Supplying Company is filled;NOR=kan ikke vëre fylt ut hvis Leverende selskap er fylt ut;SVE=fÜr inte vara ifyllt om Levererande Fîretag har fyllts i';
+      Text005@1100285029 : TextConst 'ENU=Norm hours are not controlled for broken weeks.;NOR=Normtid er ikke kontrollert for brutte uker;SVE=Normtid kontrolleras inte mot brutna veckor.';
+      Text006@1100285028 : TextConst 'ENU=%1 has no Sales Price;NOR=%1 har ingen salgspris;SVE=%1 har inget fîrsÑljningspris';
+      Text007@1100285027 : TextConst 'ENU=%1 has no Cost Price;NOR=%1 har ingen selvkost;SVE=%1 har inget sjÑlvkostnadspris';
+      Text008@1100285026 : TextConst 'ENU=Number of hours (%1) is not equal to norm hours (%2). %3 %4, date %5.;NOR=Antall timer (%1) stemmer ikke i forhold til normert tid (%2). %3 %4, dato %5;SVE=Antal timmar (%1) Ñr inte lika med normtiden (%2). %3 %4, datum %5.';
+      ProjRec@1100285034 : Record 11072003;
+      ProjTypeRec@1100285035 : Record 11012009;
+      gvVendorCde@1100285036 : Code[20];
+      WIPAcc@1100285037 : Code[20];
+      ProjElemRec@1100285038 : Record 11012010;
+      ProjExpBalAccRec@1100285039 : Record 11012053;
+      Text010@1100285042 : TextConst 'ENU=No hour accounting lines present, release not allowed.;NOR=Det finnes ingen timerapporter, ikke tillatt Ü frigi.;SVE=Det finns inga tidrapporter, slÑppning inte tillÜten.';
+      Text018@1100285063 : TextConst 'ENU=Project manager in project %1, employee %2 is not linked to %3.;NOR=Prosjektleder i prosjekt %1, ansattnr %2 er ikke kÜblet till %3.;SVE=Platschefen i projekt %1, anstÑllningsnr %2 Ñr inte kopplad till %3.';
+      Text025@1100285053 : TextConst 'ENU=Number of hours (%1) different from norm hours (%2);NOR=Antall timer (%1) skiller seg fra normtimer (%2);SVE=Antal timmar (%1) skiljer sig frÜn normtimmar (%2)';
+      Text100@1100285046 : TextConst 'ENU=Missing balance account;NOR=Mangler balansekonto;SVE=Balanskonto saknas';
+      Text101@1100285047 : TextConst 'ENU=Trade Association is missing;SVE=Branschorganisation saknas';
+      Text102@1100285048 : TextConst 'ENU=Wage Coverage Account is missing';
+      Text103@1100285049 : TextConst 'ENU=Project: %1. Project type is missing';
+      Text11128000@1100285041 : TextConst 'ENU=Team Code must be filled for Hours and Expense Hours;NOR=Tidskode mÜ vëre fylt ut for timer og forbrukstimer;SVE=Arbetslag kod mÜste fyllas i fîr timmar och kostnadstimmar';
+      Text1008@1100285043 : TextConst 'ENU=%1 not present in User Setup of %2.;NOR=%1 finnes ikke i Brukerinnstillingene for %2.;SVE=%1 finns inte i anvÑndarinstÑllningarna fîr %2.';
+      Text1009@1100285044 : TextConst 'ENU=You are no Controller for Employee %1.;NOR=Du er ikke kontroller for Ansatt %1.;SVE=Du Ñr inte kontrollant fîr anstÑlld %1.';
+      Text104@1100285050 : TextConst 'ENU=Project No. is missing;SVE=Projektnummer saknas.';
+      Text105@1100285051 : TextConst 'ENU=Cost object is missing;SVE=Kostnadsobjekt saknas';
+      Text106@1100285052 : TextConst 'ENU=Cost code is missing in indirect hour lines;SVE=Kostnadskod mÜste ha ett vÑrde i indirekta tidrapporteringsrader';
+      Text107@1000000000 : TextConst 'ENU=Employee no %1 has status %2;SVE=AnstÑlld nr %1 har status %2';
+      Text108@1100285054 : TextConst 'ENU=Outside date range;SVE=Utanfîr datumintervallet';
+      ServOrderRec@1100285056 : Record 11012823;
+      ServTypeRec@1100285055 : Record 11012814;
+      Text109@1100285057 : TextConst 'ENU=Service Type (Other) is missing.';
+      Text110@1100285058 : TextConst 'ENU=Service Type is missing.';
+      Text111@1100285060 : TextConst 'ENU=Cost Component is missing;SVE=Kostnadskomponent saknas';
+      Text112@1100285061 : TextConst 'ENU="Manager No. must have a value in Employee: No.= %1. It cannot be zero or empty.";SVE="Chefsnr mÜste ha ett vÑrde i Personal: Nr= %1. Det fÜr inte vara noll eller tomt."';
+      Text113@1100285062 : TextConst 'ENU="Project Manager must have a value in Project: No.= %1. It cannot be zero or empty.";SVE="Platschef mÜste ha ett vÑrde i Projekt: Nr= %1. Det fÜr inte vara noll eller tomt."';
+      Text114@1100285064 : TextConst 'ENU=%1 is %2.;NOR=%1 er %2.;SVE=%1 Ñr %2.';
+      Text115@1100285066 : TextConst 'ENU="Hours consent line already exists: Year = %1, Week = %2, Employee no.= %3";NOR="Attestrad timer finnes allerede: èr = %1, Uke = %2, Ansatt= %3";SVE="Attestrad timmar finns redan: èr = %1, Vecka = %2, Anst nr.= %3"';
+      PostingDateRec@1000000001 : Record 11020202;
+
+    LOCAL PROCEDURE CheckLines@1100285012(pYear@1100285000 : Integer;pWeek@1100285001 : Integer;pEmployee@1100285002 : Code[20]) : Boolean;
+    BEGIN
+      HourAccountingLine.SETRANGE(Year, pYear );
+      HourAccountingLine.SETRANGE(Week, pWeek);
+      HourAccountingLine.SETRANGE("Employee No.", pEmployee);
+      IF HourAccountingLine.FINDSET THEN
+        REPEAT
+
+          IF CheckLine(HourAccountingLine) = FALSE THEN
+            EXIT(FALSE);
+        UNTIL HourAccountingLine.NEXT = 0;
+
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE CheckLine@1100285000(Rec@1100285001 : Record 11012039) : Boolean;
+    VAR
+      HourLineRec@1100285000 : Record 11012039;
+      TempPostingDate@1000000000 : Date;
+    BEGIN
+      // This function is similar to CheckHourLine.RunCheck(HourAccountingLine) and Code()
+      // but without error messages.
+      // Instead of error message the function will return FALSE if something is wrong
+      HourLineRec := Rec;
+
+      WITH HourLineRec DO BEGIN
+        CALCFIELDS("Component Type");
+        CalcRateAndAmount();
+
+        //Skip empty lines
+        IF EmptyLine THEN
+          EXIT(TRUE);
+
+        //Test Fields
+        IF Year < 2000 THEN
+          EXIT(FALSE);
+        IF Week < 1 THEN
+          EXIT(FALSE);
+        IF "Document No." = '' THEN
+          EXIT(FALSE);
+        IF "Posting Date" = 0D THEN
+          EXIT(FALSE);
+        IF "Hour Set" <> '' THEN
+          EXIT(FALSE);
+
+        IF "Cost Type" = "Cost Type"::Plant THEN BEGIN
+          IF NOT (Type IN [Type::Project, Type::Plant, Type::Service]) THEN //mg.c, 20-09-11: M27549
+            //FIELDERROR("Cost Type");
+            EXIT(FALSE);
+          //IF "Connection No." > 0 THEN     //*C-019491.o
+          //  TESTFIELD("Employee No.", ''); //*C-019491.o
+          IF External <> FALSE THEN
+            EXIT(FALSE);
+          //TESTFIELD(External,FALSE);
+        END ELSE BEGIN
+          IF "Employee No." = '' THEN
+            EXIT(FALSE);
+          IF "Wage Component" = '' THEN
+            EXIT(FALSE);
+        END;
+
+        // TODO Implement this
+        //lCheckCompanyIC;
+
+        IF Type = Type::Plant THEN BEGIN
+          //Similar tests in codeunit 11012570 Post Plant Hours Revenues and codeunit 11012571 Plant Hours Costs-Post
+          PlantSetup.GET;
+          IF "Plant Type" = '' THEN
+            EXIT(FALSE);
+          IF "Plant Location" <> '' THEN //25-01-06 Plant No is only needed for revenues
+            IF "Plant No." = '' THEN
+              EXIT(FALSE);
+            //TESTFIELD("Plant No.");
+
+          IF "Employee No." = '' THEN
+            EXIT(FALSE);
+          //TESTFIELD("Employee No.");
+
+          IF "Plant Location" = '' THEN BEGIN
+            IF "Cost Component Plant" = '' THEN
+              EXIT(FALSE);
+            //TESTFIELD("Cost Component Plant");
+
+            IF "Component Type" <> "Component Type"::Expenses THEN BEGIN
+              IF "Total Line" = 0 THEN
+                EXIT(FALSE);
+              //TESTFIELD("Total Line")
+            END ELSE BEGIN
+              IF Quantity = 0 THEN
+                EXIT(FALSE);
+              //TESTFIELD(Quantity);
+              IF Amount = 0 THEN
+                EXIT(FALSE);
+              //TESTFIELD(Amount);
+              IF "Cost Object" = '' THEN
+                EXIT(FALSE);
+              //TESTFIELD("Cost Object");
+            END;
+            //*C-019484.en
+          END ELSE BEGIN
+            IF "Component Type" = "Component Type"::Expenses THEN BEGIN
+              IF Quantity = 0 THEN
+                EXIT(FALSE);
+              //TESTFIELD(Quantity);
+              IF Amount = 0 THEN
+                EXIT(FALSE);
+              //TESTFIELD(Amount);
+              IF "Cost Object" = '' THEN
+                EXIT(FALSE);
+              //TESTFIELD("Cost Object");
+              IF "Cost Component Plant" = '' THEN
+                EXIT(FALSE);
+              //TESTFIELD("Cost Component Plant");
+            END ELSE BEGIN
+              IF "Cost Component Plant" = '' THEN
+                EXIT(FALSE);
+              //TESTFIELD("Cost Component Plant");
+              IF "Total Line" = 0 THEN
+                EXIT(FALSE);
+              //TESTFIELD("Total Line");
+              IF PlantSetup."Rate Codes" THEN BEGIN
+                IF "Plant Rate Code" = '' THEN
+                  EXIT(FALSE);
+                //TESTFIELD("Plant Rate Code");
+              END ELSE BEGIN
+                IF "Plant Rate Code" <> '' THEN
+                  EXIT(FALSE);
+                //TESTFIELD("Plant Rate Code", '');
+              END;
+            END;
+            IF NOT PlantLocationRec.GET("Plant Location") THEN
+              EXIT(FALSE);
+            // Detta kommer att gîra att aktuell job queue entry stoppas men fîr Imtech borde det inte uppstÜ problem
+            PlantLocationRec.CheckBlockFromOtherCompany(1, FALSE, TRUE, "Receiving Company");
+          END;
+          IF NOT PlantTypeRec.GET("Plant Type") THEN
+            EXIT(FALSE);
+          IF "Plant No." <> '' THEN BEGIN
+            IF NOT PlantNoRec.GET("Plant Type", "Plant No.") THEN
+              EXIT(FALSE);
+          END;
+          IF "Plant Rate Code" <> '' THEN BEGIN
+            //PlantRateCodeRec.GET("Plant Rate Code");
+            IF NOT PlantRateCodeRec.CheckPlantRateCode("Plant Location", "Plant Rate Code", FALSE,"Receiving Company",0) THEN
+              EXIT(FALSE);
+          END;
+          IF "Cost Component Plant" <> '' THEN BEGIN
+            IF NOT PlantCostCompRec.GET("Cost Component Plant") THEN
+              EXIT(FALSE);
+          END;
+        END;
+
+        //No support for
+        IF HumanResourcesSetup."Salary Application" = HumanResourcesSetup."Salary Application"::Mercash THEN
+          IF "Supplying Company" <> '' THEN  //Employee Intercompany not supported for Mercash.
+            EXIT(FALSE);
+          //TESTFIELD("Supplying Company",''); //Employee Intercompany not supported for Mercash.
+        IF ("Supplying Company" <> '') AND ("Receiving Company" <> '') THEN
+          //FIELDERROR("Receiving Company", Text004); //'Double IC' not supported.
+          EXIT(FALSE);
+        IF Type = Type::Service THEN
+          IF "Supplying Company" <> '' THEN  //Employee IC not supported for Service
+            EXIT(FALSE);
+          //TESTFIELD("Supplying Company", ''); //Employee IC not supported for Service
+
+        IF "Cost Type" <> "Cost Type"::Plant THEN BEGIN
+          IF NOT WageComponentRec.GET("Wage Component") THEN
+            EXIT(FALSE);
+        END ELSE BEGIN
+          CLEAR(WageComponentRec);
+        END;
+
+        IF "Employee No." <> '' THEN BEGIN
+          IF NOT EmplRec.GET("Employee No.") THEN
+            EXIT(FALSE);
+        END ELSE BEGIN
+          CLEAR(EmplRec);
+        END;
+
+        //>> 150910 ITERO.AC Added new check caused by an error 150904
+        IF EmplRec."Account Hours" = EmplRec."Account Hours"::"Not allowed" THEN BEGIN
+          ErrMsg := STRSUBSTNO(Text114, EmplRec.FIELDCAPTION("Account Hours"), EmplRec."Account Hours");
+          EXIT(FALSE);
+        END;
+        //<< 150910 ITERO.AC
+
+        IF External <> EmplRec.External THEN
+          EXIT(FALSE);
+        //TESTFIELD(External,EmplRec.External);
+
+        IF External THEN BEGIN
+          IF "Supplying Company" <> '' THEN
+            EXIT(FALSE);
+          // TESTFIELD("Supplying Company",''); //No External Employees of other Companies allowed
+
+          IF Employer = '' THEN
+            EXIT(FALSE);
+          //TESTFIELD(Employer);
+        END;
+
+        DimMgt.GetDimValueRec(2, "Cost Object", DimValRec, "Cost Object" <> '', "Project No.");
+        IF DimValRec.ISEMPTY THEN
+          EXIT(FALSE);
+
+        IF NOT CheckCostType(FALSE) THEN
+          EXIT(FALSE);
+
+        CASE Type OF
+          Type::Project:
+            BEGIN
+              IF "Project No." = '' THEN BEGIN
+                ErrMsg := Text104;
+                EXIT(FALSE);
+              END;
+              //TESTFIELD("Project No.");
+              IF "Cost Object" = '' THEN BEGIN
+                ErrMsg := Text105;
+                EXIT(FALSE);
+              END;
+              //TESTFIELD("Cost Object");
+              IF "Service Order No." <> '' THEN
+                EXIT(FALSE);
+              // TESTFIELD("Service Order No.", '');
+              IF "Service Contract No." <> '' THEN
+                EXIT(FALSE);
+              //TESTFIELD("Service Contract No.", '');
+              IF "Cost Code" <> '' THEN
+                EXIT(FALSE);
+              //TESTFIELD("Cost Code", '');
+              IF NOT CheckProjectEx(Rec, "Receiving Company") THEN
+                EXIT(FALSE);
+              IF ProjRec."Posting Element Mandatory" THEN BEGIN
+                IF Element = '' THEN
+                  EXIT(FALSE);
+                //TESTFIELD(Element);
+              END;
+              IF Element <> '' THEN BEGIN //Call 6564
+                ProjElemRec.GET("Project No.", Element);
+                ProjElemRec.CheckProjectElementBlocked;
+              END;
+              IF JobsSetup."Cost Component Mandatory" THEN BEGIN
+                IF "Cost Component" = '' THEN
+                  EXIT(FALSE);
+                //TESTFIELD("Cost Component");
+              END;
+              IF EmplRec."No." <> '' THEN BEGIN
+                IF EmplRec."Trade Association" = '' THEN
+                  EXIT(FALSE);
+                //EmplRec.TESTFIELD("Trade Association");
+              END;
+            END;
+          Type::Service:
+            BEGIN
+              IF "Service Order No." = '' THEN
+                EXIT(FALSE);
+              //TESTFIELD("Service Order No.");
+              IF "Project No." <> '' THEN
+                EXIT(FALSE);
+              //TESTFIELD("Project No.",'');
+              IF "Cost Code" <> '' THEN
+                EXIT(FALSE);
+              //TESTFIELD("Cost Code", '');
+              IF "Cost Object" = '' THEN
+                EXIT(FALSE);
+              TESTFIELD("Cost Object");
+              IF NOT CheckServiceEx(Rec) THEN
+                EXIT(FALSE);
+              IF NOT ServiceSetup.GET THEN
+                EXIT(FALSE);
+              IF ServiceSetup."Cost Component Mandatory" THEN BEGIN
+                IF "Cost Component" = '' THEN BEGIN
+                  ErrMsg := Text111;
+                  EXIT (FALSE);
+                  //TESTFIELD("Cost Component");
+                END;
+              END;
+              IF EmplRec."No." <> '' THEN BEGIN
+                IF EmplRec."Trade Association" = '' THEN BEGIN
+                  ErrMsg := Text101;
+                //EmplRec.TESTFIELD("Trade Association");
+                END;
+              END
+            END;
+          Type::Indirect:
+            BEGIN
+              IF "Project No." <> '' THEN
+                EXIT(FALSE);
+              //TESTFIELD("Project No." , '');
+              IF "Service Order No." <> '' THEN
+                EXIT(FALSE);
+              //TESTFIELD("Service Order No.", '');
+              IF "Service Contract No." <> '' THEN
+                EXIT(FALSE);
+              //TESTFIELD("Service Contract No.", '');
+              IF "Calculate Wage Costs" = "Calculate Wage Costs"::"Fixed Rate" THEN BEGIN
+                IF "Cost Code" = '' THEN BEGIN
+                  ErrMsg := Text106;
+                  EXIT(FALSE);
+                //TESTFIELD("Cost Code");
+                END;
+                CostCodeRec.GET("Cost Code");
+                IF NOT CostCodeRec."No Ledger Entry" THEN BEGIN
+                  IF CostCodeRec."Account No." = '' THEN
+                    EXIT(FALSE);
+                  //CostCodeRec.TESTFIELD("Account No.");
+                  IF EmplRec."Trade Association" = '' THEN
+                    EXIT(FALSE);
+                  //EmplRec.TESTFIELD("Trade Association");
+                  IF NOT TradeGroupRec.GET(EmplRec."Trade Association") THEN
+                    EXIT(FALSE);
+                  IF TradeGroupRec."Wage Coverage Account" = '' THEN
+                    EXIT(FALSE);
+                  //TradeGroupRec.TESTFIELD("Wage Coverage Account");
+                  //Check Cost Price Indirect Hours
+                  IF HumanResourcesSetup."Cost Price Check" AND ("Component Type" = "Component Type"::Hours) AND
+                     (HourLineRec."Unit Cost (LCY)" = 0) THEN
+                     EXIT(FALSE);
+                    // FIELDERROR("Employee No.", STRSUBSTNO(Text007, "Employee No."));
+                END;
+              END ELSE
+                IF HumanResourcesSetup."Exchange Salary Application" THEN BEGIN
+                  IF "Cost Code" = '' THEN
+                    EXIT(FALSE);
+                  //TESTFIELD("Cost Code");
+                END;
+            END;
+        END;
+
+        IF ("Rental Unit" <> '')  THEN BEGIN
+          IF NOT RentalUnitRec.GET("Project No.", "Rental Unit") THEN
+            EXIT(FALSE);
+        END;
+
+        //Check norm hours
+        IF NOT CheckHourLine.CheckNormPostingHours(HourLineRec, TRUE, TRUE, ErrMsg) THEN
+          EXIT(FALSE);
+
+        //Check Sales Price Present
+        IF NOT CheckSalesPriceEx(HourLineRec) THEN
+          EXIT (FALSE);
+
+        //Check Cost Price Direct Hours
+        IF HumanResourcesSetup."Cost Price Check" AND ("Component Type" = "Component Type"::Hours) AND
+          (HourLineRec."Unit Cost (LCY)" = 0) AND (Type <> Type::Indirect)
+        THEN BEGIN
+          IF "Cost Type" = "Cost Type"::Plant THEN BEGIN
+            ErrMsg := STRSUBSTNO(Text007, "Cost Object");
+            EXIT(FALSE);
+            //FIELDERROR("Cost Object", STRSUBSTNO(Text007, "Cost Object"))
+          END ELSE BEGIN
+            ErrMsg := STRSUBSTNO(Text007, "Employee No.");
+            EXIT(FALSE);
+            //FIELDERROR("Employee No.", STRSUBSTNO(Text007, "Employee No."));
+          END;
+      END;
+
+        //Check posting date
+        IF "Posting Date" <> NORMALDATE("Posting Date") THEN BEGIN
+          //FIELDERROR("Posting Date", Text002);
+          ErrMsg := FORMAT("Posting Date", 0, '<Year4>-<Month,2>-<Day,2>') + ' ' + Text002;
+          EXIT(FALSE);
+        END;
+
+
+        IF (AllowPostingFrom = 0D) AND (AllowPostingTo = 0D) THEN BEGIN
+          IF USERID <> '' THEN
+            IF UserSetup.GET(USERID) THEN BEGIN
+              AllowPostingFrom := UserSetup."Allow Posting From";
+              AllowPostingTo := UserSetup."Allow Posting To";
+            END;
+          IF (AllowPostingFrom = 0D) AND (AllowPostingTo = 0D) THEN BEGIN
+            GLSetup.GET;
+            AllowPostingFrom := GLSetup."Allow Posting From";
+            AllowPostingTo := GLSetup."Allow Posting To";
+          END;
+          IF AllowPostingTo = 0D THEN
+            AllowPostingTo := 99991231D;
+        END;
+
+        IF ("Posting Date" < AllowPostingFrom) OR ("Posting Date" > AllowPostingTo) THEN BEGIN
+        //>>170508 IME512
+          IF PostingDateRec.GET(Year, Week) THEN BEGIN
+            IF PostingDateRec."Posting Date" <> 0D THEN
+              TempPostingDate := PostingDateRec."Posting Date";
+          END;
+          IF (TempPostingDate < AllowPostingFrom) OR (TempPostingDate > AllowPostingTo) THEN BEGIN
+        //<<170508 IME512
+            ErrMsg := FORMAT("Posting Date", 0, '<Year4>-<Month,2>-<Day,2>') + ' ' + Text003;
+            EXIT(FALSE);
+          END;
+        END;
+
+      END;
+
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE CheckNormHoursConsentEx@1100285049(HourLine@1100285000 : Record 11012039) : Boolean;
+    VAR
+      LvHourLines@1100285002 : Record 11012039;
+    BEGIN
+
+      LvHourLines.SETRANGE(Year,HourLine.Year);
+      LvHourLines.SETRANGE(Week,HourLine.Week);
+      LvHourLines.SETRANGE("Employee No.",HourLine."Employee No.");
+      IF LvHourLines.FINDFIRST THEN
+        EXIT(CheckHourLine.CheckNormPostingHours(LvHourLines, TRUE, TRUE, ErrMsg));
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE CheckProjectEx@1210190002(HourLineRec@1100285000 : Record 11012039;ICompany@1100285001 : Text[30]) : Boolean;
+    VAR
+      lvCompName@1100485000 : Text[50];
+    BEGIN
+      WITH HourLineRec DO BEGIN
+        DimMgt.GetDimValueRec(2, "Cost Object", DimValRec, TRUE, "Project No.");
+
+        ProjRec.GET("Project No.");
+        IF ProjRec."Project Type" = '' THEN BEGIN
+          ErrMsg := STRSUBSTNO(Text103, "Project No.");
+          EXIT(FALSE);
+        //ProjRec.TESTFIELD("Project Type");
+        END;
+        ProjTypeRec.GET(ProjRec."Project Type");
+
+        IF NOT CheckProjectStatusEx( ProjRec."No.", ICompany) THEN
+          EXIT(FALSE);
+
+        IF (ProjRec."Project Manager" = '0') OR (ProjRec."Project Manager" = '') THEN BEGIN
+          ErrMsg := STRSUBSTNO(Text113, "Project No.");
+          EXIT(FALSE);
+        END;
+
+        //>> 150828 ITERO.AC ny kontroll att projektets platschef finns upplagd i anvÑndarinstÑllningar
+        UserSetupRec.SETCURRENTKEY("Employee No.");
+        UserSetupRec.SETRANGE("Employee No.", ProjRec."Project Manager");
+        IF NOT UserSetupRec.FINDFIRST THEN BEGIN
+          ErrMsg := STRSUBSTNO(Text018, "Project No.", ProjRec."Project Manager", UserSetupRec.TABLECAPTION );
+          EXIT(FALSE);
+        END;
+        //<< 150828 ITERO.AC
+
+        GLSetup.GET;
+        IF HourLineRec."Receiving Company" <> '' THEN
+          lvCompName := HourLineRec."Receiving Company"
+        ELSE
+          lvCompName := COMPANYNAME;
+
+        IF External AND (Employer <> '') THEN
+          gvVendorCde := Employer
+        ELSE
+          gvVendorCde := '';
+
+        WIPAcc := ProjTypeRec.GetWipAcc(ProjRec."Project Type",
+                                        DimValRec."Cost Type",
+                                        ProjRec."Project Status",
+                                        JobsSetup."Provisions at Closure",
+                                        lvCompName,
+                                        DimValRec."Cost Type",
+                                        gvVendorCde,'');
+        CASE "Component Type" OF
+          "Component Type"::Hours:
+            IF "Cost Type" = "Cost Type"::Plant THEN BEGIN
+              IF DimValRec."Balance Account Plant Hours" = '' THEN BEGIN
+                ErrMsg := Text100;
+                EXIT(FALSE);
+              END;
+              // DimValRec.TESTFIELD("Balance Account Plant Hours")
+            END ELSE BEGIN
+              IF ProjTypeRec."Wage Coverage Account" = '' THEN BEGIN
+                IF EmplRec."Trade Association" = '' THEN BEGIN
+                  ErrMsg := Text101;
+                  EXIT(FALSE);
+                  //EmplRec.TESTFIELD("Trade Association");
+                END;
+                TradeGroupRec.GET(EmplRec."Trade Association");
+                IF TradeGroupRec."Wage Coverage Account" = '' THEN BEGIN
+                  ErrMsg := Text102;
+                  EXIT(FALSE);
+                  //TradeGroupRec.TESTFIELD("Wage Coverage Account");
+                END;
+              END;
+            END;
+          "Component Type"::Expenses:
+            BEGIN
+              IF NOT ProjExpBalAccRec.GET(ProjRec."Project Type", "Wage Component") THEN
+                ProjExpBalAccRec.INIT;
+              IF ProjExpBalAccRec."Balance Account" = '' THEN BEGIN
+                IF WageComponentRec."Bal. Account No." = '' THEN BEGIN
+                  ErrMsg := Text100;
+                  EXIT(FALSE);
+                //WageComponentRec.TESTFIELD("Bal. Account No.");
+                END;
+              END;
+            END;
+        END;
+      END;
+
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE CheckProjectStatusEx@1100525006(ProjectNo@1100285000 : Code[20];Company@1100285002 : Text[30]) : Boolean;
+    VAR
+      BlockingCode@1100525000 : Record 11012027;
+    BEGIN
+      ProjRec.CHANGECOMPANY(Company);
+      ProjRec.GET(ProjectNo);
+      ICProjSetup.CHANGECOMPANY(Company);
+      ICProjSetup.GET;
+
+      IF (ProjRec."Blocking Code" <> '') AND
+         ((ProjRec."Project Status" = ProjRec."Project Status"::"Technical Finished") OR
+          (ProjRec."Project Status" = ProjRec."Project Status"::"Administrative Finished") OR
+          ((ProjRec."Project Status" = ProjRec."Project Status"::Finished) AND ICProjSetup."Provisions at Closure")
+         ) THEN
+      BEGIN
+        IF NOT Employee.External THEN
+          BlockingCode.Switch := BlockingCode.Switch::"Hour Accounting"
+        ELSE
+          BlockingCode.Switch := BlockingCode.Switch::"Post Hours External";
+        IF BlockingCode.CheckBlocked(ProjRec."Blocking Code", BlockingCode.Switch, ProjRec, FALSE) THEN BEGIN
+          ErrMsg := 'Project is blocked';
+          EXIT(FALSE);
+        END;
+      END ELSE BEGIN
+        IF (ICProjSetup."Provisions at Closure") THEN BEGIN
+          IF NOT CheckProjectStatusEx2(-1) THEN
+            EXIT(FALSE);
+        END ELSE BEGIN
+          IF NOT CheckProjectStatusEx2(1) THEN
+            EXIT(FALSE);
+        END;
+      END;
+
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE CheckProjectStatusEx2@11012266(ExtraStepsLimitation@11012000 : Integer) : Boolean;
+    VAR
+      Text11012010@1100285001 : TextConst 'ENU=%1 %2 is %3.;NOR=%1 %2 i %3.;SVE=%1 %2 Ñr %3.';
+      Text11012011@1100285000 : TextConst 'ENU=%1 %2 has %3 %4.;NOR=%1 %2 har %3 %4.;SVE=%1 %2 har %3 %4.';
+    BEGIN
+
+      IF ProjRec.Blocked >= ProjRec.Blocked::Posting THEN BEGIN
+        ErrMsg := STRSUBSTNO(Text11012010,ProjRec.TABLECAPTION,ProjRec."No.",ProjRec.FIELDCAPTION(Blocked));
+        EXIT(FALSE);
+      END;
+
+      IF ProjRec."Project Status" >= (ProjRec."Project Status"::Finished - ExtraStepsLimitation) THEN BEGIN
+        ErrMsg := STRSUBSTNO(Text11012011,ProjRec.TABLECAPTION,ProjRec."No.",ProjRec.FIELDCAPTION("Project Status"),ProjRec."Project Status");
+        EXIT(FALSE);
+      END;
+
+      EXIT (TRUE);
+    END;
+
+    PROCEDURE CheckSalesPriceEx@1100285044(HourLineRec@1100285000 : Record 11012039) : Boolean;
+    VAR
+      lProjCostPlusEntry@1100285004 : Record 11012019;
+      lProjPrincipalRec@1100285003 : Record 11012005;
+      lDimValRec@1100285002 : Record 349;
+      lExtContrRec@1100285001 : Record 11012004;
+    BEGIN
+      WITH HourLineRec DO BEGIN
+
+        IF (Type <> Type::Project) OR NOT HumanResourcesSetup."Sales Price Check" THEN
+          EXIT(TRUE);
+
+        IF WageComponentRec.GET("Wage Component") THEN
+          IF NOT WageComponentRec.Chargeable THEN
+            EXIT(TRUE);
+
+        IF "Extension Contract" <> '' THEN BEGIN
+          lExtContrRec.CHANGECOMPANY("Receiving Company");
+          lExtContrRec.GET("Project No.", "Extension Contract");
+          IF lExtContrRec."Settlement Method" = lExtContrRec."Settlement Method"::"Fixed Price" THEN
+            EXIT(TRUE);
+        END ELSE
+          IF ProjRec."Settlement Method" = ProjRec."Settlement Method"::"Fixed Price" THEN
+            EXIT(TRUE);
+
+        //Functions in table Proj Cost Plus are used to calculate Req. Rev. Amount (= expected Sales Amount)
+        CLEAR(lProjCostPlusEntry);
+        lProjCostPlusEntry."Project No." := "Project No.";
+
+        //Find the Cost Plus Principal
+        lProjPrincipalRec.SETRANGE("Project No.", "Project No.");
+        lProjPrincipalRec.SETRANGE("Cost Plus Customer",TRUE);
+        IF lProjPrincipalRec.FINDFIRST THEN
+          lProjCostPlusEntry.Principal := lProjPrincipalRec.Principal;
+
+        lProjCostPlusEntry."Extension Contract" := "Extension Contract";
+        lProjCostPlusEntry.Quantity := Quantity;
+        lProjCostPlusEntry."Employee No." := "Employee No.";
+        DimMgt.GetDimValueRec(2, "Cost Object", lDimValRec, FALSE, "Project No.");
+        lProjCostPlusEntry."Cost Object" := "Cost Object";
+        lProjCostPlusEntry."Wage Component" := "Wage Component";
+        lProjCostPlusEntry.Element := Element;
+        lProjCostPlusEntry."Extension Contract" := "Extension Contract";
+        lProjCostPlusEntry.GetBasicPrice;
+        IF lProjCostPlusEntry."Basic Price (LCY)" = 0 THEN BEGIN
+          ErrMsg := STRSUBSTNO(Text006, "Cost Object");
+          EXIT(FALSE);
+          //FIELDERROR("Cost Object", STRSUBSTNO(Text006, "Cost Object"));
+        END;
+
+      EXIT(TRUE);
+
+      END;
+    END;
+
+    PROCEDURE CheckServiceEx@1210190000(HourLineRec@1100285000 : Record 11012039) : Boolean;
+    VAR
+      lvCompName@1100525000 : Text[50];
+    BEGIN
+      WITH HourLineRec DO BEGIN
+        DimMgt.GetDimValueRec(2, "Cost Object", DimValRec, TRUE, "Project No.");
+
+        ServOrderRec.GET("Service Order No.");
+        IF "Additional Cost (Service)" THEN BEGIN
+          IF ServOrderRec."Service Type (Other)" = '' THEN BEGIN
+            ErrMsg := Text109;
+            EXIT(FALSE)
+            //ServOrderRec.TESTFIELD("Service Type (Other)");
+          END;
+          IF NOT ServTypeRec.GET(ServOrderRec."Service Type (Other)") THEN
+            EXIT (FALSE);
+        END ELSE BEGIN
+          IF ServOrderRec."Service Type" = '' THEN BEGIN
+            ErrMsg := Text110;
+            EXIT(FALSE);
+          // ServOrderRec.TESTFIELD("Service Type");
+          END;
+          IF NOT ServTypeRec.GET(ServOrderRec."Service Type") THEN
+            EXIT(FALSE);
+        END;
+        IF HourLineRec."Receiving Company" <> '' THEN
+          lvCompName := HourLineRec."Receiving Company"
+        ELSE
+          lvCompName := COMPANYNAME;
+        IF External AND (Employer <> '') THEN
+          gvVendorCde := Employer
+        ELSE
+          gvVendorCde := '';
+
+        WIPAcc := ServTypeRec.GetWipAcc(
+          ServTypeRec.Code,
+          DimValRec."Cost Type",
+          lvCompName,
+          DimValRec."Cost Type",
+          gvVendorCde,'');
+
+        CASE "Component Type" OF
+          "Component Type"::Hours:
+            IF ServTypeRec."Wage Coverage Account" = '' THEN BEGIN
+              IF EmplRec."Trade Association" = '' THEN BEGIN
+                ErrMsg := Text101;
+                EXIT (FALSE);
+                //EmplRec.TESTFIELD("Trade Association");
+              END;
+
+              IF NOT TradeGroupRec.GET(EmplRec."Trade Association") THEN
+                EXIT (FALSE);
+              IF TradeGroupRec."Wage Coverage Account" = '' THEN BEGIN
+                ErrMsg := Text102;
+                EXIT (FALSE);
+                //TradeGroupRec.TESTFIELD("Wage Coverage Account");
+              END;
+            END;
+          "Component Type"::Expenses:
+            BEGIN
+              IF WageComponentRec."Bal. Account No." = '' THEN
+                EXIT (FALSE);
+                //WageComponentRec.TESTFIELD("Bal. Account No.");
+            END;
+        END;
+      END;
+
+      EXIT (TRUE);
+    END;
+
+    BEGIN
+    {
+      This report is used to display all Hour Accounting Records that will or will not be released when
+      81660 ReleaseHourAccounting is run (81660 is intended to be run from a job queue entry.
+
+      Most of the locig has been copied from table 11012038 Hour Accounting
+      and Code Unit 11012003 Check Hour Line
+      and Table 11012039 Hour Accounting Line
+
+      Compared to the objects above, a lot of changes has been made in order to collect error messages and to
+      avoid altering data in a way that would results in an error.
+
+      If you want to make changes, the best way is to alter report and then copy the changes to 81660 ReleaseHourAccounting
+
+      Created/Last revision:
+      150815 ITERO.AC  First version
+      150910 ITERO.AC  Bug fix Check EmplRec."Account Hours"::"Not allowed"
+      151015 ITERO.AC  Check to avoid error that occurred 151013 due to existsing Hour Consent Lines
+      170508 ITERO.FH  In function CheckLine() - Check if hours outside allowed posting dates is in a week between two months.
+                       If so then set a temporary "Posting Date" within allowed posting dates.
+    }
+    END.
+  }
+  RDLDATA
+  {
+    <?xml version="1.0" encoding="utf-8"?>
+<Report xmlns="http://schemas.microsoft.com/sqlserver/reporting/2016/01/reportdefinition" xmlns:rd="http://schemas.microsoft.com/SQLServer/reporting/reportdesigner">
+  <AutoRefresh>0</AutoRefresh>
+  <DataSources>
+    <DataSource Name="DataSource">
+      <ConnectionProperties>
+        <DataProvider>SQL</DataProvider>
+        <ConnectString />
+      </ConnectionProperties>
+      <rd:SecurityType>None</rd:SecurityType>
+    </DataSource>
+  </DataSources>
+  <DataSets>
+    <DataSet Name="DataSet_Result">
+      <Query>
+        <DataSourceName>DataSource</DataSourceName>
+        <CommandText />
+      </Query>
+      <Fields>
+        <Field Name="Year_HourAccounting">
+          <DataField>Year_HourAccounting</DataField>
+        </Field>
+        <Field Name="Week_HourAccounting">
+          <DataField>Week_HourAccounting</DataField>
+        </Field>
+        <Field Name="EmployeeNo_HourAccounting">
+          <DataField>EmployeeNo_HourAccounting</DataField>
+        </Field>
+        <Field Name="Status_HourAccounting">
+          <DataField>Status_HourAccounting</DataField>
+        </Field>
+        <Field Name="FullName">
+          <DataField>FullName</DataField>
+        </Field>
+        <Field Name="Error_Message">
+          <DataField>Error_Message</DataField>
+        </Field>
+        <Field Name="PossibleToRelease">
+          <DataField>PossibleToRelease</DataField>
+        </Field>
+      </Fields>
+    </DataSet>
+  </DataSets>
+  <ReportSections>
+    <ReportSection>
+      <Body>
+        <ReportItems>
+          <Tablix Name="Tablix1">
+            <TablixBody>
+              <TablixColumns>
+                <TablixColumn>
+                  <Width>0.55208in</Width>
+                </TablixColumn>
+                <TablixColumn>
+                  <Width>0.625in</Width>
+                </TablixColumn>
+                <TablixColumn>
+                  <Width>0.90625in</Width>
+                </TablixColumn>
+                <TablixColumn>
+                  <Width>1in</Width>
+                </TablixColumn>
+                <TablixColumn>
+                  <Width>1in</Width>
+                </TablixColumn>
+                <TablixColumn>
+                  <Width>1in</Width>
+                </TablixColumn>
+                <TablixColumn>
+                  <Width>2.65625in</Width>
+                </TablixColumn>
+              </TablixColumns>
+              <TablixRows>
+                <TablixRow>
+                  <Height>0.3125in</Height>
+                  <TablixCells>
+                    <TablixCell>
+                      <CellContents>
+                        <Textbox Name="Textbox4">
+                          <CanGrow>true</CanGrow>
+                          <KeepTogether>true</KeepTogether>
+                          <Paragraphs>
+                            <Paragraph>
+                              <TextRuns>
+                                <TextRun>
+                                  <Value>èr</Value>
+                                  <Style />
+                                </TextRun>
+                              </TextRuns>
+                              <Style>
+                                <TextAlign>Left</TextAlign>
+                              </Style>
+                            </Paragraph>
+                          </Paragraphs>
+                          <rd:DefaultName>Textbox4</rd:DefaultName>
+                          <Style>
+                            <Border>
+                              <Color>LightGrey</Color>
+                              <Style>Solid</Style>
+                            </Border>
+                            <PaddingLeft>2pt</PaddingLeft>
+                            <PaddingRight>2pt</PaddingRight>
+                            <PaddingTop>2pt</PaddingTop>
+                            <PaddingBottom>2pt</PaddingBottom>
+                          </Style>
+                        </Textbox>
+                      </CellContents>
+                    </TablixCell>
+                    <TablixCell>
+                      <CellContents>
+                        <Textbox Name="Textbox6">
+                          <CanGrow>true</CanGrow>
+                          <KeepTogether>true</KeepTogether>
+                          <Paragraphs>
+                            <Paragraph>
+                              <TextRuns>
+                                <TextRun>
+                                  <Value>MÜnad</Value>
+                                  <Style />
+                                </TextRun>
+                              </TextRuns>
+                              <Style>
+                                <TextAlign>Left</TextAlign>
+                              </Style>
+                            </Paragraph>
+                          </Paragraphs>
+                          <rd:DefaultName>Textbox6</rd:DefaultName>
+                          <Style>
+                            <Border>
+                              <Color>LightGrey</Color>
+                              <Style>Solid</Style>
+                            </Border>
+                            <PaddingLeft>2pt</PaddingLeft>
+                            <PaddingRight>2pt</PaddingRight>
+                            <PaddingTop>2pt</PaddingTop>
+                            <PaddingBottom>2pt</PaddingBottom>
+                          </Style>
+                        </Textbox>
+                      </CellContents>
+                    </TablixCell>
+                    <TablixCell>
+                      <CellContents>
+                        <Textbox Name="Textbox8">
+                          <CanGrow>true</CanGrow>
+                          <KeepTogether>true</KeepTogether>
+                          <Paragraphs>
+                            <Paragraph>
+                              <TextRuns>
+                                <TextRun>
+                                  <Value>Anst.nr.</Value>
+                                  <Style />
+                                </TextRun>
+                              </TextRuns>
+                              <Style />
+                            </Paragraph>
+                          </Paragraphs>
+                          <rd:DefaultName>Textbox8</rd:DefaultName>
+                          <Style>
+                            <Border>
+                              <Color>LightGrey</Color>
+                              <Style>Solid</Style>
+                            </Border>
+                            <PaddingLeft>2pt</PaddingLeft>
+                            <PaddingRight>2pt</PaddingRight>
+                            <PaddingTop>2pt</PaddingTop>
+                            <PaddingBottom>2pt</PaddingBottom>
+                          </Style>
+                        </Textbox>
+                      </CellContents>
+                    </TablixCell>
+                    <TablixCell>
+                      <CellContents>
+                        <Textbox Name="Textbox10">
+                          <CanGrow>true</CanGrow>
+                          <KeepTogether>true</KeepTogether>
+                          <Paragraphs>
+                            <Paragraph>
+                              <TextRuns>
+                                <TextRun>
+                                  <Value>Status</Value>
+                                  <Style />
+                                </TextRun>
+                              </TextRuns>
+                              <Style />
+                            </Paragraph>
+                          </Paragraphs>
+                          <rd:DefaultName>Textbox10</rd:DefaultName>
+                          <Style>
+                            <Border>
+                              <Color>LightGrey</Color>
+                              <Style>Solid</Style>
+                            </Border>
+                            <PaddingLeft>2pt</PaddingLeft>
+                            <PaddingRight>2pt</PaddingRight>
+                            <PaddingTop>2pt</PaddingTop>
+                            <PaddingBottom>2pt</PaddingBottom>
+                          </Style>
+                        </Textbox>
+                      </CellContents>
+                    </TablixCell>
+                    <TablixCell>
+                      <CellContents>
+                        <Textbox Name="Textbox12">
+                          <CanGrow>true</CanGrow>
+                          <KeepTogether>true</KeepTogether>
+                          <Paragraphs>
+                            <Paragraph>
+                              <TextRuns>
+                                <TextRun>
+                                  <Value>Full Name</Value>
+                                  <Style />
+                                </TextRun>
+                              </TextRuns>
+                              <Style />
+                            </Paragraph>
+                          </Paragraphs>
+                          <rd:DefaultName>Textbox12</rd:DefaultName>
+                          <Style>
+                            <Border>
+                              <Color>LightGrey</Color>
+                              <Style>Solid</Style>
+                            </Border>
+                            <PaddingLeft>2pt</PaddingLeft>
+                            <PaddingRight>2pt</PaddingRight>
+                            <PaddingTop>2pt</PaddingTop>
+                            <PaddingBottom>2pt</PaddingBottom>
+                          </Style>
+                        </Textbox>
+                      </CellContents>
+                    </TablixCell>
+                    <TablixCell>
+                      <CellContents>
+                        <Textbox Name="Textbox1">
+                          <CanGrow>true</CanGrow>
+                          <KeepTogether>true</KeepTogether>
+                          <Paragraphs>
+                            <Paragraph>
+                              <TextRuns>
+                                <TextRun>
+                                  <Value>Possible To Release</Value>
+                                  <Style />
+                                </TextRun>
+                              </TextRuns>
+                              <Style />
+                            </Paragraph>
+                          </Paragraphs>
+                          <rd:DefaultName>Textbox1</rd:DefaultName>
+                          <Style>
+                            <Border>
+                              <Color>LightGrey</Color>
+                              <Style>Solid</Style>
+                            </Border>
+                            <PaddingLeft>2pt</PaddingLeft>
+                            <PaddingRight>2pt</PaddingRight>
+                            <PaddingTop>2pt</PaddingTop>
+                            <PaddingBottom>2pt</PaddingBottom>
+                          </Style>
+                        </Textbox>
+                      </CellContents>
+                    </TablixCell>
+                    <TablixCell>
+                      <CellContents>
+                        <Textbox Name="Textbox13">
+                          <CanGrow>true</CanGrow>
+                          <KeepTogether>true</KeepTogether>
+                          <Paragraphs>
+                            <Paragraph>
+                              <TextRuns>
+                                <TextRun>
+                                  <Value>Error Message</Value>
+                                  <Style />
+                                </TextRun>
+                              </TextRuns>
+                              <Style />
+                            </Paragraph>
+                          </Paragraphs>
+                          <rd:DefaultName>Textbox13</rd:DefaultName>
+                          <Style>
+                            <Border>
+                              <Color>LightGrey</Color>
+                              <Style>Solid</Style>
+                            </Border>
+                            <PaddingLeft>2pt</PaddingLeft>
+                            <PaddingRight>2pt</PaddingRight>
+                            <PaddingTop>2pt</PaddingTop>
+                            <PaddingBottom>2pt</PaddingBottom>
+                          </Style>
+                        </Textbox>
+                      </CellContents>
+                    </TablixCell>
+                  </TablixCells>
+                </TablixRow>
+                <TablixRow>
+                  <Height>0.3125in</Height>
+                  <TablixCells>
+                    <TablixCell>
+                      <CellContents>
+                        <Textbox Name="Textbox5">
+                          <CanGrow>true</CanGrow>
+                          <KeepTogether>true</KeepTogether>
+                          <Paragraphs>
+                            <Paragraph>
+                              <TextRuns>
+                                <TextRun>
+                                  <Value>=Fields!Year_HourAccounting.Value</Value>
+                                  <Style />
+                                </TextRun>
+                              </TextRuns>
+                              <Style>
+                                <TextAlign>Left</TextAlign>
+                              </Style>
+                            </Paragraph>
+                          </Paragraphs>
+                          <rd:DefaultName>Textbox5</rd:DefaultName>
+                          <Style>
+                            <Border>
+                              <Color>LightGrey</Color>
+                              <Style>Solid</Style>
+                            </Border>
+                            <PaddingLeft>2pt</PaddingLeft>
+                            <PaddingRight>2pt</PaddingRight>
+                            <PaddingTop>2pt</PaddingTop>
+                            <PaddingBottom>2pt</PaddingBottom>
+                          </Style>
+                        </Textbox>
+                      </CellContents>
+                    </TablixCell>
+                    <TablixCell>
+                      <CellContents>
+                        <Textbox Name="Textbox7">
+                          <CanGrow>true</CanGrow>
+                          <KeepTogether>true</KeepTogether>
+                          <Paragraphs>
+                            <Paragraph>
+                              <TextRuns>
+                                <TextRun>
+                                  <Value>=Fields!Week_HourAccounting.Value</Value>
+                                  <Style />
+                                </TextRun>
+                              </TextRuns>
+                              <Style>
+                                <TextAlign>Left</TextAlign>
+                              </Style>
+                            </Paragraph>
+                          </Paragraphs>
+                          <rd:DefaultName>Textbox7</rd:DefaultName>
+                          <Style>
+                            <Border>
+                              <Color>LightGrey</Color>
+                              <Style>Solid</Style>
+                            </Border>
+                            <PaddingLeft>2pt</PaddingLeft>
+                            <PaddingRight>2pt</PaddingRight>
+                            <PaddingTop>2pt</PaddingTop>
+                            <PaddingBottom>2pt</PaddingBottom>
+                          </Style>
+                        </Textbox>
+                      </CellContents>
+                    </TablixCell>
+                    <TablixCell>
+                      <CellContents>
+                        <Textbox Name="Textbox9">
+                          <CanGrow>true</CanGrow>
+                          <KeepTogether>true</KeepTogether>
+                          <Paragraphs>
+                            <Paragraph>
+                              <TextRuns>
+                                <TextRun>
+                                  <Value>=Fields!EmployeeNo_HourAccounting.Value</Value>
+                                  <Style />
+                                </TextRun>
+                              </TextRuns>
+                              <Style />
+                            </Paragraph>
+                          </Paragraphs>
+                          <rd:DefaultName>Textbox9</rd:DefaultName>
+                          <Style>
+                            <Border>
+                              <Color>LightGrey</Color>
+                              <Style>Solid</Style>
+                            </Border>
+                            <PaddingLeft>2pt</PaddingLeft>
+                            <PaddingRight>2pt</PaddingRight>
+                            <PaddingTop>2pt</PaddingTop>
+                            <PaddingBottom>2pt</PaddingBottom>
+                          </Style>
+                        </Textbox>
+                      </CellContents>
+                    </TablixCell>
+                    <TablixCell>
+                      <CellContents>
+                        <Textbox Name="Textbox11">
+                          <CanGrow>true</CanGrow>
+                          <KeepTogether>true</KeepTogether>
+                          <Paragraphs>
+                            <Paragraph>
+                              <TextRuns>
+                                <TextRun>
+                                  <Value>=Fields!Status_HourAccounting.Value</Value>
+                                  <Style />
+                                </TextRun>
+                              </TextRuns>
+                              <Style />
+                            </Paragraph>
+                          </Paragraphs>
+                          <rd:DefaultName>Textbox11</rd:DefaultName>
+                          <Style>
+                            <Border>
+                              <Color>LightGrey</Color>
+                              <Style>Solid</Style>
+                            </Border>
+                            <PaddingLeft>2pt</PaddingLeft>
+                            <PaddingRight>2pt</PaddingRight>
+                            <PaddingTop>2pt</PaddingTop>
+                            <PaddingBottom>2pt</PaddingBottom>
+                          </Style>
+                        </Textbox>
+                      </CellContents>
+                    </TablixCell>
+                    <TablixCell>
+                      <CellContents>
+                        <Textbox Name="FullName">
+                          <CanGrow>true</CanGrow>
+                          <KeepTogether>true</KeepTogether>
+                          <Paragraphs>
+                            <Paragraph>
+                              <TextRuns>
+                                <TextRun>
+                                  <Value>=Fields!FullName.Value</Value>
+                                  <Style />
+                                </TextRun>
+                              </TextRuns>
+                              <Style />
+                            </Paragraph>
+                          </Paragraphs>
+                          <rd:DefaultName>FullName</rd:DefaultName>
+                          <Style>
+                            <Border>
+                              <Color>LightGrey</Color>
+                              <Style>Solid</Style>
+                            </Border>
+                            <PaddingLeft>2pt</PaddingLeft>
+                            <PaddingRight>2pt</PaddingRight>
+                            <PaddingTop>2pt</PaddingTop>
+                            <PaddingBottom>2pt</PaddingBottom>
+                          </Style>
+                        </Textbox>
+                      </CellContents>
+                    </TablixCell>
+                    <TablixCell>
+                      <CellContents>
+                        <Textbox Name="PossibleToRelease">
+                          <CanGrow>true</CanGrow>
+                          <KeepTogether>true</KeepTogether>
+                          <Paragraphs>
+                            <Paragraph>
+                              <TextRuns>
+                                <TextRun>
+                                  <Value>=Fields!PossibleToRelease.Value</Value>
+                                  <Style />
+                                </TextRun>
+                              </TextRuns>
+                              <Style />
+                            </Paragraph>
+                          </Paragraphs>
+                          <rd:DefaultName>PossibleToRelease</rd:DefaultName>
+                          <Style>
+                            <Border>
+                              <Color>LightGrey</Color>
+                              <Style>Solid</Style>
+                            </Border>
+                            <PaddingLeft>2pt</PaddingLeft>
+                            <PaddingRight>2pt</PaddingRight>
+                            <PaddingTop>2pt</PaddingTop>
+                            <PaddingBottom>2pt</PaddingBottom>
+                          </Style>
+                        </Textbox>
+                      </CellContents>
+                    </TablixCell>
+                    <TablixCell>
+                      <CellContents>
+                        <Textbox Name="Error_Message">
+                          <CanGrow>true</CanGrow>
+                          <KeepTogether>true</KeepTogether>
+                          <Paragraphs>
+                            <Paragraph>
+                              <TextRuns>
+                                <TextRun>
+                                  <Value>=Fields!Error_Message.Value</Value>
+                                  <Style />
+                                </TextRun>
+                              </TextRuns>
+                              <Style />
+                            </Paragraph>
+                          </Paragraphs>
+                          <rd:DefaultName>Error_Message</rd:DefaultName>
+                          <Style>
+                            <Border>
+                              <Color>LightGrey</Color>
+                              <Style>Solid</Style>
+                            </Border>
+                            <PaddingLeft>2pt</PaddingLeft>
+                            <PaddingRight>2pt</PaddingRight>
+                            <PaddingTop>2pt</PaddingTop>
+                            <PaddingBottom>2pt</PaddingBottom>
+                          </Style>
+                        </Textbox>
+                      </CellContents>
+                    </TablixCell>
+                  </TablixCells>
+                </TablixRow>
+              </TablixRows>
+            </TablixBody>
+            <TablixColumnHierarchy>
+              <TablixMembers>
+                <TablixMember />
+                <TablixMember />
+                <TablixMember />
+                <TablixMember />
+                <TablixMember />
+                <TablixMember />
+                <TablixMember />
+              </TablixMembers>
+            </TablixColumnHierarchy>
+            <TablixRowHierarchy>
+              <TablixMembers>
+                <TablixMember>
+                  <KeepWithGroup>After</KeepWithGroup>
+                </TablixMember>
+                <TablixMember>
+                  <Group Name="Details" />
+                </TablixMember>
+              </TablixMembers>
+            </TablixRowHierarchy>
+            <DataSetName>DataSet_Result</DataSetName>
+            <Top>0.79042in</Top>
+            <Left>0.24875in</Left>
+            <Height>0.625in</Height>
+            <Width>7.73958in</Width>
+            <Style>
+              <Border>
+                <Style>None</Style>
+              </Border>
+            </Style>
+          </Tablix>
+        </ReportItems>
+        <Height>21.7cm</Height>
+        <Style />
+      </Body>
+      <Width>21cm</Width>
+      <Page>
+        <PageHeight>29.7cm</PageHeight>
+        <PageWidth>21cm</PageWidth>
+        <Style />
+      </Page>
+    </ReportSection>
+  </ReportSections>
+  <ReportParameters>
+    <ReportParameter Name="Year_HourAccountingCaption">
+      <DataType>String</DataType>
+      <DefaultValue>
+        <Values>
+          <Value>Year_HourAccountingCaption</Value>
+        </Values>
+      </DefaultValue>
+      <Prompt>Year_HourAccountingCaption</Prompt>
+    </ReportParameter>
+    <ReportParameter Name="Week_HourAccountingCaption">
+      <DataType>String</DataType>
+      <DefaultValue>
+        <Values>
+          <Value>Week_HourAccountingCaption</Value>
+        </Values>
+      </DefaultValue>
+      <Prompt>Week_HourAccountingCaption</Prompt>
+    </ReportParameter>
+    <ReportParameter Name="EmployeeNo_HourAccountingCaption">
+      <DataType>String</DataType>
+      <DefaultValue>
+        <Values>
+          <Value>EmployeeNo_HourAccountingCaption</Value>
+        </Values>
+      </DefaultValue>
+      <Prompt>EmployeeNo_HourAccountingCaption</Prompt>
+    </ReportParameter>
+    <ReportParameter Name="Status_HourAccountingCaption">
+      <DataType>String</DataType>
+      <DefaultValue>
+        <Values>
+          <Value>Status_HourAccountingCaption</Value>
+        </Values>
+      </DefaultValue>
+      <Prompt>Status_HourAccountingCaption</Prompt>
+    </ReportParameter>
+    <ReportParameter Name="FullNameCaption">
+      <DataType>String</DataType>
+      <DefaultValue>
+        <Values>
+          <Value>FullNameCaption</Value>
+        </Values>
+      </DefaultValue>
+      <Prompt>FullNameCaption</Prompt>
+    </ReportParameter>
+  </ReportParameters>
+  <ReportParametersLayout>
+    <GridLayoutDefinition>
+      <NumberOfColumns>1</NumberOfColumns>
+      <NumberOfRows>5</NumberOfRows>
+      <CellDefinitions>
+        <CellDefinition>
+          <ColumnIndex>0</ColumnIndex>
+          <RowIndex>0</RowIndex>
+          <ParameterName>Year_HourAccountingCaption</ParameterName>
+        </CellDefinition>
+        <CellDefinition>
+          <ColumnIndex>0</ColumnIndex>
+          <RowIndex>1</RowIndex>
+          <ParameterName>Week_HourAccountingCaption</ParameterName>
+        </CellDefinition>
+        <CellDefinition>
+          <ColumnIndex>0</ColumnIndex>
+          <RowIndex>2</RowIndex>
+          <ParameterName>EmployeeNo_HourAccountingCaption</ParameterName>
+        </CellDefinition>
+        <CellDefinition>
+          <ColumnIndex>0</ColumnIndex>
+          <RowIndex>3</RowIndex>
+          <ParameterName>Status_HourAccountingCaption</ParameterName>
+        </CellDefinition>
+        <CellDefinition>
+          <ColumnIndex>0</ColumnIndex>
+          <RowIndex>4</RowIndex>
+          <ParameterName>FullNameCaption</ParameterName>
+        </CellDefinition>
+      </CellDefinitions>
+    </GridLayoutDefinition>
+  </ReportParametersLayout>
+  <Code>Public Function BlankZero(ByVal Value As Decimal)
+    if Value = 0 then
+        Return ""
+    end if
+    Return Value
+End Function
+
+Public Function BlankPos(ByVal Value As Decimal)
+    if Value &gt; 0 then
+        Return ""
+    end if
+    Return Value
+End Function
+
+Public Function BlankZeroAndPos(ByVal Value As Decimal)
+    if Value &gt;= 0 then
+        Return ""
+    end if
+    Return Value
+End Function
+
+Public Function BlankNeg(ByVal Value As Decimal)
+    if Value &lt; 0 then
+        Return ""
+    end if
+    Return Value
+End Function
+
+Public Function BlankNegAndZero(ByVal Value As Decimal)
+    if Value &lt;= 0 then
+        Return ""
+    end if
+    Return Value
+End Function
+</Code>
+  <Language>=User!Language</Language>
+  <ConsumeContainerWhitespace>true</ConsumeContainerWhitespace>
+  <rd:ReportUnitType>Inch</rd:ReportUnitType>
+</Report>
+    END_OF_RDLDATA
+  }
+}
+

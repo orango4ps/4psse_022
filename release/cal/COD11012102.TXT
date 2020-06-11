@@ -1,0 +1,356 @@
+OBJECT Codeunit 11012102 Post Plant Order Receipts
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    TableNo=11020492;
+    OnRun=BEGIN
+            PlantOrderReceipt.COPY(Rec);
+            Code;
+            Rec := PlantOrderReceipt;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1100525000 : TextConst 'DEU=M”chten Sie %1 ''%2'' buchten?;ENU=Do you want to post %1 ''%2''?;NLD=Wilt u %1 ''%2'' boeken?;NOR=Vil du bokf›re %1 ''%2''?;SVE=Vill du bokf”ra %1 ''%2''?';
+      PlantSetup@1100525004 : Record 11012550;
+      PlantOrderReceipt@1100525001 : Record 11020492;
+      Text001@1100525003 : TextConst 'DEU=%1 ''%2'' hat keine Zeilen mit %3;ENU=%1 ''%2'' has no lines with %3 filled;NLD=%1 ''%2'' heeft geen regels met %3 gevuld;SVE=%1 ''%2'' har inga rader med %3 ifylld';
+      Text002@1100529001 : TextConst 'DEU=''%1-%2'' ist nicht bei %3 mit %4 ''%5'' vorhanden;ENU=''%1-%2'' is not present on %3 with %4 ''%5'';NLD=''%1-%2'' is niet aanwezig op %3 met %4 ''%5'';SVE=''%1-%2'' finns inte i %3 med %4 ''%5''';
+      Text003@1100529002 : TextConst 'DEU=(%1) ist gr”áer als vorhandene Anzahl (%2) bei (%3) von %4 ''%5-%6'', %7 ''%8'';ENU=(%1) is greater than present quantity (%2) on (%3) of %4 ''%5-%6'', %7 ''%8'';NLD=(%1) is groter dan aanwezig aantal (%2) op %3 van %4 ''%5-%6'', %7 ''%8''';
+      Text004@1100529003 : TextConst 'DEU=%1, gesamt %2;ENU=%1, total %2;NLD=%1, totaal %2;SVE=%1, totalt %2';
+      PONewNextLineNo@1100529000 : Integer;
+      Text005a@1100529004 : TextConst 'DEU=Noch keine Belege. M”chten Sie %1 ''%2''schlieáen?;ENU=No receipts yet. Do you want to close %1 ''%2''?;NLD=Nog geen ontvangsten. Wilt u %1 ''%2'' sluiten?';
+      Text005b@1100529006 : TextConst 'DEU=Noch nicht alle erhalten. M”chten Sie %1 ''%2''schlieáen?;ENU=Not received all yet. Do you want to close %1 ''%2''?;NLD=Nog niet alles ontvangen. Wilt u %1 ''%2'' sluiten?';
+      Text006@1100529005 : TextConst 'DEU=Es sind noch Zeile(n) mit %1 vorhanden. Diese mssen erst gebucht (oder auf %1 null gesetzt) werden;ENU=Still line(s) with %1 present. These must be posted first (or make %1 zero);NLD=Nog regel(s) met %1 aanwezig, deze moeten eerst geboekt worden (of %1 nul maken)';
+      Text007@1100529007 : TextConst 'DEU=Maánahmen ergreifen, um die Unterschiede am Standort ''%1'' zu korrigieren. Einverstanden?;ENU=Take action to correct the differences on location ''%1''. Agree?;NLD=Onderneem actie om de verschillen op locatie ''%1'' te corrigeren. Akkoord?';
+      Text008@1100529008 : TextConst 'DEU=Abgebrochen, %1 ''%2'' ist nicht abgeschlossen;ENU=Aborted, %1 ''%2'' is not closed;NLD=Afgebroken, %1 ''%2'' is niet afgesloten;SVE=Avbruten, %1 ''%2'' „r inte st„ngd';
+
+    PROCEDURE ConfirmPostReceipt@1100525001(PlantOrderReceipt@1100525000 : Record 11020492) : Boolean;
+    BEGIN
+      IF NOT CONFIRM(Text000, FALSE, PlantOrderReceipt.TABLECAPTION, PlantOrderReceipt."Plant Order No.") THEN
+        EXIT(FALSE);
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE ConfirmCloseReceipt@1100529003(PlantOrderReceipt@1100525000 : Record 11020492) : Boolean;
+    VAR
+      ConfirmTxt@1100529000 : Text;
+    BEGIN
+      IF PlantOrderReceipt.Status = PlantOrderReceipt.Status::Open THEN
+        ConfirmTxt := Text005a
+      ELSE
+        ConfirmTxt := Text005b;
+      IF NOT CONFIRM(ConfirmTxt, FALSE, PlantOrderReceipt.TABLECAPTION, PlantOrderReceipt."Plant Order No.") THEN
+        EXIT(FALSE);
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE RunCloseReceipt@1100529004(VAR Rec@1100529000 : Record 11020492);
+    BEGIN
+      PlantOrderReceipt.COPY(Rec);
+      CloseReceipt;
+      Rec := PlantOrderReceipt;
+    END;
+
+    LOCAL PROCEDURE Code@1100525000();
+    VAR
+      PlantOrderOrg@1100529000 : Record 11012556;
+      PlantOrderNew@1100529002 : Record 11012556;
+    BEGIN
+      PlantSetup.GET;
+      PlantSetup.TESTFIELD("Rate Codes", TRUE);
+      PlantSetup.TESTFIELD("Receipt Registration PO (TR)", TRUE);
+
+      WITH PlantOrderReceipt DO BEGIN
+        TESTFIELD("Plant Order No.");
+        IF Status >= Status::Finished THEN
+          FIELDERROR(Status);
+        TESTFIELD("Receipt Date");
+        PlantOrderReceipt.CheckReceiptDate;
+        PlantOrderOrg.GET("Plant Order No.");
+        PlantOrderOrg.TESTFIELD(Posted, TRUE);
+        PlantOrderOrg.TESTFIELD("Receipt Registration (TR)", TRUE);
+        PlantOrderOrg.ReceiptRegistrationTransportAllowed(TRUE);
+        TESTFIELD("To Location", PlantOrderOrg."To Location");
+        CheckPlantOrderReceiptLines();
+
+        PlantOrderNew."No." := '';
+        PONewNextLineNo := 10000;
+        ProcessPlantOrderReceiptLines(PlantOrderOrg, PlantOrderNew);
+        IF PlantOrderNew."No." <> '' THEN
+          CODEUNIT.RUN(CODEUNIT::"Post Plant Order", PlantOrderNew);
+
+        Status := GetNewReceiptStatus();
+        "Receipt Date" := 0D;
+        MODIFY;
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckPlantOrderReceiptLines@1100529000();
+    VAR
+      PlantOrderReceiptLine@1100529000 : Record 11020493;
+      PlantOrderLineOrg@1100529002 : Record 11012557;
+    BEGIN
+      WITH PlantOrderReceiptLine DO BEGIN
+        SETRANGE("Plant Order No.", PlantOrderReceipt."Plant Order No.");
+        SETFILTER("To Receive", '<>%1', 0);
+        IF NOT FINDSET THEN
+          ERROR(Text001, PlantOrderReceipt.TABLECAPTION, PlantOrderReceipt."Plant Order No.", FIELDCAPTION("To Receive"));
+        REPEAT
+          PlantOrderLineOrg.GET("Plant Order No.", "Plant Order Line No.");
+          TESTFIELD(Type, PlantOrderLineOrg.Type);
+          TESTFIELD("Plant Type", PlantOrderLineOrg."Plant Type");
+          TESTFIELD("Plant No.", PlantOrderLineOrg."No.");
+          TESTFIELD("Item No.", PlantOrderLineOrg."Item No.");
+          TESTFIELD("Mobilization Rate Code", PlantOrderLineOrg."Mobilization Rate Code");
+          TESTFIELD(Quantity, PlantOrderLineOrg.Quantity);
+          PlantOrderReceiptLine.CheckToReceive;
+          IF (Type = Type::Plant) AND (PlantOrderLineOrg."Rental Type" = PlantOrderLineOrg."Rental Type"::Rental) THEN BEGIN
+            PlantOrderLineOrg.TESTFIELD("To Rate Code");
+            CheckPlantInventory(PlantOrderReceiptLine);
+          END;
+        UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckPlantInventory@1100529002(PlantOrderReceiptLine@1100529000 : Record 11020493);
+    VAR
+      PlantInventory@1100529002 : Record 11012555;
+      PlantOrderReceiptLine2@1100529005 : Record 11020493;
+      Found@1100529003 : Boolean;
+      ToReceiveOnOtherLines@1100529001 : Decimal;
+      TextArg1@1100529004 : Text;
+    BEGIN
+      WITH PlantOrderReceiptLine DO BEGIN
+        PlantInventory.SETRANGE(Removed, FALSE);
+        PlantInventory.SETRANGE(Location, PlantOrderReceipt."To Location");
+        PlantInventory.SETRANGE("Plant Type", "Plant Type");
+        PlantInventory.SETRANGE("Plant No.", "Plant No.");
+        PlantInventory.SETRANGE("Rate Code", "Mobilization Rate Code");
+        PlantInventory.SETRANGE(Sold, FALSE);
+        PlantInventory.SETFILTER("Present from", '<=%1', PlantOrderReceipt."Receipt Date");
+        PlantInventory.SETFILTER(Quantity, '>%1', 0);
+        Found := PlantInventory.FINDFIRST;
+        IF (NOT Found) OR ((NOT Bulk) AND (PlantInventory.Quantity < 1)) THEN
+          FIELDERROR("Plant No.", STRSUBSTNO(Text002,
+            "Plant Type", "Plant No.", PlantOrderReceipt."Receipt Date", FIELDCAPTION("Mobilization Rate Code"), "Mobilization Rate Code"));
+        CALCFIELDS(Bulk);
+        IF Bulk THEN BEGIN
+          PlantInventory.SETCURRENTKEY(Removed, Location, "Plant Type", "Plant No.", "Rate Code", Sold, "Present from", Quantity);
+          PlantInventory.CALCSUMS(Quantity);
+          IF "To Receive" > PlantInventory.Quantity THEN
+            FIELDERROR("To Receive", STRSUBSTNO(Text003, "To Receive", PlantInventory.Quantity, PlantOrderReceipt."Receipt Date",
+              FIELDCAPTION("Plant No."), "Plant Type", "Plant No.", FIELDCAPTION("Mobilization Rate Code"), "Mobilization Rate Code"));
+          PlantOrderReceiptLine2.COPY(PlantOrderReceiptLine);
+          PlantOrderReceiptLine2.SETFILTER("Plant Order Line No.", '<>%1', "Plant Order Line No.");
+          PlantOrderReceiptLine2.SETRANGE("Plant Type", "Plant Type");
+          PlantOrderReceiptLine2.SETRANGE("Plant No.", "Plant No.");
+          PlantOrderReceiptLine2.SETRANGE("Mobilization Rate Code", "Mobilization Rate Code");
+          PlantOrderReceiptLine2.SETFILTER("To Receive", '>%1', 0);
+          PlantOrderReceiptLine2.SETRANGE("Rental Type", "Rental Type"::Rental);
+          IF PlantOrderReceiptLine2.FINDSET THEN BEGIN
+            REPEAT
+              ToReceiveOnOtherLines := ToReceiveOnOtherLines + PlantOrderReceiptLine2."To Receive";
+            UNTIL PlantOrderReceiptLine2.NEXT = 0;
+            IF ("To Receive" + ToReceiveOnOtherLines) > PlantInventory.Quantity THEN BEGIN
+              TextArg1 := STRSUBSTNO(Text004, "To Receive", "To Receive"+ToReceiveOnOtherLines);
+              FIELDERROR("To Receive", STRSUBSTNO(Text003, TextArg1, PlantInventory.Quantity, PlantOrderReceipt."Receipt Date",
+                FIELDCAPTION("Plant No."), "Plant Type", "Plant No.", FIELDCAPTION("Mobilization Rate Code"), "Mobilization Rate Code"));
+            END;
+          END;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE ProcessPlantOrderReceiptLines@1100529007(PlantOrderOrg@1100529001 : Record 11012556;VAR PlantOrderNew@1100529004 : Record 11012556);
+    VAR
+      PlantOrderReceiptLine@1100529000 : Record 11020493;
+      PlantOrderLineOrg@1100529002 : Record 11012557;
+      PlantOrderReceivedQuantity@1100529003 : Record 11020494;
+    BEGIN
+      WITH PlantOrderReceiptLine DO BEGIN
+        SETRANGE("Plant Order No.", PlantOrderReceipt."Plant Order No.");
+        SETFILTER("To Receive", '<>%1', 0);
+        IF FINDSET(TRUE,FALSE) THEN BEGIN
+          REPEAT
+            PlantOrderReceivedQuantity.INIT;
+            PlantOrderReceivedQuantity."Plant Order No." := "Plant Order No.";
+            PlantOrderReceivedQuantity."Plant Order Line No." := "Plant Order Line No.";
+            PlantOrderReceivedQuantity."Line No." := ReceivedQuantityFreeLineNo(PlantOrderReceivedQuantity);
+            PlantOrderReceivedQuantity."Plant Type" := "Plant Type";
+            PlantOrderReceivedQuantity."Plant No." := "Plant No.";
+            PlantOrderReceivedQuantity."Item No." := "Item No.";
+            PlantOrderReceivedQuantity.Received := "To Receive";
+            PlantOrderReceivedQuantity."Unit of Measure" := "Unit of Measure";
+            PlantOrderReceivedQuantity."Receipt Date" := PlantOrderReceipt."Receipt Date";
+            PlantOrderLineOrg.GET("Plant Order No.", "Plant Order Line No.");
+            IF (Type = Type::Plant) AND (PlantOrderLineOrg."Rental Type" = PlantOrderLineOrg."Rental Type"::Rental) THEN BEGIN
+              IF PlantOrderNew."No." = '' THEN
+                CreatePlantOrder(PlantOrderOrg, PlantOrderNew);
+              PlantOrderReceivedQuantity."Receipt Plant Order No." := PlantOrderNew."No.";
+              PlantOrderReceivedQuantity."Receipt Plant Order Line No." :=
+                CreatePlantOrderLine(PlantOrderNew, PlantOrderReceiptLine, PlantOrderLineOrg, PlantOrderReceivedQuantity."Line No.");
+            END;
+            PlantOrderReceivedQuantity.INSERT;
+            "To Receive" := 0;
+            MODIFY;
+          UNTIL NEXT = 0;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreatePlantOrder@1100525002(PlantOrderOrg@1100529000 : Record 11012556;VAR PlantOrderNew@1100529001 : Record 11012556);
+    BEGIN
+      WITH PlantOrderNew DO BEGIN
+        INIT;
+        "No." := PlantOrderNew.PlantOrderBackorderNo(PlantOrderReceipt."Plant Order No.");
+        TESTFIELD("No.");
+        Type := Type::"Other Transfers";
+        "Transfer Date" := PlantOrderReceipt."Receipt Date";
+        "Department Code" := PlantOrderOrg."Department Code";
+        "From Location" := PlantOrderReceipt."To Location";
+        "From Location Address" := PlantOrderOrg."To Location Address";
+        "From Location Address 2" := PlantOrderOrg."To Location Address 2";
+        "From Location City":= PlantOrderOrg."To Location City";
+        "From Location Contact" := PlantOrderOrg."To Location Contact";
+        "From Location Contact Phone No" := PlantOrderOrg."To Location Contact Phone No";
+        "From Location Post Code" := PlantOrderOrg."To Location Post Code";
+        "From Location Address Code" := PlantOrderOrg."To Location Address Code";
+        "From Location County" := PlantOrderOrg."To Location County";
+        "From Location Country/Region" := PlantOrderOrg."To Location Country/Region";
+        "From Location Mobile Phone No." := PlantOrderOrg."To Location Mobile Phone No.";
+        "From Location E-Mail" := PlantOrderOrg."To Location E-Mail";
+        "From Location Contact Name" := PlantOrderOrg."To Location Contact Name";
+        "To Location" := PlantOrderReceipt."To Location";
+        "To Location Address" := PlantOrderOrg."To Location Address";
+        "To Location Address 2" := PlantOrderOrg."To Location Address 2";
+        "To Location City" := PlantOrderOrg."To Location City";
+        "To Location Contact" := PlantOrderOrg."To Location Contact";
+        "To Location Contact Phone No" := PlantOrderOrg."To Location Contact Phone No";
+        "To Location Post Code" := PlantOrderOrg."To Location Post Code";
+        "To Location Address Code" := PlantOrderOrg."To Location Address Code";
+        "To Location County" := PlantOrderOrg."To Location County";
+        "To Location Country/Region" := PlantOrderOrg."To Location Country/Region";
+        "To Location Mobile Phone No." := PlantOrderOrg."To Location Mobile Phone No.";
+        "To Location E-Mail" := PlantOrderOrg."To Location E-Mail";
+        "To Location Contact Name" := PlantOrderOrg."To Location Contact Name";
+        "Created by" := USERID;
+        "Created on" := CURRENTDATETIME;
+        Posted := FALSE;
+        "Posting Date" := 0D;
+        Status := Status::Released;
+        IF (PlantSetup."Def. Transfer PO" = PlantSetup."Def. Transfer PO"::Yes) THEN
+          "Def. Transfer" := "Transfer Date";
+        "Rental Shift" := TRUE;
+        "Rental Startdate (To Location)" := "Transfer Date";
+        "Rental Enddate (From Location)" := "Transfer Date" - 1;
+        "Your Reference" := PlantOrderOrg."Your Reference";
+        "To Employee Company" := PlantOrderOrg."To Employee Company";
+        "To Employee Company" := PlantOrderOrg."To Employee No.";
+        "Shipping Agent" := PlantOrderOrg."Shipping Agent";
+        "Shipment Method Code" := PlantOrderOrg."Shipment Method Code";
+        "Salesperson Code" := PlantOrderOrg."Salesperson Code";
+        INSERT(FALSE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreatePlantOrderLine@1100525009(PlantOrderNew@1100529003 : Record 11012556;PlantOrderReceiptLine@1100529001 : Record 11020493;PlantOrderLineOrg@1100529000 : Record 11012557;ReceivedQtyLineNo@1100529004 : Integer) : Integer;
+    VAR
+      PlantOrderLineNew@1100529002 : Record 11012557;
+    BEGIN
+      //* No linked-plant-/cost-/item lines may be created and also no check with messages/errors on fields (checks are already done), etc.
+      //* So do not use VALIDATES and INSERT/MODIFY(TRUE).
+      PlantOrderLineNew.INIT;
+      PlantOrderLineNew."Plant Order No." := PlantOrderNew."No.";
+      PlantOrderLineNew."Line No." := PONewNextLineNo;
+      PONewNextLineNo := PONewNextLineNo + 10000;
+      PlantOrderLineNew.INSERT(FALSE);
+      PlantOrderLineNew."Transfer Date" := PlantOrderNew."Transfer Date";
+      PlantOrderLineNew."To Employee Company" := PlantOrderLineOrg."To Employee Company";
+      PlantOrderLineNew."To Employee No." := PlantOrderLineOrg."To Employee No.";
+      PlantOrderLineNew.Posted := FALSE;
+      PlantOrderLineNew.Type := PlantOrderLineNew.Type::Plant;
+      PlantOrderLineNew."Plant Type" := PlantOrderReceiptLine."Plant Type";
+      PlantOrderLineNew."No." := PlantOrderReceiptLine."Plant No.";
+      PlantOrderLineNew."Unit of Measure" := PlantOrderReceiptLine."Unit of Measure";
+      PlantOrderLineNew."Rental Type" := PlantOrderLineNew."Rental Type"::Rental;
+      PlantOrderLineNew.Description := PlantOrderLineOrg.Description;
+      PlantOrderLineNew."Description 2" := PlantOrderLineOrg."Description 2";
+      PlantOrderLineNew."From Location" := PlantOrderNew."To Location";
+      PlantOrderLineNew.Quantity :=  PlantOrderReceiptLine."To Receive";
+      PlantOrderLineNew."From Rate Code" := PlantOrderReceiptLine."Mobilization Rate Code";
+      PlantOrderLineNew."To Rate Code" := PlantOrderLineOrg."To Rate Code";
+      PlantOrderLineNew.Element :=  PlantOrderLineOrg.Element;
+      PlantOrderLineNew."Expected return on" := PlantOrderLineOrg."Expected return on";
+      PlantOrderLineNew."Receipt No." := PlantOrderReceiptLine."Plant Order No.";
+      PlantOrderLineNew."Receipt Line No." := PlantOrderReceiptLine."Plant Order Line No.";
+      PlantOrderLineNew."Receipt Qty. Line No." := ReceivedQtyLineNo;
+      PlantOrderLineNew.MODIFY(FALSE);
+      EXIT(PlantOrderLineNew."Line No.");
+    END;
+
+    LOCAL PROCEDURE GetNewReceiptStatus@1100529011() NewStatus : Integer;
+    VAR
+      PlantOrderReceiptLine@1100529000 : Record 11020493;
+    BEGIN
+      NewStatus := PlantOrderReceipt.Status::Finished;
+      PlantOrderReceiptLine.SETRANGE("Plant Order No.", PlantOrderReceipt."Plant Order No.");
+      PlantOrderReceiptLine.FINDSET;
+      REPEAT
+        PlantOrderReceiptLine.CALCFIELDS(Received);
+        IF PlantOrderReceiptLine.Received < PlantOrderReceiptLine.Quantity THEN
+          NewStatus := PlantOrderReceipt.Status::"Partly Received";
+      UNTIL (PlantOrderReceiptLine.NEXT = 0) OR (NewStatus = PlantOrderReceipt.Status::"Partly Received");
+    END;
+
+    LOCAL PROCEDURE ReceivedQuantityFreeLineNo@1100529001(PlantOrderReceivedQuantity@1100529000 : Record 11020494) : Integer;
+    BEGIN
+      PlantOrderReceivedQuantity.SETRANGE("Plant Order No.", PlantOrderReceivedQuantity."Plant Order No.");
+      PlantOrderReceivedQuantity.SETRANGE("Plant Order Line No.", PlantOrderReceivedQuantity."Plant Order Line No.");
+      IF PlantOrderReceivedQuantity.FINDLAST THEN
+        EXIT(PlantOrderReceivedQuantity."Line No." + 10000);
+      EXIT(10000);
+    END;
+
+    LOCAL PROCEDURE CloseReceipt@1100529005();
+    VAR
+      UserSetup@1100529000 : Record 91;
+      PlantOrderReceiptLine@1100529001 : Record 11020493;
+    BEGIN
+      UserSetup.GET(USERID);
+      UserSetup.TESTFIELD("Access Close PO Receipt", TRUE);
+
+      WITH PlantOrderReceipt DO BEGIN
+        TESTFIELD("Plant Order No.");
+        IF Status >= Status::Finished THEN
+          FIELDERROR(Status);
+
+        PlantOrderReceiptLine.SETRANGE("Plant Order No.", "Plant Order No.");
+        PlantOrderReceiptLine.SETFILTER("To Receive", '<>%1', 0);
+        IF NOT PlantOrderReceiptLine.ISEMPTY THEN
+          ERROR(Text006, PlantOrderReceiptLine.FIELDCAPTION("To Receive"));
+
+        IF GUIALLOWED THEN BEGIN
+          IF NOT CONFIRM(Text007, TRUE, "To Location") THEN
+            ERROR(Text008, PlantOrderReceipt.TABLECAPTION, PlantOrderReceipt."Plant Order No.");
+        END;
+
+        Status := Status::Closed;
+        "Receipt Date" := 0D;
+        MODIFY;
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

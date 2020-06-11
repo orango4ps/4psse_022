@@ -1,0 +1,363 @@
+OBJECT Codeunit 11012496 CTRL Interface WS
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      OK@1100528300 : TextConst 'ENU=OK;SVE=OK';
+      NOK@1100528301 : TextConst 'ENU=Not OK';
+      QuotePortalUrlTxt@1100527803 : TextConst 'ENU="%1/portal/%2/static-tile/ProjectPurchaseActions?filters=Code=%4,Project=%3"';
+      SourceTypeNotSupportedTxt@1100528303 : TextConst 'ENU=SourceType %1 does is not supported.';
+      CTRLManagement@1100528302 : Codeunit 11012498;
+      CTRLProcessManagement@1100527802 : Codeunit 11012495;
+      StringFunctions@1100527800 : Codeunit 11012273;
+      VendorNotFoundTxt@1100527801 : TextConst 'ENU=%1 %2 not found in %3.';
+
+    [External]
+    PROCEDURE AddDebriefText@1100527800(CTRLDebriefTextWS@1100527800 : XMLport 11128892) : Text;
+    BEGIN
+      CTRLDebriefTextWS.IMPORT;
+      EXIT(FORMAT(CTRLDebriefTextWS.GetNoOfLines));
+    END;
+
+    [External]
+    PROCEDURE AddServiceCall@1100528303(CTRLServiceCallWS@1100528300 : XMLport 11128890) : Text;
+    BEGIN
+      CTRLServiceCallWS.IMPORT;
+      EXIT(CTRLServiceCallWS.GetCallNo);
+    END;
+
+    [External]
+    PROCEDURE AddDocument@1100528307(TableNo@1100528316 : Integer;EntityKey@1100528315 : ARRAY [10] OF Code[20];FileName@1100528314 : Text;Base64EncodedContents@1100528313 : BigText;ContactNo@1100528312 : Code[20];ContactPersonNo@1100528311 : Code[20];DocumentGroup@1100528309 : Code[10];DocumentDescription@1100528308 : Text[50];DocumentDate@1100528305 : Text[10];Status@1100528302 : Integer) : Code[20];
+    VAR
+      DocumentProperties@1100528317 : Record 11012746;
+      ProjectPurchaseAction@1100528310 : Record 11012026;
+      VendorsbyPurchaseAction@1100528304 : Record 11012068;
+      DocumentManagementWebservice@1100528300 : Codeunit 11012405;
+      ExternalDocumentManagement@1100528303 : Codeunit 11012403;
+      DocNo@1100528301 : Code[20];
+      DocSubSite@1100528306 : Code[20];
+      DocType@1100528307 : Code[10];
+      PrivateDoc@1100528318 : Boolean;
+    BEGIN
+      DocSubSite := '';
+      DocType := '';
+
+      CASE TableNo OF
+        DATABASE::"Project Purchase Action": BEGIN
+          IF (NOT ProjectPurchaseAction.GET(EntityKey[1], EntityKey[2])) THEN
+            ProjectPurchaseAction.INIT;
+          IF (VendorsbyPurchaseAction.GetVendorPurchActionByContactNo(0, ProjectPurchaseAction."Project No.", ProjectPurchaseAction.Code, ContactNo)) THEN
+            ContactPersonNo := VendorsbyPurchaseAction."Contact Person No.";
+          ExternalDocumentManagement.GetDocumentSetupPeripheralApp(EntityKey[1], 2, 15, //CNT-Quote
+            DocSubSite, DocType);
+        END;
+        DATABASE::"Work Order":
+          ExternalDocumentManagement.GetDocumentSetupPeripheralApp(EntityKey[1], 2, 16, //CNT-WorkOrder
+            DocSubSite, DocType);
+        DATABASE::"Service Call":
+          ExternalDocumentManagement.GetDocumentSetupPeripheralApp(EntityKey[1], 2, 17, //CNT-ServiceCall
+            DocSubSite, DocType);
+      END;
+
+      DocNo := DocumentManagementWebservice.AddExternalDocumentAndContent(TableNo, EntityKey, FileName, Base64EncodedContents,
+        ContactNo, ContactPersonNo, DocType, DocumentGroup, DocumentDescription, '', '',
+        DocumentDate, COPYSTR(FORMAT(CURRENTDATETIME, 0, 9), 1, 20), FORMAT(TODAY, 0, 9), Status, DocSubSite);
+
+      DocumentProperties.GET(DocNo);
+      DocumentProperties.VALIDATE("Publish on Service Portal", TRUE);
+      IF (ContactNo <> '') THEN
+        DocumentProperties.VALIDATE("Uploaded by ContactNo",ContactNo);
+
+      DocumentProperties.MODIFY(TRUE);
+
+      CASE TableNo OF
+        DATABASE::"Project Purchase Action":
+          CTRLManagement.QuoteDocumentUploaded(ContactNo, DocNo);
+      END;
+
+      EXIT(DocNo);
+    END;
+
+    [External]
+    PROCEDURE AddServiceText@1100528306(CTRLServiceTextWS@1100528300 : XMLport 11128891) : Text;
+    BEGIN
+      CTRLServiceTextWS.IMPORT;
+      EXIT(FORMAT(CTRLServiceTextWS.GetNoOfLines));
+    END;
+
+    [External]
+    PROCEDURE BulkSyncCompleted@1100527803(ContactNo@1100527802 : Code[20];NotifyContext@1100527800 : Text;PortalUrl@1100527816 : Text) : Text;
+    VAR
+      Contact@1100527809 : Record 5050;
+      VendorsbyPurchaseAction@1100527807 : Record 11012068;
+      CTRLManagement@1100527815 : Codeunit 11012498;
+      CTRLProcessManagement@1100527804 : Codeunit 11012495;
+      ContactEmail@1100527806 : Text;
+      ContactName@1100527803 : Text;
+      ContextArr@1100527805 : ARRAY [10] OF Text;
+    BEGIN
+      StringFunctions.SplitString(NotifyContext, '_-_', ContextArr);
+      IF (NOT VendorsbyPurchaseAction.GetVendorPurchActionByContactNo(0, ContextArr[1], ContextArr[2], ContactNo)) THEN
+        ERROR(VendorNotFoundTxt, Contact.TABLECAPTION, ContactNo, VendorsbyPurchaseAction.TABLECAPTION);
+      VendorsbyPurchaseAction."Ctrl Quote Site Url" := STRSUBSTNO(QuotePortalUrlTxt,
+        PortalUrl, ContactNo, VendorsbyPurchaseAction."Project No.", VendorsbyPurchaseAction."Purchase Action");
+      VendorsbyPurchaseAction.MODIFY;
+
+      CTRLManagement.GetContactFromVendorsbyPurchaseAction(VendorsbyPurchaseAction, Contact);
+      IF (Contact."Available for Control") THEN
+        CTRLProcessManagement.AddEnsureEvent(ContactNo, Contact, NotifyContext);
+
+      EXIT(OK);
+    END;
+
+    [External]
+    PROCEDURE EnsureUserCompleted@1100527806(ContactNo@1100527802 : Code[20];NotifyContext@1100527801 : Text;ActivateUrl@1100527800 : Text) : Text;
+    VAR
+      Contact@1100527805 : Record 5050;
+      ContactCP@1100527809 : Record 5050;
+      ProjectPurchaseAction@1100528300 : Record 11012026;
+      VendorsbyPurchaseAction@1100527803 : Record 11012068;
+      CTRLManagement@1100527810 : Codeunit 11012498;
+      MailTemplateManagement@1100527808 : Codeunit 11012622;
+      ContactEmail@1100527807 : Text;
+      ContactName@1100527806 : Text;
+      ContextArr@1100527804 : ARRAY [10] OF Text;
+      MailTemplateNo@1100527811 : Integer;
+    BEGIN
+      StringFunctions.SplitString(NotifyContext, '_-_', ContextArr);
+      IF (NOT VendorsbyPurchaseAction.GetVendorPurchActionByContactNo(0, ContextArr[1], ContextArr[2], ContactNo)) THEN
+        ERROR(VendorNotFoundTxt, Contact.TABLECAPTION, ContactNo, VendorsbyPurchaseAction.TABLECAPTION);
+      VendorsbyPurchaseAction."Ctrl Activate Url" := ActivateUrl;
+      VendorsbyPurchaseAction.MODIFY;
+      COMMIT;
+
+      CTRLManagement.GetContactFromVendorsbyPurchaseAction(VendorsbyPurchaseAction, Contact);
+      IF (Contact."Available for Control") THEN BEGIN
+        Contact.TESTFIELD("E-Mail 2");
+        ProjectPurchaseAction.GET(VendorsbyPurchaseAction."Project No.", VendorsbyPurchaseAction."Purchase Action");
+
+        IF (ActivateUrl <> '') THEN
+          MailTemplateNo := 49  //DPTLoginQuoteRequest
+        ELSE
+          MailTemplateNo := 200; //DPTQuoteUpdate
+
+        CTRLManagement.SendDocumentLinkTriggers(VendorsbyPurchaseAction.RECORDID);
+        CTRLManagement.SendDocumentLinkTriggers(ProjectPurchaseAction.RECORDID);
+        CTRLProcessManagement.AddEvent(ProjectPurchaseAction.RECORDID, CTRLProcessManagement.GetModifyTxt);
+        CTRLProcessManagement.AddMailEvent(VendorsbyPurchaseAction.RECORDID, MailTemplateNo);
+      END;
+
+      EXIT(OK);
+    END;
+
+    [External]
+    PROCEDURE GetImage@1100528304(SourceType@1100528300 : ',Contact,Customer,ServiceLocation,Resource,SalsePerson';SourceCode@1100528303 : Code[20];VAR ImageText@1100528307 : Text;VAR MimeType@1100528306 : Text) : Boolean;
+    VAR
+      Contact@1100528305 : Record 5050;
+      Customer@1100528301 : Record 18;
+      SalespersonPurchaser@1100528308 : Record 13;
+      ServiceLocation@1100528302 : Record 11012801;
+      ResourceWOP@1100528304 : Record 11229278;
+      CTRLManagement@1100527800 : Codeunit 11012498;
+    BEGIN
+      CASE SourceType OF
+        SourceType::Contact: BEGIN
+          IF (NOT Contact.GET(SourceCode)) THEN EXIT;
+          CTRLManagement.GetImage(Contact, ImageText, MimeType);
+          EXIT(ImageText <> '');
+        END;
+        SourceType::Customer: BEGIN
+          IF (NOT Customer.GET(SourceCode)) THEN EXIT;
+          CTRLManagement.GetImage(Customer, ImageText, MimeType);
+          EXIT(ImageText <> '');
+        END;
+        SourceType::SalsePerson: BEGIN
+          IF (NOT SalespersonPurchaser.GET(SourceCode)) THEN EXIT;
+          CTRLManagement.GetImage(SalespersonPurchaser, ImageText, MimeType);
+          EXIT(ImageText <> '');
+        END;
+        SourceType::ServiceLocation: BEGIN
+          IF (NOT ServiceLocation.GET(SourceCode)) THEN EXIT;
+          CTRLManagement.GetImage(ServiceLocation, ImageText, MimeType);
+          EXIT(ImageText <> '');
+        END;
+        SourceType::Resource: BEGIN
+          IF (NOT ResourceWOP.GET(SourceCode)) THEN EXIT;
+          CTRLManagement.GetImage(ResourceWOP, ImageText, MimeType);
+          EXIT(ImageText <> '');
+        END;
+      END;
+      ERROR(SourceTypeNotSupportedTxt, SourceType);
+    END;
+
+    [External]
+    PROCEDURE QuoteDocumentDownloaded@1100527804(ContactNo@1100527800 : Code[20];DocumentNo@1100527801 : Code[20]) : Text;
+    BEGIN
+      CTRLManagement.QuoteDocumentDownloaded(ContactNo, DocumentNo);
+      EXIT(OK);
+    END;
+
+    [External]
+    PROCEDURE TestNok@1100528300();
+    BEGIN
+      ERROR(NOK);
+    END;
+
+    [External]
+    PROCEDURE TestOk@1100528301() : Text;
+    BEGIN
+      EXIT(OK);
+    END;
+
+    [External]
+    PROCEDURE UpdateCtrlSetup@1100528305(AccessToken@1100528301 : Text;TenantId@1100528302 : Text;TriggerUrl@1100528303 : Text) : Text;
+    VAR
+      CTRLSetup@1100528300 : Record 11125686;
+    BEGIN
+      IF (NOT CTRLSetup.GET) THEN  BEGIN
+        CTRLSetup.INIT;
+        CTRLSetup.INSERT;
+      END;
+
+      CTRLSetup."Access Token" := COPYSTR(AccessToken, 1, MAXSTRLEN(CTRLSetup."Access Token"));
+      CTRLSetup."Tenant Id" := COPYSTR(TenantId, 1, MAXSTRLEN(CTRLSetup."Tenant Id"));
+      CTRLSetup."Trigger Url" := COPYSTR(TriggerUrl, 1, MAXSTRLEN(CTRLSetup."Trigger Url"));
+      CTRLSetup.MODIFY;
+      EXIT(OK);
+    END;
+
+    [External]
+    PROCEDURE UpdateWorkOrder@1100527801(CTRLWorkOrderWS@1100527800 : XMLport 11128893);
+    VAR
+      WorkOrder@1100528300 : Record 11229279;
+    BEGIN
+      CTRLWorkOrderWS.IMPORT;
+      WorkOrder.GET(CTRLWorkOrderWS.GetWorkOrderNo);
+      WorkOrderSendEmailEvent(WorkOrder);
+    END;
+
+    [External]
+    PROCEDURE UpdateWorkOrderReferencePoint@1100528600(WorkOrderNo@1100528100 : Code[20];ReferencePointNo@1100528101 : Integer;ReferencePointDateTime@1100528108 : DateTime);
+    VAR
+      ReferencePoint@1100528102 : Record 11020271;
+      WorkOrderReferencePoint@1100528600 : Record 11229282;
+      WorkOrder@1100409000 : Record 11229279;
+      ModifiedBySubcontPortVendor@1100527800 : Code[20];
+    BEGIN
+      ReferencePoint.GET(ReferencePointNo);
+      ReferencePoint.TESTFIELD("Choice in Subcont.Port", TRUE);
+      ReferencePoint.TESTFIELD(Apply, ReferencePoint.Apply::ServOrder);
+
+      WorkOrder.GET(WorkOrderNo);
+      WorkOrder.SetDateTimeRefPointRegistr(ReferencePointDateTime);
+      WorkOrder."Actual Field Service Status" := ReferencePoint."Triggered by Field Service";
+      WorkOrder."Actual Reference Point" := ReferencePointNo;
+      WorkOrder.MODIFY(TRUE);
+    END;
+
+    [External]
+    PROCEDURE UpdateServiceOrder@1100527802(CTRLServiceOrderWS@1100527800 : XMLport 11128894);
+    BEGIN
+      CTRLServiceOrderWS.IMPORT;
+    END;
+
+    [External]
+    PROCEDURE GetMailWorkOrderPreview@1100528310(WorkOrderNo@1100527600 : Code[20];LanguageCode@1100527610 : Text) : Text;
+    VAR
+      WorkOrder@1100527609 : Record 11229279;
+      SubjectText@1100527612 : Text;
+      BodyText@1100527611 : Text;
+      MailTemplate@1100527602 : Record 11229450;
+      MailTemplateManagement@1100527603 : Codeunit 11012622;
+      SMTPMail@1100527604 : Codeunit 400;
+      StringFunctions@1100527605 : Codeunit 11012273;
+      MailTemplateNo@1100527608 : Integer;
+    BEGIN
+      MailTemplateNo := 43; // WorkOrder Job Notice
+      IF WorkOrder.GET(WorkOrderNo) THEN BEGIN
+        IF MailTemplateManagement.CheckMailTemplate(MailTemplateNo, FALSE) THEN
+          IF MailTemplateManagement.GetMailTemplate(MailTemplate, MailTemplateNo, '') THEN BEGIN
+            MailTemplateManagement.GetLayoutTextSubstitutedSubjectAndTotalBody(MailTemplateNo, LanguageCode, WorkOrder, SubjectText, BodyText);
+            EXIT(BodyText);
+          END;
+      END;
+      EXIT('');
+    END;
+
+    [External]
+    PROCEDURE MailWorkOrder@1100527600(WorkOrderNo@1100527600 : Code[20];LanguageCode@1100528301 : Text;"From Name"@1100528300 : Text;MailAddress@1100527601 : Text;BodyText@1100528302 : Text) : Text;
+    VAR
+      WorkOrder@1100527609 : Record 11229279;
+      SubjectText@1100527612 : Text;
+      TempBodyText@1100527611 : Text;
+      MailTemplate@1100527602 : Record 11229450;
+      MailTemplateManagement@1100527603 : Codeunit 11012622;
+      SMTPMail@1100527604 : Codeunit 400;
+      StringFunctions@1100527605 : Codeunit 11012273;
+      MailTemplateNo@1100527608 : Integer;
+    BEGIN
+      MailTemplateNo := 43; // WorkOrder Job Notice
+      IF WorkOrder.GET(WorkOrderNo) THEN BEGIN
+        IF MailTemplateManagement.CheckMailTemplate(MailTemplateNo, FALSE) THEN
+          IF MailTemplateManagement.GetMailTemplate(MailTemplate, MailTemplateNo, '') THEN BEGIN
+            MailTemplateManagement.GetLayoutTextSubstitutedSubjectAndTotalBody(MailTemplateNo, LanguageCode, WorkOrder, SubjectText, TempBodyText);
+            IF BodyText <> '' THEN
+              SMTPMail.CreateMessage("From Name", MailTemplate.From, MailAddress, SubjectText, BodyText, TRUE)
+            ELSE
+              SMTPMail.CreateMessage("From Name", MailTemplate.From, MailAddress, SubjectText, TempBodyText, TRUE);
+            SMTPMail.Send;
+            EXIT(OK);
+          END;
+      END;
+      EXIT(OK);
+    END;
+
+    LOCAL PROCEDURE "---Locals---"@1100528302();
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE UpdateVendorPurchaseAction@1100527807(ContactNo@1100527801 : Code[20];DocumentNo@1100527800 : Code[20];ProjectPurchaseAction@1100527802 : Record 11012026);
+    VAR
+      Contact@1100527804 : Record 5050;
+      VendorsbyPurchaseAction@1100527803 : Record 11012068;
+    BEGIN
+      VendorsbyPurchaseAction.SETRANGE("Project No.", ProjectPurchaseAction."Project No.");
+      VendorsbyPurchaseAction.SETRANGE("Purchase Action", ProjectPurchaseAction.Code);
+      IF (NOT VendorsbyPurchaseAction.FINDSET(TRUE)) THEN
+        EXIT;
+
+      REPEAT
+        CTRLManagement.GetContactFromVendorsbyPurchaseAction(VendorsbyPurchaseAction, Contact);
+        IF (Contact."No." = ContactNo) THEN BEGIN
+          VendorsbyPurchaseAction."Downloaded in Control" := TRUE;
+          VendorsbyPurchaseAction.MODIFY;
+        END;
+      UNTIL (VendorsbyPurchaseAction.NEXT = 0);
+    END;
+
+    LOCAL PROCEDURE WorkOrderSendEmailEvent@1100528308(WorkOrder@1100528300 : Record 11229279);
+    VAR
+      MailTemplateNo@1100528301 : Integer;
+    BEGIN
+      MailTemplateNo := 202; //CTRL Work Order changed by Subcontractor Planner
+      IF (CTRLManagement.IsValidResourceWOP(WorkOrder."Resource No.")) THEN
+        CTRLProcessManagement.AddMailEvent(WorkOrder.RECORDID, MailTemplateNo);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

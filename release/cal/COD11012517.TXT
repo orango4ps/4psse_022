@@ -1,0 +1,217 @@
+OBJECT Codeunit 11012517 Purch.-Post + Email (Yes/No)
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    TableNo=38;
+    EventSubscriberInstance=Manual;
+    OnRun=VAR
+            PurchaseHeader@1000 : Record 38;
+          BEGIN
+            PurchaseHeader.COPY(Rec);
+
+            IF NOT FIND THEN
+              ERROR(NothingToPostErr);
+
+            Code(PurchaseHeader);
+            Rec := PurchaseHeader;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'DEU=&Eingehen,&Fakturieren,Eingehen und Rechnung &registrieren, Eingehen &und fakturieren;ENU=&Receive,&Invoice,Receive and &Register Invoice,Receive &and Invoice;NLD=&Ontvangen,&Factureren,Ontvangen en factuur &registreren,Ontvangen &en factureren;NOR=&Motta,F&akturer,Motta &og register fakturer,Motta &og fakturer;SVE=&Inleverera,&Fakturera,Inleverera &och fakturera';
+      Text001@1001 : TextConst 'DEU=Mîchten Sie die %1 buchen?;ENU=Do you want to post the %1?;NLD=Wilt u de %1 boeken?;NOR=Vil du bokfõre %1?;SVE=Vill du bokfîra %1?';
+      Text002@1002 : TextConst 'DEU=&Liefern,&Fakturieren,Liefern &und fakturieren;ENU=&Ship,&Invoice,Ship &and Invoice;NLD=&Verzenden,&Factureren,Verzenden &en factureren;NOR=&Lever,F&akturer,Lever &og fakturer;SVE=&Leverera,&Fakturera,Leverera &och fakturera';
+      Selection@1005 : Integer;
+      NothingToPostErr@1007 : TextConst 'DEU=Es gibt nichts zu buchen.;ENU=There is nothing to post.;NLD=Er valt niets te boeken.;NOR=Det finnes ingenting Ü bokfõre.;SVE=Det finns inget att bokfîra.';
+      gWorkingDate@1100525003 : Date;
+      gSelectionOnlyReceipt@1100525000 : Boolean;
+      gSkipReplaceDates@1100525001 : Boolean;
+      gFromSiteMgtForm@1100525002 : Boolean;
+      Text11012000@1100525004 : TextConst 'DEU=&Eingehen, &Fakturieren, Eingehen und Rechnung &registrieren;ENU=&Receive,&Invoice,Receive and &Register Invoice;NLD=&Ontvangen,&Factureren,Ontvangen en factuur &registreren;NOR=&Motta,F&akturer,Motta &og register fakturer;SVE=&Inleverera,&Fakturera,Inleverera &och registrera faktura';
+      Text11012001@1100409000 : TextConst 'DEU=Nur freigegebene AuftrÑge dÅrfen gebucht werden;ENU=It is only possible to post released Orders;NLD=Alleen vrijgegeven orders mogen geboekt worden;NOR=Det er kun mulig Ü bokfõre frigitte ordre;SVE=Det Ñr bara mîjligt att bokfîra slÑppta ordrar';
+      PostingHasBeenDone@1100528400 : Boolean;
+      UseEMailForPurchReceipt@1100529600 : Boolean;
+
+    LOCAL PROCEDURE Code@1(VAR PurchaseHeader@1002 : Record 38);
+    VAR
+      PurchSetup@1000 : Record 312;
+      PurchPostViaJobQueue@1001 : Codeunit 98;
+      PrintDoc@1100527900 : Codeunit 229;
+      PurchRcptHeader@1100527300 : Record 120;
+    BEGIN
+      PostingHasBeenDone := FALSE;
+      WITH PurchaseHeader DO BEGIN
+        CASE "Document Type" OF
+          "Document Type"::Order:
+            BEGIN
+              IF ("Purchase Order Type" = "Purchase Order Type"::"Purchase Order") THEN
+                IF PurchSetup."Release Purch Orders Required" THEN BEGIN
+                  IF Status = Status::Open THEN BEGIN
+                    MESSAGE(Text11012001);
+                    EXIT;
+                  END;
+                END;
+
+              IF ("Purchase Order Type" = "Purchase Order Type"::"Return Order") OR gSelectionOnlyReceipt THEN
+                Selection := 1
+              ELSE BEGIN
+                PurchSetup.GET;
+                IF PurchSetup."Invoice Purchase Orders" THEN BEGIN
+                  IF NOT PurchOrderWithPlantAcqOrRent(PurchaseHeader) THEN
+                    Selection := STRMENU(Text000,1)
+                  ELSE
+                    Selection := STRMENU(Text11012000,1);
+                END ELSE BEGIN
+                  IF NOT CONFIRM(Text001,FALSE,"Document Type") THEN
+                    EXIT
+                  ELSE
+                    Selection := 1;
+                END;
+              END;
+
+              IF Selection = 0 THEN
+                EXIT;
+              Receive := Selection IN [1,3,4];
+              Invoice := Selection IN [2,4];
+
+              "Register Invoice" := (Selection = 3);
+              IF NOT gSkipReplaceDates THEN
+                UpdatePostingAndDocDate(FALSE,gWorkingDate);
+            END;
+          "Document Type"::"Return Order":
+            BEGIN
+              Selection := STRMENU(Text002,3);
+              IF Selection = 0 THEN
+                EXIT;
+              Ship := Selection IN [1,3];
+              Invoice := Selection IN [2,3];
+              "Register Invoice" := FALSE
+            END
+          ELSE
+            IF NOT CONFIRM(Text001,FALSE,LOWERCASE(FORMAT("Document Type"))) THEN
+              EXIT;
+        END;
+        "Print Posted Documents" := FALSE;
+        PostingHasBeenDone := TRUE;
+      END;
+      PurchSetup.GET;
+      IF PurchSetup."Post with Job Queue" THEN
+        PurchPostViaJobQueue.EnqueuePurchDoc(PurchaseHeader)
+      ELSE BEGIN
+        CODEUNIT.RUN(CODEUNIT::"Purch.-Post",PurchaseHeader);
+        IF PurchaseHeader.Receive THEN BEGIN  //C050557+C051138
+          PurchRcptHeader.GET(PurchaseHeader."Last Receiving No.");
+          PrintDoc.EmailPostedPurchReceipt(PurchRcptHeader, UseEMailForPurchReceipt);
+        END ELSE
+          PrintDoc.EmailPurchOrderReceipt(PurchaseHeader, UseEMailForPurchReceipt);
+      END;
+    END;
+
+    PROCEDURE Preview@2(VAR PurchaseHeader@1000 : Record 38);
+    VAR
+      GenJnlPostPreview@1002 : Codeunit 19;
+      PurchPostYesNo@1001 : Codeunit 91;
+    BEGIN
+      BINDSUBSCRIPTION(PurchPostYesNo);
+      GenJnlPostPreview.Preview(PurchPostYesNo,PurchaseHeader);
+    END;
+
+    [EventSubscriber(Codeunit,19,OnRunPreview)]
+    LOCAL PROCEDURE OnRunPreview@3(VAR Result@1000 : Boolean;Subscriber@1001 : Variant;RecVar@1002 : Variant);
+    VAR
+      PurchaseHeader@1003 : Record 38;
+      PurchPost@1004 : Codeunit 90;
+    BEGIN
+      WITH PurchaseHeader DO BEGIN
+        COPY(RecVar);
+        Ship := "Document Type" = "Document Type"::"Return Order";
+        Receive := "Document Type" = "Document Type"::Order;
+        Invoice := TRUE;
+      END;
+      PurchPost.SetPreviewMode(TRUE);
+      Result := PurchPost.RUN(PurchaseHeader);
+    END;
+
+    PROCEDURE PostReceiptsFromBlanketScheme@1100485001(VAR Rec@1100485000 : Record 38;NewPostingDate@1100485001 : Date;PlotNo@1100525000 : Code[10]);
+    VAR
+      PurchPost@1100525002 : Codeunit 90;
+      PurchHeader@1100525001 : Record 38;
+    BEGIN
+      PurchHeader.COPY(Rec);
+      WITH PurchHeader DO BEGIN
+        PostingHasBeenDone := FALSE;
+        TESTFIELD("Document Type", "Document Type"::Order);
+        TESTFIELD("Purchase Order Type", "Purchase Order Type"::"Blanket Order");
+
+        Receive := TRUE;
+        Invoice := FALSE;
+        "Register Invoice" := FALSE;
+
+        IF NOT gSkipReplaceDates THEN
+          UpdatePostingAndDocDate(TRUE,NewPostingDate);
+
+        CLEAR(PurchPost);
+        PurchPost.SetPlotNoReceipts(PlotNo);
+        IF PurchPost.RUN(PurchHeader) THEN
+        //Note: PurchPostViaJobQueue not allowed. Post receipts must be done immediately because there can be a
+        //      second run for the same order. Then first run must be processed. (see R11020239)
+          PostingHasBeenDone := TRUE;
+      END;
+      Rec := PurchHeader;
+    END;
+
+    PROCEDURE SetSelectionOnlyReceipt@1100525000();
+    BEGIN
+      gSelectionOnlyReceipt := TRUE;
+    END;
+
+    PROCEDURE SetSkipReplaceDates@1100525001();
+    BEGIN
+      gSkipReplaceDates := TRUE;
+    END;
+
+    PROCEDURE SetSiteMgtForm@1100525002(WorkingDate@1100525000 : Date);
+    BEGIN
+      gFromSiteMgtForm := TRUE;
+      gWorkingDate := WorkingDate;
+    END;
+
+    PROCEDURE PurchOrderWithPlantAcqOrRent@1100525003(PurchHeader@1100525001 : Record 38) : Boolean;
+    VAR
+      PurchOrderLine@1100525000 : Record 39;
+    BEGIN
+      PurchOrderLine.SETRANGE("Document Type", PurchHeader."Document Type");
+      PurchOrderLine.SETRANGE("Document No.", PurchHeader."No.");
+      PurchOrderLine.SETFILTER("Cost Component Plant", '<>%1', '');
+      IF PurchOrderLine.FINDSET THEN BEGIN
+        REPEAT
+          IF PurchOrderLine.CheckPlantAcquisitionOrRent(PurchOrderLine) <> 0 THEN
+            EXIT(TRUE);
+        UNTIL PurchOrderLine.NEXT = 0;
+      END;
+      EXIT(FALSE);
+    END;
+
+    PROCEDURE GetPostingHasBeenDone@1100528400() : Boolean;
+    BEGIN
+      EXIT(PostingHasBeenDone);
+    END;
+
+    PROCEDURE SetUseEMailForPurchReceipt@1100529600(NewUseEMailForPurchReceipt@1100529600 : Boolean);
+    BEGIN
+      UseEMailForPurchReceipt := NewUseEMailForPurchReceipt;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

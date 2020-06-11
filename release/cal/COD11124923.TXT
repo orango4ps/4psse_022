@@ -1,0 +1,357 @@
+OBJECT Codeunit 11124923 PLA Replication Msg. Processor
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      AppReplicationMsgManager@1100528000 : Codeunit 11130047;
+      Text000@1100528001 : TextConst 'ENU=No such command: %1 - %2';
+      BaseLib@1100528002 : Codeunit 11130048;
+      JsonConvert@1100528004 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.JsonConvert";
+      Text001@1100528003 : TextConst 'ENU=Could not find record. (%1 %2)';
+      Text002@1100528005 : TextConst 'ENU=Could not insert record. (%1 %2)';
+
+    PROCEDURE ProcessReplicationMessage@1100528004(VAR AppReplicationMessage@1100528000 : Record 11130032) : Boolean;
+    BEGIN
+      AppReplicationMessage.TESTFIELD(App, BaseLib.AppCodePLA);
+
+      CASE AppReplicationMessage."Request Type" OF
+        'PlantOrderInsert': ProcessInsertPlantOrder(AppReplicationMessage);
+        'PlantOrderPost': ProcessPostPlantOrder(AppReplicationMessage);
+        'PlantOrderAssignLines': ProcessAssignPlantOrderLines(AppReplicationMessage);
+        'PlantOrderUpdateComments': ProcessPlantOrderComments(AppReplicationMessage);
+        'PlantOrderLineInsert': ProcessInsertPlantOrderLine(AppReplicationMessage);
+        'PlantOrderLineUpdate': ProcessUpdatePlantOrderLine(AppReplicationMessage);
+        'PlantOrderLineUpdateComments': ProcessPlantOrderLineComments(AppReplicationMessage);
+        'PlantOrderLineSendCosts': ProcessInsertPlantOrderLineCost(AppReplicationMessage);
+      ELSE
+        ERROR(Text000, AppReplicationMessage.App, AppReplicationMessage."Request Type");
+      END;
+    END;
+
+    LOCAL PROCEDURE "=== Processors ==="@1100528003();
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE ProcessInsertPlantOrder@1100528011(VAR AppReplicationMessage@1100528000 : Record 11130032);
+    VAR
+      PlantOrder@1100528005 : Record 11012556;
+      JObject@1100528004 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      UserID@1100527104 : Code[50];
+      TypeAsInt@1100528003 : Integer;
+      DotNetExceptionHandler@1100528001 : Codeunit 1291;
+      JsonManagement@1100528700 : Codeunit 5459;
+    BEGIN
+      CLEAR(JsonManagement);
+      JsonManagement.InitializeObject(AppReplicationMessage.GetRequestDataUTF8);
+      JsonManagement.GetJSONObject(JObject);
+
+      TypeAsInt := BaseLib.GetPropertyValueByNameAsInt(JObject, 'Type');
+
+      PlantOrder.INIT;
+      PlantOrder.Type := TypeAsInt;
+      IF PlantOrder.INSERT(TRUE) THEN BEGIN
+        PlantOrder.VALIDATE("Transfer Date", DT2DATE(BaseLib.GetPropertyValueByNameAsDateTime(JObject, 'TransferDate')));
+        PlantOrder.VALIDATE("From Location", BaseLib.GetPropertyValueByNameAsText(JObject, 'FromLocation'));
+        PlantOrder.VALIDATE("To Location", BaseLib.GetPropertyValueByNameAsText(JObject, 'ToLocation'));
+        PlantOrder.MODIFY(TRUE);
+        UserID := AppReplicationMessage.GetUserID;
+        IF UserID <> '' THEN BEGIN
+          PlantOrder.VALIDATE("Created by", UserID);
+          PlantOrder.VALIDATE("Changed by", UserID);
+          PlantOrder.MODIFY;
+        END;
+        PlantOrder.CALCFIELDS("From Location Description", "To Location Description");
+        BaseLib.SetPropertyByName(JObject, 'No', PlantOrder."No.");
+        BaseLib.SetPropertyByName(JObject, 'FromLocationDescription', PlantOrder."From Location Description");
+        BaseLib.SetPropertyByName(JObject, 'FromLocationAddress', PlantOrder."From Location Address");
+        BaseLib.SetPropertyByName(JObject, 'FromLocationPostCode', PlantOrder."From Location Post Code");
+        BaseLib.SetPropertyByName(JObject, 'FromLocationCity', PlantOrder."From Location City");
+        BaseLib.SetPropertyByName(JObject, 'ToLocationDescription', PlantOrder."To Location Description");
+        BaseLib.SetPropertyByName(JObject, 'ToLocationAddress', PlantOrder."To Location Address");
+        BaseLib.SetPropertyByName(JObject, 'ToLocationPostCode', PlantOrder."To Location Post Code");
+        BaseLib.SetPropertyByName(JObject, 'ToLocationCity', PlantOrder."To Location City");
+        BaseLib.SetPropertyByName(JObject, 'CreatedBy', PlantOrder."Created by");
+        BaseLib.SetPropertyByName(JObject, 'ChangedBy', PlantOrder."Changed by");
+        BaseLib.SetPropertyByName(JObject, 'ChangedOn', PlantOrder."Changed on");
+        AppReplicationMessage."Response Type" := BaseLib.ResponseOK;
+        AppReplicationMessage.SetResponseData(BaseLib.ConvertUTF8ToBase64(JsonConvert.SerializeObject(JObject)));
+      END ELSE BEGIN
+        AppReplicationMessage."Response Type":= BaseLib.ResponseError;
+        ERROR(STRSUBSTNO(Text002, PlantOrder.TABLENAME, BaseLib.GetPropertyValueByNameAsText(JObject, 'No')));
+      END;
+    END;
+
+    LOCAL PROCEDURE ProcessPostPlantOrder@1100528009(VAR AppReplicationMessage@1100528000 : Record 11130032);
+    VAR
+      PlantOrder@1100528005 : Record 11012556;
+      JObject@1100528004 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      UserID@1100527100 : Code[50];
+      PostPlantOrder@1100528002 : Codeunit 11012553;
+      ExtendedPlantOrderFunctions@1100528003 : Codeunit 11020503;
+      DotNetExceptionHandler@1100528001 : Codeunit 1291;
+      JsonManagement@1100528700 : Codeunit 5459;
+    BEGIN
+      CLEAR(JsonManagement);
+      JsonManagement.InitializeObject(AppReplicationMessage.GetRequestDataUTF8);
+      JsonManagement.GetJSONObject(JObject);
+
+      IF PlantOrder.GET(BaseLib.GetPropertyValueByNameAsText(JObject, 'No')) THEN BEGIN
+        IF PlantOrder.Status = PlantOrder.Status::Posted THEN BEGIN
+          AppReplicationMessage."Response Type" := BaseLib.ResponseOK;
+          EXIT;
+        END;
+        IF PlantOrder.Status <> PlantOrder.Status::Released THEN BEGIN
+          ExtendedPlantOrderFunctions.SetRec(PlantOrder);
+          ExtendedPlantOrderFunctions.ReleasePlantOrder();
+        END;
+        PlantOrder.GET(BaseLib.GetPropertyValueByNameAsText(JObject, 'No'));
+        PlantOrder.CheckNotPostedLinkedRequest(PlantOrder."No.", TRUE);
+        PlantOrder.SETRANGE("No.");
+        PostPlantOrder.RUN(PlantOrder);
+        PlantOrder.GET(PlantOrder."No.");
+        UserID := AppReplicationMessage.GetUserID;
+        IF UserID <> '' THEN BEGIN
+          PlantOrder.VALIDATE("Changed by", UserID);
+          PlantOrder.VALIDATE("Posted by", UserID);
+          PlantOrder.MODIFY;
+        END;
+        AppReplicationMessage."Response Type" := BaseLib.ResponseOK;
+      END ELSE BEGIN
+        AppReplicationMessage."Response Type":= BaseLib.ResponseError;
+        ERROR(STRSUBSTNO(Text001, PlantOrder.TABLENAME, BaseLib.GetPropertyValueByNameAsText(JObject, 'No')));
+      END;
+    END;
+
+    LOCAL PROCEDURE ProcessAssignPlantOrderLines@1100527100(VAR AppReplicationMessage@1100528007 : Record 11130032);
+    VAR
+      PlantOrder@1100527101 : Record 11012556;
+      PlantOrderLine@1100528002 : Record 11012557;
+      JObject@1100527100 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      PlantOrderLineNo@1100528001 : DotNet "'mscorlib, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Int32";
+      JsonManagement@1100528700 : Codeunit 5459;
+      PlantOrderLineNos@1100528701 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JArray";
+      Value@1100528702 : Variant;
+      LineNo@1100528703 : Integer;
+    BEGIN
+      CLEAR(JsonManagement);
+      JsonManagement.InitializeObject(AppReplicationMessage.GetRequestDataUTF8);
+      JsonManagement.GetJSONObject(JObject);
+
+      PlantOrderLine.SETRANGE("Plant Order No.", BaseLib.GetPropertyValueByNameAsText(JObject, 'PlantOrderNo'));
+      BaseLib.GetPropertyValueByName(JObject, 'PlantOrderLineNos', Value);
+      PlantOrderLineNos := Value;
+
+      FOREACH PlantOrderLineNo IN PlantOrderLineNos DO BEGIN
+        EVALUATE(LineNo, PlantOrderLineNo.ToString);
+        PlantOrderLine.SETRANGE("Line No.", LineNo);
+        IF PlantOrderLine.FINDFIRST THEN BEGIN
+          IF ((PlantOrderLine."Picker No." = '') OR (PlantOrderLine."Picker No." = BaseLib.GetPropertyValueByNameAsText(JObject, 'PickerNo'))) AND
+             (PlantOrderLine."Picking Status" IN [PlantOrderLine."Picking Status"::Open, PlantOrderLine."Picking Status"::Released]) THEN BEGIN
+            PlantOrderLine.VALIDATE("Picker No.", BaseLib.GetPropertyValueByNameAsText(JObject, 'PickerNo'));
+            PlantOrderLine.VALIDATE("Picking Status", PlantOrderLine."Picking Status"::Released);
+            PlantOrderLine.MODIFY(TRUE);
+          END ELSE BEGIN
+            AppReplicationMessage."Response Type":= BaseLib.ResponseError;
+            ERROR(STRSUBSTNO(Text001, PlantOrder.TABLENAME, BaseLib.GetPropertyValueByNameAsText(JObject, 'PlantOrderNo')));
+          END;
+        END ELSE BEGIN
+          AppReplicationMessage."Response Type":= BaseLib.ResponseError;
+          ERROR(STRSUBSTNO(Text001, PlantOrder.TABLENAME, BaseLib.GetPropertyValueByNameAsText(JObject, 'PlantOrderNo')));
+        END;
+      END;
+      AppReplicationMessage."Response Type" := BaseLib.ResponseOK;
+    END;
+
+    LOCAL PROCEDURE ProcessPlantOrderComments@1100528000(VAR AppReplicationMessage@1100528007 : Record 11130032);
+    VAR
+      PlantOrder@1100528004 : Record 11012556;
+      PlantCommentLine@1100528008 : Record 11072666;
+      JsonManagement@1100528700 : Codeunit 5459;
+      JObject@1100528003 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+    BEGIN
+      CLEAR(JsonManagement);
+      JsonManagement.InitializeObject(AppReplicationMessage.GetRequestDataUTF8);
+      JsonManagement.GetJSONObject(JObject);
+
+      IF PlantOrder.GET(BaseLib.GetPropertyValueByNameAsText(JObject, 'PlantOrderNo')) THEN BEGIN
+        PlantCommentLine.InsertPltOrdCommentLns(
+          BaseLib.GetPropertyValueByNameAsText(JObject, 'Comment'), TRUE, AppReplicationMessage.GetUserID, AppReplicationMessage."Sent at", PlantOrder);
+        AppReplicationMessage."Response Type" := BaseLib.ResponseOK;
+      END ELSE BEGIN
+        AppReplicationMessage."Response Type":= BaseLib.ResponseError;
+        ERROR(STRSUBSTNO(Text001, PlantOrder.TABLENAME, BaseLib.GetPropertyValueByNameAsText(JObject, 'PlantOrderNo')));
+      END;
+    END;
+
+    LOCAL PROCEDURE ProcessInsertPlantOrderLine@1100528007(VAR AppReplicationMessage@1100528007 : Record 11130032);
+    VAR
+      PlantSetup@1100527100 : Record 11012550;
+      PlantOrderLine@1100528002 : Record 11012557;
+      JsonManagement@1100528700 : Codeunit 5459;
+      JObject@1100528004 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      TypeAsInt@1100528000 : Integer;
+      PickingStatusAsInt@1100528001 : Integer;
+      LineNo@1100528003 : Integer;
+    BEGIN
+      PlantSetup.GET;
+
+      CLEAR(JsonManagement);
+      JsonManagement.InitializeObject(AppReplicationMessage.GetRequestDataUTF8);
+      JsonManagement.GetJSONObject(JObject);
+
+      PlantOrderLine.SETRANGE("Plant Order No.", BaseLib.GetPropertyValueByNameAsText(JObject, 'PlantOrderNo'));
+      IF PlantOrderLine.FINDLAST THEN
+        LineNo := PlantOrderLine."Line No." + 10000
+      ELSE
+        LineNo := 10000;
+
+      PlantOrderLine.INIT;
+      PlantOrderLine.VALIDATE("Plant Order No.", BaseLib.GetPropertyValueByNameAsText(JObject, 'PlantOrderNo'));
+      PlantOrderLine.VALIDATE("Line No.", LineNo);
+      IF PlantOrderLine.INSERT(TRUE) THEN BEGIN
+        TypeAsInt := BaseLib.GetPropertyValueByNameAsInt(JObject, 'Type');
+        PickingStatusAsInt := BaseLib.GetPropertyValueByNameAsInt(JObject, 'PickingStatus');
+        PlantOrderLine.VALIDATE(Type, TypeAsInt);
+        PlantOrderLine.VALIDATE("Plant Type", BaseLib.GetPropertyValueByNameAsText(JObject, 'PlantType'));
+        PlantOrderLine.CALCFIELDS(Bulk);
+        IF (PlantOrderLine.Bulk) THEN
+          PlantOrderLine.VALIDATE("No.", '0')
+        ELSE
+          PlantOrderLine.VALIDATE("No.", BaseLib.GetPropertyValueByNameAsText(JObject, 'PlantNo'));
+        PlantOrderLine.VALIDATE("Item No.", BaseLib.GetPropertyValueByNameAsText(JObject, 'ItemNo'));
+        PlantOrderLine.CALCFIELDS("Plant Order Type");
+        IF (PlantOrderLine."Plant Order Type" = PlantOrderLine."Plant Order Type"::Arrival) THEN
+          PlantOrderLine.VALIDATE("Asked Quantity", BaseLib.GetPropertyValueByNameAsDecimal(JObject, 'RequestedQuantity'));
+        IF (PlantOrderLine."Plant Order Type" = PlantOrderLine."Plant Order Type"::Removal) AND
+           (PlantSetup."Removal with Qty. to Receive") THEN
+          PlantOrderLine.VALIDATE("Qty. to Receive", BaseLib.GetPropertyValueByNameAsDecimal(JObject, 'QtyToReceive'));
+        PlantOrderLine.VALIDATE(Quantity, BaseLib.GetPropertyValueByNameAsDecimal(JObject, 'Quantity'));
+        PlantOrderLine.VALIDATE("From Location", BaseLib.GetPropertyValueByNameAsText(JObject, 'FromLocation'));
+        PlantOrderLine.VALIDATE("Picker No.", BaseLib.GetPropertyValueByNameAsText(JObject, 'PickerNo'));
+        PlantOrderLine.VALIDATE("Picking Status", PickingStatusAsInt);
+        PlantOrderLine.MODIFY(TRUE);
+
+        BaseLib.SetPropertyByName(JObject, 'LineNo', PlantOrderLine."Line No.");
+        AppReplicationMessage."Response Type" := BaseLib.ResponseOK;
+        AppReplicationMessage.SetResponseData(BaseLib.ConvertUTF8ToBase64(JsonConvert.SerializeObject(JObject)));
+      END ELSE BEGIN
+        AppReplicationMessage."Response Type":= BaseLib.ResponseError;
+        ERROR(STRSUBSTNO(Text002, PlantOrderLine.TABLENAME, BaseLib.GetPropertyValueByNameAsText(JObject, 'PlantOrderNo')));
+      END;
+    END;
+
+    LOCAL PROCEDURE ProcessUpdatePlantOrderLine@1100528001(VAR AppReplicationMessage@1100528007 : Record 11130032);
+    VAR
+      PlantOrderLine@1100528002 : Record 11012557;
+      JObject@1100528004 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      PickingStatusAsInt@1100527101 : Integer;
+      JsonManagement@1100528700 : Codeunit 5459;
+    BEGIN
+      CLEAR(JsonManagement);
+      JsonManagement.InitializeObject(AppReplicationMessage.GetRequestDataUTF8);
+      JsonManagement.GetJSONObject(JObject);
+
+      PlantOrderLine.SETRANGE("Plant Order No.", BaseLib.GetPropertyValueByNameAsText(JObject, 'PlantOrderNo'));
+      PlantOrderLine.SETRANGE("Line No.", BaseLib.GetPropertyValueByNameAsInt(JObject, 'LineNo'));
+      IF PlantOrderLine.FINDFIRST THEN BEGIN
+        PickingStatusAsInt := BaseLib.GetPropertyValueByNameAsInt(JObject, 'PickingStatus');
+        PlantOrderLine.TESTFIELD("Picker No.", BaseLib.GetPropertyValueByNameAsText(JObject, 'PickerNo'));
+        PlantOrderLine.CALCFIELDS(Bulk);
+        IF (NOT PlantOrderLine.Bulk) AND (PlantOrderLine."No." <> BaseLib.GetPropertyValueByNameAsText(JObject, 'PlantNo')) THEN
+          PlantOrderLine.VALIDATE("No.", BaseLib.GetPropertyValueByNameAsText(JObject, 'PlantNo'));
+        PlantOrderLine.VALIDATE("Quantity Damaged", BaseLib.GetPropertyValueByNameAsDecimal(JObject, 'QuantityDamaged'));
+        PlantOrderLine.VALIDATE("Quantity Exit", BaseLib.GetPropertyValueByNameAsDecimal(JObject, 'QuantityExit'));
+        PlantOrderLine.VALIDATE("Quantity Inventory", BaseLib.GetPropertyValueByNameAsDecimal(JObject, 'QuantityInventory'));
+        PlantOrderLine.VALIDATE("Reason Code (Exit)", BaseLib.GetPropertyValueByNameAsText(JObject, 'ExitReasonCode'));
+        PlantOrderLine.VALIDATE(Quantity, BaseLib.GetPropertyValueByNameAsDecimal(JObject, 'Quantity'));
+        PlantOrderLine.VALIDATE("Picking Status", PickingStatusAsInt);
+        PlantOrderLine.MODIFY(TRUE);
+        AppReplicationMessage."Response Type" := BaseLib.ResponseOK;
+      END ELSE BEGIN
+        AppReplicationMessage."Response Type":= BaseLib.ResponseError;
+        ERROR(STRSUBSTNO(Text001, PlantOrderLine.TABLENAME, STRSUBSTNO('%1-%2', BaseLib.GetPropertyValueByNameAsText(JObject, 'PlantOrderNo'), BaseLib.GetPropertyValueByNameAsInt(JObject, 'LineNo'))));
+      END;
+    END;
+
+    LOCAL PROCEDURE ProcessPlantOrderLineComments@1100528002(VAR AppReplicationMessage@1100528007 : Record 11130032);
+    VAR
+      PlantOrderLine@1100528002 : Record 11012557;
+      PlantCommentLine@1100528008 : Record 11072666;
+      JObject@1100528003 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      PickingStatusAsInt@1100528001 : Integer;
+      JsonManagement@1100528700 : Codeunit 5459;
+    BEGIN
+      CLEAR(JsonManagement);
+      JsonManagement.InitializeObject(AppReplicationMessage.GetRequestDataUTF8);
+      JsonManagement.GetJSONObject(JObject);
+
+      PlantOrderLine.SETRANGE("Plant Order No.", BaseLib.GetPropertyValueByNameAsText(JObject, 'PlantOrderNo'));
+      PlantOrderLine.SETRANGE("Line No.", BaseLib.GetPropertyValueByNameAsInt(JObject, 'LineNo'));
+      IF PlantOrderLine.FINDFIRST THEN BEGIN
+        PlantCommentLine.InsertPltOrdLineCommentLns(
+          BaseLib.GetPropertyValueByNameAsText(JObject, 'Comment'), TRUE, AppReplicationMessage.GetUserID, AppReplicationMessage."Sent at", PlantOrderLine);
+        AppReplicationMessage."Response Type" := BaseLib.ResponseOK;
+      END ELSE BEGIN
+        AppReplicationMessage."Response Type":= BaseLib.ResponseError;
+        ERROR(STRSUBSTNO(Text001, PlantOrderLine.TABLENAME, STRSUBSTNO('%1-%2', BaseLib.GetPropertyValueByNameAsText(JObject, 'PlantOrderNo'), BaseLib.GetPropertyValueByNameAsInt(JObject, 'LineNo'))));
+      END;
+    END;
+
+    LOCAL PROCEDURE ProcessInsertPlantOrderLineCost@1100528008(VAR AppReplicationMessage@1100528007 : Record 11130032);
+    VAR
+      PlantOrderCostLine@1100528002 : Record 11012558;
+      JObject@1100528004 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      EnumAsInt@1100528001 : Integer;
+      LineNo@1100528000 : Integer;
+      JsonManagement@1100528700 : Codeunit 5459;
+    BEGIN
+      CLEAR(JsonManagement);
+      JsonManagement.InitializeObject(AppReplicationMessage.GetRequestDataUTF8);
+      JsonManagement.GetJSONObject(JObject);
+
+      PlantOrderCostLine.SETRANGE("Plant Order No.", BaseLib.GetPropertyValueByNameAsText(JObject, 'PlantOrderNo'));
+      IF PlantOrderCostLine.FINDLAST THEN
+        LineNo := PlantOrderCostLine."Line No." + 10000
+      ELSE
+        LineNo := 10000;
+
+      PlantOrderCostLine.INIT;
+      PlantOrderCostLine.VALIDATE("Plant Order No.", BaseLib.GetPropertyValueByNameAsText(JObject, 'PlantOrderNo'));
+      PlantOrderCostLine.VALIDATE("Line No.", LineNo);
+
+      IF PlantOrderCostLine.INSERT(TRUE) THEN BEGIN
+        PlantOrderCostLine.VALIDATE("Plant Order Line No.", BaseLib.GetPropertyValueByNameAsInt(JObject, 'PlantOrderLineNo'));
+        EnumAsInt := BaseLib.GetPropertyValueByNameAsInt(JObject, 'PlantOrderLineCostType');
+        PlantOrderCostLine.VALIDATE(Type, EnumAsInt);
+        PlantOrderCostLine.VALIDATE("Plant Type", BaseLib.GetPropertyValueByNameAsText(JObject, 'PlantType'));
+        PlantOrderCostLine.VALIDATE("Plant No.", BaseLib.GetPropertyValueByNameAsText(JObject, 'PlantNo'));
+        PlantOrderCostLine.VALIDATE(Quantity, BaseLib.GetPropertyValueByNameAsDecimal(JObject, 'Quantity'));
+
+        IF EnumAsInt = 4 THEN // Enum PlandOrderLineCostType.Damage
+            PlantOrderCostLine.VALIDATE("Damage Code", BaseLib.GetPropertyValueByNameAsText(JObject, 'PlantTypeDamageCode'));
+
+        PlantOrderCostLine.MODIFY(TRUE);
+        AppReplicationMessage."Response Type" := BaseLib.ResponseOK;
+      END ELSE BEGIN
+        AppReplicationMessage."Response Type" := BaseLib.ResponseError;
+          ERROR(STRSUBSTNO(Text001, PlantOrderCostLine.TABLENAME, STRSUBSTNO('%1-%2', BaseLib.GetPropertyValueByNameAsText(JObject, 'PlantNo'), BaseLib.GetPropertyValueByNameAsText(JObject, 'PlantType'))));
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

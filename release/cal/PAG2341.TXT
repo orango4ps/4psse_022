@@ -1,0 +1,872 @@
+OBJECT Page 2341 BC O365 Sales Quote
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.00;
+  }
+  PROPERTIES
+  {
+    CaptionML=[ENU=Estimate;
+               NOR=Estimat;
+               SVE=Uppskattning];
+    SourceTable=Table36;
+    DataCaptionExpr='';
+    SourceTableView=WHERE(Document Type=CONST(Quote));
+    PageType=Document;
+    RefreshOnActivate=Yes;
+    PromotedActionCategoriesML=[ENU=New,Process,Report,Manage;
+                                NOR=Ny,Prosess,Rapport,Administrer;
+                                SVE=Ny,Process,Rapport,Hantera];
+    OnInit=BEGIN
+             IsUsingVAT := O365SalesInitialSetup.IsUsingVAT;
+             IsDevice := ClientTypeManagement.GetCurrentClientType IN [CLIENTTYPE::Tablet,CLIENTTYPE::Phone];
+             FieldsVisible := TRUE;
+           END;
+
+    OnNextRecord=BEGIN
+                   IF NOT IsNew THEN
+                     ForceExit := TRUE;
+
+                   O365SalesInvoiceMgmt.OnQueryCloseForSalesHeader(Rec,ForceExit,CustomerName);
+                   IsNew := FALSE;
+
+                   EXIT(NEXT(Steps));
+                 END;
+
+    OnNewRecord=BEGIN
+                  CustomerName := '';
+                  CustomerEmail := '';
+                  WorkDescription := '';
+                  IsNew := TRUE;
+
+                  SetDefaultPaymentServices;
+                END;
+
+    OnInsertRecord=BEGIN
+                     "Document Type" := "Document Type"::Quote;
+                     O365SendResendInvoice.CheckNextNoSeriesIsAvailable("Document Type"::Quote);
+                   END;
+
+    OnDeleteRecord=VAR
+                     CustInvoiceDisc@1000 : Record 19;
+                   BEGIN
+                     ForceExit := TRUE;
+                     IF NOT FIND THEN BEGIN
+                       CurrPage.CLOSE;
+                       EXIT(FALSE);
+                     END;
+
+                     IF CustInvoiceDisc.GET("Invoice Disc. Code","Currency Code",0) THEN
+                       CustInvoiceDisc.DELETE;
+                   END;
+
+    OnQueryClosePage=BEGIN
+                       IF NOT IsNew THEN
+                         ForceExit := TRUE;
+
+                       EXIT(O365SalesInvoiceMgmt.OnQueryCloseForSalesHeader(Rec,ForceExit,CustomerName));
+                     END;
+
+    OnAfterGetCurrRecord=VAR
+                           O365DocumentSendMgt@1004 : Codeunit 2158;
+                         BEGIN
+                           // Tasks shared with invoices (PAG2310)
+                           O365SalesInvoiceMgmt.OnAfterGetSalesHeaderRecord(Rec,CurrencyFormat,TaxAreaDescription,NoOfAttachmentsValueTxt,WorkDescription);
+                           CurrPageEditable := CurrPage.EDITABLE;
+
+                           O365SalesInvoiceMgmt.UpdateCustomerFields(Rec,CustomerName,CustomerEmail,IsCompanyContact);
+                           O365SalesInvoiceMgmt.UpdateAddress(Rec,FullAddress,CountryRegionCode);
+
+                           IF ClientTypeManagement.GetCurrentClientType = CLIENTTYPE::Phone THEN
+                             FieldsVisible := CustomerName <> '';
+
+                           O365SalesInvoiceMgmt.CalcInvoiceDiscountAmount(Rec,SubTotalAmount,DiscountTxt,InvoiceDiscountAmount,InvDiscAmountVisible);
+
+                           IsCustomerBlocked := O365SalesInvoiceMgmt.IsCustomerBlocked("Sell-to Customer No.");
+                           IF IsCustomerBlocked THEN
+                             O365SalesInvoiceMgmt.SendCustomerHasBeenBlockedNotification("Sell-to Customer Name");
+
+                           // Estimate specific tasks
+                           IF ("Sell-to Customer No." = '') AND ("Quote Valid Until Date" < WORKDATE) THEN
+                             "Quote Valid Until Date" := WORKDATE + 30;
+
+                           O365DocumentSendMgt.ShowSalesHeaderFailedNotification(Rec);
+                         END;
+
+    ActionList=ACTIONS
+    {
+      { 22      ;    ;ActionContainer;
+                      CaptionML=[ENU=Invoice;
+                                 NOR=Fakturere;
+                                 SVE=Fakturera];
+                      ActionContainerType=ActionItems }
+      { 3       ;1   ;Action    ;
+                      Name=ViewPdf;
+                      CaptionML=[ENU=Preview;
+                                 NOR=ForhÜndsvisning;
+                                 SVE=Fîrhandsgranska];
+                      ToolTipML=[ENU=Show a preview of the estimate before you send it.;
+                                 NOR=Vis en forhÜndsvisning av estimatet fõr du sender det.;
+                                 SVE=Visa en fîrhandsgranskning av uppskattningen innan du skickar den.];
+                      ApplicationArea=#Basic,#Suite,#Invoicing;
+                      Promoted=Yes;
+                      Visible=NOT IsCustomerBlocked;
+                      Enabled="Sell-to Customer Name" <> '';
+                      PromotedIsBig=Yes;
+                      Image=Document;
+                      PromotedCategory=Category4;
+                      PromotedOnly=Yes;
+                      OnAction=VAR
+                                 ReportSelections@1001 : Record 77;
+                                 DocumentPath@1000 : Text[250];
+                               BEGIN
+                                 SETRECFILTER;
+                                 LOCKTABLE;
+                                 FIND;
+                                 ReportSelections.GetPdfReport(DocumentPath,ReportSelections.Usage::"S.Quote",Rec,"Sell-to Customer No.");
+                                 DOWNLOAD(DocumentPath,'','','',DocumentPath);
+                                 FIND;
+                               END;
+                                }
+      { 11      ;1   ;Action    ;
+                      Name=EmailQuote;
+                      CaptionML=[ENU=Send;
+                                 NOR=Send;
+                                 SVE=Skicka];
+                      ToolTipML=[ENU=Send the estimate.;
+                                 NOR=Send estimatet.;
+                                 SVE=Skicka uppskattningen.];
+                      ApplicationArea=#Basic,#Suite,#Invoicing;
+                      Promoted=Yes;
+                      Visible=NOT IsCustomerBlocked;
+                      Enabled="Sell-to Customer Name" <> '';
+                      PromotedIsBig=Yes;
+                      Image=SendTo;
+                      PromotedCategory=Category4;
+                      PromotedOnly=Yes;
+                      OnAction=BEGIN
+                                 SETRECFILTER;
+
+                                 IF NOT O365SendResendInvoice.SendSalesInvoiceOrQuoteFromBC(Rec) THEN
+                                   EXIT;
+
+                                 FIND;
+                                 CurrPage.UPDATE;
+                                 ForceExit := TRUE;
+                                 CurrPage.CLOSE;
+                               END;
+
+                      Gesture=LeftSwipe }
+      { 28      ;1   ;Action    ;
+                      Name=MakeToInvoice;
+                      CaptionML=[ENU=Make invoice;
+                                 NOR=Lag faktura;
+                                 SVE=Skapa faktura];
+                      ToolTipML=[ENU=Make invoice out of the estimate.;
+                                 NOR=Lag faktura av estimatet.;
+                                 SVE=Skapa faktura frÜn uppskattningen.];
+                      ApplicationArea=#Basic,#Suite,#Invoicing;
+                      Promoted=Yes;
+                      Visible=NOT IsCustomerBlocked;
+                      Enabled="Sell-to Customer Name" <> '';
+                      PromotedIsBig=Yes;
+                      Image=MakeOrder;
+                      PromotedCategory=Category4;
+                      PromotedOnly=Yes;
+                      OnAction=VAR
+                                 SalesHeader@1000 : Record 36;
+                               BEGIN
+                                 IF NOT O365SendResendInvoice.MakeInvoiceFromQuote(SalesHeader,Rec,TRUE) THEN
+                                   EXIT;
+
+                                 ForceExit := TRUE;
+
+                                 SalesHeader.SETRECFILTER;
+                                 PAGE.RUN(PAGE::"BC O365 Sales Invoice",SalesHeader);
+                                 CurrPage.CLOSE;
+                               END;
+                                }
+    }
+  }
+  CONTROLS
+  {
+    { 1   ;0   ;Container ;
+                ContainerType=ContentArea }
+
+    { 5   ;1   ;Group     ;
+                Name=SellToWeb;
+                CaptionML=[ENU=Sell to;
+                           NOR=Selg til;
+                           SVE=Kund];
+                Visible=NOT IsDevice;
+                GroupType=Group }
+
+    { 9   ;2   ;Field     ;
+                CaptionML=[ENU=Customer Name;
+                           NOR=Kundens navn;
+                           SVE=Kundens namn];
+                ToolTipML=[ENU=Specifies the customer's name.;
+                           NOR=Angir kundens navn.;
+                           SVE=Anger kundens namn.];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr="Sell-to Customer Name";
+                Importance=Promoted;
+                LookupPageID=BC O365 Contact Lookup;
+                OnValidate=BEGIN
+                             O365SalesInvoiceMgmt.ValidateCustomerName(Rec,CustomerName,CustomerEmail);
+                             O365SalesInvoiceMgmt.UpdateAddress(Rec,FullAddress,CountryRegionCode);
+
+                             CurrPage.UPDATE(TRUE);
+                           END;
+
+                ShowMandatory=TRUE;
+                QuickEntry=FALSE }
+
+    { 18  ;2   ;Field     ;
+                ExtendedDatatype=E-Mail;
+                CaptionML=[ENU=Email Address;
+                           NOR=E-postadresse;
+                           SVE=E-postadress];
+                ToolTipML=[ENU=Specifies the customer's email address.;
+                           NOR=Angir kundens e-postadresse.;
+                           SVE=Anger kundens e-postadress.];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr=CustomerEmail;
+                Editable=CurrPageEditable AND (CustomerName <> '');
+                OnValidate=BEGIN
+                             O365SalesInvoiceMgmt.ValidateCustomerEmail(Rec,CustomerEmail);
+                           END;
+                            }
+
+    { 24  ;2   ;Group     ;
+                Visible=FieldsVisible;
+                GroupType=Group }
+
+    { 29  ;3   ;Field     ;
+                CaptionML=[ENU=Customer accepted;
+                           NOR=Kunde godtatt;
+                           SVE=Kunden har accepterats];
+                ToolTipML=[ENU=Specifies whether the customer has accepted the quote or not.;
+                           NOR=Angir om kunden har godtatt tilbudet eller ikke.;
+                           SVE=Anger om kunden godkÑnde offerten eller inte.];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr="Quote Accepted";
+                Editable=CurrPageEditable AND (CustomerName <> '') }
+
+    { 10  ;2   ;Group     ;
+                GroupType=Group }
+
+    { 7   ;3   ;Field     ;
+                Name=ViewContactCard;
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr=ViewContactDetailsLbl;
+                Enabled=CustomerName <> '';
+                Editable=FALSE;
+                OnDrillDown=BEGIN
+                              O365SalesInvoiceMgmt.EditCustomerCardFromSalesHeader(Rec,FullAddress,CountryRegionCode);
+                            END;
+
+                ShowCaption=No }
+
+    { 58  ;2   ;Group     ;
+                GroupType=Group }
+
+    { 57  ;3   ;Field     ;
+                CaptionML=[ENU=Address;
+                           NOR=Adresse;
+                           SVE=Adress];
+                ToolTipML=[ENU=Specifies the address where the customer is located.;
+                           NOR=Angir adressen der kunden befinner seg.;
+                           SVE=Anger kundens adress.];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr="Sell-to Address";
+                Editable=CustomerName <> '';
+                OnValidate=BEGIN
+                             O365SalesInvoiceMgmt.ValidateCustomerAddress("Sell-to Address","Sell-to Customer No.");
+                             O365SalesInvoiceMgmt.UpdateAddress(Rec,FullAddress,CountryRegionCode);
+                           END;
+                            }
+
+    { 56  ;3   ;Field     ;
+                CaptionML=[ENU=Address 2;
+                           NOR=Adresse 2;
+                           SVE=Adress 2];
+                ToolTipML=[ENU=Specifies additional address information.;
+                           NOR=Angir ekstra adresseinformasjon.;
+                           SVE=Anger ytterligare adressuppgifter.];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr="Sell-to Address 2";
+                Editable=CustomerName <> '';
+                OnValidate=BEGIN
+                             O365SalesInvoiceMgmt.ValidateCustomerAddress2("Sell-to Address 2","Sell-to Customer No.");
+                             O365SalesInvoiceMgmt.UpdateAddress(Rec,FullAddress,CountryRegionCode);
+                           END;
+                            }
+
+    { 54  ;3   ;Field     ;
+                Lookup=No;
+                CaptionML=[ENU=City;
+                           NOR=Sted;
+                           SVE=Ort];
+                ToolTipML=[ENU=Specifies the address city.;
+                           NOR=Angir poststedet for adressen.;
+                           SVE=Anger adressens ort.];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr="Sell-to City";
+                Editable=CustomerName <> '';
+                OnValidate=BEGIN
+                             O365SalesInvoiceMgmt.ValidateCustomerCity("Sell-to City","Sell-to Customer No.");
+                             O365SalesInvoiceMgmt.UpdateAddress(Rec,FullAddress,CountryRegionCode);
+                           END;
+                            }
+
+    { 55  ;3   ;Field     ;
+                Lookup=No;
+                CaptionML=[ENU=Post Code;
+                           NOR=Postnummer;
+                           SVE=Postnummer];
+                ToolTipML=[ENU=Specifies the postal code.;
+                           NOR=Angir postnummeret.;
+                           SVE=Anger postnumret.];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr="Sell-to Post Code";
+                Editable=CustomerName <> '';
+                OnValidate=BEGIN
+                             O365SalesInvoiceMgmt.ValidateCustomerPostCode("Sell-to Post Code","Sell-to Customer No.");
+                             O365SalesInvoiceMgmt.UpdateAddress(Rec,FullAddress,CountryRegionCode);
+                           END;
+                            }
+
+    { 53  ;3   ;Field     ;
+                Lookup=No;
+                CaptionML=[ENU=County;
+                           NOR=Fylke/delstat;
+                           SVE=Delstat];
+                ToolTipML=[ENU=Specifies the address county.;
+                           NOR=Angir fylket for adressen.;
+                           SVE=Anger adressens delstat.];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr="Sell-to County";
+                Editable=CustomerName <> '';
+                OnValidate=BEGIN
+                             O365SalesInvoiceMgmt.ValidateCustomerCounty("Sell-to County","Sell-to Customer No.");
+                             O365SalesInvoiceMgmt.UpdateAddress(Rec,FullAddress,CountryRegionCode);
+                           END;
+                            }
+
+    { 52  ;3   ;Field     ;
+                Lookup=Yes;
+                CaptionML=[ENU=Country/Region Code;
+                           NOR=Lands-/omrÜdekode;
+                           SVE=Lands-/regionkod];
+                ToolTipML=[ENU=Specifies the address country/region.;
+                           NOR=Angir landet/omrÜdet for adressen.;
+                           SVE=Anger adressens land/region.];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr=CountryRegionCode;
+                TableRelation=Country/Region;
+                Editable=CurrPageEditable AND (CustomerName <> '');
+                LookupPageID=BC O365 Country/Region List;
+                OnValidate=BEGIN
+                             CountryRegionCode := O365SalesInvoiceMgmt.FindCountryCodeFromInput(CountryRegionCode);
+                             "Sell-to Country/Region Code" := CountryRegionCode;
+                             O365SalesInvoiceMgmt.ValidateCustomerCountryRegion("Sell-to Country/Region Code","Sell-to Customer No.");
+                             O365SalesInvoiceMgmt.UpdateAddress(Rec,FullAddress,CountryRegionCode);
+                           END;
+                            }
+
+    { 46  ;1   ;Group     ;
+                Name=SellToDevice;
+                CaptionML=[ENU=Sell to;
+                           NOR=Selg til;
+                           SVE=Kund];
+                Visible=IsDevice AND NOT FieldsVisible;
+                GroupType=Group }
+
+    { 43  ;2   ;Field     ;
+                Name=EnterNewSellToCustomerName;
+                Lookup=No;
+                CaptionML=[ENU=Add new customer;
+                           NOR=Legg til ny kunde;
+                           SVE=LÑgg till ny kund];
+                ToolTipML=[ENU=Specifies the customer's name.;
+                           NOR=Angir kundens navn.;
+                           SVE=Anger kundens namn.];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                NotBlank=Yes;
+                SourceExpr="Sell-to Customer Name";
+                Importance=Promoted;
+                OnValidate=VAR
+                             Customer@1000 : Record 18;
+                           BEGIN
+                             O365SalesInvoiceMgmt.CreateCustomer(Rec,Customer,CustomerName,CustomerEmail);
+                             O365SalesInvoiceMgmt.UpdateAddress(Rec,FullAddress,CountryRegionCode);
+
+                             CurrPage.UPDATE(TRUE);
+                           END;
+
+                QuickEntry=FALSE }
+
+    { 42  ;2   ;Group     ;
+                CaptionML=[ENU=Or;
+                           NOR=Eller;
+                           SVE=Eller];
+                GroupType=Group }
+
+    { 40  ;3   ;Field     ;
+                Name=PickExistingCustomer;
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr=PickExistingCustomerLbl;
+                Editable=FALSE;
+                LookupPageID=BC O365 Contact Lookup;
+                OnDrillDown=BEGIN
+                              IF O365SalesInvoiceMgmt.LookupContactFromSalesHeader(Rec) THEN
+                                CurrPage.UPDATE(TRUE);
+                            END;
+
+                ShowCaption=No;
+                QuickEntry=FALSE }
+
+    { 39  ;1   ;Group     ;
+                Name=SellToDeviceWithCustomerName;
+                CaptionML=[ENU=Sell to;
+                           NOR=Selg til;
+                           SVE=Kund];
+                Visible=IsDevice AND FieldsVisible;
+                GroupType=Group }
+
+    { 38  ;2   ;Field     ;
+                Name=PhoneSellToCustomerName;
+                CaptionML=[ENU=Customer Name;
+                           NOR=Kundenavn;
+                           SVE=Kundens namn];
+                ToolTipML=[ENU=Specifies the customer's name.;
+                           NOR=Angir kundens navn.;
+                           SVE=Anger kundens namn.];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr="Sell-to Customer Name";
+                Importance=Promoted;
+                Visible=IsDevice;
+                LookupPageID=BC O365 Contact Lookup;
+                OnValidate=BEGIN
+                             O365SalesInvoiceMgmt.ValidateCustomerName(Rec,CustomerName,CustomerEmail);
+                             O365SalesInvoiceMgmt.UpdateAddress(Rec,FullAddress,CountryRegionCode);
+
+                             CurrPage.UPDATE(TRUE);
+                           END;
+
+                OnLookup=BEGIN
+                           IF O365SalesInvoiceMgmt.LookupContactFromSalesHeader(Rec) THEN
+                             CurrPage.UPDATE(TRUE);
+                         END;
+
+                ShowMandatory=TRUE;
+                QuickEntry=FALSE }
+
+    { 37  ;2   ;Field     ;
+                Name=PhoneCustomerEmail;
+                ExtendedDatatype=E-Mail;
+                CaptionML=[ENU=Email Address;
+                           NOR=E-postadresse;
+                           SVE=E-postadress];
+                ToolTipML=[ENU=Specifies the customer's email address.;
+                           NOR=Angir kundens e-postadresse.;
+                           SVE=Anger kundens e-postadress.];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr=CustomerEmail;
+                Editable=CurrPageEditable AND (CustomerName <> '');
+                OnValidate=BEGIN
+                             O365SalesInvoiceMgmt.ValidateCustomerEmail(Rec,CustomerEmail);
+                           END;
+                            }
+
+    { 23  ;2   ;Field     ;
+                Name=PhoneQuoteAccepted;
+                CaptionML=[ENU=Customer accepted;
+                           NOR=Kunden har godtatt;
+                           SVE=Kunden har accepterat];
+                ToolTipML=[ENU=Specifies whether the customer has accepted the quote or not.;
+                           NOR=Angir om kunden har godtatt tilbudet eller ikke.;
+                           SVE=Anger om kunden godkÑnde offerten eller inte.];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr="Quote Accepted";
+                Editable=CurrPageEditable AND (CustomerName <> '') }
+
+    { 30  ;2   ;Field     ;
+                CaptionML=[ENU=Address;
+                           NOR=Adresse;
+                           SVE=Adress];
+                ToolTipML=[ENU=Specifies the address of the customer.;
+                           NOR=Angir adressen til kunden.;
+                           SVE=Anger kundens adress.];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr=FullAddress;
+                Editable=FALSE;
+                OnAssistEdit=VAR
+                               TempStandardAddress@1000 : TEMPORARY Record 730;
+                             BEGIN
+                               IF NOT CurrPageEditable THEN
+                                 EXIT;
+                               IF CustomerName = '' THEN
+                                 EXIT;
+
+                               CurrPage.SAVERECORD;
+                               COMMIT;
+                               TempStandardAddress.CopyFromSalesHeaderSellTo(Rec);
+                               IF PAGE.RUNMODAL(PAGE::"O365 Address",TempStandardAddress) = ACTION::LookupOK THEN BEGIN
+                                 FIND;
+                                 O365SalesInvoiceMgmt.UpdateAddress(Rec,FullAddress,CountryRegionCode);
+                                 // UpdateAddress changes Bill-To address without MODIFYing: make sure the next line is either MODIFY or CurrPage.UPDATE(TRUE);
+                                 CurrPage.UPDATE(TRUE);
+                               END;
+                             END;
+                              }
+
+    { 2   ;1   ;Group     ;
+                CaptionML=[ENU=Estimate Details;
+                           NOR=Estimer detaljer;
+                           SVE=Uppskattningsinformation];
+                Visible=FieldsVisible;
+                GroupType=Group }
+
+    { 41  ;2   ;Field     ;
+                Name=EstimateNoControl;
+                CaptionML=[ENU=Estimate No.;
+                           NOR=Estimatnr.;
+                           SVE=Uppskattningsnummer];
+                ToolTipML=[ENU=Specifies the number of the estimate.;
+                           NOR=Angir nummeret pÜ estimatet.;
+                           SVE=Anger uppskattningens nummer.];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr="No.";
+                Editable=FALSE }
+
+    { 26  ;2   ;Field     ;
+                CaptionML=[ENU=Valid until;
+                           NOR=Gyldig til;
+                           SVE=Giltig till];
+                ToolTipML=[ENU=Specifies how long the quote is valid.;
+                           NOR=Angir hvor lenge tilbudet er gyldig.;
+                           SVE=Anger hur lÑnge offerten Ñr giltig.];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr="Quote Valid Until Date";
+                Editable=CustomerName <> '' }
+
+    { 4   ;2   ;Field     ;
+                CaptionML=[ENU=Sent;
+                           NOR=Sendt;
+                           SVE=Skickad];
+                ToolTipML=[ENU=Specifies date and time of when the quote was sent to the customer.;
+                           NOR=Angir datoen og klokkeslettet da tilbudet ble sendt til kunden.;
+                           SVE=Anger datum och tid dÜ offerten skickades till kunden.];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr="Quote Sent to Customer" }
+
+    { 6   ;2   ;Field     ;
+                CaptionML=[ENU=Accepted on;
+                           NOR=Godtatt den;
+                           SVE=GodkÑnd den];
+                ToolTipML=[ENU=Specifies when the client accepted the quote.;
+                           NOR=Angir tidspunktet da klienten godtok tilbudet.;
+                           SVE=Anger nÑr kunden godkÑnde offerten.];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr="Quote Accepted Date" }
+
+    { 35  ;2   ;Field     ;
+                CaptionML=[ENU=Customer is tax liable;
+                           NOR=Kunde er skyldig mva;
+                           SVE=Kunden Ñr momspliktig];
+                ToolTipML=[ENU=Specifies if the sales invoice contains sales tax.;
+                           NOR=Angir om salgsfakturaen inneholder salgs-mva.;
+                           SVE=Anger om fîrsÑljningsfakturan innehÜller moms.];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr="Tax Liable";
+                Visible=NOT IsUsingVAT;
+                Editable=CustomerName <> '';
+                OnValidate=BEGIN
+                             CurrPage.UPDATE;
+                           END;
+                            }
+
+    { 34  ;2   ;Field     ;
+                Name=TaxAreaDescription;
+                CaptionML=[ENU=Customer tax rate;
+                           NOR=Mva-sats for kunde;
+                           SVE=Kundens momssats];
+                ToolTipML=[ENU=Specifies the customer's tax area.;
+                           NOR=Angir kundens mva-omrÜde.;
+                           SVE=Anger kundens skatteomrÜde.];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                NotBlank=Yes;
+                SourceExpr=TaxAreaDescription;
+                Visible=NOT IsUsingVAT;
+                Enabled=CustomerName <> '';
+                Editable=FALSE;
+                OnAssistEdit=VAR
+                               TaxArea@1000 : Record 318;
+                             BEGIN
+                               IF PAGE.RUNMODAL(PAGE::"O365 Tax Area List",TaxArea) = ACTION::LookupOK THEN BEGIN
+                                 VALIDATE("Tax Area Code",TaxArea.Code);
+                                 TaxAreaDescription := TaxArea.GetDescriptionInCurrentLanguage;
+                                 CurrPage.UPDATE;
+                               END;
+                             END;
+
+                QuickEntry=FALSE }
+
+    { 27  ;2   ;Field     ;
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr="VAT Registration No.";
+                Visible=IsUsingVAT;
+                Editable=(IsUsingVAT AND IsCompanyContact) }
+
+    { 44  ;1   ;Part      ;
+                Name=Lines;
+                CaptionML=[ENU=Line Items;
+                           NOR=Linjevarer;
+                           SVE=Radartiklar];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SubPageLink=Document Type=FIELD(Document Type),
+                            Document No.=FIELD(No.);
+                PagePartID=Page2311;
+                Visible=FieldsVisible;
+                Enabled=CustomerName <> '';
+                Editable=CustomerName <> '';
+                PartType=Page }
+
+    { 33  ;1   ;Group     ;
+                CaptionML=[ENU=Totals;
+                           NOR=Totaler;
+                           SVE=Summor];
+                Visible=FieldsVisible AND NOT InvDiscAmountVisible;
+                GroupType=Group }
+
+    { 32  ;2   ;Group     ;
+                GroupType=Group }
+
+    { 31  ;3   ;Field     ;
+                Name=Amount;
+                Lookup=No;
+                DrillDown=No;
+                CaptionML=[ENU=Net Total;
+                           NOR=Nettosum;
+                           SVE=Nettosumma];
+                ToolTipML=[ENU=Specifies the total amount on the sales invoice excluding VAT.;
+                           NOR=Angir det totale belõpet pÜ salgsfakturaen, ekskl. mva.;
+                           SVE=Anger fîrsÑljningsfakturans totalbelopp, exklusive moms.];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr=Amount;
+                AutoFormatType=10;
+                AutoFormatExpr=CurrencyFormat }
+
+    { 25  ;3   ;Field     ;
+                Name=AmountInclVAT;
+                Lookup=No;
+                DrillDown=No;
+                CaptionML=[ENU=Total Including VAT;
+                           NOR=Sum inkludert mva.;
+                           SVE=Summa inklusive moms];
+                ToolTipML=[ENU=Specifies the total amount on the sales invoice including VAT.;
+                           NOR=Angir det totale belõpet pÜ salgsfakturaen, inkl. mva.;
+                           SVE=Anger fîrsÑljningsfakturans totalbelopp, inklusive moms.];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr="Amount Including VAT";
+                AutoFormatType=10;
+                AutoFormatExpr=CurrencyFormat;
+                Importance=Promoted;
+                Style=Strong;
+                StyleExpr=TRUE }
+
+    { 21  ;3   ;Field     ;
+                Name=DiscountLink;
+                DrillDown=Yes;
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr=DiscountTxt;
+                Importance=Promoted;
+                Enabled=CustomerName <> '';
+                Editable=FALSE;
+                OnDrillDown=BEGIN
+                              IF PAGE.RUNMODAL(PAGE::"O365 Sales Invoice Discount",Rec) = ACTION::LookupOK THEN
+                                CurrPage.UPDATE;
+                            END;
+
+                ShowCaption=No }
+
+    { 20  ;1   ;Group     ;
+                CaptionML=[ENU=Totals;
+                           NOR=Totaler;
+                           SVE=Summor];
+                Visible=FieldsVisible AND InvDiscAmountVisible;
+                GroupType=Group }
+
+    { 19  ;2   ;Group     ;
+                GroupType=Group }
+
+    { 17  ;3   ;Field     ;
+                CaptionML=[ENU=Subtotal;
+                           NOR=Delsum;
+                           SVE=Delsumma];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr=SubTotalAmount;
+                AutoFormatType=10;
+                AutoFormatExpr=CurrencyFormat;
+                Importance=Promoted;
+                Editable=FALSE }
+
+    { 16  ;3   ;Field     ;
+                Name=InvoiceDiscount;
+                CaptionML=[ENU=Invoice Discount;
+                           NOR=Fakturarabatt;
+                           SVE=Fakturarabatt];
+                ToolTipML=[ENU=Specifies the invoice discount amount. To edit the invoice discount, click on the amount.;
+                           NOR=Angir fakturarabattbelõpet. Hvis du vil redigere fakturarabatten, klikker du belõpet.;
+                           SVE=Anger fakturarabattens belopp. Klicka pÜ beloppet om vill redigera fakturarabatten.];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr=-InvoiceDiscountAmount;
+                AutoFormatType=10;
+                AutoFormatExpr=CurrencyFormat;
+                CaptionClass=GetInvDiscountCaption;
+                Importance=Promoted;
+                Editable=FALSE;
+                OnDrillDown=BEGIN
+                              IF PAGE.RUNMODAL(PAGE::"O365 Sales Invoice Discount",Rec) = ACTION::LookupOK THEN
+                                CurrPage.UPDATE;
+                            END;
+                             }
+
+    { 15  ;3   ;Field     ;
+                Name=Amount2;
+                Lookup=No;
+                DrillDown=No;
+                CaptionML=[ENU=Net Total;
+                           NOR=Nettosum;
+                           SVE=Nettosumma];
+                ToolTipML=[ENU=Specifies the total amount on the sales invoice excluding VAT.;
+                           NOR=Angir det totale belõpet pÜ salgsfakturaen, ekskl. mva.;
+                           SVE=Anger fîrsÑljningsfakturans totalbelopp, exklusive moms.];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr=Amount;
+                AutoFormatType=10;
+                AutoFormatExpr=CurrencyFormat }
+
+    { 14  ;3   ;Field     ;
+                Name=AmountInclVAT2;
+                Lookup=No;
+                DrillDown=No;
+                CaptionML=[ENU=Total Including VAT;
+                           NOR=Sum inkludert mva.;
+                           SVE=Summa inklusive moms];
+                ToolTipML=[ENU=Specifies the total amount on the sales invoice including VAT.;
+                           NOR=Angir det totale belõpet pÜ salgsfakturaen, inkl. mva.;
+                           SVE=Anger fîrsÑljningsfakturans totalbelopp, inklusive moms.];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr="Amount Including VAT";
+                AutoFormatType=10;
+                AutoFormatExpr=CurrencyFormat;
+                Importance=Promoted;
+                Style=Strong;
+                StyleExpr=TRUE }
+
+    { 12  ;1   ;Group     ;
+                CaptionML=[ENU=Note and attachments;
+                           NOR=Merknad og vedlegg;
+                           SVE=Noteringar och bilagor];
+                Visible=FieldsVisible;
+                GroupType=Group }
+
+    { 36  ;2   ;Group     ;
+                GroupType=Group }
+
+    { 8   ;3   ;Field     ;
+                CaptionML=[ENU=Note for customer;
+                           NOR=Notat til kunde;
+                           SVE=Anteckning fîr kund];
+                ToolTipML=[ENU=Specifies the products or service being offered;
+                           NOR=Angir produktene eller tjenestene som tilbys;
+                           SVE=Anger erbjudna produkter eller tjÑnster];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr=WorkDescription;
+                Editable=CurrPageEditable AND (CustomerName <> '');
+                MultiLine=Yes;
+                OnValidate=BEGIN
+                             SetWorkDescription(WorkDescription);
+                           END;
+                            }
+
+    { 13  ;3   ;Field     ;
+                DrillDown=Yes;
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SourceExpr=NoOfAttachmentsValueTxt;
+                Importance=Promoted;
+                Enabled=CustomerName <> '';
+                Editable=FALSE;
+                OnDrillDown=BEGIN
+                              O365SalesInvoiceMgmt.UpdateNoOfAttachmentsLabel(O365SalesAttachmentMgt.EditAttachments(Rec),NoOfAttachmentsValueTxt);
+                              CurrPage.UPDATE(FALSE);
+                            END;
+
+                ShowCaption=No }
+
+    { 990 ;    ;Container ;
+                ContainerType=FactBoxArea }
+
+    { 999 ;1   ;Part      ;
+                Name=CustomerStatisticsFactBox;
+                CaptionML=[ENU=Customer statistics;
+                           NOR=Kundestatistikk;
+                           SVE=Kundstatistik];
+                ApplicationArea=#Basic,#Suite,#Invoicing;
+                SubPageLink=No.=FIELD(Sell-to Customer No.);
+                PagePartID=Page2306;
+                PartType=Page }
+
+  }
+  CODE
+  {
+    VAR
+      O365SalesInitialSetup@1016 : Record 2110;
+      O365SalesAttachmentMgt@1006 : Codeunit 2112;
+      O365SendResendInvoice@1001 : Codeunit 2104;
+      ClientTypeManagement@1049 : Codeunit 4030;
+      O365SalesInvoiceMgmt@1005 : Codeunit 2310;
+      CustomerName@1000 : Text[100];
+      CustomerEmail@1004 : Text[80];
+      WorkDescription@1002 : Text;
+      FullAddress@1008 : Text;
+      CurrPageEditable@1003 : Boolean;
+      IsUsingVAT@1010 : Boolean;
+      ForceExit@1012 : Boolean;
+      InvDiscAmountVisible@1022 : Boolean;
+      IsCompanyContact@1015 : Boolean;
+      InvoiceDiscountAmount@1037 : Decimal;
+      SubTotalAmount@1020 : Decimal;
+      DiscountTxt@1019 : Text;
+      NoOfAttachmentsValueTxt@1011 : Text;
+      CurrencyFormat@1013 : Text;
+      ViewContactDetailsLbl@1007 : TextConst 'ENU=Open contact details;NOR=èpne kontaktdetaljer;SVE=ôppna kontaktinformation';
+      TaxAreaDescription@1014 : Text[50];
+      CountryRegionCode@1021 : Code[10];
+      IsCustomerBlocked@1023 : Boolean;
+      IsNew@1093 : Boolean;
+      IsDevice@1048 : Boolean;
+      FieldsVisible@1009 : Boolean;
+      PickExistingCustomerLbl@1017 : TextConst 'ENU=Choose existing customer;NOR=Velg eksisterende kunde;SVE=VÑlj befintlig kund';
+
+    [External]
+    PROCEDURE SuppressExitPrompt@5();
+    BEGIN
+      ForceExit := TRUE;
+    END;
+
+    LOCAL PROCEDURE GetInvDiscountCaption@8() : Text;
+    BEGIN
+      EXIT(O365SalesInvoiceMgmt.GetInvoiceDiscountCaption(ROUND("Invoice Discount Value",0.1)));
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -1,0 +1,291 @@
+OBJECT Codeunit 11126706 Create Demo Data FSA WS
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+            CreateDemoUser('pschoenmaker@4ps.nl', 'Peter', 'Schoenmaker1', 'SO0');
+            //CreateDemoUser('moskam@4ps.nl', 'Marjolein', 'Oskam3', 'SO0');
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text001@1100525000 : TextConst 'ENU=Login details for the Field Service App';
+      Text002@1100525001 : TextConst 'ENU="Dear %1,%4 %4Thank you for creating a demo account.%4Below you can find instructions on how to start using the 4PS Field Service App: %4%4 1. Download the app from the store (<a href=""https://play.google.com/store/apps/details?id=com.fps.fsa"">Android</a>, <a href=""https://itunes.apple.com/nl/app/4ps-buitendienst/id1173821193"">iOS</a>, <a href=""https://www.microsoft.com/store/apps/9nblggh4wrt3"">UWP, Windows</a>))%4%4 2. After installation click <a href=""https://fsa.4ps.nl/login/?username=%2&proxy=%5"">here (Android)</a> or <a href=""fps.fsa://login/?username=%2&proxy=%5"">here (iOS, UWP, Window)</a>  to start the app.%4 <i>The app opens and the connection with the back-office will be set.</i>%4You can find a working link on <a href=""%5"">this page</a> of the above link doesn''t work (which is the case in some mail clients).%4%4"';
+      CopyServiceOrderCall@1100525002 : Codeunit 11012851;
+      CopyMethod@1100525003 : 'Copy,Unfinished,Additional';
+      AdviceOrderLineStatus@1100525004 : 'Both,Open,Released';
+      Text003@1100525005 : TextConst 'ENU=3. Log in with the following credentials:%4User Name: %2%4Password: %3%4%4 4. Refresh the work order overview to fetch the orders that are prepared for you!%4 <i>You can always get new orders. You can find that possibility on the settings page.</i>%4%4With kind regards,%4 4PS';
+
+    [External]
+    PROCEDURE CreateWorkOrdersForResource@1100528001(ResourceNo@1100528000 : Code[20];ServiceOrderBaseNo@1100528005 : Code[20]) : Boolean;
+    VAR
+      ServiceSourceTypeSetup@1100525000 : Record 11071726;
+      ServiceOrderCopyNo@1100525001 : Code[20];
+      WorkOrder@1100528001 : Record 11229279;
+      ServiceOrder@1100528004 : Record 11012823;
+      Count@1100528006 : Integer;
+    BEGIN
+      IF (ServiceOrderBaseNo = '') OR (ResourceNo = '') THEN
+        EXIT(FALSE);
+
+      ServiceOrder.SETFILTER("No.", '%1', ServiceOrderBaseNo + '*');
+      ServiceOrder.SETFILTER(Status, '%1|%2', ServiceOrder.Status::Open, ServiceOrder.Status::"In Process");
+      ServiceOrder.SETRANGE("Unit Price Status", ServiceOrder."Unit Price Status"::" ");
+      IF ServiceOrder.FINDSET THEN BEGIN
+        IF ServiceOrder.COUNT > 4 THEN //then we use last 4 to copy from
+          ServiceOrder.NEXT(RANDOM(ServiceOrder.COUNT - 5));
+        REPEAT
+          ServiceSourceTypeSetup.GET(ServiceOrder."Source Type");
+          ServiceSourceTypeSetup.TESTFIELD("No. Series");
+          ServiceOrderCopyNo := CopyServiceOrderCall.CopyServiceOrder(
+              ServiceOrder."No.",
+              CopyMethod::Copy,
+              ServiceOrder."Source Type",
+              ServiceSourceTypeSetup."No. Series",
+              ServiceOrder."Order Kind",
+              TRUE,TRUE,TRUE,TRUE,TRUE,TRUE,
+              AdviceOrderLineStatus::Both,
+              TRUE,TRUE,TRUE,TRUE,TRUE,TRUE,TRUE,TRUE,FALSE,FALSE,FALSE);
+          CLEAR(WorkOrder);
+          WorkOrder.INIT;
+          WorkOrder."Source Company" := COMPANYNAME;
+          WorkOrder."Source Type" := WorkOrder."Source Type"::ServiceOrder;
+          WorkOrder.VALIDATE("Source No.", ServiceOrderCopyNo);
+          WorkOrder.VALIDATE("Resource Type", WorkOrder."Resource Type"::Employee);
+          WorkOrder.VALIDATE("Resource No.", ResourceNo);
+          WorkOrder.VALIDATE("Signature Mandatory", FALSE);
+          WorkOrder.INSERT(TRUE);
+          WorkOrder.VALIDATE("Export to FSA", TRUE);
+          WorkOrder.MODIFY(TRUE);
+          Count += 1;
+        UNTIL (ServiceOrder.NEXT = 0) OR (Count = 5);
+        EXIT(TRUE);
+      END;
+    END;
+
+    [External]
+    PROCEDURE CreateDemoUser@1100528100(EMail@1100528101 : Text[80];"First Name"@1100528106 : Text[30];"Last Name"@1100528107 : Text[30];ServiceOrderBaseNoForWorkOrders@1100528000 : Code[20]) : Boolean;
+    VAR
+      Employee@1100528103 : Record 5200;
+      FSAUserSetupGAP@1100528104 : Record 11229875;
+      AppUserSetupGAP@1100529301 : Record 11124976;
+      AppUserGAP@1100529300 : Record 11124975;
+      AppSetupGroupGAP@1100529302 : Record 11124992;
+      ProductsGAP@1100529304 : Record 11124990;
+      UserByAppSetupGroupGAP@1100529305 : Record 11124980;
+      GAPInitializer@1100529303 : Codeunit 11128546;
+      ResourceWOP@1100528105 : Record 11229278;
+      Password@1100525000 : Text;
+    BEGIN
+      Employee.INIT;
+      Employee.VALIDATE("First Name", "First Name");
+      Employee.VALIDATE("Last Name", "Last Name");
+      Employee.VALIDATE("Company E-Mail", EMail);
+      Employee.INSERT(TRUE);
+      Employee.VALIDATE(Status, Employee.Status::Active);
+      Employee.MODIFY(TRUE);
+      COMMIT;
+
+      ResourceWOP.INIT;
+      ResourceWOP."No." := Employee."No.";
+      ResourceWOP.VALIDATE(Name, Employee."Last Name");
+      ResourceWOP.VALIDATE(Company, COMPANYNAME);
+      ResourceWOP.VALIDATE(Type, ResourceWOP.Type::Employee);
+      ResourceWOP.VALIDATE("Source No.", Employee."No.");
+      ResourceWOP.VALIDATE("Synchronize FSA", ResourceWOP."Synchronize FSA"::"Changes Only");
+      ResourceWOP.INSERT(TRUE);
+
+      Password := GeneratePassword();
+      AppUserGAP.INIT;
+      AppUserGAP.Username := Employee."No.";
+      AppUserGAP.VALIDATE(Password, Password);
+      AppUserGAP.VALIDATE(Email, EMail);
+      AppUserGAP.INSERT(TRUE);
+
+      IF NOT AppUserSetupGAP.GET(AppUserGAP.Username) THEN BEGIN
+        AppUserSetupGAP.Username := Employee."No.";
+        AppUserSetupGAP.INSERT;
+      END;
+
+      AppUserSetupGAP.VALIDATE("Resource No.", ResourceWOP."No.");
+      AppUserSetupGAP.MODIFY;
+
+      GAPInitializer.InitializeFSA;
+      AppSetupGroupGAP.SETRANGE("Product Code", ProductsGAP.GetProductCodeFSA);
+      IF NOT AppSetupGroupGAP.FINDFIRST THEN BEGIN
+        AppSetupGroupGAP.INIT;
+        AppSetupGroupGAP.Name := 'FSADEMO';
+        AppSetupGroupGAP."Product Code" := ProductsGAP.GetProductCodeFSA;
+        IF AppSetupGroupGAP.INSERT THEN;
+      END;
+
+      UserByAppSetupGroupGAP.INIT;
+      UserByAppSetupGroupGAP.Username := AppUserGAP.Username;
+      UserByAppSetupGroupGAP."Group Name" := AppSetupGroupGAP.Name;
+      UserByAppSetupGroupGAP."Product Code" := ProductsGAP.GetProductCodeFSA;
+      IF UserByAppSetupGroupGAP.INSERT THEN;
+
+      FSAUserSetupGAP.SETRANGE(Username, AppUserGAP.Username);
+      IF NOT FSAUserSetupGAP.FINDFIRST THEN BEGIN
+        FSAUserSetupGAP.INIT;
+        FSAUserSetupGAP."Group Name" := UserByAppSetupGroupGAP."Group Name";
+        FSAUserSetupGAP.Username := AppUserGAP.Username;
+        FSAUserSetupGAP.VALIDATE(Active, FSAUserSetupGAP.Active::Yes);
+        FSAUserSetupGAP.INSERT(TRUE);
+      END ELSE BEGIN
+        FSAUserSetupGAP.VALIDATE(Active, FSAUserSetupGAP.Active::Yes);
+        FSAUserSetupGAP.MODIFY(TRUE);
+      END;
+
+      CreateWorkOrdersForResource(ResourceWOP."No.", ServiceOrderBaseNoForWorkOrders);
+      COMMIT;
+
+      SendEmail(EMail, AppUserGAP, Employee, Password, "First Name");
+      EXIT(TRUE);
+    END;
+
+    [External]
+    PROCEDURE IsDemoUserExisting@1100528000(Username@1100528003 : Code[20]) : Boolean;
+    VAR
+      Employee@1100528002 : Record 5200;
+      FSAUser@1100528001 : Record 11126698;
+      ResourceWOP@1100528000 : Record 11229278;
+    BEGIN
+      IF NOT FSAUser.GET(Username) THEN BEGIN
+        IF NOT ResourceWOP.GET(Username) THEN BEGIN
+          IF NOT Employee.GET(Username) THEN BEGIN
+            EXIT(FALSE);
+          END;
+        END;
+      END;
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE GeneratePassword@1100528302() : Text;
+    VAR
+      StringFunctions@1100525000 : Codeunit 11012273;
+      PasswordPlain@1100525001 : Text;
+    BEGIN
+      StringFunctions.GeneratePasswordPlainText(PasswordPlain, 8);
+      EXIT(PasswordPlain);
+    END;
+
+    LOCAL PROCEDURE SendEmail@1100528101(SentMailToAddress@1100528308 : Text[80];AppUserGAP@1100529301 : Record 11124975;Employee@1100528307 : Record 5200;Password@1100525002 : Text;FirstName@1100525003 : Text[30]);
+    VAR
+      FieldServiceAppSetup@1100528304 : Record 11126700;
+      SetupGAP@1100529300 : Record 11124982;
+      MailTemplate@1100528305 : Record 11229450;
+      MailTemplateManagement@1100528302 : Codeunit 11012622;
+      SMTPMail@1100528102 : Codeunit 400;
+      StringFunctions@1100528309 : Codeunit 11012273;
+      BodyText@1100528300 : Text;
+      SubjectText@1100528301 : Text;
+      MailTemplateNo@1100528303 : Integer;
+    BEGIN
+      MailTemplateNo := 71;
+      FieldServiceAppSetup.GET;
+      SetupGAP.GET;
+      MailTemplateManagement.GetMailTemplate(MailTemplate, MailTemplateNo, '');
+      MailTemplateManagement.GetLayoutTextSubstitutedSubjectAndTotalBody(MailTemplateNo, '', AppUserGAP, SubjectText, BodyText);
+      IF (NOT MailTemplate."Use Mail Template Subject Text") THEN
+        SubjectText := Text001;
+      IF (SubjectText = '') THEN
+        SubjectText := Text001;
+      IF (BodyText = '') THEN BEGIN
+        BodyText := STRSUBSTNO(Text002, FirstName, Employee."No.", Password, STRSUBSTNO('%1%2', StringFunctions.CarriageReturn, StringFunctions.LineFeed), FieldServiceAppSetup."Proxy URL");
+        BodyText += STRSUBSTNO(Text003, FirstName, Employee."No.", Password, STRSUBSTNO('%1%2', StringFunctions.CarriageReturn, StringFunctions.LineFeed), FieldServiceAppSetup."Proxy URL");
+      END;
+
+      SMTPMail.CreateMessage(MailTemplate."From Name", MailTemplate.From, Employee."Company E-Mail", SubjectText, BodyText, TRUE);
+      SMTPMail.Send;
+    END;
+
+    [External]
+    PROCEDURE CreateDemoUser1@1100525000(Employee@1100525001 : Record 5200;ServiceOrderBaseNoForWorkOrders@1100528000 : Code[20]) : Boolean;
+    VAR
+      FSAUserSetupGAP@1100529308 : Record 11229875;
+      AppUserSetupGAP@1100529307 : Record 11124976;
+      AppUserGAP@1100529306 : Record 11124975;
+      AppSetupGroupGAP@1100529305 : Record 11124992;
+      ProductsGAP@1100529304 : Record 11124990;
+      UserByAppSetupGroupGAP@1100529303 : Record 11124980;
+      GAPInitializer@1100529302 : Codeunit 11128546;
+      ResourceWOP@1100528105 : Record 11229278;
+      Password@1100525000 : Text;
+    BEGIN
+      IF NOT ResourceWOP.GET(Employee."No.") THEN BEGIN
+        ResourceWOP.INIT;
+        ResourceWOP."No." := Employee."No.";
+        ResourceWOP.VALIDATE(Name, Employee."Last Name");
+        ResourceWOP.VALIDATE(Company, COMPANYNAME);
+        ResourceWOP.VALIDATE(Type, ResourceWOP.Type::Employee);
+        ResourceWOP.VALIDATE("Source No.", Employee."No.");
+        ResourceWOP.VALIDATE("Synchronize FSA", ResourceWOP."Synchronize FSA"::"Changes Only");
+        ResourceWOP.INSERT(TRUE);
+      END;
+      Password := GeneratePassword();
+      IF NOT AppUserGAP.GET(Employee."No.") THEN BEGIN
+        AppUserGAP.INIT;
+        AppUserGAP.Username := Employee."No.";
+        AppUserGAP.VALIDATE(Password, Password);
+        AppUserGAP.VALIDATE(Email, Employee."Company E-Mail");
+        AppUserGAP.INSERT(TRUE);
+      END ELSE BEGIN
+        AppUserGAP.VALIDATE(Password, Password);
+        AppUserGAP.MODIFY(TRUE);
+      END;
+
+      IF NOT AppUserSetupGAP.GET(AppUserGAP.Username) THEN BEGIN
+        AppUserSetupGAP.Username := Employee."No.";
+        AppUserSetupGAP.INSERT;
+      END;
+
+      AppUserSetupGAP.VALIDATE("Resource No.", ResourceWOP."No.");
+      AppUserSetupGAP.MODIFY;
+
+      GAPInitializer.InitializeFSA;
+      AppSetupGroupGAP.SETRANGE("Product Code", ProductsGAP.GetProductCodeFSA);
+      IF NOT AppSetupGroupGAP.FINDFIRST THEN BEGIN
+        AppSetupGroupGAP.INIT;
+        AppSetupGroupGAP.Name := 'FSADEMO';
+        AppSetupGroupGAP."Product Code" := ProductsGAP.GetProductCodeFSA;
+        IF AppSetupGroupGAP.INSERT THEN;
+      END;
+
+      UserByAppSetupGroupGAP.INIT;
+      UserByAppSetupGroupGAP.Username := AppUserGAP.Username;
+      UserByAppSetupGroupGAP."Group Name" := AppSetupGroupGAP.Name;
+      UserByAppSetupGroupGAP."Product Code" := ProductsGAP.GetProductCodeFSA;
+      IF UserByAppSetupGroupGAP.INSERT THEN;
+
+      FSAUserSetupGAP.SETFILTER(Username, AppUserGAP.Username);
+      IF NOT FSAUserSetupGAP.FINDFIRST THEN BEGIN
+        FSAUserSetupGAP.INIT;
+        FSAUserSetupGAP."Group Name" := UserByAppSetupGroupGAP."Group Name";
+        FSAUserSetupGAP.Username := AppUserGAP.Username;
+        FSAUserSetupGAP.VALIDATE(Active, FSAUserSetupGAP.Active::Yes);
+        FSAUserSetupGAP.INSERT(TRUE);
+      END ELSE BEGIN
+        FSAUserSetupGAP.VALIDATE(Active, FSAUserSetupGAP.Active::Yes);
+        FSAUserSetupGAP.MODIFY(TRUE);
+      END;
+
+      CreateWorkOrdersForResource(ResourceWOP."No.", ServiceOrderBaseNoForWorkOrders);
+      COMMIT;
+
+      SendEmail(Employee."Company E-Mail", AppUserGAP, Employee, Password, Employee."First Name");
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

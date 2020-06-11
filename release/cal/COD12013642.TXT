@@ -1,0 +1,227 @@
+OBJECT Codeunit 12013642 Exflow-Check Head Line
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=EXF512000;
+  }
+  PROPERTIES
+  {
+    TableNo=12013587;
+    Permissions=TableData 36=m,
+                TableData 37=m,
+                TableData 39=imd,
+                TableData 49=imd,
+                TableData 93=imd,
+                TableData 94=imd,
+                TableData 110=imd,
+                TableData 111=imd,
+                TableData 120=imd,
+                TableData 121=imd,
+                TableData 122=imd,
+                TableData 123=imd,
+                TableData 124=imd,
+                TableData 125=imd,
+                TableData 223=imd,
+                TableData 357=imd,
+                TableData 359=imd,
+                TableData 6507=ri,
+                TableData 6508=rid,
+                TableData 6650=imd,
+                TableData 6651=imd;
+    OnRun=VAR
+            PurchLine@1100285002 : Record 39;
+            ExFPurchDocLine@1100285000 : Record 12013588;
+            PurchSetup@1100285003 : Record 312;
+          BEGIN
+            ExFlowSetup.GET;
+            IF (ExFlowSetup."Order Applies-to" <> ExFlowSetup."Order Applies-to"::"Order not used") AND
+                (ExFlowSetup."Order Applies-to" <> ExFlowSetup."Order Applies-to"::"Purch Order Lines") AND
+                ("Order No." <> '') THEN BEGIN
+              ExFPurchDocLine.RESET;
+              ExFPurchDocLine.SETRANGE("Inbound Document No.", "Inbound Document No.");
+              ExFPurchDocLine.SETFILTER(Quantity, '<>%1', 0);
+              ExFPurchDocLine.SETRANGE("Exflow-Created Entry", 0);
+              IF NOT ExFPurchDocLine.FINDFIRST THEN BEGIN
+                PurchLine.RESET;
+
+                CASE "Document Type" OF
+                 "Document Type"::Invoice:
+                    BEGIN
+                      PurchLine.SETRANGE("Document Type", PurchLine."Document Type"::Order);
+                      PurchLine.SETFILTER("Qty. Rcd. Not Invoiced", '<>%1', 0);
+                    END;
+                  "Document Type"::"Credit Memo":
+                    BEGIN
+                      PurchLine.SETRANGE("Document Type", PurchLine."Document Type"::"Return Order");
+                      PurchLine.SETFILTER("Return Qty. Shipped Not Invd.", '<>%1', 0);
+                    END;
+                END;
+
+                PurchLine.SETRANGE("Document No.","Order No.");
+                IF NOT PurchLine.FINDFIRST THEN
+                  ERROR(STRSUBSTNO(EXF142,"Order No."));
+              END;
+            END;
+
+            IF ExFlowSetup."Order Applies-to" = ExFlowSetup."Order Applies-to"::"Receipts Lines" THEN BEGIN
+              ExFPurchDocLine.RESET;
+              ExFPurchDocLine.SETRANGE("Inbound Document No.", "Inbound Document No.");
+              ExFPurchDocLine.SETFILTER("Order No.", '<>%1', '');
+              ExFPurchDocLine.SETFILTER("Order Line No.", '<>%1', 0);
+              CASE "Document Type" OF
+                "Document Type"::Invoice:
+                  ExFPurchDocLine.SETFILTER("Receipt No.", '%1', '');
+                "Document Type"::"Credit Memo":
+                  ExFPurchDocLine.SETFILTER("Return Shipment No.", '%1', '');
+              END;
+
+              IF ExFPurchDocLine.FINDFIRST THEN
+                ERROR(EXF144);
+            END;
+
+            IF ExFlowSetup."Order Applies-to" <> ExFlowSetup."Order Applies-to"::"Order not used" THEN BEGIN
+              ExFPurchDocLine.RESET;
+              ExFPurchDocLine.SETRANGE("Inbound Document No.", "Inbound Document No.");
+              ExFPurchDocLine.SETFILTER("Order No.", '<>%1', '');
+              ExFPurchDocLine.SETRANGE("Order Line No.", 0);
+              IF ExFPurchDocLine.FINDFIRST THEN
+                ERROR(EXF141);
+            END;
+
+            IF ExFlowSetup."Check If Lines Exists" THEN
+              CheckLinesExist(Rec,ExFlowSetup);
+
+            IF ExFlowSetup."Test Amounts" > 0 THEN
+              CheckAmounts(Rec,ExFlowSetup);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ExFlowSetup@1100285001 : Record 12013601;
+      ExfPurchDocLine@1041 : Record 12013588;
+      VendPostingGr@1064 : Record 93;
+      Currency@1073 : Record 4;
+      GenJnlCheckLine@1100285000 : Codeunit 11;
+      ExDimMgt@1100285002 : Codeunit 12013605;
+      Usedate@1104 : Date;
+      RoundingLineNo@1112 : Integer;
+      LastLineRetrieved@1119 : Boolean;
+      RoundingLineInserted@1120 : Boolean;
+      EXF117@1100285004 : TextConst 'ENU=%1 (%2) is not equal to total VAT of lines (%3);SVE=%1 (%2) ”verensst„mmer ej med momssumman av raderna (%3)';
+      EXF118@1100285003 : TextConst 'ENU=%1 (%2) is not equal to total of on lines (%3);SVE=%1 (%2) ”verensst„mmer ej med summan av raderna (%3)';
+      EXF135@1100285005 : TextConst 'ENU=Invoice is missing Invoice Lines.;SVE=Fakturan saknar fakturarader.';
+      EXF142@1100285006 : TextConst 'ENU=Order No %1 has no received lines.;SVE=Ordernr %1 har inga inlevererade rader.';
+      EXF141@1100285008 : TextConst 'ENU=Lines exists without an order line match.;SVE=Rader finns utan att vara kopplade till en orderrad.';
+      EXF144@1100285007 : TextConst 'ENU=There are lines matched against order but where receipt is missing!;SVE=D„r „r rader matchade mot order men d„r inleverans saknas!';
+
+    PROCEDURE CheckAmounts@1100285022(ExfPurchDocHead@1100285006 : Record 12013587;ExFlowSetup@1100285007 : Record 12013601);
+    VAR
+      ExflowDocLineDummy@1100285001 : Record 12013588;
+      ExfPurchDocLine@1100285002 : Record 12013588;
+      MaxVATDiff@1100285010 : Decimal;
+      MaxNetDiff@1100285020 : Decimal;
+      MaxGrossDiff@1100285000 : Decimal;
+      TotalPrePaymentAmount@1100285003 : Decimal;
+      TotalPrePaymentAmountIncl@1100285004 : Decimal;
+      ExPurchCode@1100285005 : Record 12013682;
+    BEGIN
+      WITH ExfPurchDocHead DO BEGIN
+        IF "Pre Posting" = "Pre Posting"::"Pre Post" THEN
+          IF ExFlowSetup."Automatic Reg. of Inwards" = ExFlowSetup."Automatic Reg. of Inwards"::"Values from Header" THEN
+            EXIT;
+        // Recalc. Test VAT Amount to Document Currency
+        MaxVATDiff := ExFlowSetup."Max. Variation on VAT Amount";
+
+        // Recalc. Test Net Amount to Document Currency
+        MaxNetDiff := ExFlowSetup."Max. Variation on Net Amount";
+
+        MaxGrossDiff := ExFlowSetup."Max. Diff. Gross Amount";
+
+        RecalcAmounts(ExfPurchDocHead,ExflowDocLineDummy);
+        CALCFIELDS(Amount,"Amount Including VAT");
+
+        //348801
+        TotalPrePaymentAmount := 0;
+        TotalPrePaymentAmountIncl := 0;
+        ExfPurchDocLine.RESET;
+        ExfPurchDocLine.SETRANGE("Inbound Document No.", "Inbound Document No.");
+        ExfPurchDocLine.CALCSUMS("Prepmt. Amt. Inv.","Prepmt. Amt. Incl. VAT");
+        TotalPrePaymentAmount := ExfPurchDocLine."Prepmt. Amt. Inv.";
+        TotalPrePaymentAmountIncl := ExfPurchDocLine."Prepmt. Amt. Incl. VAT";
+
+        "Document Amount" := "Document Amount" + TotalPrePaymentAmount;
+        "Document Amount VAT" := "Document Amount VAT" + (TotalPrePaymentAmountIncl - TotalPrePaymentAmount);
+        "Document Amount Including VAT" := "Document Amount Including VAT" + TotalPrePaymentAmountIncl;
+        //348801
+
+        CASE ExFlowSetup."Test Amounts" OF
+          ExFlowSetup."Test Amounts"::Gross:
+            BEGIN
+              IF (ABS("Amount Including VAT" - "Document Amount Including VAT") > MaxGrossDiff) THEN
+                ERROR(EXF118,FIELDCAPTION("Document Amount Including VAT"),"Document Amount Including VAT","Amount Including VAT");
+            END;
+          ExFlowSetup."Test Amounts"::"Net+VAT":
+            BEGIN
+              IF "Predefined Purch. Code" <> '' THEN
+                IF ExPurchCode.GET("Predefined Purch. Code") THEN
+                  ExPurchCode.CALCFIELDS("Total VAT weight");
+
+              IF ExPurchCode."Total VAT weight" <> 0 THEN BEGIN
+                IF (ABS("Amount Including VAT" - "Document Amount Including VAT") > MaxGrossDiff) THEN
+                  ERROR(EXF118,FIELDCAPTION("Document Amount Including VAT"),"Document Amount Including VAT","Amount Including VAT");
+              END ELSE BEGIN
+                IF (ABS(Amount - "Document Amount") > MaxNetDiff) THEN
+                  ERROR(EXF118,FIELDCAPTION("Document Amount"),"Document Amount",Amount);
+
+                IF (ABS("Document Amount VAT" - ("Amount Including VAT" - Amount)) > MaxVATDiff) THEN
+                  ERROR(EXF117,FIELDCAPTION("Document Amount VAT"),"Document Amount VAT","Amount Including VAT" - Amount);
+              END;
+            END;
+        END;
+      END;
+    END;
+
+    PROCEDURE RecalcAmounts@1010000(VAR _ExfPurchDocHeader@1010000 : Record 12013587;_ExfPurchDocLine@1010001 : Record 12013588);
+    VAR
+      TempVATAmountLine0@1010004 : TEMPORARY Record 290;
+      TempVATAmountLine1@1010005 : TEMPORARY Record 290;
+    BEGIN
+      _ExfPurchDocLine.SETRANGE("Inbound Document No.", _ExfPurchDocHeader."Inbound Document No.");
+      _ExfPurchDocLine.SETFILTER(Type,'>0');
+      _ExfPurchDocLine.SETFILTER(Quantity,'<>0');
+      IF NOT _ExfPurchDocLine.FINDFIRST THEN
+        EXIT;
+
+      _ExfPurchDocLine.SetExfPurchDocHeader(_ExfPurchDocHeader);
+      _ExfPurchDocLine.CalcVATAmountLines(0,_ExfPurchDocHeader,_ExfPurchDocLine,TempVATAmountLine0);
+      _ExfPurchDocLine.CalcVATAmountLines(1,_ExfPurchDocHeader,_ExfPurchDocLine,TempVATAmountLine1);
+      _ExfPurchDocLine.UpdateVATOnLines(0,_ExfPurchDocHeader,_ExfPurchDocLine,TempVATAmountLine0);
+      _ExfPurchDocLine.UpdateVATOnLines(1,_ExfPurchDocHeader,_ExfPurchDocLine,TempVATAmountLine1);
+    END;
+
+    PROCEDURE CheckLinesExist@1100285007(VAR ExfPurchDocHead@1100285001 : Record 12013587;ExFlowSetup@1100285002 : Record 12013601);
+    VAR
+      ExFPurchDocLine@1100285000 : Record 12013588;
+    BEGIN
+      WITH ExfPurchDocHead DO BEGIN
+        IF "Pre Posting" = "Pre Posting"::"Pre Post" THEN
+          IF ExFlowSetup."Automatic Reg. of Inwards" = ExFlowSetup."Automatic Reg. of Inwards"::"Values from Header" THEN
+            EXIT;
+
+        ExFPurchDocLine.RESET;
+        ExFPurchDocLine.SETRANGE("Inbound Document No.", "Inbound Document No.");
+        ExFPurchDocLine.SETFILTER(Quantity, '<>%1', 0);
+        IF NOT ExFPurchDocLine.FINDFIRST THEN
+          ERROR(EXF135);
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

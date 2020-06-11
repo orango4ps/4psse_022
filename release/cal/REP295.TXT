@@ -1,0 +1,505 @@
+OBJECT Report 295 Combine Shipments
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.03,4PS14.00;
+  }
+  PROPERTIES
+  {
+    CaptionML=[DEU=Sammelrechnung;
+               ENU=Combine Shipments;
+               NLD=Verzamelfacturering;
+               NOR=Opprett samlefaktura;
+               SVE=Samlingsfakturering];
+    ApplicationArea=#Basic,#Suite;
+    ProcessingOnly=Yes;
+    OnPreReport=BEGIN
+                  OnBeforePreReport;
+                END;
+
+    OnPostReport=BEGIN
+                   OnBeforePostReport;
+                 END;
+
+    UsageCategory=Tasks;
+  }
+  DATASET
+  {
+    { 2495;    ;DataItem;SalesOrderHeader    ;
+               DataItemTable=Table36;
+               DataItemTableView=SORTING(Document Type,Combine Shipments,Bill-to Customer No.,Currency Code,EU 3-Party Trade,Dimension Set ID)
+                                 WHERE(Document Type=CONST(Order),
+                                       Combine Shipments=CONST(Yes));
+               ReqFilterHeadingML=[DEU=Verkaufsauftrag;
+                                   ENU=Sales Order;
+                                   NLD=Verkooporder;
+                                   NOR=Ordre;
+                                   SVE=Fîrs.order];
+               OnPreDataItem=BEGIN
+                               IF PostingDateReq = 0D THEN
+                                 ERROR(Text000);
+                               IF DocDateReq = 0D THEN
+                                 ERROR(Text001);
+
+                               Window.OPEN(
+                                 Text002 +
+                                 Text003 +
+                                 Text004 +
+                                 Text005);
+
+                               OnSalesOrderHeaderOnPreDataItem(SalesOrderHeader);
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  IsHandled@1000 : Boolean;
+                                BEGIN
+                                  IsHandled := FALSE;
+                                  OnAfterGetRecordSalesOrderHeader(SalesOrderHeader,IsHandled);
+                                  IF IsHandled THEN
+                                    CurrReport.SKIP;
+
+                                  CurrReport.LANGUAGE := Language.GetLanguageID("Language Code");
+
+                                  Window.UPDATE(1,"Bill-to Customer No.");
+                                  Window.UPDATE(2,"No.");
+                                END;
+
+               OnPostDataItem=BEGIN
+                                CurrReport.LANGUAGE := GLOBALLANGUAGE;
+                                Window.CLOSE;
+                                IF SalesHeader."No." <> '' THEN BEGIN // Not the first time
+                                  FinalizeSalesInvHeader;
+                                  IF (NoOfSalesInvErrors = 0) AND NOT HideDialog THEN BEGIN
+                                    IF NoOfskippedShiment > 0 THEN BEGIN
+                                      MESSAGE(
+                                        Text011,
+                                        NoOfSalesInv,NoOfskippedShiment)
+                                    END ELSE
+                                      MESSAGE(
+                                        Text010,
+                                        NoOfSalesInv);
+                                  END ELSE
+                                    IF NOT HideDialog THEN
+                                      IF PostInv THEN
+                                        MESSAGE(
+                                          Text007,
+                                          NoOfSalesInvErrors)
+                                      ELSE
+                                        MESSAGE(
+                                          NotAllInvoicesCreatedMsg,
+                                          NoOfSalesInvErrors)
+                                END ELSE
+                                  IF NOT HideDialog THEN
+                                    MESSAGE(Text008);
+                              END;
+
+               ReqFilterFields=Sell-to Customer No.,Bill-to Customer No. }
+
+    { 3595;1   ;DataItem;                    ;
+               DataItemTable=Table110;
+               DataItemTableView=SORTING(Order No.);
+               ReqFilterHeadingML=[DEU=Geb. Verkaufslieferung;
+                                   ENU=Posted Sales Shipment;
+                                   NLD=Geboekte verkoopverzending;
+                                   NOR=Bokfõrt fõlgeseddel;
+                                   SVE=Bokfîrd utleverans];
+               OnAfterGetRecord=VAR
+                                  DueDate@1000 : Date;
+                                  PmtDiscDate@1001 : Date;
+                                  PmtDiscPct@1002 : Decimal;
+                                BEGIN
+                                  Window.UPDATE(3,"No.");
+
+                                  IF IsCompletlyInvoiced THEN
+                                    CurrReport.SKIP;
+
+                                  IF OnlyStdPmtTerms THEN BEGIN
+                                    Cust.GET("Bill-to Customer No.");
+                                    PmtTerms.GET(Cust."Payment Terms Code");
+                                    IF PmtTerms.Code = "Payment Terms Code" THEN BEGIN
+                                      DueDate := CALCDATE(PmtTerms."Due Date Calculation","Document Date");
+                                      PmtDiscDate := CALCDATE(PmtTerms."Discount Date Calculation","Document Date");
+                                      PmtDiscPct := PmtTerms."Discount %";
+                                      IF (DueDate <> "Due Date") OR
+                                         (PmtDiscDate <> "Pmt. Discount Date") OR
+                                         (PmtDiscPct <> "Payment Discount %")
+                                      THEN BEGIN
+                                        NoOfskippedShiment := NoOfskippedShiment + 1;
+                                        CurrReport.SKIP;
+                                      END;
+                                    END ELSE BEGIN
+                                      NoOfskippedShiment := NoOfskippedShiment + 1;
+                                      CurrReport.SKIP;
+                                    END;
+                                  END;
+                                END;
+
+               ReqFilterFields=Posting Date;
+               DataItemLink=Order No.=FIELD(No.) }
+
+    { 2502;2   ;DataItem;                    ;
+               DataItemTable=Table111;
+               DataItemTableView=SORTING(Document No.,Line No.);
+               OnAfterGetRecord=BEGIN
+                                  IF Type = 0 THEN BEGIN
+                                    IF (NOT CopyTextLines) OR ("Attached to Line No." <> 0) THEN
+                                      CurrReport.SKIP;
+                                  END;
+
+                                  IF "Authorized for Credit Card" THEN
+                                    CurrReport.SKIP;
+
+                                  IF ("Qty. Shipped Not Invoiced" <> 0) OR (Type = 0) THEN BEGIN
+                                    IF ("Bill-to Customer No." <> Cust."No.") AND
+                                       ("Sell-to Customer No." <> '')
+                                    THEN
+                                      Cust.GET("Bill-to Customer No.");
+                                    IF NOT (Cust.Blocked IN [Cust.Blocked::All,Cust.Blocked::Invoice]) THEN BEGIN
+                                      IF ShouldFinalizeSalesInvHeader(SalesOrderHeader,SalesHeader) THEN BEGIN
+                                        IF SalesHeader."No." <> '' THEN
+                                          FinalizeSalesInvHeader;
+                                        InsertSalesInvHeader;
+                                        SalesLine.SETRANGE("Document Type",SalesHeader."Document Type");
+                                        SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+                                        SalesLine."Document Type" := SalesHeader."Document Type";
+                                        SalesLine."Document No." := SalesHeader."No.";
+                                      END;
+                                      SalesShptLine := "Sales Shipment Line";
+                                      HasAmount := HasAmount OR ("Qty. Shipped Not Invoiced" <> 0);
+                                      //SalesShptLine.InsertInvLineFromShptLine(SalesLine); //**4PS.o
+                                      SalesShptLine.InsertInvLineFromShptLine(SalesLine,FALSE); //**4PS.n
+                                    END ELSE
+                                      NoOfSalesInvErrors := NoOfSalesInvErrors + 1;
+                                  END;
+                                END;
+
+               OnPostDataItem=VAR
+                                SalesShipmentLine@1000 : Record 111;
+                                SalesLineInvoice@1002 : Record 37;
+                                SalesGetShpt@1001 : Codeunit 64;
+                              BEGIN
+                                SalesShipmentLine.SETRANGE("Document No.","Document No.");
+                                SalesShipmentLine.SETRANGE(Type,Type::"Charge (Item)");
+                                IF SalesShipmentLine.FINDSET THEN
+                                  REPEAT
+                                    SalesLineInvoice.SETRANGE("Document Type",SalesLineInvoice."Document Type"::Invoice);
+                                    SalesLineInvoice.SETRANGE("Document No.",SalesHeader."No.");
+                                    SalesLineInvoice.SETRANGE("Shipment Line No.",SalesShipmentLine."Line No.");
+                                    IF SalesLineInvoice.FINDFIRST THEN
+                                      SalesGetShpt.GetItemChargeAssgnt(SalesShipmentLine,SalesLineInvoice."Qty. to Invoice");
+                                  UNTIL SalesShipmentLine.NEXT = 0;
+                              END;
+
+               DataItemLink=Document No.=FIELD(No.) }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      SaveValues=Yes;
+      OnOpenPage=BEGIN
+                   IF PostingDateReq = 0D THEN
+                     PostingDateReq := WORKDATE;
+                   IF DocDateReq = 0D THEN
+                     DocDateReq := WORKDATE;
+                   SalesSetup.GET;
+                   CalcInvDisc := SalesSetup."Calc. Inv. Discount";
+                 END;
+
+    }
+    CONTROLS
+    {
+      { 1900000001;0;Container;
+                  ContainerType=ContentArea }
+
+      { 1900000002;1;Group  ;
+                  CaptionML=[DEU=Optionen;
+                             ENU=Options;
+                             NLD=Opties;
+                             NOR=Alternativer;
+                             SVE=Alternativ] }
+
+      { 1   ;2   ;Field     ;
+                  Name=PostingDate;
+                  CaptionML=[DEU=Buchungsdatum;
+                             ENU=Posting Date;
+                             NLD=Boekingsdatum;
+                             NOR=Bokfõringsdato;
+                             SVE=Bokfîringsdatum];
+                  ToolTipML=[DEU=Gibt das Buchungsdatum fÅr die Rechnung(en) an, die von der Stapelverarbeitung erstellt werden. Dieses Feld muss ausgefÅllt werden.;
+                             ENU=Specifies the posting date for the invoice(s) that the batch job creates. This field must be filled in.;
+                             NLD=Hiermee wordt de boekingsdatum opgegeven voor de facturen die tijdens de batchtaak worden gemaakt. Het veld moet worden ingevuld.;
+                             NOR=Angir bokfõringsdatoen for fakturaen(e) som kjõrselen lager. Dette feltet mÜ fylles ut.];
+                  ApplicationArea=#Basic,#Suite;
+                  SourceExpr=PostingDateReq }
+
+      { 4   ;2   ;Field     ;
+                  CaptionML=[DEU=Belegdatum;
+                             ENU=Document Date;
+                             NLD=Documentdatum;
+                             NOR=Bilagsdato;
+                             SVE=Dokumentdatum];
+                  ToolTipML=[DEU=Gibt das Belegdatum fÅr die Rechnung(en) an, die die Stapelverarbeitung erstellt. Dieses Feld muss ausgefÅllt werden.;
+                             ENU=Specifies the document date for the invoice(s) that the batch job creates. This field must be filled in.;
+                             NLD=Hiermee wordt de documentdatum opgegeven voor de facturen die tijdens batchverwerking worden gemaakt. Het veld moet worden ingevuld.;
+                             NOR=Angir dokumentdatoen for fakturaen(e) som kjõrselen lager. Dette feltet mÜ fylles ut.];
+                  ApplicationArea=#Basic,#Suite;
+                  SourceExpr=DocDateReq }
+
+      { 2   ;2   ;Field     ;
+                  CaptionML=[DEU=Rechnungsrab. berechnen;
+                             ENU=Calc. Inv. Discount;
+                             NLD=Factuurkorting berekenen;
+                             NOR=Beregn fakturarabatt;
+                             SVE=BerÑkna fakturarabatt];
+                  ToolTipML=[DEU=Gibt an, ob der Rechnungsrabattbetrag automatisch fÅr die Lieferung berechnet wird.;
+                             ENU=Specifies if you want the invoice discount amount to be automatically calculated on the shipment.;
+                             NLD=Hiermee wordt opgegeven of u wilt dat het factuurkortingsbedrag automatisch wordt berekend bij verzending.;
+                             NOR=Angir om du vil at fakturarabattbelõpet skal beregnes automatisk i leveringen.];
+                  ApplicationArea=#Basic,#Suite;
+                  SourceExpr=CalcInvDisc;
+                  OnValidate=BEGIN
+                               SalesSetup.GET;
+                               SalesSetup.TESTFIELD("Calc. Inv. Discount",FALSE);
+                             END;
+                              }
+
+      { 3   ;2   ;Field     ;
+                  CaptionML=[DEU=Rechnungen buchen;
+                             ENU=Post Invoices;
+                             NLD=Facturen boeken;
+                             NOR=Bokfõr fakturaer];
+                  ToolTipML=[DEU=Gibt an, ob die Rechnungen sofort gebucht werden sollen.;
+                             ENU=Specifies if you want to have the invoices posted immediately.;
+                             NLD=Hiermee wordt opgegeven of de facturen direct worden geboekt.;
+                             NOR=Angir om du vil at fakturaene skal bokfõres umiddelbart.];
+                  ApplicationArea=#Basic,#Suite;
+                  SourceExpr=PostInv }
+
+      { 6   ;2   ;Field     ;
+                  CaptionML=[DEU=Nur Std.-Zahlungsbedingungen;
+                             ENU=Only Std. Payment Terms;
+                             NLD=Alleen standaardbetalingscondities;
+                             NOR=Bare standard betalingsbetingelser];
+                  ToolTipML=[DEU=Gibt an, ob Lieferungen mit Standardzahlungsbedingungen einbezogen werden sollen. Bei Auswahl dieser Option mÅssen alle anderen Lieferungen manuell fakturiert werden.;
+                             ENU=Specifies if you want to include shipments with standard payments terms. If you select this option, you must manually invoice all other shipments.;
+                             NLD=Hiermee wordt opgegeven of verzendingen met standaardbetalingsvoorwaarden worden opgenomen. Als u deze optie selecteert, moet u alle andere verzendingen handmatig factureren.;
+                             NOR=Angir om du vil inkludere leveringer med standard betalingsbetingelser. Hvis du velger dette alternativet, mÜ du fakturere alle andre leveringer manuelt.];
+                  ApplicationArea=#Basic,#Suite;
+                  SourceExpr=OnlyStdPmtTerms }
+
+      { 8   ;2   ;Field     ;
+                  CaptionML=[DEU=Textzeilen kopieren;
+                             ENU=Copy Text Lines;
+                             NLD=Tekstregels kopiâren;
+                             NOR=Kopier tekstlinjer];
+                  ToolTipML=[DEU=Gibt an, ob Sie manuell einen Text fÅr die Lieferungspositionen auf der Rechnung eingeben mîchten.;
+                             ENU=Specifies if you want manually written text on the shipment lines to be copied to the invoice.;
+                             NLD=Hiermee wordt opgegeven of u wilt dat handmatig geschreven tekst op de verzendregels naar de factuur wordt gekopieerd.;
+                             NOR=Angir om du vil at manuelt skrevet tekst pÜ leveringslinjene skal kopieres til fakturaen.];
+                  ApplicationArea=#Basic,#Suite;
+                  SourceExpr=CopyTextLines }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'DEU=Geben Sie das Buchungsdatum ein.;ENU=Enter the posting date.;NLD=Voer de boekingdatum opnieuw in.;NOR=Angi bokfõringsdatoen.;SVE=Ange bokfîringsdatum.';
+      Text001@1001 : TextConst 'DEU=Geben Sie das Belegdatum ein.;ENU=Enter the document date.;NLD=Geef een documentdatum op.;NOR=Angi bilagsdato.';
+      Text002@1002 : TextConst 'DEU=Sammelrechnung...\\;ENU=Combining shipments...\\;NLD=Verzamelfacturering...\\;NOR=Oppretter samlefaktura...\\';
+      Text003@1003 : TextConst 'DEU=Debitor Nr.     #1##########\;ENU=Customer No.    #1##########\;NLD=Klantnr.        #1##########\;NOR=Kundenr.        #1##########\';
+      Text004@1004 : TextConst 'DEU=Auftrag Nr.     #2##########\;ENU=Order No.       #2##########\;NLD=Ordernr.        #2##########\;NOR=Ordrenr.        #2##########\';
+      Text005@1005 : TextConst 'DEU=Lieferungsnr.   #3##########;ENU=Shipment No.    #3##########;NLD=Verzendnr.      #3##########;NOR=Fõlgeseddelnr.  #3##########';
+      Text007@1006 : TextConst 'DEU=Nicht alle Rechnungen gebucht. %1 Rechnungen wurden nicht gebucht.;ENU=Not all the invoices were posted. A total of %1 invoices were not posted.;NLD=Niet alle facturen werden geboekt. %1 facturen werden niet geboekt.;NOR=Ikke alle fakturaer ble bokfõrt.  Til sammen %1 fakturaer ble ikke bokfõrt.';
+      Text008@1007 : TextConst 'DEU=Keine Lieferungen fÅr Sammelrechnung vorhanden.;ENU=There is nothing to combine.;NLD=Niets te combineren.;NOR=Det finnes ingenting Ü kombinere.';
+      Text010@1008 : TextConst 'DEU=Die Sammelrechnungen wurden erstellt. Anzahl der erstellten Rechnungen: %1.;ENU=The shipments are now combined and the number of invoices created is %1.;NLD=De verzendingen zijn gecombineerd. Het aantal gemaakte facturen is %1.;NOR=Fõlgesedlene er nÜ samlet, og antall opprettede fakturaer er %1.';
+      SalesHeader@1010 : Record 36;
+      SalesLine@1011 : Record 37;
+      SalesShptLine@1012 : Record 111;
+      SalesSetup@1013 : Record 311;
+      Cust@1018 : Record 18;
+      Language@1009 : Record 8;
+      PmtTerms@1017 : Record 3;
+      SalesCalcDisc@1019 : Codeunit 60;
+      SalesPost@1020 : Codeunit 80;
+      Window@1021 : Dialog;
+      PostingDateReq@1022 : Date;
+      DocDateReq@1023 : Date;
+      CalcInvDisc@1024 : Boolean;
+      PostInv@1025 : Boolean;
+      OnlyStdPmtTerms@1015 : Boolean;
+      HasAmount@1102601000 : Boolean;
+      HideDialog@1034 : Boolean;
+      NoOfSalesInvErrors@1027 : Integer;
+      NoOfSalesInv@1028 : Integer;
+      Text011@1029 : TextConst '@@@=%1-Number of invoices,%2-Number Of shipments;DEU=Die Sammelrechnungen wurden erstellt. Anzahl der erstellten Rechnungen: %1.\%2 Lieferungen ohne Standardzahlungsbedingungen wurden nicht kombiniert.;ENU=The shipments are now combined, and the number of invoices created is %1.\%2 Shipments with nonstandard payment terms have not been combined.;NLD=De verzendingen zijn gecombineerd. Het aantal gemaakte facturen is %1.\%2 Verzendingen met niet-standaardbetalingscondities zijn niet gecombineerd.;NOR=Fõlgesedlene er nÜ samlet, og antall opprettede fakturaer er %1.\%2 Samlefakturaer med ikke-standard betalingsbetingelser er ikke kombinert.';
+      NoOfskippedShiment@1030 : Integer;
+      CopyTextLines@1035 : Boolean;
+      NotAllInvoicesCreatedMsg@1014 : TextConst 'DEU=Nicht alle Rechnungen wurden erstellt. %1 Rechnungen wurden nicht erstellt.;ENU=Not all the invoices were created. A total of %1 invoices were not created.;NLD=Niet alle facturen zijn gemaakt. %1 facturen zijn niet gemaakt.;NOR=Ikke alle fakturaer ble opprettet. Til sammen %1 fakturaer ble ikke opprettet.';
+
+    LOCAL PROCEDURE FinalizeSalesInvHeader@2();
+    VAR
+      HasError@1000 : Boolean;
+    BEGIN
+      HasError := FALSE;
+      OnBeforeFinalizeSalesInvHeader(SalesHeader,HasAmount,HasError);
+      IF HasError THEN
+        NoOfSalesInvErrors += 1;
+
+      WITH SalesHeader DO BEGIN
+        IF (NOT HasAmount) OR HasError THEN BEGIN
+          OnFinalizeSalesInvHeaderOnBeforeDelete(SalesHeader);
+          DELETE(TRUE);
+          OnFinalizeSalesInvHeaderOnAfterDelete(SalesHeader);
+          EXIT;
+        END;
+        OnFinalizeSalesInvHeader(SalesHeader);
+        IF CalcInvDisc THEN
+          SalesCalcDisc.RUN(SalesLine);
+        FIND;
+        COMMIT;
+        CLEAR(SalesCalcDisc);
+        CLEAR(SalesPost);
+        NoOfSalesInv := NoOfSalesInv + 1;
+        IF PostInv THEN BEGIN
+          CLEAR(SalesPost);
+          IF NOT SalesPost.RUN(SalesHeader) THEN
+            NoOfSalesInvErrors := NoOfSalesInvErrors + 1;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE InsertSalesInvHeader@1();
+    BEGIN
+      CLEAR(SalesHeader);
+      WITH SalesHeader DO BEGIN
+        INIT;
+        "Document Type" := "Document Type"::Invoice;
+        "No." := '';
+        OnBeforeSalesInvHeaderInsert(SalesHeader,SalesOrderHeader);
+        INSERT(TRUE);
+        VALIDATE("Sell-to Customer No.",SalesOrderHeader."Sell-to Customer No." );
+        IF "Bill-to Customer No." <> "Sell-to Customer No." THEN
+          VALIDATE("Bill-to Customer No.",SalesOrderHeader."Bill-to Customer No.");
+        VALIDATE("Posting Date",PostingDateReq);
+        VALIDATE("Document Date",DocDateReq);
+        VALIDATE("Currency Code",SalesOrderHeader."Currency Code");
+        VALIDATE("EU 3-Party Trade",SalesOrderHeader."EU 3-Party Trade");
+        "Salesperson Code" := SalesOrderHeader."Salesperson Code";
+        "Shortcut Dimension 1 Code" := SalesOrderHeader."Shortcut Dimension 1 Code";
+        "Shortcut Dimension 2 Code" := SalesOrderHeader."Shortcut Dimension 2 Code";
+        "Dimension Set ID" := SalesOrderHeader."Dimension Set ID";
+        OnBeforeSalesInvHeaderModify(SalesHeader,SalesOrderHeader);
+        MODIFY;
+        COMMIT;
+        HasAmount := FALSE;
+      END;
+
+      OnAfterInsertSalesInvHeader(SalesHeader,"Sales Shipment Header");
+    END;
+
+    [External]
+    PROCEDURE InitializeRequest@5(NewPostingDate@1002 : Date;NewDocDate@1003 : Date;NewCalcInvDisc@1000 : Boolean;NewPostInv@1001 : Boolean;NewOnlyStdPmtTerms@1004 : Boolean;NewCopyTextLines@1005 : Boolean);
+    BEGIN
+      PostingDateReq := NewPostingDate;
+      DocDateReq := NewDocDate;
+      CalcInvDisc := NewCalcInvDisc;
+      PostInv := NewPostInv;
+      OnlyStdPmtTerms := NewOnlyStdPmtTerms;
+      CopyTextLines := NewCopyTextLines;
+    END;
+
+    [External]
+    PROCEDURE SetHideDialog@7(NewHideDialog@1000 : Boolean);
+    BEGIN
+      HideDialog := NewHideDialog;
+    END;
+
+    LOCAL PROCEDURE ShouldFinalizeSalesInvHeader@12(SalesOrderHeader@1000 : Record 36;SalesHeader@1001 : Record 36) Finalize : Boolean;
+    BEGIN
+      Finalize :=
+        (SalesOrderHeader."Sell-to Customer No." <> SalesHeader."Sell-to Customer No.") OR
+        (SalesOrderHeader."Bill-to Customer No." <> SalesHeader."Bill-to Customer No.") OR
+        (SalesOrderHeader."Currency Code" <> SalesHeader."Currency Code") OR
+        (SalesOrderHeader."EU 3-Party Trade" <> SalesHeader."EU 3-Party Trade") OR
+        (SalesOrderHeader."Dimension Set ID" <> SalesHeader."Dimension Set ID");
+
+      OnAfterShouldFinalizeSalesInvHeader(SalesOrderHeader,SalesHeader,Finalize);
+      EXIT(Finalize);
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterGetRecordSalesOrderHeader@9(VAR SalesOrderHeader@1000 : Record 36;VAR IsHandled@1001 : Boolean);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterInsertSalesInvHeader@3(VAR SalesHeader@1000 : Record 36;VAR SalesShipmentHeader@1001 : Record 110);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeFinalizeSalesInvHeader@15(VAR SalesHeader@1000 : Record 36;VAR HasAmount@1001 : Boolean;VAR HasError@1002 : Boolean);
+    BEGIN
+    END;
+
+    [Integration(TRUE,TRUE)]
+    LOCAL PROCEDURE OnBeforePreReport@4();
+    BEGIN
+    END;
+
+    [Integration(TRUE,TRUE)]
+    LOCAL PROCEDURE OnBeforePostReport@8();
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeSalesInvHeaderInsert@14(VAR SalesHeader@1000 : Record 36;SalesOrderHeader@1001 : Record 36);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeSalesInvHeaderModify@13(VAR SalesHeader@1000 : Record 36;SalesOrderHeader@1001 : Record 36);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnFinalizeSalesInvHeader@6(VAR SalesHeader@1000 : Record 36);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnFinalizeSalesInvHeaderOnAfterDelete@19(VAR SalesHeader@1000 : Record 36);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnFinalizeSalesInvHeaderOnBeforeDelete@18(VAR SalesHeader@1000 : Record 36);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnSalesOrderHeaderOnPreDataItem@10(VAR SalesOrderHeader@1000 : Record 36);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterShouldFinalizeSalesInvHeader@11(VAR SalesOrderHeader@1000 : Record 36;SalesHeader@1001 : Record 36;VAR Finalize@1002 : Boolean);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

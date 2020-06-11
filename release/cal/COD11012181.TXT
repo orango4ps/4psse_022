@@ -1,0 +1,268 @@
+OBJECT Codeunit 11012181 Check Site Mng Hour Accounting
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    TableNo=11012360;
+    OnRun=VAR
+            SiteMngmntHoursLine@1100528400 : Record 11012360;
+          BEGIN
+            SiteMngmntHoursLine.COPY(Rec);
+            Code(SiteMngmntHoursLine);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text004@11012010 : TextConst 'DEU=%1 ist nicht eingegeben worden.;ENU=%1 is not filled.;NLD=%1 is niet gevuld.;SVE=%1 har inte fyllts i.';
+      Text005@1100485007 : TextConst 'DEU=Stundenerfassung nicht empfangen;ENU=No Site Management Hour Accounting lines Received;NLD=Geen ontvangst urenverantwoording';
+      Text002@11012013 : TextConst 'DEU=Es sind keine Fehler gefunden worden.;ENU=No errors found.;NLD=Er zijn geen fouten gevonden.;SVE=Inga fel funna.';
+      Text001@1100527374 : TextConst 'DEU=Anzahl der Stunden (%1) entspricht nicht den Normstunden (%2).;ENU=Number of hours (%1) is not equal to norm hours (%2).;NLD=Aantal uren (%1) ongelijk aan norm uren (%2).;SVE=Antal timmar (%1) „r inte lika med normtiden (%2).';
+      HumanResourcesSetup@1100527367 : Record 5218;
+      ServiceSetup@1100527366 : Record 11012800;
+      SiteMngmntHoursSetup@1100527350 : Record 11012355;
+
+    PROCEDURE Code@2(VAR SiteMngHourAccounting@1100528400 : Record 11012360);
+    VAR
+      ErrorRec@1100528401 : Record 11012051;
+    BEGIN
+      CheckSiteMngHourAccountings(SiteMngHourAccounting);
+      COMMIT;
+      ErrorRec.SETRANGE("User ID", USERID);
+      ErrorRec.SETRANGE("Source Type", ErrorRec."Source Type"::"Hoursacc. Site manager");
+      IF ErrorRec.FINDFIRST THEN
+        PAGE.RUNMODAL(PAGE::Errors, ErrorRec)
+      ELSE
+        MESSAGE(Text002);
+    END;
+
+    PROCEDURE CheckSiteMngHourAccountings@1100528400(VAR SiteMngHourAccounting@1100528400 : Record 11012360);
+    VAR
+      Employee@1100528401 : Record 5200;
+      SiteMngmntHoursLine@1100528402 : Record 11012361;
+      ErrorRec@1100528404 : Record 11012051;
+      JobsSetup@1100528408 : Record 315;
+      ServiceSetup@1100528407 : Record 11012800;
+      HumanResourcesSetup@1100528406 : Record 5218;
+      FPSLicenseManagement@1100527400 : Codeunit 11229289;
+    BEGIN
+      ErrorRec.SETRANGE("User ID", USERID);
+      ErrorRec.SETRANGE("Source Type", ErrorRec."Source Type"::"Hoursacc. Site manager");
+      ErrorRec.DELETEALL;
+
+      WITH SiteMngHourAccounting DO BEGIN
+        JobsSetup.GET;
+        IF FPSLicenseManagement.LicenseAndReadPermissionForTable(HumanResourcesSetup) THEN
+          HumanResourcesSetup.GET;
+
+        Employee.SETRANGE("Account Hours", Employee."Account Hours"::"Required according to Norm");
+        IF Employee.FINDSET THEN BEGIN
+          REPEAT
+            IF ("Posting Date" >= Employee."Employment Date") OR (Employee."Employment Date" = 0D) THEN BEGIN
+              SETRANGE(Year,Year);
+              SETRANGE(Week,Week);
+              SETRANGE("Employee No.",Employee."No.");
+              SiteMngmntHoursLine.SETRANGE(Year,Year);
+              SiteMngmntHoursLine.SETRANGE(Week,Week);
+              SiteMngmntHoursLine.SETRANGE("Employee No.",Employee."No.");
+              SiteMngmntHoursLine.SETRANGE("Component Type", SiteMngmntHoursLine."Component Type"::Hours);
+
+              IF NOT SiteMngmntHoursLine.FINDSET(FALSE,FALSE) THEN BEGIN
+                IF FPSLicenseManagement.LicenseAndReadPermissionForTable(HumanResourcesSetup) THEN
+                  IF HumanResourcesSetup."Pre Registration Hours" THEN BEGIN
+                    StoreMessage(STRSUBSTNO(Text005, Employee.FIELDCAPTION(Employee."Full Name")),
+                      SiteMngHourAccounting, Employee);
+                  END;
+
+                SiteMngmntHoursLine.INIT;
+                SiteMngmntHoursLine.Year := Year;
+                SiteMngmntHoursLine.Week := Week;
+                SiteMngmntHoursLine."Document No." := "Document No.";
+                SiteMngmntHoursLine."Employee No." := Employee."No.";
+                SiteMngmntHoursLine."Posting Date" := "Posting Date";
+                CheckNormHours(SiteMngHourAccounting, SiteMngmntHoursLine, Employee);
+              END;
+            END;
+          UNTIL Employee.NEXT = 0;
+        END;
+
+        SETRANGE("Document No.","Document No.");
+        SETRANGE("Posting Date","Posting Date");
+        SETRANGE("Employee No.");
+        IF FINDSET THEN BEGIN
+          REPEAT
+            SiteMngmntHoursLine.SETRANGE(Year,Year);
+            SiteMngmntHoursLine.SETRANGE(Week,Week);
+            SiteMngmntHoursLine.SETRANGE("Employee No.","Employee No.");
+            SiteMngmntHoursLine.SETRANGE("Component Type", SiteMngmntHoursLine."Component Type"::Hours);
+
+            Employee.CHANGECOMPANY("Supplying Company");
+            IF "Employee No." <> '' THEN BEGIN
+              Employee.GET("Employee No.");
+              IF Employee."Trade Association" = '' THEN
+                StoreMessage(STRSUBSTNO(Text004, Employee.FIELDCAPTION("Trade Association")),
+                  SiteMngHourAccounting, Employee);
+            END ELSE
+              CLEAR(Employee);
+
+            IF SiteMngmntHoursLine.FINDSET THEN BEGIN
+              IF Employee."Account Hours" = Employee."Account Hours"::"Required according to Norm" THEN
+                CheckNormHours(SiteMngHourAccounting, SiteMngmntHoursLine, Employee);
+              REPEAT
+                IF SiteMngmntHoursLine."Total Line" <> 0 THEN BEGIN
+                  IF HumanResourcesSetup."Salary Application" <> HumanResourcesSetup."Salary Application"::Multipay THEN BEGIN
+                    CASE SiteMngmntHoursLine.Type OF
+                      SiteMngmntHoursLine.Type::Project:
+                        BEGIN
+                          IF SiteMngmntHoursLine."Cost Object" = '' THEN
+                            StoreMessage(STRSUBSTNO(Text004, SiteMngmntHoursLine.FIELDCAPTION("Cost Object")),
+                              SiteMngHourAccounting, Employee);
+                          IF JobsSetup."Cost Component Mandatory" AND (SiteMngmntHoursLine."Cost Component" = '') THEN
+                            StoreMessage(STRSUBSTNO(Text004, SiteMngmntHoursLine.FIELDCAPTION("Cost Component")),
+                              SiteMngHourAccounting, Employee);
+                        END;
+                      SiteMngmntHoursLine.Type::Service:
+                        BEGIN
+                          IF SiteMngmntHoursLine."Cost Object" = '' THEN
+                            StoreMessage(STRSUBSTNO(Text004, SiteMngmntHoursLine.FIELDCAPTION("Cost Object")),
+                              SiteMngHourAccounting, Employee);
+                          ServiceSetup.GET;
+                          IF ServiceSetup."Cost Component Mandatory" AND (SiteMngmntHoursLine."Cost Component" = '') THEN
+                            StoreMessage(STRSUBSTNO(Text004, SiteMngmntHoursLine.FIELDCAPTION("Cost Component")),
+                              SiteMngHourAccounting, Employee);
+                        END;
+                      SiteMngmntHoursLine.Type::Indirect:
+                        BEGIN
+                          SiteMngmntHoursSetup.GET;
+                          IF SiteMngmntHoursSetup."Cost Object By Indirect Lines" THEN
+                            IF SiteMngmntHoursLine."Cost Object" = '' THEN
+                              StoreMessage(STRSUBSTNO(Text004, SiteMngmntHoursLine.FIELDCAPTION("Cost Object")),
+                                SiteMngHourAccounting, Employee);
+                        END;
+                    END;
+                  END;
+                END;
+              UNTIL SiteMngmntHoursLine.NEXT = 0;
+            END;
+          UNTIL NEXT = 0;
+        END;
+      END;
+    END;
+
+    PROCEDURE CheckNormHours@1100485000(SiteMngHourAccounting@1100528400 : Record 11012360;SiteMngmntHoursLine@1100528402 : Record 11012361;Employee@1100528401 : Record 5200);
+    VAR
+      ErrMsg@1100528701 : Text[1024];
+    BEGIN
+      WITH SiteMngmntHoursLine DO BEGIN
+        IF ("Posting Date" < Employee."Employment Date") THEN
+          EXIT;
+        IF (Employee."Inactive Date" <> 0D) AND ("Posting Date" > Employee."Inactive Date") THEN
+          EXIT;
+
+        IF NOT CheckNormPostingHours(SiteMngmntHoursLine, FALSE, TRUE, ErrMsg) THEN
+          StoreMessage(ErrMsg, SiteMngHourAccounting, Employee);
+      END;
+    END;
+
+    PROCEDURE StoreMessage@7(lvMess@11012001 : Text[250];SiteMngHourAccounting@1100528400 : Record 11012360;Employee@1100528401 : Record 5200);
+    VAR
+      ErrorRec@1100528402 : Record 11012051;
+      lvError@11012002 : Integer;
+    BEGIN
+      WITH ErrorRec DO BEGIN
+        SETRANGE("User ID", USERID);
+        SETRANGE("Source Type", "Source Type"::"Hoursacc. Site manager");
+        IF FINDLAST THEN
+          lvError := "Line No." + 1
+        ELSE
+          lvError := 1;
+
+        INIT;
+        "User ID" := USERID;
+        "Source Type" := "Source Type"::"Hoursacc. Site manager";
+        "Line No." := lvError;
+        "Error message" := lvMess;
+        "Employee No." := Employee."No.";
+        "Document No." := SiteMngHourAccounting."Document No.";
+        "Posting Date" := SiteMngHourAccounting."Posting Date";
+        "Department Code" := Employee."Global Dimension 1 Code";
+        INSERT;
+      END;
+    END;
+
+    PROCEDURE CheckNormPostingHours@1100528701(SiteMngmntHoursLine@1100528700 : Record 11012361;CheckBeforePost@1100528703 : Boolean;ReturnErrMsg@1100528701 : Boolean;VAR ErrMsg@1100528702 : Text[1024]) : Boolean;
+    BEGIN
+      EXIT(CheckNormPostingHoursPerWeek(SiteMngmntHoursLine, CheckBeforePost, ReturnErrMsg, ErrMsg));
+    END;
+
+    PROCEDURE CheckNormPostingHoursPerWeek@1100528702(SiteMngmntHoursLine@1100528700 : Record 11012361;CheckBeforePost@1100528710 : Boolean;ReturnErrMsg@1100528708 : Boolean;VAR ErrMsg@1100528709 : Text[1024]) : Boolean;
+    VAR
+      Employee@1100528701 : Record 5200;
+      TotalHours@1100528702 : Decimal;
+      StartDate@1100528703 : Date;
+      EndDate@1100528704 : Date;
+      MonthIn@1100528705 : Integer;
+      MonthOut@1100528706 : Integer;
+    BEGIN
+      IF SiteMngmntHoursLine."Component Type" <> SiteMngmntHoursLine."Component Type"::Hours THEN
+        EXIT(TRUE);
+      IF SiteMngmntHoursLine."Employee No." = '' THEN
+        EXIT(TRUE);
+
+      IF SiteMngmntHoursLine."Supplying Company" <> '' THEN
+        Employee.CHANGECOMPANY(SiteMngmntHoursLine."Supplying Company");
+      IF SiteMngmntHoursLine."Employee No." <> '' THEN
+        Employee.GET(SiteMngmntHoursLine."Employee No.");
+
+      IF NOT ((Employee."Account Hours" = Employee."Account Hours"::"Required according to Norm") AND (NOT Employee.External)) THEN
+        EXIT(TRUE);
+
+      HumanResourcesSetup.GET;
+
+      TotalHours := ROUND(TotalHours, 0.01, '=');
+
+      IF CheckBeforePost THEN BEGIN
+        IF (TotalHours <> 0) AND (Employee."Norm Hours" <> TotalHours) THEN BEGIN
+          IF (NOT HumanResourcesSetup."Soft Norm Check") OR (Employee."Norm Hours" < TotalHours) THEN BEGIN
+            IF ReturnErrMsg THEN BEGIN
+              ErrMsg := STRSUBSTNO(Text001, TotalHours, Employee."Norm Hours");
+              EXIT(FALSE);
+            END ELSE
+              SiteMngmntHoursLine.FIELDERROR("Employee No.", STRSUBSTNO(Text001, TotalHours, Employee."Norm Hours"));
+          END ELSE BEGIN
+            StartDate := DWY2DATE(1, SiteMngmntHoursLine.Week, SiteMngmntHoursLine.Year);
+            EndDate := DWY2DATE(7, SiteMngmntHoursLine.Week, SiteMngmntHoursLine.Year);
+            MonthIn := DATE2DMY(StartDate, 2);
+            MonthOut := DATE2DMY(EndDate, 2);
+            IF MonthIn = MonthOut THEN BEGIN
+              IF ReturnErrMsg THEN BEGIN
+                ErrMsg := STRSUBSTNO(Text001, TotalHours, Employee."Norm Hours");
+                EXIT(FALSE);
+              END ELSE
+                SiteMngmntHoursLine.FIELDERROR("Employee No.", STRSUBSTNO(Text001, TotalHours, Employee."Norm Hours"));
+            END;
+          END;
+        END;
+      END ELSE BEGIN
+        IF Employee."Norm Hours" <> TotalHours THEN
+          IF ReturnErrMsg THEN BEGIN
+            ErrMsg := STRSUBSTNO(Text001, TotalHours, Employee."Norm Hours");
+            EXIT(FALSE);
+          END ELSE
+            SiteMngmntHoursLine.FIELDERROR("Employee No.", STRSUBSTNO(Text001, TotalHours, Employee."Norm Hours"));
+      END;
+
+      EXIT(TRUE);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

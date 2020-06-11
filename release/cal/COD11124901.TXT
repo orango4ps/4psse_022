@@ -1,0 +1,632 @@
+OBJECT Codeunit 11124901 Resource Request Status Mgt.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text001@1100529001 : TextConst 'DEU=(%1) wurde noch nicht erreicht;ENU=(%1) has not been reached yet;NLD=(%1) is nog niet bereikt';
+      Text002@1100529000 : TextConst 'DEU=aber Rechnungsbetrag ist null;ENU=but amount to invoice is zero;NLD=maar te factureren bedrag is nul';
+      Text003@1100529002 : TextConst 'DEU=%1 ''%2'', keine Zeilen mit ''%3'' vorhanden;ENU=%1 ''%2'', no lines with ''%3'' present;NLD=%1 ''%2'', geen regels met ''%3'' aanwezig';
+      InventorySetup@1100528300 : Record 313;
+      PlantSetup@1100528301 : Record 11012550;
+      Text004@1100528302 : TextConst 'DEU=%1 ''%2'' (Artikel) k”nnen nicht gebucht werden. L”sen Sie das Problem und buchen Sie %1 manuell.;ENU=%1 ''%2'' (items) can not be posted. Solve problem and post this %1 manually.;NLD=%1 ''%2'' (artikelen) kan niet geboekt. Los probleem op en boek deze %1 handmatig.';
+      ResourcePlanningSetup@1100527200 : Record 11124900;
+      Text005@1100529003 : TextConst 'DEU=muss von %1 ''%2'' sein.;ENU=must be of %1 ''%2'';NLD=moet van %1 ''%2'' zijn';
+
+    PROCEDURE FinishRequest@1100529000(Rec@1100529000 : Record 11124901);
+    VAR
+      ResourceRequest@1100529001 : Record 11124901;
+      WorkOrder@1100529003 : Record 11229279;
+      PlantOrder@1100528302 : Record 11012556;
+    BEGIN
+      ResourceRequest.COPY(Rec);
+      PlantSetup.GET;
+      InventorySetup.GET;
+      ResourcePlanningSetup.GET;
+      PlantOrder."No." := '';
+      WITH ResourceRequest DO BEGIN
+        TESTFIELD("No.");
+        TESTFIELD(Status, Status::Open);
+        TESTFIELD("Source No.");
+        TESTFIELD("Request Type");
+        CheckLinesOnFinish(ResourceRequest);
+        CheckItemLinesOnFinish(ResourceRequest);
+        CheckTransportCostOnFinish(ResourceRequest);
+
+        PostRequestItems(ResourceRequest, PlantOrder);
+        IF "Source Type" IN ["Source Type"::Project , "Source Type"::ServiceOrder] THEN BEGIN
+          PostSubcontractorHours(ResourceRequest, PlantOrder);
+          PostTransportCost(ResourceRequest);
+        END;
+
+        VALIDATE(Status, Status::Finished);
+        MODIFY(FALSE);
+
+        WorkOrder.SETCURRENTKEY("Source Company", "Source Type", "Source No.");
+        WorkOrder.SETRANGE("Source Company", COMPANYNAME);
+        WorkOrder.SETRANGE("Source Type", WorkOrder."Source Type"::Request);
+        WorkOrder.SETRANGE("Source No.", ResourceRequest."No.");
+        WorkOrder.SETRANGE(Finished, FALSE);
+        WorkOrder.MODIFYALL(Finished, TRUE, FALSE);
+
+        PostPlantOrder(PlantOrder."No.")
+      END;
+      Rec := ResourceRequest;
+    END;
+
+    PROCEDURE ReopenRequest@1100529001(Rec@1100529000 : Record 11124901);
+    VAR
+      ResourceRequest@1100529001 : Record 11124901;
+      AdditionalInfoRequestWO@1100529002 : Record 11124915;
+      ResourceRequestItemLine@1100528300 : Record 11124908;
+      TransportCostRequestWO@1100529004 : Record 11124913;
+      WorkOrder@1100529003 : Record 11229279;
+    BEGIN
+      ResourceRequest.COPY(Rec);
+      WITH ResourceRequest DO BEGIN
+        TESTFIELD("No.");
+        TESTFIELD(Status, Status::Finished);
+        IF "Source Type" = "Source Type"::Customer THEN BEGIN
+          AdditionalInfoRequestWO.SETCURRENTKEY("Request No.", "Work Order No.");
+          AdditionalInfoRequestWO.SETRANGE("Request No.", "No.");
+          AdditionalInfoRequestWO.SETFILTER("Collective List No.", '<>%1', '');
+          IF AdditionalInfoRequestWO.FINDFIRST THEN
+            AdditionalInfoRequestWO.TESTFIELD("Collective List No.", '');
+          //
+          ResourceRequestItemLine.SETRANGE("Request No.", "No.");
+          ResourceRequestItemLine.SETFILTER("Collective List No.", '<>%1', '');
+          IF ResourceRequestItemLine.FINDFIRST THEN
+            ResourceRequestItemLine.TESTFIELD("Collective List No.", '');
+          //
+          TransportCostRequestWO.SETRANGE("Request No.", "No.");
+          TransportCostRequestWO.SETFILTER("Collective List No.", '<>%1', '');
+          IF TransportCostRequestWO.FINDFIRST THEN
+            TransportCostRequestWO.TESTFIELD("Collective List No.", '');
+        END ELSE BEGIN
+          AdditionalInfoRequestWO.SETCURRENTKEY("Request No.", "Work Order No.");
+          AdditionalInfoRequestWO.SETRANGE("Request No.", "No.");
+          AdditionalInfoRequestWO.SETFILTER("Plant Order No", '<>%1', '');
+          IF AdditionalInfoRequestWO.FINDFIRST THEN
+            REPEAT
+              IF WorkOrder.GET(AdditionalInfoRequestWO."Work Order No.") THEN BEGIN
+                IF WorkOrder."Resource Type" = WorkOrder."Resource Type"::Subcontractor THEN
+                  AdditionalInfoRequestWO.TESTFIELD("Plant Order No", '');
+              END;
+            UNTIL AdditionalInfoRequestWO.NEXT = 0;
+        END;
+        VALIDATE(Status, Status::Open);
+        MODIFY(FALSE);
+      END;
+      Rec := ResourceRequest;
+    END;
+
+    PROCEDURE CheckFinishWorkOrder_Request@1100529002(WorkOrder@1100529000 : Record 11229279);
+    VAR
+      ResourceRequest@1100529001 : Record 11124901;
+      ResourceReqPlantLocation@1100528501 : Record 11124914;
+      AdditionalInfoRequestWO@1100528500 : Record 11124915;
+    BEGIN
+      WorkOrder.TESTFIELD("Source Type", WorkOrder."Source Type"::Request);
+      WorkOrder.TESTFIELD("Resource No.");
+      WorkOrder.TESTFIELD("Starting Date/Time");
+      WorkOrder.TESTFIELD("Ending Date/Time");
+      IF WorkOrder."Starting Date/Time" > CURRENTDATETIME THEN
+        WorkOrder.FIELDERROR("Starting Date/Time", STRSUBSTNO(Text001, WorkOrder."Starting Date/Time"));
+      IF WorkOrder."Ending Date/Time" > CURRENTDATETIME THEN
+        WorkOrder.FIELDERROR("Ending Date/Time", STRSUBSTNO(Text001, WorkOrder."Starting Date/Time"));
+
+      ResourceRequest.GET(WorkOrder."Source No.");
+      ResourceRequest.TESTFIELD("Source No.");
+      ResourceRequest.TESTFIELD("Request Type");
+      IF (WorkOrder."Resource Type" = WorkOrder."Resource Type"::Plant) AND
+         (ResourceRequest."Source Type" IN [ResourceRequest."Source Type"::Project, ResourceRequest."Source Type"::ServiceOrder])
+      THEN BEGIN
+        IF NOT AdditionalInfoRequestWO.GET(WorkOrder."No.") THEN
+          AdditionalInfoRequestWO."Actual Hours" := 0;
+        IF AdditionalInfoRequestWO."Actual Hours" <> 0 THEN BEGIN
+          WorkOrder.CALCFIELDS("Resource Company");
+          IF WorkOrder."Resource Company" = COMPANYNAME THEN
+            ResourceRequest.TESTFIELD("Plant Location")
+          ELSE BEGIN
+            ResourceReqPlantLocation.CheckInsertPlantCompanyAndFillPlantLocation(ResourceRequest."No.", WorkOrder."Resource Company");
+            GetPlantLocationCodeInPlantCompany(ResourceRequest, WorkOrder."Resource Company");
+          END;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckLinesOnFinish@1100529007(ResourceRequest@1100529000 : Record 11124901);
+    VAR
+      AdditionalInfoRequestWO@1100529001 : Record 11124915;
+      WorkOrder@1100529002 : Record 11229279;
+      ResourceGroup@1100529004 : Record 11229384;
+      PurchaseOrder@1100529006 : Record 38;
+      ChargeableFound@1100529003 : Boolean;
+    BEGIN
+      WITH ResourceRequest DO BEGIN
+        AdditionalInfoRequestWO.SETCURRENTKEY("Request No.", "Work Order No.");
+        AdditionalInfoRequestWO.SETRANGE("Request No.", "No.");
+        IF AdditionalInfoRequestWO.FINDSET THEN BEGIN
+          REPEAT
+            WorkOrder.GET(AdditionalInfoRequestWO."Work Order No.");
+            WorkOrder.TESTFIELD("Resource No.");
+            WorkOrder.TESTFIELD("Starting Date/Time");
+            WorkOrder.TESTFIELD("Ending Date/Time");
+            IF WorkOrder."Starting Date/Time" > CURRENTDATETIME THEN
+              WorkOrder.FIELDERROR("Starting Date/Time", STRSUBSTNO(Text001, WorkOrder."Starting Date/Time"));
+            IF WorkOrder."Ending Date/Time" > CURRENTDATETIME THEN
+              WorkOrder.FIELDERROR("Ending Date/Time", STRSUBSTNO(Text001, WorkOrder."Starting Date/Time"));
+            IF WorkOrder."Resource Type" = WorkOrder."Resource Type"::Subcontractor THEN
+              WorkOrder.TESTFIELD("Resource Group No.");
+            IF WorkOrder."Resource Group No." <> '' THEN BEGIN
+              ResourceGroup.GET(WorkOrder."Resource Group No.");
+              ResourceGroup.TESTFIELD("Source No.");
+              IF WorkOrder."Resource Type" = WorkOrder."Resource Type"::Plant THEN
+                ResourceGroup.TESTFIELD(Type, ResourceGroup.Type::Plant)
+              ELSE
+                ResourceGroup.TESTFIELD(Type, ResourceGroup.Type::Discipline);
+            END;
+            WorkOrder.CALCFIELDS("Resource Company");
+            IF WorkOrder."Resource Company" = COMPANYNAME THEN BEGIN  // Purchase Orders only created for external resources of the
+              IF IsExternalResource(WorkOrder) THEN BEGIN             // own/current company, see C11124904
+                IF AdditionalInfoRequestWO."Purchase Order No" <> '' THEN BEGIN
+                  IF NOT PurchaseOrder.GET(PurchaseOrder."Document Type"::Order, AdditionalInfoRequestWO."Purchase Order No") THEN
+                    AdditionalInfoRequestWO."Purchase Order No" := '';
+                END;
+                AdditionalInfoRequestWO.TESTFIELD("Purchase Order No");
+              END;
+            END;
+            IF "Source Type" = "Source Type"::Customer THEN BEGIN
+              IF AdditionalInfoRequestWO.Chargeable THEN BEGIN
+                ChargeableFound := TRUE;
+                IF NOT
+                  ((AdditionalInfoRequestWO."Agreement Type" = AdditionalInfoRequestWO."Agreement Type"::Discount) AND
+                   (AdditionalInfoRequestWO."Special Discount %" = 100))
+                THEN BEGIN
+                  IF AdditionalInfoRequestWO.GetInvoiceAmount = 0 THEN
+                    AdditionalInfoRequestWO.FIELDERROR(Chargeable, Text002);
+                END;
+              END;
+            END ELSE BEGIN  // Project/ServiceOrder
+              IF (WorkOrder."Resource Type" = WorkOrder."Resource Type"::Plant) AND (AdditionalInfoRequestWO."Actual Hours" <> 0) THEN BEGIN
+                IF WorkOrder."Resource Company" = COMPANYNAME THEN
+                  ResourceRequest.TESTFIELD("Plant Location")
+                ELSE
+                  GetPlantLocationCodeInPlantCompany(ResourceRequest, WorkOrder."Resource Company");
+              END;
+            END;
+          UNTIL AdditionalInfoRequestWO.NEXT = 0;
+          IF ("Source Type" = "Source Type"::Customer) AND (NOT ChargeableFound) THEN
+            ERROR(Text003, TABLECAPTION, "No.", AdditionalInfoRequestWO.FIELDCAPTION(Chargeable));
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckItemLinesOnFinish@1100529010(ResourceRequest@1100529000 : Record 11124901);
+    VAR
+      ResourceRequestItemLine@1100529001 : Record 11124908;
+    BEGIN
+      WITH ResourceRequest DO BEGIN
+        ResourceRequestItemLine.SETRANGE("Request No.", "No.");
+        ResourceRequestItemLine.SETRANGE(Posted, FALSE);
+        IF ResourceRequestItemLine.FINDSET THEN BEGIN
+          IF "Source Type" IN ["Source Type"::Project, "Source Type"::ServiceOrder] THEN
+            ResourceRequest.TESTFIELD("Plant Location");
+          REPEAT
+            IF ResourceRequestItemLine."Cost Object" = '' THEN
+              ResourceRequestItemLine.TESTFIELD("Item No.");
+            IF ResourceRequestItemLine."Item No." = '' THEN BEGIN
+              ResourceRequestItemLine.TESTFIELD("Cost Object");
+              IF "Source Type" IN ["Source Type"::Project, "Source Type"::ServiceOrder] THEN
+                ResourcePlanningSetup.TESTFIELD("Cost Object Line- Item No.(PO)");
+            END;
+            ResourceRequestItemLine.TESTFIELD(Description);
+            ResourceRequestItemLine.TESTFIELD(Quantity);
+            IF InventorySetup."Location Mandatory" AND (ResourceRequestItemLine."Item No." <> '') THEN
+              ResourceRequestItemLine.TESTFIELD("Location Code");
+          UNTIL ResourceRequestItemLine.NEXT = 0;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckTransportCostOnFinish@1100529008(ResourceRequest@1100529000 : Record 11124901);
+    VAR
+      TransportCostRequestWO@1100529001 : Record 11124913;
+      WorkOrder@1100529002 : Record 11229279;
+      Resource@1100529004 : Record 11229278;
+      PrevWorkOrderNo@1100529003 : Code[20];
+    BEGIN
+      WITH ResourceRequest DO BEGIN
+        TransportCostRequestWO.SETRANGE("Request No.", "No.");
+        IF TransportCostRequestWO.FINDSET THEN BEGIN
+          REPEAT
+            IF TransportCostRequestWO."Work Order No." <> PrevWorkOrderNo THEN BEGIN
+              WorkOrder.GET(TransportCostRequestWO."Work Order No.");
+              IF WorkOrder."Resource Type" <> WorkOrder."Resource Type"::Plant THEN BEGIN
+                TransportCostRequestWO.FIELDERROR("Work Order No.",
+                  STRSUBSTNO(Text005, WorkOrder.FIELDCAPTION("Resource Type"), WorkOrder."Resource Type"::Plant));
+              END;
+              WorkOrder.TESTFIELD("Resource No.");
+              WorkOrder.TESTFIELD("Starting Date/Time");
+              Resource.GET(WorkOrder."Resource No.");
+              Resource.TESTFIELD(Type, Resource.Type::Plant);
+              Resource.TESTFIELD("Source No.");
+              Resource.TESTFIELD("Source No. 2");
+              Resource.TESTFIELD(Company);
+              IF ("Source Type" IN ["Source Type"::Project, "Source Type"::ServiceOrder]) THEN BEGIN
+                IF Resource.Company = COMPANYNAME THEN
+                  ResourceRequest.TESTFIELD("Plant Location")
+                ELSE
+                  GetPlantLocationCodeInPlantCompany(ResourceRequest, Resource.Company);
+              END;
+              PrevWorkOrderNo := TransportCostRequestWO."Work Order No.";
+            END;
+            TransportCostRequestWO.TESTFIELD("Cost Object");
+            TransportCostRequestWO.TESTFIELD(Description);
+            TransportCostRequestWO.TESTFIELD(Quantity);
+          UNTIL TransportCostRequestWO.NEXT = 0;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE IsExternalResource@1100529005(WorkOrder@1100529001 : Record 11229279) : Boolean;
+    VAR
+      Resource@1100529000 : Record 11229278;
+      PlantNumber@1100529003 : Record 11012552;
+    BEGIN
+      CASE WorkOrder."Resource Type" OF
+        WorkOrder."Resource Type"::Subcontractor:
+          EXIT(TRUE);
+        WorkOrder."Resource Type"::Plant:
+          BEGIN
+            Resource.GET(WorkOrder."Resource No.");
+            Resource.TESTFIELD("Source No.");
+            Resource.TESTFIELD("Source No. 2");
+            PlantNumber.GET(Resource."Source No.", Resource."Source No. 2");
+            IF PlantNumber.External THEN
+              EXIT(TRUE);
+          END;
+      END;
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE PostRequestItems@1100528301(ResourceRequest@1100528300 : Record 11124901;VAR PlantOrder@1100529000 : Record 11012556);
+    VAR
+      ResourceRequestItemLine@1100528302 : Record 11124908;
+      PlantOrderCostLine@1100528305 : Record 11012558;
+      Customer@1100528301 : Record 18;
+      NextPlantOrderLineNo@1100528304 : Integer;
+    BEGIN
+      NextPlantOrderLineNo := 10000;
+      WITH ResourceRequest DO BEGIN
+        ResourceRequestItemLine.SETRANGE("Request No.", "No.");
+        ResourceRequestItemLine.SETRANGE(Posted, FALSE);
+        IF ResourceRequestItemLine.FINDSET(TRUE,FALSE) THEN BEGIN
+          IF "Source Type" = "Source Type"::Customer THEN
+            Customer.GET("Source No.");
+          REPEAT
+            IF ResourceRequestItemLine."Cost Object" = '' THEN
+              ResourceRequestItemLine.TESTFIELD("Item No.");
+            IF ResourceRequestItemLine."Item No." = '' THEN
+              ResourceRequestItemLine.TESTFIELD("Cost Object");
+            ResourceRequestItemLine.TESTFIELD(Description);
+            ResourceRequestItemLine.TESTFIELD(Quantity);
+            IF InventorySetup."Location Mandatory" AND (ResourceRequestItemLine."Item No." <> '') THEN
+              ResourceRequestItemLine.TESTFIELD("Location Code");
+            CASE "Source Type" OF
+              "Source Type"::Customer:
+                PostRequestItemLine(ResourceRequest, ResourceRequestItemLine, Customer);
+              "Source Type"::Project,
+              "Source Type"::ServiceOrder:
+                BEGIN
+                   IF PlantOrder."No." = '' THEN
+                     InsertPlantOrder(ResourceRequest, PlantOrder);
+                   InsertPlantOrderItemLine(PlantOrder, ResourceRequestItemLine, NextPlantOrderLineNo);
+                END;
+            END;
+            ResourceRequestItemLine.Posted := TRUE;
+            ResourceRequestItemLine."Plant Order No" := PlantOrder."No.";
+            ResourceRequestItemLine.MODIFY;
+          UNTIL ResourceRequestItemLine.NEXT = 0;
+          IF PlantOrder."No." <> '' THEN BEGIN
+            PlantOrderCostLine.SETRANGE("Plant Order No.", PlantOrder."No.");
+            PlantOrderCostLine.SETFILTER("Plant Order Line No.", '<>%1', 0);
+            PlantOrderCostLine.DELETEALL;
+          END
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE PostRequestItemLine@1100485004(ResourceRequest@1100528303 : Record 11124901;ResourceRequestItemLine@1100528300 : Record 11124908;Customer@1100528305 : Record 18);
+    VAR
+      Item@1100528301 : Record 27;
+      ItemJournalLine@1100528302 : Record 83;
+      DimMgt@1100409000 : Codeunit 408;
+      ItemJnlPostLine@1100528304 : Codeunit 22;
+    BEGIN
+      WITH ResourceRequestItemLine DO BEGIN
+        IF "Item No." = '' THEN
+          EXIT;
+        Item.GET("Item No.");
+        ItemJournalLine.INIT;
+        ItemJournalLine."Source Code" := PlantSetup."Source Code Item Delivery";
+        ItemJournalLine."Line No." := "Line No.";
+        ItemJournalLine."Document No." := "Request No.";
+        ItemJournalLine."Document Date" := TODAY;
+        ItemJournalLine."Posting Date" := WORKDATE;
+        ItemJournalLine."Gen. Bus. Posting Group" := Customer."Gen. Bus. Posting Group";
+        ItemJournalLine."Source Type" := ItemJournalLine."Source Type"::Customer;
+        ItemJournalLine."Source No." := ResourceRequest."Source No."; //CustomerNo
+        ItemJournalLine."Entry Type" := ItemJournalLine."Entry Type"::Sale;
+        ItemJournalLine."Location Code" := "Location Code";
+        ItemJournalLine.VALIDATE("Item No.", "Item No.");
+        ItemJournalLine.VALIDATE("Unit of Measure Code","Unit of Measure");
+        ItemJournalLine.VALIDATE(Quantity, Quantity);
+        ItemJournalLine.VALIDATE("Unit Amount", "Unit Price");
+        ItemJournalLine.Description := Description;
+        IF ItemJournalLine."Shortcut Dimension 1 Code" <> Item."Global Dimension 1 Code" THEN BEGIN
+          ItemJournalLine."Shortcut Dimension 1 Code" := Item."Global Dimension 1 Code";
+          DimMgt.ValidateShortcutDimValues(1,ItemJournalLine."Shortcut Dimension 1 Code",ItemJournalLine."Dimension Set ID");
+        END;
+        IF ItemJournalLine."Shortcut Dimension 2 Code" <> Item."Global Dimension 2 Code" THEN BEGIN
+          ItemJournalLine."Shortcut Dimension 2 Code" := Item."Global Dimension 2 Code";
+          DimMgt.ValidateShortcutDimValues(2,ItemJournalLine."Shortcut Dimension 2 Code",ItemJournalLine."Dimension Set ID");
+        END;
+        ItemJnlPostLine.RunWithCheck(ItemJournalLine);
+      END;
+    END;
+
+    LOCAL PROCEDURE PostSubcontractorHours@1100529003(ResourceRequest@1100529002 : Record 11124901;VAR PlantOrder@1100529004 : Record 11012556);
+    VAR
+      AdditionalInfoRequestWO@1100529001 : Record 11124915;
+      WorkOrder@1100529000 : Record 11229279;
+      RequestType@1100529005 : Record 11124907;
+      NextPlantOrderCostLineNo@1100529003 : Integer;
+    BEGIN
+      NextPlantOrderCostLineNo := 10000;
+      WorkOrder.SETCURRENTKEY("Source Company", "Source Type", "Source No.");
+      WorkOrder.SETRANGE("Source Company", COMPANYNAME);
+      WorkOrder.SETRANGE("Source Type", WorkOrder."Source Type"::Request);
+      WorkOrder.SETRANGE("Source No.", ResourceRequest."No.");
+      WorkOrder.SETRANGE("Resource Type", WorkOrder."Resource Type"::Subcontractor);
+      IF WorkOrder.FINDSET THEN BEGIN
+        RequestType.GET(ResourceRequest."Request Type");
+        RequestType.TESTFIELD("Cost Object Subc.Hrs (PO Cost)");
+        REPEAT
+          AdditionalInfoRequestWO.GET(WorkOrder."No.");
+          IF AdditionalInfoRequestWO."Plant Order No" = '' THEN BEGIN
+            ResourceRequest.TESTFIELD("Plant Location");
+            IF PlantOrder."No." = '' THEN
+              InsertPlantOrder(ResourceRequest, PlantOrder);
+            InsertPlantOrderCostLineSubcHours(
+              PlantOrder, AdditionalInfoRequestWO, WorkOrder, RequestType."Cost Object Subc.Hrs (PO Cost)", NextPlantOrderCostLineNo);
+            AdditionalInfoRequestWO."Plant Order No" := PlantOrder."No.";
+            AdditionalInfoRequestWO.MODIFY;
+          END;
+        UNTIL WorkOrder.NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE PostTransportCost@1100529016(ResourceRequest@1100529000 : Record 11124901);
+    VAR
+      WorkOrder@1100529001 : Record 11229279;
+      TransportCostRequestWO@1100529002 : Record 11124913;
+      Resource@1100529007 : Record 11229278;
+      StartDate@1100529003 : Date;
+      YearNo@1100529004 : Integer;
+      WeekNo@1100529005 : Integer;
+      PrevWorkOrderNo@1100529006 : Code[20];
+      PlantLoc@1100529008 : Code[20];
+    BEGIN
+      TransportCostRequestWO.SETRANGE("Request No.", ResourceRequest."No.");
+      IF TransportCostRequestWO.FINDSET THEN BEGIN
+        REPEAT
+          IF TransportCostRequestWO."Work Order No." <> PrevWorkOrderNo THEN BEGIN
+            WorkOrder.GET(TransportCostRequestWO."Work Order No.");
+            Resource.GET(WorkOrder."Resource No.");
+            StartDate := DT2DATE(WorkOrder."Starting Date/Time");
+            YearNo := DATE2DWY(StartDate, 3);
+            WeekNo := DATE2DWY(StartDate, 2);
+            IF Resource.Company = COMPANYNAME THEN
+              PlantLoc := ResourceRequest."Plant Location"
+            ELSE
+              PlantLoc := GetPlantLocationCodeInPlantCompany(ResourceRequest, Resource.Company);
+            PrevWorkOrderNo := TransportCostRequestWO."Work Order No.";
+          END;
+          InsertPlantHourRevenueCostLine(TransportCostRequestWO, ResourceRequest."No.", Resource, YearNo, WeekNo, PlantLoc, WorkOrder."Project Element", ResourceRequest."Receiving Company");
+        UNTIL TransportCostRequestWO.NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE InsertPlantOrder@1100528300(ResourceRequest@1100528301 : Record 11124901;VAR PlantOrder@1100528302 : Record 11012556);
+    BEGIN
+      PlantOrder.INIT;
+      PlantOrder.Type := PlantOrder.Type::Arrival;
+      PlantOrder.INSERT(TRUE);
+      PlantOrder.TESTFIELD("No.");
+      PlantOrder.VALIDATE("To Location", ResourceRequest."Plant Location");
+      PlantOrder."Transfer Date" := WORKDATE;
+      PlantOrder."Resource Request No." := ResourceRequest."No.";
+      PlantOrder.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE InsertPlantOrderItemLine@1100528304(PlantOrder@1100528300 : Record 11012556;ResourceRequestItemLine@1100528301 : Record 11124908;VAR NextLineNo@1100528303 : Integer);
+    VAR
+      PlantOrderLine@1100528302 : Record 11012557;
+    BEGIN
+      PlantOrderLine.INIT;
+      PlantOrderLine."Plant Order No." := PlantOrder."No.";
+      PlantOrderLine."Line No." := NextLineNo;
+      PlantOrderLine.InitRecord;
+      PlantOrderLine.VALIDATE(Type, PlantOrderLine.Type::Item);
+      IF ResourceRequestItemLine."Item No." <> '' THEN BEGIN
+        PlantOrderLine."Item No." := ResourceRequestItemLine."Item No.";
+        PlantOrderLine."Resource Request Item Line Typ" := PlantOrderLine."Resource Request Item Line Typ"::Item;
+      END ELSE BEGIN
+        ResourcePlanningSetup.TESTFIELD("Cost Object Line- Item No.(PO)");
+        PlantOrderLine."Item No." := ResourcePlanningSetup."Cost Object Line- Item No.(PO)";
+        PlantOrderLine."Resource Request Item Line Typ" := PlantOrderLine."Resource Request Item Line Typ"::CostObject;
+      END;
+      PlantOrderLine."Cost Object (Resource Req.)" := ResourceRequestItemLine."Cost Object";
+      PlantOrderLine.Description := ResourceRequestItemLine.Description;
+      PlantOrderLine."Description 2" := ResourceRequestItemLine."Description 2";
+      PlantOrderLine."Unit of Measure" := ResourceRequestItemLine."Unit of Measure";
+      PlantOrderLine."Location Code" := ResourceRequestItemLine."Location Code";
+      IF PlantSetup."Extended Picking Procedure" THEN
+        PlantOrderLine."Asked Quantity" := ResourceRequestItemLine.Quantity;
+      PlantOrderLine.Quantity := ResourceRequestItemLine.Quantity;
+      PlantOrderLine."Sales Rate" := ResourceRequestItemLine."Unit Price";
+      PlantOrderLine."Item Amount" := ResourceRequestItemLine.Amount;
+      PlantOrderLine.INSERT(TRUE);
+      NextLineNo := NextLineNo + 10000;
+    END;
+
+    LOCAL PROCEDURE InsertPlantOrderCostLineSubcHours@1100529004(PlantOrder@1100529001 : Record 11012556;AdditionalInfoRequestWO@1100529002 : Record 11124915;WorkOrder@1100529004 : Record 11229279;CostObjectNo@1100529005 : Code[20];VAR NextCostLineNo@1100529003 : Integer);
+    VAR
+      PlantOrderCostLine@1100529000 : Record 11012558;
+      ResourceGroup@1100529008 : Record 11229384;
+      SubcRate@1100529007 : Decimal;
+      PriceFoundAt@1100529006 : Text;
+    BEGIN
+      PlantOrderCostLine.INIT;
+      PlantOrderCostLine."Plant Order No." := PlantOrder."No.";
+      PlantOrderCostLine."Line No." := NextCostLineNo;
+      PlantOrderCostLine.InitRecord;
+      PlantOrderCostLine.Date := PlantOrder."Transfer Date";
+      PlantOrderCostLine.Type := PlantOrderCostLine.Type::Hours;
+      PlantOrderCostLine.VALIDATE("No.", CostObjectNo);
+      WorkOrder.CALCFIELDS("Resource Group Name");
+      IF WorkOrder."Resource Group Name" <> '' THEN
+        PlantOrderCostLine.Description := WorkOrder."Resource Group Name";
+      PlantOrderCostLine.VALIDATE(Quantity, AdditionalInfoRequestWO."Actual Hours");
+      ResourceGroup.GET(WorkOrder."Resource Group No.");
+      SubcRate := AdditionalInfoRequestWO.GetSubcontractingRate(
+        '', COMPANYNAME, ResourceGroup."Source No.", DT2DATE(WorkOrder."Starting Date/Time"), PriceFoundAt);
+      IF PriceFoundAt <> '' THEN
+        PlantOrderCostLine.VALIDATE(Price, SubcRate);
+      DeterminePlantFromOperatesWO(WorkOrder."Operates Plant (WO)", PlantOrderCostLine."Plant Type", PlantOrderCostLine."Plant No.");
+      PlantOrderCostLine."Purchase Order No." := AdditionalInfoRequestWO."Purchase Order No";
+      IF WorkOrder."Project Element" <> '' THEN
+        PlantOrderCostLine.Element := WorkOrder."Project Element";
+      PlantOrderCostLine.INSERT(TRUE);
+      NextCostLineNo := NextCostLineNo + 10000;
+    END;
+
+    LOCAL PROCEDURE DeterminePlantFromOperatesWO@1100529006(OperatesPlantWO@1100529000 : Code[20];VAR PlantType@1100529001 : Code[20];VAR PlantNo@1100529002 : Code[10]);
+    VAR
+      WorkOrder@1100529003 : Record 11229279;
+      Resource@1100529004 : Record 11229278;
+    BEGIN
+      IF OperatesPlantWO = '' THEN
+        EXIT;
+      IF NOT WorkOrder.GET(OperatesPlantWO) THEN
+        EXIT;
+      IF (WorkOrder."Resource Type" <> WorkOrder."Resource Type"::Plant) OR (WorkOrder."Resource No." = '') THEN
+        EXIT;
+      IF NOT Resource.GET(WorkOrder."Resource No.") THEN
+        EXIT;
+      IF (Resource.Type <> Resource.Type::Plant) OR (Resource."Source No." = '') THEN
+        EXIT;
+      PlantType := Resource."Source No.";
+      PlantNo := Resource."Source No. 2";
+    END;
+
+    LOCAL PROCEDURE PostPlantOrder@1100529014(PlantOrderNo@1100529000 : Code[20]);
+    VAR
+      PlantOrder@1100529001 : Record 11012556;
+    BEGIN
+      IF PlantOrderNo <> '' THEN BEGIN
+        IF PlantOrder.GET(PlantOrderNo) THEN BEGIN
+          IF PlantSetup."Extended Picking Procedure" THEN BEGIN
+            PlantOrder.Status := PlantOrder.Status::Released;
+            PlantOrder.MODIFY;
+          END;
+          COMMIT;
+          IF NOT CODEUNIT.RUN(CODEUNIT::"Post Plant Order", PlantOrder) THEN
+            MESSAGE(Text004, PlantOrder.TABLECAPTION, PlantOrder."No.");
+        END
+      END;
+    END;
+
+    LOCAL PROCEDURE InsertPlantHourRevenueCostLine@1100529012(TransportCostRequestWO@1100529009 : Record 11124913;RequestNo@1100529005 : Code[20];Resource@1100529000 : Record 11229278;YearNo@1100529003 : Integer;WeekNo@1100529004 : Integer;PlantLoc@1100529006 : Code[20];ProjectElement@1100528500 : Code[20];RequestCompanyName@1100529600 : Text[30]);
+    VAR
+      PlantHoursRevenuesLine@1100529001 : Record 11012574;
+      PlantHoursRevenuesLine2@1100529010 : Record 11012574;
+    BEGIN
+      CheckInsertPlantHourRevenueHead(Resource, YearNo, WeekNo);
+      PlantHoursRevenuesLine.CHANGECOMPANY(Resource.Company);
+      PlantHoursRevenuesLine2.CHANGECOMPANY(Resource.Company);
+      PlantHoursRevenuesLine.INIT;
+      PlantHoursRevenuesLine.Year := YearNo;
+      PlantHoursRevenuesLine.Week := WeekNo;
+      PlantHoursRevenuesLine."Plant Type" := Resource."Source No.";
+      PlantHoursRevenuesLine."Plant No.":= Resource."Source No. 2";
+      PlantHoursRevenuesLine.Type := PlantHoursRevenuesLine.Type::Cost;
+      PlantHoursRevenuesLine."Plant Location" := PlantLoc;
+      PlantHoursRevenuesLine."Employee No." := '';
+      PlantHoursRevenuesLine.Origin := PlantHoursRevenuesLine.Origin::ResourceRequest;
+      IF RequestCompanyName = '' THEN
+        RequestCompanyName := COMPANYNAME;
+      IF RequestCompanyName <> Resource.Company THEN
+        PlantHoursRevenuesLine."Resource Req. Receiv. Company" := RequestCompanyName;
+      PlantHoursRevenuesLine."Resource Request No." := RequestNo;
+      PlantHoursRevenuesLine."Cost Object" := TransportCostRequestWO."Cost Object";
+      PlantHoursRevenuesLine.Quantity := TransportCostRequestWO.Quantity;
+      PlantHoursRevenuesLine."Unit Price" := TransportCostRequestWO."Unit Price";
+      PlantHoursRevenuesLine.Amount := TransportCostRequestWO.Amount;
+      PlantHoursRevenuesLine."Description (Cost)" := TransportCostRequestWO.Description;
+      PlantHoursRevenuesLine."Unit of Measure (Cost)" := TransportCostRequestWO."Unit of Measure";
+      IF ProjectElement <> '' THEN
+        PlantHoursRevenuesLine.Element := ProjectElement;
+      //
+      PlantHoursRevenuesLine2.SETRANGE(Year, PlantHoursRevenuesLine.Year);
+      PlantHoursRevenuesLine2.SETRANGE(Week, PlantHoursRevenuesLine.Week);
+      PlantHoursRevenuesLine2.SETRANGE("Plant Type", PlantHoursRevenuesLine."Plant Type");
+      PlantHoursRevenuesLine2.SETRANGE("Plant No.", PlantHoursRevenuesLine."Plant No.");
+      IF PlantHoursRevenuesLine2.FINDLAST THEN
+        PlantHoursRevenuesLine."Line No." := PlantHoursRevenuesLine2."Line No."+ 10000
+      ELSE
+        PlantHoursRevenuesLine."Line No." := 10000;
+      PlantHoursRevenuesLine.INSERT(FALSE);
+    END;
+
+    LOCAL PROCEDURE CheckInsertPlantHourRevenueHead@1100529011(Resource@1100529005 : Record 11229278;YearNo@1100529004 : Integer;WeekNo@1100529000 : Integer);
+    VAR
+      PlantHoursRevenues@1100529001 : Record 11012573;
+    BEGIN
+      PlantHoursRevenues.CHANGECOMPANY(Resource.Company);
+      IF PlantHoursRevenues.GET(YearNo, WeekNo, Resource."Source No.", Resource."Source No. 2") THEN
+        EXIT;
+      PlantHoursRevenues.INIT;
+      PlantHoursRevenues.Year := YearNo;
+      PlantHoursRevenues.Week := WeekNo;
+      PlantHoursRevenues."Plant Type" := Resource."Source No.";
+      PlantHoursRevenues."Plant No." := Resource."Source No. 2";
+      PlantHoursRevenues.INSERT(FALSE);
+    END;
+
+    LOCAL PROCEDURE GetPlantLocationCodeInPlantCompany@1100529013(ResourceRequest@1100529002 : Record 11124901;PlantCompany@1100529000 : Text) : Code[20];
+    VAR
+      ResourceReqPlantLocation@1100528500 : Record 11124914;
+    BEGIN
+      ResourceReqPlantLocation.GET(ResourceRequest."No.", PlantCompany);
+      ResourceReqPlantLocation.TESTFIELD("Plant Location");
+      EXIT(ResourceReqPlantLocation."Plant Location");
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

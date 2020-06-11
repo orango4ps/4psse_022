@@ -1,0 +1,444 @@
+OBJECT Codeunit 11012626 Office to PDF Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=VAR
+            TempBlob@1100528600 : TEMPORARY Record 99008535;
+            FileManagement@1100528603 : Codeunit 419;
+            SMTPMail@1100528604 : Codeunit 400;
+            OutStream@1100528601 : OutStream;
+            InStream@1100528605 : InStream;
+            XmlParameters@1100528602 : Text;
+          BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      AccountRoot@1100528600 : TextConst 'DEU=https://v2.convertapi.com;ENU=https://v2.convertapi.com;NLD=https://v2.convertapi.com';
+      RequestError@1100528601 : TextConst 'DEU=Fehlermeldung von InvokeRequest: %1 %2;ENU=Error from InvokeRequest: %1 %2;NLD=Foutmelding van InvokeRequest: %1 %2';
+      SourceType@1100528602 : 'Url,File';
+      Text000@1100528603 : TextConst 'DEU=Konnte Belegart nicht bestimmen;ENU=Could not determine document type;NLD=Documenttype niet kunnen bepalen';
+      Text001@1100528604 : TextConst 'DEU=Keine Belege zum ZusammenfÅgen gefunden.;ENU=No Documents found to be merged.;NLD=Geen documenten gevonden voor het samenvoegen.';
+      Text002@1100528605 : TextConst 'DEU=Fehlercode wÑhrend Konvertierung: %1.;ENU=Error code during conversion: %1;NLD=Foutcode tijdens convertie: %1';
+
+    PROCEDURE ConvertFileToPDF@1100528626(SourceFileName@1100528603 : Text;SourceDocumentType@1100528601 : Text;DestinationFileName@1100528610 : Text);
+    VAR
+      TempBlob@1100528600 : Record 99008535;
+      FileManagement@1100528604 : Codeunit 419;
+    BEGIN
+      IF ConvertFileToPDFBlob(SourceFileName, SourceDocumentType, TempBlob) THEN
+        FileManagement.BLOBExport4PS(TempBlob, DestinationFileName, FALSE, TRUE);
+    END;
+
+    PROCEDURE ConvertUrlToPDF@1100528613(Url@1100528600 : Text;SourceDocumentType@1100528606 : Text;DestinationFileName@1100528607 : Text);
+    VAR
+      TempBlob@1100528605 : TEMPORARY Record 99008535;
+      FileManagement@1100528613 : Codeunit 419;
+    BEGIN
+      IF ConvertUrlToPDFBlob(Url, SourceDocumentType, TempBlob) THEN
+        FileManagement.BLOBExport4PS(TempBlob, DestinationFileName, FALSE, TRUE);
+    END;
+
+    PROCEDURE ConvertFileToPDFBlob@1100528612(SourceFileName@1100528603 : Text;SourceDocumentType@1100528601 : Text;VAR TempBlob@1100528610 : TEMPORARY Record 99008535) : Boolean;
+    BEGIN
+      EXIT(ConvertToPDF(SourceType::File, SourceFileName, SourceDocumentType, TempBlob));
+    END;
+
+    PROCEDURE ConvertUrlToPDFBlob@1100528611(Url@1100528600 : Text;SourceDocumentType@1100528606 : Text;VAR TempBlob@1100528607 : TEMPORARY Record 99008535) : Boolean;
+    BEGIN
+      EXIT(ConvertToPDF(SourceType::Url, Url, SourceDocumentType, TempBlob));
+    END;
+
+    PROCEDURE ConvertDocumentPropertyToPDFBlob@1100528608(DocumentProperties@1100528600 : Record 11012746;VAR TempBlob@1100528602 : TEMPORARY Record 99008535) : Boolean;
+    VAR
+      ExternalDocumentManagement@1100528601 : Codeunit 11012403;
+      IsTemporaryFile@1100528603 : Boolean;
+      SourcePath@1100528604 : Text;
+    BEGIN
+      DocumentProperties.TESTFIELD("External Document");
+      DocumentProperties.WriteContentToServerTempFile(SourcePath);
+      CASE DocumentProperties."Storage Type" OF
+        DocumentProperties."Storage Type"::"File System on Premise":
+          EXIT(ConvertFileToPDFBlob(SourcePath, DocumentProperties."File Extension", TempBlob));
+        DocumentProperties."Storage Type"::"Azure File Storage":
+          BEGIN
+            EXIT(ConvertUrlToPDFBlob(SourcePath, DocumentProperties."File Extension", TempBlob));
+          END;
+        DocumentProperties."Storage Type"::"SharePoint Online":
+          EXIT(ConvertUrlToPDFBlob(SourcePath, DocumentProperties."File Extension", TempBlob));
+      END;
+    END;
+
+    PROCEDURE ConvertDocumentPropertyToPDFOutStream@1100528606(DocumentProperties@1100528601 : Record 11012746;VAR OutStream@1100528600 : OutStream) : Boolean;
+    VAR
+      TempBlob@1100528602 : TEMPORARY Record 99008535;
+      InStream@1100528603 : InStream;
+    BEGIN
+      IF ConvertDocumentPropertyToPDFBlob(DocumentProperties, TempBlob) THEN BEGIN
+        TempBlob.Blob.CREATEINSTREAM(InStream);
+        COPYSTREAM(OutStream, InStream);
+        EXIT(TRUE);
+      END
+    END;
+
+    PROCEDURE MergeFilesToPDF@1100528600(VAR DocumentProperties@1100528600 : Record 11012746;VAR TempBlob@1100528610 : TEMPORARY Record 99008535) : Boolean;
+    VAR
+      JsonManagement@1100528605 : Codeunit 11125361;
+      AzureFileStorageManagement@1100527800 : Codeunit 11012350;
+      ExternalDocumentManagement@1100528613 : Codeunit 11012403;
+      HttpWebRequest@1100528604 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebRequest";
+      HttpWebResponse@1100528603 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebResponse";
+      Encoding@1100528606 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.Encoding";
+      ResponseInputStream@1100528607 : InStream;
+      JsonString@1100528601 : Text;
+      JsonResponse@1100528608 : Text;
+      FileData@1100528609 : Text;
+      Resource@1100528614 : Text;
+      Url@1100528615 : Text;
+      DownloadLink@1100528616 : Text;
+      FirstDocument@1100528602 : Boolean;
+      IsTemporaryFile@1100528611 : Boolean;
+    BEGIN
+      DocumentProperties.SETRANGE("External Document", TRUE);
+      IF DocumentProperties.ISEMPTY THEN
+        EXIT;
+      JsonString := '{ "Parameters": [';
+      JsonString += '{"Name": "Files", "FileValues": [';
+      DocumentProperties.FINDSET;
+      FirstDocument := TRUE;
+      REPEAT
+        IF NOT FirstDocument THEN
+          JsonString += ', ';
+        CASE DocumentProperties."Storage Type" OF
+          DocumentProperties."Storage Type"::"File System on Premise":
+            BEGIN
+              IF DocumentProperties."File Extension" = 'pdf' THEN
+                JsonString += STRSUBSTNO('{ "Name": "%1", "Data": "%2" }',
+                  DocumentProperties.File, FileToBase64(DocumentProperties.GetClientFile(IsTemporaryFile)))
+              ELSE BEGIN
+                IF ConvertToPDFAndStore(SourceType::File, DocumentProperties.GetClientFile(IsTemporaryFile), DocumentProperties."File Extension", Url) THEN
+                  JsonString += STRSUBSTNO('{ "Url": "%1" }', Url);
+              END;
+            END;
+          DocumentProperties."Storage Type"::"Azure File Storage":
+            BEGIN
+              DocumentProperties.WriteContentToServerTempFile(Resource);
+              DownloadLink := AzureFileStorageManagement.GetDownloadUrlByResource(Resource, 0DT, CURRENTDATETIME + 15*60*1000);
+              IF DocumentProperties."File Extension" = 'pdf' THEN
+                JsonString += STRSUBSTNO('{ "Url": "%1" }', DownloadLink)
+              ELSE BEGIN
+                IF ConvertToPDFAndStore(SourceType::Url, DownloadLink, DocumentProperties."File Extension", Url) THEN
+                  JsonString += STRSUBSTNO('{ "Url": "%1" }', Url);
+              END;
+            END;
+          DocumentProperties."Storage Type"::"SharePoint Online":
+            ERROR('Not yet implemented');
+        END;
+        FirstDocument := FALSE;
+      UNTIL DocumentProperties.NEXT = 0;
+      JsonString += '] }] }';
+      CreateHttpRequest(HttpWebRequest, STRSUBSTNO('convert/pdf/to/merge?Token=%1', GetToken), 'POST');
+      HttpWebRequest.ContentType('application/json');
+      AddBodyAsTextWithEncoding(HttpWebRequest, JsonString, Encoding.UTF8);
+      InvokeRequestWithResponse(HttpWebRequest, HttpWebResponse, FALSE);
+      IF HttpWebResponse.StatusCode = 200 THEN BEGIN
+        ResponseInputStream := HttpWebResponse.GetResponseStream;
+        ResponseInputStream.READTEXT(JsonResponse);
+        JsonManagement.ReadFirstJSonValue(JsonResponse, 'FileData', FileData);
+        TempBlob.FromBase64String(FileData);
+        EXIT(TRUE);
+      END ELSE BEGIN
+        ResponseInputStream := HttpWebResponse.GetResponseStream;
+        ResponseInputStream.READTEXT(JsonResponse);
+        ERROR(JsonResponse);
+      END;
+    END;
+
+    PROCEDURE MergeTempItemAttachmentsToPDF@1100528607(VAR TempEmailAttachment@1100528600 : TEMPORARY Record 11229294) : Boolean;
+    VAR
+      TempBlob@1100528610 : TEMPORARY Record 99008535;
+      JsonManagement@1100528605 : Codeunit 11125361;
+      ExternalDocumentManagement@1100528613 : Codeunit 11012403;
+      HttpWebRequest@1100528604 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebRequest";
+      HttpWebResponse@1100528603 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebResponse";
+      Encoding@1100528606 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.Encoding";
+      ResponseInputStream@1100528607 : InStream;
+      JsonString@1100528601 : Text;
+      JsonResponse@1100528608 : Text;
+      FileData@1100528609 : Text;
+      Resource@1100528614 : Text;
+      Url@1100528615 : Text;
+      DownloadLink@1100528616 : Text;
+      FirstDocument@1100528602 : Boolean;
+      IsTemporaryFile@1100528611 : Boolean;
+    BEGIN
+      IF TempEmailAttachment.ISEMPTY THEN
+        EXIT;
+      JsonString := '{ "Parameters": [';
+      JsonString += '{"Name": "Files", "FileValues": [';
+      TempEmailAttachment.SETAUTOCALCFIELDS("Attachment File");
+      TempEmailAttachment.FINDSET;
+      FirstDocument := TRUE;
+      REPEAT
+        IF NOT FirstDocument THEN
+          JsonString += ', ';
+        TempBlob.Blob := TempEmailAttachment."Attachment File";
+        JsonString += STRSUBSTNO('{ "Name": "%1", "Data": "%2" }',
+          TempEmailAttachment."Attachment Name", TempBlob.ToBase64String());
+        FirstDocument := FALSE;
+      UNTIL TempEmailAttachment.NEXT = 0;
+      JsonString += '] }] }';
+      //It seams like the token from GetToken doesn't always get accepted, for now Secret is used
+      //CreateHttpRequest(HttpWebRequest, STRSUBSTNO('convert/pdf/to/merge?Token=%1', GetToken), 'POST');
+      CreateHttpRequest(HttpWebRequest, STRSUBSTNO('convert/pdf/to/merge?Secret=%1', GetSecret), 'POST');
+      HttpWebRequest.ContentType('application/json');
+      AddBodyAsTextWithEncoding(HttpWebRequest, JsonString, Encoding.UTF8);
+      InvokeRequestWithResponse(HttpWebRequest, HttpWebResponse, FALSE);
+      IF HttpWebResponse.StatusCode = 200 THEN BEGIN
+        ResponseInputStream := HttpWebResponse.GetResponseStream;
+        ResponseInputStream.READTEXT(JsonResponse);
+        JsonManagement.ReadFirstJSonValue(JsonResponse, 'FileData', FileData);
+        TempBlob.FromBase64String(FileData);
+        TempEmailAttachment.FINDFIRST;
+        TempEmailAttachment.DELETEALL;
+        TempEmailAttachment."Attachment File" := TempBlob.Blob;
+        TempEmailAttachment.INSERT(TRUE);
+      END ELSE BEGIN
+        ResponseInputStream := HttpWebResponse.GetResponseStream;
+        ResponseInputStream.READTEXT(JsonResponse);
+        ERROR(JsonResponse);
+      END;
+    END;
+
+    PROCEDURE MergeDocumentsToPDFByRecRef@1100528605(RecRef@1100528603 : RecordRef;VAR TempBlob@1100528602 : TEMPORARY Record 99008535) : Boolean;
+    VAR
+      DocumentProperties@1100528601 : Record 11012746;
+      DocumentLinkManagement@1100528600 : Codeunit 11012401;
+    BEGIN
+      DocumentLinkManagement.GetDocuments(DocumentProperties, RecRef);
+      DocumentProperties.MARKEDONLY(TRUE);
+      IF DocumentProperties.ISEMPTY THEN
+        ERROR(Text001);
+      EXIT(MergeFilesToPDF(DocumentProperties, TempBlob));
+    END;
+
+    PROCEDURE ReportToPDFBlob@1100528617(ReportID@1100528600 : Integer;XmlParameters@1100528603 : Text;VAR TempBlob@1100528601 : TEMPORARY Record 99008535);
+    VAR
+      OutStream@1100528602 : OutStream;
+    BEGIN
+      TempBlob.Blob.CREATEOUTSTREAM(OutStream);
+      REPORT.SAVEAS(ReportID, XmlParameters, REPORTFORMAT::Pdf, OutStream);
+    END;
+
+    LOCAL PROCEDURE "------ LOCALS -----"@1100528601();
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE ConvertToPDF@1100528603(SourceType@1100528600 : 'Url,File';SourcePath@1100528601 : Text;SourceDocumentType@1100528602 : Text;VAR TempBlob@1100528603 : TEMPORARY Record 99008535) : Boolean;
+    VAR
+      JsonManagement@1100528613 : Codeunit 11125361;
+      JsonResponse@1100528604 : Text;
+      FileDataBase64@1100528605 : Text;
+    BEGIN
+      IF ConvertToPDFJSON(SourceType, SourcePath, SourceDocumentType, FALSE, JsonResponse) THEN BEGIN
+        JsonManagement.ReadFirstJSonValue(JsonResponse, 'FileData', FileDataBase64);
+        TempBlob.FromBase64String(FileDataBase64);
+        EXIT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE ConvertToPDFAndStore@1100528649(SourceType@1100528600 : 'Url,File';SourcePath@1100528601 : Text;SourceDocumentType@1100528602 : Text;VAR Url@1100528603 : Text) : Boolean;
+    VAR
+      JsonManagement@1100528613 : Codeunit 11125361;
+      JsonResponse@1100528604 : Text;
+    BEGIN
+      IF ConvertToPDFJSON(SourceType, SourcePath, SourceDocumentType, TRUE, JsonResponse) THEN BEGIN
+        JsonManagement.ReadFirstJSonValue(JsonResponse, 'Url', Url);
+        EXIT(TRUE);
+      END;
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE ConvertToPDFJSON@1100528641(SourceType@1100528600 : 'Url,File';SourcePath@1100528601 : Text;SourceDocumentType@1100528602 : Text;StoreFile@1100528606 : Boolean;VAR JsonResponse@1100528603 : Text);
+    VAR
+      TempBlob@1100528604 : TEMPORARY Record 99008535;
+      FileManagement@1100528614 : Codeunit 419;
+      JsonManagement@1100528613 : Codeunit 11125361;
+      HttpWebRequest@1100528612 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebRequest";
+      HttpWebResponse@1100528611 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebResponse";
+      Encoding@1100528610 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.Encoding";
+      ResponseInputStream@1100528609 : InStream;
+      JsonString@1100528607 : Text;
+      FileData@1100528605 : Text;
+      StoreFileParameter@1100528608 : Text;
+    BEGIN
+      IF StoreFile THEN
+        StoreFileParameter := '{"Name": "StoreFile", "Value": true},';
+      CASE SourceType OF
+        SourceType::Url:
+          JsonString :=
+            STRSUBSTNO('{"Parameters":[%1{"Name": "File", "FileValue": { "Url": "%2" } }] }', StoreFileParameter, SourcePath);
+        SourceType::File:
+          BEGIN
+            FileManagement.BLOBImport4PS(TempBlob, SourcePath, FALSE);
+            IF SourceDocumentType = '' THEN
+              SourceDocumentType := GetFileExtension(SourcePath);
+            JsonString :=
+              STRSUBSTNO('{"Parameters":[%1{"Name": "File", "FileValue": { "Name": "%2", "Data": "%3" } }] }',
+                StoreFileParameter, FileManagement.GetFileName(SourcePath), TempBlob.ToBase64String());
+          END;
+      END;
+      IF SourceDocumentType = '' THEN
+        ERROR(Text000);
+      CreateHttpRequest(HttpWebRequest, STRSUBSTNO('convert/%1/to/pdf?Token=%2', SourceDocumentType, GetToken), 'POST');
+      HttpWebRequest.ContentType('application/json');
+      AddBodyAsTextWithEncoding(HttpWebRequest, JsonString, Encoding.UTF8);
+      InvokeRequestWithResponse(HttpWebRequest, HttpWebResponse, FALSE);
+      IF HttpWebResponse.StatusCode = 200 THEN BEGIN
+        ResponseInputStream := HttpWebResponse.GetResponseStream;
+        ResponseInputStream.READTEXT(JsonResponse);
+      END ELSE
+        ERROR(Text002, HttpWebResponse.StatusCode);
+    END;
+
+    LOCAL PROCEDURE FileToBase64@1100528604(FileName@1100528600 : Text) : Text;
+    VAR
+      TempBlob@1100528601 : TEMPORARY Record 99008535;
+      FileManagement@1100528602 : Codeunit 419;
+    BEGIN
+      FileManagement.BLOBImport4PS(TempBlob, FileName, FALSE);
+      EXIT(TempBlob.ToBase64String());
+    END;
+
+    LOCAL PROCEDURE GetToken@1100528602() Token : Text;
+    VAR
+      JsonManagement@1100528602 : Codeunit 11125361;
+      HttpWebRequest@1100528603 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebRequest";
+      HttpWebResponse@1100528601 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebResponse";
+      ResponseInputStream@1100528604 : InStream;
+      OutStream@1100528600 : OutStream;
+      JsonResponse@1100528606 : Text;
+    BEGIN
+      CreateHttpRequest(HttpWebRequest, STRSUBSTNO('token/create?Secret=%1&RequestCount=%2&Lifetime=%3&Count=1', GetSecret, 1, 2), 'POST');
+      HttpWebRequest.ContentLength(0);
+      InvokeRequestWithResponse(HttpWebRequest, HttpWebResponse, FALSE);
+      ResponseInputStream := HttpWebResponse.GetResponseStream;
+      ResponseInputStream.READTEXT(JsonResponse);
+      JsonManagement.ReadFirstJSonValue(JsonResponse, 'Id', Token);
+    END;
+
+    LOCAL PROCEDURE AddBodyAsTextWithEncoding@20(HttpWebRequest@1100528600 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebRequest";BodyText@1001 : Text;Encoding@1000 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.Encoding");
+    VAR
+      RequestStr@1004 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.Stream";
+      StreamWriter@1003 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.StreamWriter";
+    BEGIN
+      RequestStr := HttpWebRequest.GetRequestStream;
+      StreamWriter := StreamWriter.StreamWriter(RequestStr,Encoding);
+      StreamWriter.Write(BodyText);
+      StreamWriter.Flush;
+      StreamWriter.Close;
+      StreamWriter.Dispose;
+    END;
+
+    LOCAL PROCEDURE CreateHttpRequest@1100525015(VAR HttpWebRequest@1100525000 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebRequest";Resource@1100525001 : Text;Verb@1100525002 : Text);
+    VAR
+      String@1100525003 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.String";
+    BEGIN
+      HttpWebRequest := HttpWebRequest.Create(GetRoot() + '/' + Resource);
+      HttpWebRequest.Method := Verb;
+      //MESSAGE('Url: %1', GetRoot() + '/' + Resource);
+    END;
+
+    LOCAL PROCEDURE GetRoot@1100525016() : Text;
+    BEGIN
+      EXIT(AccountRoot);
+    END;
+
+    LOCAL PROCEDURE GetSecret@1100525013() : Text;
+    VAR
+      FreePDFConvertSetup@1100528600 : Record 11229438;
+    BEGIN
+      FreePDFConvertSetup.GET;
+      EXIT(FreePDFConvertSetup."Secret Key");
+    END;
+
+    LOCAL PROCEDURE InvokeRequest@1100525028(HttpWebRequest@1100525000 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebRequest");
+    VAR
+      HttpWebResponse@1100525001 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebResponse";
+      WebException@1100525002 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.WebException";
+    BEGIN
+      IF NOT GetResponse(HttpWebRequest,HttpWebResponse) THEN BEGIN
+        WebException := GETLASTERROROBJECT;
+        WebException := WebException.InnerException;
+        ERROR(RequestError,HttpWebRequest.Address,WebException.Message);
+      END;
+      HttpWebResponse.Close();
+    END;
+
+    LOCAL PROCEDURE InvokeRequestWithResponse@1100525006(HttpWebRequest@1100525000 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebRequest";VAR HttpWebResponse@1100525004 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebResponse";HaltOnError@1100528500 : Boolean);
+    VAR
+      WebException@1100525002 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.WebException";
+    BEGIN
+      IF NOT GetResponse(HttpWebRequest,HttpWebResponse) THEN BEGIN
+        WebException := GETLASTERROROBJECT;
+        WebException := WebException.InnerException;
+        HttpWebResponse := WebException.Response;
+        IF HaltOnError THEN
+          ERROR(RequestError,HttpWebRequest.Address,WebException.Message);
+        CLEARLASTERROR;
+      END;
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE GetResponse@1100525023(HttpWebRequest@1100525000 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebRequest";VAR HttpWebResponse@1100525001 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebResponse");
+    BEGIN
+      HttpWebResponse := HttpWebRequest.GetResponse();
+    END;
+
+    LOCAL PROCEDURE CRLF@1100528517() CRLF : Text[2];
+    BEGIN
+      CRLF := ' ';
+      CRLF[1] := 13;
+      CRLF[2] := 10;
+    END;
+
+    PROCEDURE UrlEncode@1100528609(Url@1100528600 : Text) EncodedUrl : Text;
+    VAR
+      HttpUtility@1100528601 : DotNet "'System.Web, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Web.HttpUtility";
+    BEGIN
+      EXIT(HttpUtility.UrlEncode(Url));
+    END;
+
+    PROCEDURE UrlDecode@1100528616(Url@1100528600 : Text) DecodedUrl : Text;
+    VAR
+      HttpUtility@1100528601 : DotNet "'System.Web, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Web.HttpUtility";
+    BEGIN
+      EXIT(HttpUtility.UrlDecode(Url));
+    END;
+
+    LOCAL PROCEDURE GetFileExtension@1100528643(FileName@1100528600 : Text) : Text;
+    VAR
+      PathHelper@1100528601 : DotNet "'mscorlib'.System.IO.Path";
+      FileExtension@1100528602 : Text;
+    BEGIN
+      FileExtension := PathHelper.GetExtension(FileName);
+      FileExtension := DELCHR(FileExtension, '=', '.');
+      EXIT(FileExtension);
+    END;
+
+    BEGIN
+    {
+      This codeunit uses Convertapi.com
+    }
+    END.
+  }
+}
+

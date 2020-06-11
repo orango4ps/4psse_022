@@ -1,0 +1,614 @@
+OBJECT Codeunit 11126715 DSP Production Recording Mgt
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    TableNo=11126715;
+    OnRun=BEGIN
+            DSPSetup.GET;
+            GenericWebserviceSetup.GET;
+
+            GenericWebServiceQueue := Rec;
+            CASE "Method Name" OF
+              DSPManagement.GetTcJudgementProductionRecording: ProcessInboundJudgementProductionRecording;
+              DSPManagement.GetTcProductionRecording:          ProcessOutboundProductionRecording;
+              ELSE
+                ERROR(Text000, FIELDCAPTION("Method Name"), "Method Name");
+            END;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ServiceSetup@1100528324 : Record 11012800;
+      DSPSetup@1100528300 : Record 11126726;
+      DocumentMgtSetup@1100528322 : Record 11071831;
+      GenericWebserviceSetup@1100528303 : Record 11126728;
+      GenericWebServiceQueue@1100528301 : Record 11126715;
+      TempBlob@1100528306 : TEMPORARY Record 99008535;
+      GenericWebserviceFunctions@1100528302 : Codeunit 11126711;
+      NOTTXT@1100528329 : TextConst 'ENU=not';
+      NOTXT@1100528319 : TextConst 'ENU=No;NOR=Nr.;SVE=Nej';
+      Text000@1100528304 : TextConst 'ENU=%1 %2 is not implemented.';
+      DSPInterfaceWS@1100528310 : Codeunit 11126713;
+      DSPManagement@1100529900 : Codeunit 11126714;
+      DSPRequestManagement@1100528316 : Codeunit 11126222;
+      DotnetFunctions@1100528312 : Codeunit 11126712;
+      XMLDOMManagement@1100528313 : Codeunit 6224;
+      PrefCommon@1100528318 : Text;
+      PrefJudg@1100528326 : Text;
+      PrefOpdr@1100528305 : Text;
+      PrefProd@1100528325 : Text;
+      RootElement@1100528323 : Text;
+      RootElementNamespace@1100528330 : Text;
+      RecId@1100529901 : RecordID;
+      RecRef@1100528311 : RecordRef;
+      DnXmlDocument@1100528333 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      DnXmlNamespaceManager@1100528332 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNamespaceManager";
+      DnXmlChildNode@1100528315 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      DnXmlRootNode@1100528308 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      DnXmlNode@1100528307 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      DnBasicHttpBinding@1100528342 : DotNet "'System.ServiceModel, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.ServiceModel.BasicHttpBinding";
+      DnBasicHttpSecurityMode@1100528341 : DotNet "'System.ServiceModel, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.ServiceModel.BasicHttpSecurityMode";
+      DnEndPointAddress@1100528340 : DotNet "'System.ServiceModel, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.ServiceModel.EndpointAddress";
+      DnHttpClientCredentialType@1100528339 : DotNet "'System.ServiceModel, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.ServiceModel.HttpClientCredentialType";
+      DnNetworkCredential@1100528338 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.NetworkCredential";
+      DnWSMessageEncoding@1100528337 : DotNet "'System.ServiceModel, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.ServiceModel.WSMessageEncoding";
+      Text001@1100528309 : TextConst 'ENU=%1 %2(s) created.';
+      Text002@1100528314 : TextConst 'ENU=%1 must have a value.';
+      Text003@1100528321 : TextConst 'ENU=Error while sending Object %1 to the Web Service.\\Error Code %2';
+      Text004@1100528327 : TextConst 'ENU=There are other disciplines than %1 present in this %2.';
+      Text005@1100528328 : TextConst 'ENU=%1 %2 found.';
+
+    PROCEDURE ProcessJudgementProductionRecording@1100528336(DSPJudgementProdRecording@1100528300 : Record 11126737);
+    VAR
+      DSPAssignment@1100528301 : Record 11126740;
+      DSPOperator@1100528305 : Record 11126732;
+      SUPProduction@1100528302 : Record 11071773;
+      ServiceOrder@1100528304 : Record 11012823;
+      ServiceUnitPriceManagement@1100528303 : Codeunit 11012846;
+    BEGIN
+      DSPManagement.GetDspAssignmentByAssignmentId(DSPJudgementProdRecording."Assignment Id", DSPAssignment);
+      GetGlobalVars(DSPAssignment."Version No.");
+      SUPProduction.SETRANGE("Service Order No.", DSPAssignment."Service Order No.");
+      SUPProduction.SETRANGE("Object No.", DSPAssignment."Object No.");
+      SUPProduction.SETRANGE(Status, SUPProduction.Status::Offered);
+      IF (NOT SUPProduction.FINDSET(TRUE)) THEN
+        ERROR(Text005, NOTXT, SUPProduction.TABLECAPTION);
+
+      REPEAT
+        IF (DSPJudgementProdRecording."Is Approved") THEN BEGIN
+          DSPOperator.GET(DSPAssignment.Operator);
+          IF (DSPOperator."Invoice Start Point" = DSPOperator."Invoice Start Point"::AGP) THEN BEGIN
+            IF (DSPOperator."Create Cost Plus Directly") THEN BEGIN
+              DSPManagement.CreateNewTask(DSPManagement.GetTcProcessCostPlus, SUPProduction.RECORDID, 1, GenericWebServiceQueue."Company Name");
+              IF (DSPOperator."Create Invoice Directly") THEN
+                DSPManagement.CreateNewTask(DSPManagement.GetTcProcessInvoice, SUPProduction.RECORDID, 1, GenericWebServiceQueue."Company Name");
+            END;
+          END;
+          SUPProduction.SetDspStatusFields(SUPProduction.Status::Approved, SUPProduction."Sent To Dsp", SUPProduction."Processed By Dsp");
+        END ELSE BEGIN
+          SUPProduction.SetDspStatusFields(SUPProduction.Status::Rejected, 0DT, 0DT);
+        END;
+
+        DSPManagement.AddStatusUpdateAgp(SUPProduction);
+      UNTIL (SUPProduction.NEXT = 0);
+    END;
+
+    PROCEDURE SendProcuctionRecording@1100528300(SUPProduction@1100528306 : Record 11071773);
+    VAR
+      SUPProductionLine@1100528300 : Record 11071774;
+      DSPAssignment@1100528301 : Record 11126740;
+      ServiceOrderObject@1100528302 : Record 11071724;
+    BEGIN
+      SUPProduction.CALCFIELDS("Dsp Assignment Id");
+      SUPProduction.TESTFIELD(Status, SUPProduction.Status::Proposal);
+      SUPProduction.TESTFIELD("Sent To Dsp", 0DT);
+      DSPManagement.GetDspAssignmentByServiceOrderNoObjectNo(SUPProduction."Service Order No.", SUPProduction."Object No.",
+        DSPAssignment);
+      GetGlobalVars(DSPAssignment."Version No.");
+      ServiceOrderObject.GET(DSPAssignment."Service Order No.", DSPAssignment."Object No.", '');
+      ServiceOrderObject.CALCFIELDS("Actual Reference Point", "Dsp Origin");
+      IF (ServiceOrderObject."Dsp Origin" <> ServiceOrderObject."Dsp Origin"::DSP) THEN
+        ServiceOrderObject.FIELDERROR("Dsp Origin");
+
+      SUPProductionLine.SETRANGE("Service Order No.", SUPProduction."Service Order No.");
+      SUPProductionLine.SETRANGE("Production Seq. No.", SUPProduction."Seq. No.");
+      SUPProductionLine.FINDFIRST;
+      SUPProductionLine.CALCFIELDS("Object No.");
+      CheckIfOtherDisciplinesArePresent(SUPProductionLine);
+
+      DnXmlDocument := DnXmlDocument.XmlDocument();
+      CASE DSPSetup."Dsp Partner" OF
+        DSPManagement.GetTcDspPartnerM10:
+          XMLDOMManagement.AddRootElementWithPrefix(DnXmlDocument, 'AGProductiestaatberichtXOPType', '', '', DnXmlRootNode);
+        DSPManagement.GetTcDspPartnerOther:
+          XMLDOMManagement.AddRootElementWithPrefix(DnXmlDocument, 'AGProductiestaatbericht', '', '', DnXmlRootNode);
+        ELSE
+          ERROR(Text000, DSPSetup.FIELDCAPTION("Dsp Partner"), DSPSetup."Dsp Partner");
+      END;
+
+      XMLDOMManagement.AddElement(DnXmlRootNode, 'OpdrachtID', DSPAssignment."Assignment Id", GetNsCommon, DnXmlNode);
+      XMLDOMManagement.AddElement(DnXmlRootNode, 'Versienummer', FORMAT(DSPAssignment."Version No.", 0, 9), GetNsCommon, DnXmlNode);
+      AddDnAgProductiestaatberichtXopTypeBijlagen(SUPProduction, GetNsCommon);
+      XMLDOMManagement.AddElement(DnXmlRootNode, 'AantalBeoordelingen', FORMAT(GetJudgementCount(SUPProduction), 0, 9), GetNsProd, DnXmlNode);
+      XMLDOMManagement.AddElement(DnXmlRootNode, 'Productiestaat', '', GetNsProd, DnXmlChildNode);
+      CreateDnAgProductiestaatberichtXopTypeLines(DSPAssignment, SUPProduction);
+      XMLDOMManagement.FindNodeNs(DnXmlRootNode, '//'+PrefProd+':Productiestaat', DnXmlNamespaceManager, DnXmlChildNode);
+      XMLDOMManagement.AddElement(DnXmlChildNode, 'Referentie', STRSUBSTNO('%1-%2', SUPProduction."Service Order No.", SUPProductionLine."Object No."), GetNsProd, DnXmlNode);
+      XMLDOMManagement.AddElement(DnXmlChildNode, 'Toelichting', SUPProduction.Remarks, GetNsProd, DnXmlNode);
+
+      DotnetFunctions.SerializeToBlob(TempBlob, DnXmlDocument);
+      CreateGenericWebServiceQueue(SUPProduction);
+
+      SUPProduction.SetDspStatusFields(SUPProduction.Status, SUPProduction."Sent To Dsp", CURRENTDATETIME);
+      SUPProduction."Xml Message" := TempBlob.Blob;
+      SUPProduction.MODIFY;
+    END;
+
+    LOCAL PROCEDURE "---Locals---"@1100528306();
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE AddDnAgProductiestaatberichtXopTypeBijlagen@1100528316(SUPProduction@1100528303 : Record 11071773;NamespacePrefix@1100528300 : Text);
+    VAR
+      DocumentProperties@1100528301 : Record 11012746;
+      DocumentLinkManagement@1100528302 : Codeunit 11012401;
+      DnList@1100528304 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Collections.Generic.List`1";
+    BEGIN
+      RecRef.GETTABLE(SUPProduction);
+      DocumentLinkManagement.GetDocumentsComp(DocumentProperties, RecRef, COMPANYNAME);
+      DocumentProperties.MARKEDONLY(TRUE);
+      IF (NOT DocumentProperties.FINDSET) THEN
+        EXIT;
+
+      REPEAT
+        DSPManagement.CreateDnBijlageXopType(DocumentProperties, DnXmlRootNode, NamespacePrefix);
+      UNTIL (DocumentProperties.NEXT = 0);
+    END;
+
+    LOCAL PROCEDURE CheckIfOtherDisciplinesArePresent@1100528308(SUPProductionLineIn@1100528300 : Record 11071774);
+    VAR
+      SUPProductionLine@1100528301 : Record 11071774;
+      SUPProduction@1100528302 : Record 11071773;
+    BEGIN
+      SUPProductionLine.SETRANGE("Service Order No.", SUPProductionLineIn."Service Order No.");
+      SUPProductionLine.SETRANGE("Production Seq. No.", SUPProductionLineIn."Production Seq. No.");
+      SUPProductionLine.SETFILTER("Object No.", '<>%1', SUPProductionLineIn."Object No.");
+      IF (NOT SUPProductionLine.ISEMPTY) THEN
+        ERROR(Text004, SUPProductionLineIn."Object No.", SUPProduction.TABLECAPTION);
+    END;
+
+    LOCAL PROCEDURE CheckResponse@1100528320(DnXmlRequest@1100528303 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";DnXmlResponse@1100528301 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument");
+    VAR
+      ResponseCode@1100528300 : Text;
+      Text001@1100528302 : TextConst 'ENU=Error in Object:%1';
+    BEGIN
+      ResponseCode := DSPManagement.FindNodeResponseCode(DnXmlResponse);
+      IF (ResponseCode <> 'OK') THEN
+        ERROR(Text001, DnXmlResponse.OuterXml);
+    END;
+
+    LOCAL PROCEDURE ConvertToDnObject@1100528304(VAR DnObject@1100528302 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Object";RootTag@1100528301 : Text;RootNamespace@1100528300 : Text);
+    BEGIN
+      IF (NOT GenericWebServiceQueue."Xml Message".HASVALUE) THEN
+        ERROR(Text002, GenericWebServiceQueue."Xml Message");
+
+      GenericWebServiceQueue.CALCFIELDS("Xml Message");
+      TempBlob.Blob := GenericWebServiceQueue."Xml Message";
+      IF (RootTag <> '') THEN
+        DotnetFunctions.DeSerializeFromBlob2(TempBlob, DnObject, RootTag, RootNamespace)
+      ELSE
+        DotnetFunctions.DeSerializeFromBlob(TempBlob, DnObject);
+    END;
+
+    LOCAL PROCEDURE CreateDnAgProductiestaatberichtXopTypeLines@1100528305(DSPAssignment@1100528301 : Record 11126740;SUPProduction@1100528304 : Record 11071773);
+    VAR
+      SUPProductionLine@1100528302 : Record 11071774;
+      DnXmlLineNode@1100528300 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+    BEGIN
+      SUPProductionLine.SETRANGE("Service Order No.", SUPProduction."Service Order No.");
+      SUPProductionLine.SETRANGE("Production Seq. No.", SUPProduction."Seq. No.");
+      IF (NOT SUPProductionLine.FINDSET) THEN
+        EXIT;
+
+      REPEAT
+        XMLDOMManagement.AddElement(DnXmlChildNode, 'Regels', '', GetNsProd, DnXmlLineNode);
+        CASE TRUE OF
+          (DSPManagement.GetDspVersionFirst(TRUE)  = DSPAssignment."Version No."): BEGIN
+            XMLDOMManagement.AddElement(DnXmlLineNode, 'Volgnummer', SUPProductionLine."Unit Price Code", GetNsProd, DnXmlNode);
+            XMLDOMManagement.AddElement(DnXmlLineNode, 'Omschrijving', SUPProductionLine.Description, GetNsProd, DnXmlNode);
+            XMLDOMManagement.AddElement(DnXmlLineNode, 'Aantal', FORMAT(SUPProductionLine.Production, 0, 9), GetNsProd, DnXmlNode);
+            XMLDOMManagement.AddElement(DnXmlLineNode, 'Prijs', FORMAT(SUPProductionLine."Unit Price", 0, 9), GetNsProd, DnXmlNode);
+            //XMLDOMManagement.AddElement(DnXmlLineNode, 'Opmerking', '', GetNsProd, DnXmlNode);
+          END;
+          (DSPManagement.GetDspVersionSecond(TRUE)  = DSPAssignment."Version No."): BEGIN
+            XMLDOMManagement.AddElement(DnXmlLineNode, 'Bestekcode', SUPProductionLine."Unit Price Code", GetNsOpdr, DnXmlNode);
+            XMLDOMManagement.AddElement(DnXmlLineNode, 'Omschrijving', SUPProductionLine.Description, GetNsOpdr, DnXmlNode);
+            XMLDOMManagement.AddElement(DnXmlLineNode, 'Aantal', FORMAT(SUPProductionLine.Production, 0, 9), GetNsOpdr, DnXmlNode);
+            XMLDOMManagement.AddElement(DnXmlLineNode, 'Eenheidsprijs', FORMAT(SUPProductionLine."Unit Price", 0, 9), GetNsOpdr, DnXmlNode);
+            //XMLDOMManagement.AddElement(DnXmlLineNode, 'Opmerking', '', GetNsProd, DnXmlNode);
+          END;
+          ELSE ERROR(Text000, DSPAssignment.FIELDCAPTION("Version No."), DSPAssignment."Version No.");
+        END;
+      UNTIL (SUPProductionLine.NEXT = 0);
+    END;
+
+    LOCAL PROCEDURE CreateDspJudgementProductionRecording@1100528311() : BigInteger;
+    VAR
+      DSPJudgementProdRecording@1100528300 : Record 11126737;
+      NoOfJudgements@1100528301 : Text;
+      RemarkText@1100528302 : Text;
+      OStream@1100528303 : OutStream;
+    BEGIN
+      DSPJudgementProdRecording.INIT;
+      DSPJudgementProdRecording."Assignment Id" := XMLDOMManagement.FindNodeText(DnXmlDocument, '//*[local-name()="OpdrachtID"]');
+      DSPJudgementProdRecording."Version No." := XMLDOMManagement.FindNodeText(DnXmlDocument, '//*[local-name()="Versienummer"]');
+      NoOfJudgements := XMLDOMManagement.FindNodeText(DnXmlDocument, '//*[local-name()="AantalBeoordelingen"]');
+      EVALUATE(DSPJudgementProdRecording."No. Of Judgements", NoOfJudgements);
+      IF (LOWERCASE(XMLDOMManagement.FindNodeText(DnXmlDocument, '//*[local-name()="IsGoedgekeurd"]')) = 'true') THEN
+        DSPJudgementProdRecording."Is Approved" := TRUE;
+      DSPJudgementProdRecording."Judgement No." := GetJudgementNoByDescription(XMLDOMManagement.FindNodeText(DnXmlDocument,
+        '//*[local-name()="Beoordeling"]/*[local-name()="Beoordeling"]'));
+
+      RemarkText := XMLDOMManagement.FindNodeText(DnXmlDocument, '//*[local-name()="Beoordeling"]/*[local-name()="Toelichting"]');
+      DSPJudgementProdRecording.Remark.CREATEOUTSTREAM(OStream);
+      OStream.WRITETEXT(RemarkText);
+
+      DSPJudgementProdRecording."Contact Prefix" := XMLDOMManagement.FindNodeText(DnXmlDocument,
+        '//*[local-name()="ContactpersoonNetbeheerder"]/*[local-name()="Aanhef"]');
+      DSPJudgementProdRecording."Contact Initials" := XMLDOMManagement.FindNodeText(DnXmlDocument,
+        '//*[local-name()="ContactpersoonNetbeheerder"]/*[local-name()="Voorletters"]');
+      DSPJudgementProdRecording."Contact Middle Name" := XMLDOMManagement.FindNodeText(DnXmlDocument,
+        '//*[local-name()="ContactpersoonNetbeheerder"]/*[local-name()="Tussenvoegsel"]');
+      DSPJudgementProdRecording."Contact Surname" := XMLDOMManagement.FindNodeText(DnXmlDocument,
+        '//*[local-name()="ContactpersoonNetbeheerder"]/*[local-name()="Achternaam"]');
+      DSPJudgementProdRecording."Contact Phone No." := XMLDOMManagement.FindNodeText(DnXmlDocument,
+        '//*[local-name()="ContactpersoonNetbeheerder"]/*[local-name()="Telefoonnummer"]');
+      DSPJudgementProdRecording."Contact Mobile Phone No." := XMLDOMManagement.FindNodeText(DnXmlDocument,
+        '//*[local-name()="ContactpersoonNetbeheerder"]/*[local-name()="Mobielnummer"]');
+      DSPJudgementProdRecording."Contact E-Mail" := XMLDOMManagement.FindNodeText(DnXmlDocument,
+        '//*[local-name()="ContactpersoonNetbeheerder"]/*[local-name()="Emailadres"]');
+      DSPJudgementProdRecording."Xml Message" := GenericWebServiceQueue."Xml Message";
+      DSPJudgementProdRecording.INSERT(TRUE);
+
+      CreateDspJudgementProductionRecordingDocuments(DSPJudgementProdRecording);
+      EXIT(DSPJudgementProdRecording."Entry No.");
+    END;
+
+    LOCAL PROCEDURE CreateDspJudgementProductionRecordingDocuments@1100528319(DSPJudgementProdRecording@1100528302 : Record 11126737);
+    VAR
+      Counter@1100528301 : Integer;
+      Xpath@1100528300 : Text;
+      NodeCount@1100528303 : Integer;
+    BEGIN
+      Xpath := '//*[local-name()="Bijlagen"]';
+      NodeCount := XMLDOMManagement.FindNodeCount(DnXmlDocument, Xpath);
+      IF (NodeCount = 0) THEN
+        EXIT;
+
+      FOR Counter := 1 TO NodeCount  DO BEGIN
+        DSPManagement.CreateDocument(DnXmlDocument, DSPJudgementProdRecording.RECORDID, STRSUBSTNO('%1[%2]', Xpath, Counter));
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateGenericWebServiceQueue@1100528312(SUPProduction@1100528300 : Record 11071773);
+    VAR
+      GenericWebServiceQueue@1100528301 : Record 11126715;
+    BEGIN
+      GenericWebServiceQueue.CreateNewQueueEntry(DSPManagement.GetTcProductionRecording, RecId, 2, COMPANYNAME);
+      GenericWebServiceQueue."Xml Message" := TempBlob.Blob;
+      GenericWebServiceQueue."Related Record ID" := SUPProduction.RECORDID;
+      GenericWebServiceQueue.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE GetJudgementCount@1100528310(SUPProduction@1100528300 : Record 11071773) : Integer;
+    VAR
+      SUPProductionLine@1100528301 : Record 11071774;
+    BEGIN
+      SUPProductionLine.SETRANGE("Service Order No.", SUPProduction."Service Order No.");
+      SUPProductionLine.SETRANGE("Production Seq. No.", SUPProduction."Seq. No.");
+      EXIT(SUPProductionLine.COUNT);
+    END;
+
+    LOCAL PROCEDURE GetJudgementNoByDescription@1100528315(Judgement@1100528300 : Text) : Integer;
+    VAR
+      DSPCode@1100528301 : Record 11126753;
+    BEGIN
+      DSPCode.SETRANGE(Type, DSPCode.Type::Judgement);
+      DSPCode.SETRANGE(Description, Judgement);
+      IF (DSPCode.FINDFIRST) THEN
+        EXIT(DSPCode."No.");
+      EXIT(0);
+    END;
+
+    LOCAL PROCEDURE GetGlobalVars@1100528318(VersionNo@1100528300 : Text);
+    VAR
+      VersionTxt@1100528301 : Text;
+    BEGIN
+      ServiceSetup.GET;
+      DSPSetup.GET;
+      DSPSetup.TESTFIELD("Dsp Active", TRUE);
+      DSPSetup.TESTFIELD("Default Company");
+      DocumentMgtSetup.GET;
+      DSPManagement.CreateXmlNamespaceManager(DnXmlNamespaceManager);
+
+      VersionTxt := DSPManagement.GetDspVersionAsText(VersionNo);
+
+      PrefCommon := DnXmlNamespaceManager.LookupPrefix(DSPManagement.GetNsAlgemeen(VersionTxt));
+      PrefJudg := DnXmlNamespaceManager.LookupPrefix(DSPManagement.GetNsBeoordelingAdministratiefGereed(VersionTxt));
+      PrefOpdr := DnXmlNamespaceManager.LookupPrefix(DSPManagement.GetNsOpdracht(VersionTxt));
+      PrefProd := DnXmlNamespaceManager.LookupPrefix(DSPManagement.GetNsAdministratiefGereed(VersionTxt));
+    END;
+
+    LOCAL PROCEDURE GetNsCommon@1100528301() : Text;
+    BEGIN
+      EXIT(DnXmlNamespaceManager.LookupNamespace(PrefCommon));
+    END;
+
+    LOCAL PROCEDURE GetNsJudg@1100528317() : Text;
+    BEGIN
+      EXIT(DnXmlNamespaceManager.LookupNamespace(PrefJudg));
+    END;
+
+    LOCAL PROCEDURE GetNsOpdr@1100528302() : Text;
+    BEGIN
+      EXIT(DnXmlNamespaceManager.LookupNamespace(PrefOpdr));
+    END;
+
+    LOCAL PROCEDURE GetNsProd@1100528313() : Text;
+    BEGIN
+      EXIT(DnXmlNamespaceManager.LookupNamespace(PrefProd));
+    END;
+
+    LOCAL PROCEDURE GetXmlDocument@1100528314();
+    VAR
+      OStream@1100528300 : OutStream;
+    BEGIN
+      IF (NOT TempBlob.Blob.HASVALUE) THEN
+        ERROR(Text002, GenericWebServiceQueue.FIELDCAPTION("Xml Message"));
+
+      TempBlob.Blob.CREATEOUTSTREAM(OStream);
+      DnXmlDocument := DnXmlDocument.XmlDocument();
+      DnXmlDocument.Load(OStream);
+    END;
+
+    LOCAL PROCEDURE ProcessInboundJudgementProductionRecording@1100528309();
+    VAR
+      DSPJudgementProdRecording@1100528300 : Record 11126737;
+      JudgementEntryNo@1100528301 : BigInteger;
+      RootElement@1100528302 : Text;
+      RootNamespace@1100528303 : Text;
+    BEGIN
+      GenericWebServiceQueue.CALCFIELDS("Xml Message");
+      TempBlob.Blob := GenericWebServiceQueue."Xml Message";
+      GetXmlDocument;
+      GetGlobalVars(XMLDOMManagement.FindNodeText(DnXmlDocument, '//*[local-name()="Versienummer"]'));
+
+      JudgementEntryNo := CreateDspJudgementProductionRecording;
+      DSPJudgementProdRecording.GET(JudgementEntryNo);
+
+      GenericWebServiceQueue."Related Record ID" := DSPJudgementProdRecording.RECORDID;
+      GenericWebServiceQueue.MODIFY(TRUE);
+
+      ProcessJudgementProductionRecording(DSPJudgementProdRecording);
+    END;
+
+    LOCAL PROCEDURE ProcessOutboundProductionRecording@1100528303();
+    VAR
+      DSPAssignment@1100528306 : Record 11126740;
+      SUPProduction@1100528300 : Record 11071773;
+    BEGIN
+      GenericWebServiceQueue.TESTFIELD(Direction, GenericWebServiceQueue.Direction::Outbound);
+      SUPProduction.GET(GenericWebServiceQueue."Related Record ID");
+      DSPManagement.GetDspAssignmentByServiceOrderNoObjectNo(SUPProduction."Service Order No.", SUPProduction."Object No.", DSPAssignment);
+      GetGlobalVars(DSPAssignment."Version No.");
+
+      CASE TRUE OF
+        (DSPSetup."Dsp Partner" = DSPManagement.GetTcDspPartnerM10) AND (DSPManagement.GetDspVersionFirst(TRUE)  = DSPAssignment."Version No."):
+          ProcessOutboundProductionRecordingM10V1(DSPAssignment, SUPProduction);
+        (DSPSetup."Dsp Partner" = DSPManagement.GetTcDspPartnerM10) AND (DSPManagement.GetDspVersionSecond(TRUE)  = DSPAssignment."Version No."):
+          ProcessOutboundProductionRecordingM10V2(DSPAssignment, SUPProduction);
+        (DSPSetup."Dsp Partner" = DSPManagement.GetTcDspPartnerOther) AND (DSPManagement.GetDspVersionFirst(TRUE)  = DSPAssignment."Version No."):
+          ProcessOutboundProductionRecordingV1(DSPAssignment, SUPProduction.RECORDID);
+        (DSPSetup."Dsp Partner" = DSPManagement.GetTcDspPartnerOther) AND (DSPManagement.GetDspVersionSecond(TRUE)  = DSPAssignment."Version No."):
+          ProcessOutboundProductionRecordingV2(DSPAssignment, SUPProduction.RECORDID);
+        ELSE ERROR(Text000, DSPAssignment.FIELDCAPTION("Version No."), DSPAssignment."Version No.");
+      END;
+
+      SUPProduction.SetDspStatusFields(SUPProduction.Status::Offered, CURRENTDATETIME, 0DT);
+
+      DSPManagement.AddStatusUpdateAgp(SUPProduction);
+    END;
+
+    LOCAL PROCEDURE ProcessOutboundProductionRecordingM10V1@1100528322(DSPAssignment@1100528308 : Record 11126740;SUPProduction@1100528307 : Record 11071773);
+    VAR
+      ConsumedWebService@1100528311 : Record 11229797;
+      ConsumedWebServiceLine@1100528310 : Record 11229798;
+      ResponseRec@1100528312 : TEMPORARY Record 99008535;
+      RequestRec@1100528300 : TEMPORARY Record 99008535;
+      ServiceName@1100528309 : Code[20];
+      LineNo@1100528306 : Integer;
+      VersionTxt@1100528305 : Text;
+      M10WebClient@1100528304 : DotNet "'Motion10.Dsp.Nav4PSGatewayService, Version=1.33.0.0, Culture=neutral, PublicKeyToken=024bd013665211e9'.Motion10.Dsp.Nav4PSGatewayService.Nav4PSServiceClient";
+      M10AgProductiestaatRequest@1100528303 : DotNet "'Motion10.Dsp.Nav4PSGatewayService, Version=1.33.0.0, Culture=neutral, PublicKeyToken=024bd013665211e9'.Motion10.Dsp.Nav4PSGatewayService.AGProductiestaatberichtXOPType";
+      M10DspResponseType@1100528302 : DotNet "'Motion10.Dsp.Nav4PSGatewayService, Version=1.33.0.0, Culture=neutral, PublicKeyToken=024bd013665211e9'.Motion10.Dsp.Nav4PSGatewayService.DSPResponseType";
+      ResponseCode@1100528301 : Text;
+    BEGIN
+      VersionTxt := DSPManagement.GetDspVersionAsText(DSPAssignment."Version No.");
+      ServiceName := DSPManagement.GetDspPartnerServiceName(VersionTxt);
+      LineNo := DSPManagement.GetSeqNoBijstelling;
+      ConsumedWebService.GET(ServiceName);
+      ConsumedWebServiceLine.GET(ServiceName, LineNo);
+
+      DSPManagement.GetAdjustmentWs(RootElement, RootElementNamespace, VersionTxt);
+      M10AgProductiestaatRequest := M10AgProductiestaatRequest.AGProductiestaatberichtXOPType;
+      GenericWebServiceQueue.CALCFIELDS("Xml Message");
+      TempBlob.Blob := GenericWebServiceQueue."Xml Message";
+      DotnetFunctions.DeSerializeFromBlob(TempBlob, M10AgProductiestaatRequest);
+      IF (DSPSetup.Debug) THEN DotnetFunctions.SerializeToFile(M10AgProductiestaatRequest, 'C:\Users\Public\Documents\ProductiestaatBericht1.xml');
+
+      DnBasicHttpBinding := DnBasicHttpBinding.BasicHttpBinding();
+      DnBasicHttpBinding.Name := ConsumedWebService.Code;
+      DnBasicHttpBinding.MaxReceivedMessageSize := 2147483647;
+      DnBasicHttpBinding.MessageEncoding := DnWSMessageEncoding.Mtom;
+      DnBasicHttpBinding.Security.Mode := DnBasicHttpSecurityMode.Transport;
+      DnBasicHttpBinding.Security.Transport.ClientCredentialType := DnHttpClientCredentialType.Basic;
+      DnEndPointAddress := DnEndPointAddress.EndpointAddress(ConsumedWebService."Web Service URL");
+      M10WebClient := M10WebClient.Nav4PSServiceClient(DnBasicHttpBinding, DnEndPointAddress);
+      M10WebClient.ClientCredentials.UserName.UserName := ConsumedWebService.Login;
+      M10WebClient.ClientCredentials.UserName.Password := ConsumedWebService.Password;
+      IF (DSPSetup.Debug) THEN DotnetFunctions.SerializeToFile(M10AgProductiestaatRequest,'C:\Users\Public\Documents\ProductiestaatBericht1Request.xml');
+      M10DspResponseType := M10WebClient.AGProductiestaat_OS_XOP(M10AgProductiestaatRequest);
+      IF (DSPSetup.Debug) THEN DotnetFunctions.SerializeToFile(M10DspResponseType, 'C:\Users\Public\Documents\ProductiestaatBericht1Response.xml');
+      ResponseCode := FORMAT(M10DspResponseType.ResponseCode);
+
+      DotnetFunctions.SerializeToBlob(RequestRec, M10AgProductiestaatRequest);
+      DotnetFunctions.SerializeToBlob(ResponseRec, M10DspResponseType);
+      ConsumedWebServiceLine.AddCwsLogLine(RequestRec, ResponseRec, SUPProduction.RECORDID, DSPManagement.GetTcDsp);
+
+      IF (ResponseCode <> 'OK') THEN
+        ERROR(Text001, M10AgProductiestaatRequest.ToString, ResponseCode);
+    END;
+
+    LOCAL PROCEDURE ProcessOutboundProductionRecordingM10V2@1100528323(DSPAssignment@1100528306 : Record 11126740;SUPProduction@1100528300 : Record 11071773);
+    VAR
+      ConsumedWebService@1100528310 : Record 11229797;
+      ConsumedWebServiceLine@1100528309 : Record 11229798;
+      ResponseRec@1100528312 : TEMPORARY Record 99008535;
+      RequestRec@1100528311 : TEMPORARY Record 99008535;
+      ServiceName@1100528308 : Code[20];
+      LineNo@1100528307 : Integer;
+      VersionTxt@1100528305 : Text;
+      M10WebClient@1100528304 : DotNet "'Motion10.Dsp.Nav4PSGatewayService134, Version=1.34.0.0, Culture=neutral, PublicKeyToken=024bd013665211e9'.Motion10.Dsp.Nav4PSGatewayService134.Nav4PSServiceClient";
+      M10AgProductiestaatRequest@1100528303 : DotNet "'Motion10.Dsp.Nav4PSGatewayService134, Version=1.34.0.0, Culture=neutral, PublicKeyToken=024bd013665211e9'.Motion10.Dsp.Nav4PSGatewayService134.AGProductiestaatberichtXOPType";
+      M10DspResponseType@1100528302 : DotNet "'Motion10.Dsp.Nav4PSGatewayService134, Version=1.34.0.0, Culture=neutral, PublicKeyToken=024bd013665211e9'.Motion10.Dsp.Nav4PSGatewayService134.DSPResponseType";
+      ResponseCode@1100528301 : Text;
+    BEGIN
+      VersionTxt := DSPManagement.GetDspVersionAsText(DSPAssignment."Version No.");
+      ServiceName := DSPManagement.GetDspPartnerServiceName(VersionTxt);
+      LineNo := DSPManagement.GetSeqNoBijstelling;
+      ConsumedWebService.GET(ServiceName);
+      ConsumedWebServiceLine.GET(ServiceName, LineNo);
+
+      DSPManagement.GetAdjustmentWs(RootElement, RootElementNamespace, VersionTxt);
+      M10AgProductiestaatRequest := M10AgProductiestaatRequest.AGProductiestaatberichtXOPType;
+      GenericWebServiceQueue.CALCFIELDS("Xml Message");
+      TempBlob.Blob := GenericWebServiceQueue."Xml Message";
+      DotnetFunctions.DeSerializeFromBlob(TempBlob, M10AgProductiestaatRequest);
+      IF (DSPSetup.Debug) THEN DotnetFunctions.SerializeToFile(M10AgProductiestaatRequest, 'C:\Users\Public\Documents\ProductiestaatBericht2.xml');
+
+      DnBasicHttpBinding := DnBasicHttpBinding.BasicHttpBinding();
+      DnBasicHttpBinding.Name := ConsumedWebService.Code;
+      DnBasicHttpBinding.MaxReceivedMessageSize := 2147483647;
+      DnBasicHttpBinding.MessageEncoding := DnWSMessageEncoding.Mtom;
+      DnBasicHttpBinding.Security.Mode := DnBasicHttpSecurityMode.Transport;
+      DnBasicHttpBinding.Security.Transport.ClientCredentialType := DnHttpClientCredentialType.Basic;
+      DnEndPointAddress := DnEndPointAddress.EndpointAddress(ConsumedWebService."Web Service URL");
+      M10WebClient := M10WebClient.Nav4PSServiceClient(DnBasicHttpBinding, DnEndPointAddress);
+      M10WebClient.ClientCredentials.UserName.UserName := ConsumedWebService.Login;
+      M10WebClient.ClientCredentials.UserName.Password := ConsumedWebService.Password;
+      IF (DSPSetup.Debug) THEN DotnetFunctions.SerializeToFile(M10AgProductiestaatRequest,'C:\Users\Public\Documents\ProductiestaatBericht2Request.xml');
+      M10DspResponseType := M10WebClient.AGProductiestaat_OS_XOP(M10AgProductiestaatRequest);
+      IF (DSPSetup.Debug) THEN DotnetFunctions.SerializeToFile(M10DspResponseType, 'C:\Users\Public\Documents\ProductiestaatBericht2Response.xml');
+      ResponseCode := FORMAT(M10DspResponseType.ResponseCode);
+
+      DotnetFunctions.SerializeToBlob(RequestRec, M10AgProductiestaatRequest);
+      DotnetFunctions.SerializeToBlob(ResponseRec, M10DspResponseType);
+      ConsumedWebServiceLine.AddCwsLogLine(RequestRec, ResponseRec, SUPProduction.RECORDID, DSPManagement.GetTcDsp);
+
+      IF (ResponseCode <> 'OK') THEN
+        ERROR(Text001, M10AgProductiestaatRequest.ToString, ResponseCode);
+    END;
+
+    LOCAL PROCEDURE ProcessOutboundProductionRecordingV1@1100528307(DSPAssignment@1100528308 : Record 11126740;RecID@1100528307 : RecordID);
+    VAR
+      ConsumedWebServiceLine@1100528310 : Record 11229798;
+      ResponseRec@1100528312 : TEMPORARY Record 99008535;
+      RequestRec@1100528300 : TEMPORARY Record 99008535;
+      MessageId@1100528304 : Text;
+      DnXmlRequest@1100528303 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      DnXmlResponse@1100528301 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      TargetNode@1100528305 : Text;
+    BEGIN
+      DSPManagement.GetConsumedWebServiceLineByVersion(DSPAssignment."Version No.", DSPManagement.GetSeqNoAgProductieStaat, ConsumedWebServiceLine);
+
+      GenericWebServiceQueue.CALCFIELDS("Xml Message");
+      RequestRec.Blob := GenericWebServiceQueue."Xml Message";
+      DSPManagement.GetXmlDocument(RequestRec, DnXmlRequest);
+      TargetNode := STRSUBSTNO('//%1:%2', ConsumedWebServiceLine."Prefix Method Namespace", ConsumedWebServiceLine."Request Root Tag");
+      MessageId := STRSUBSTNO('%1 %2: %3', DSPManagement.GetTcDsp, ConsumedWebServiceLine."Method Name", GenericWebServiceQueue."Entry No.");
+
+      DSPManagement.DebugSaveXml(DSPSetup, DnXmlRequest, ConsumedWebServiceLine."Method Name"+'Request.xml');
+      DSPManagement.SendCws(ConsumedWebServiceLine, DnXmlRequest, DnXmlResponse, MessageId);
+      DSPManagement.DebugSaveXml(DSPSetup, DnXmlResponse, ConsumedWebServiceLine."Method Name"+'Response.xml');
+
+      DSPManagement.SerializeToBlob(ResponseRec, DnXmlResponse);
+      ConsumedWebServiceLine.AddCwsLogLine(RequestRec,ResponseRec,RecID,DSPManagement.GetTcDsp);
+      CheckResponse(DnXmlRequest, DnXmlResponse);
+    END;
+
+    LOCAL PROCEDURE ProcessOutboundProductionRecordingV2@1100528338(DSPAssignment@1100528301 : Record 11126740;RecID@1100528300 : RecordID);
+    BEGIN
+      ProcessOutboundProductionRecordingV1(DSPAssignment, RecID);
+    END;
+
+    EVENT DnXmlDocument@1100528333::NodeInserting@94(sender@1100528301 : Variant;e@1100528300 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT DnXmlDocument@1100528333::NodeInserted@95(sender@1100528301 : Variant;e@1100528300 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT DnXmlDocument@1100528333::NodeRemoving@96(sender@1100528301 : Variant;e@1100528300 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT DnXmlDocument@1100528333::NodeRemoved@97(sender@1100528301 : Variant;e@1100528300 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT DnXmlDocument@1100528333::NodeChanging@98(sender@1100528301 : Variant;e@1100528300 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT DnXmlDocument@1100528333::NodeChanged@99(sender@1100528301 : Variant;e@1100528300 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT DnXmlRootNode@1100528308::NodeInserting@94(sender@1100528301 : Variant;e@1100528300 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT DnXmlRootNode@1100528308::NodeInserted@95(sender@1100528301 : Variant;e@1100528300 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT DnXmlRootNode@1100528308::NodeRemoving@96(sender@1100528301 : Variant;e@1100528300 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT DnXmlRootNode@1100528308::NodeRemoved@97(sender@1100528301 : Variant;e@1100528300 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT DnXmlRootNode@1100528308::NodeChanging@98(sender@1100528301 : Variant;e@1100528300 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    EVENT DnXmlRootNode@1100528308::NodeChanged@99(sender@1100528301 : Variant;e@1100528300 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeChangedEventArgs");
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

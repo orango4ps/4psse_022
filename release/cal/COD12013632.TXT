@@ -1,0 +1,172 @@
+OBJECT Codeunit 12013632 Exflow to Invoice Pre Create
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=EXF512000;
+  }
+  PROPERTIES
+  {
+    OnRun=VAR
+            ExPurchImportHeader@1100285000 : Record 12013587;
+          BEGIN
+            // Starting from menu
+            IF GUIALLOWED THEN
+              ERROR(Text010);
+
+            ExPurchImportHeader.RESET;
+            IF ExPurchImportHeader.FINDSET THEN BEGIN
+              REPEAT
+                VerifyDocument(ExPurchImportHeader);
+              UNTIL ExPurchImportHeader.NEXT = 0;
+
+              COMMIT;
+              //PostVerifyFunctions;
+            END;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text001@1100285001 : TextConst 'ENU=See line for specific action message.;SVE=Se rad f”r specifikt †tg„rdsmeddelande.';
+      Text002@1100285002 : TextConst 'ENU=Verifying document #1#############\;SVE=Verifierar dokument #1#############\';
+      Text003@1100285003 : TextConst 'ENU=Processing         #2#############\;SVE=Utf”r               #2#############\';
+      Text004@1100285000 : TextConst 'ENU=Verifying line     #3#############;SVE=Verifierar rad      #3#############';
+      Text005@1100285004 : TextConst 'ENU=Header Validation;SVE=Huvudvalidering';
+      Text006@1100285005 : TextConst 'ENU=Approval update;SVE=Attestuppdatering';
+      Text007@1100285006 : TextConst 'ENU=Header check;SVE=Huvudkontroll';
+      Text008@1100285007 : TextConst 'ENU=Create invoice test;SVE=Skapa faktura test';
+      Text009@1100285008 : TextConst 'ENU=Lines;SVE=Rader';
+      Text010@1100285009 : TextConst 'ENU=This cannot be started from object designer!;SVE=Detta kan inte startas from object designer!';
+
+    PROCEDURE VerifyDocument@1100285002(VAR ExFPurchDocHeader@1100285017 : Record 12013587);
+    VAR
+      lrecExfPurchLine@1100285005 : Record 12013588;
+      lrecExfPurchLine2@1100285004 : Record 12013588;
+      ExFlowSetup@1100285018 : Record 12013601;
+      ExfWorkflowMgt@1100285009 : Codeunit 12013593;
+      ExflowValidateOCR@1100285008 : Codeunit 12013594;
+      ExflowCheckLine@1100285003 : Codeunit 12013595;
+      ExflowCheckHead@1100285011 : Codeunit 12013589;
+      ExflowToInvoice@1100285010 : Codeunit 12013592;
+      ExDimMgt@1100285002 : Codeunit 12013605;
+      ExflowCheckHeadWarning@1100285001 : Codeunit 12013640;
+      LineError@1100285006 : Boolean;
+      ExflowCheckHeadLine@1100285012 : Codeunit 12013642;
+      ExFlowPrePost@1100285000 : Codeunit 12013643;
+    BEGIN
+      WITH ExFPurchDocHeader DO BEGIN
+        CLEARLASTERROR;
+        CLEAR(ExflowCheckHead);
+        CLEAR(ExflowValidateOCR);
+
+        ExFlowSetup.GET;
+
+        "Validation Error" := FALSE;
+        "Error Message" := '';
+        MODIFY;
+        COMMIT;
+
+        ExflowValidateOCR.SetVerifyMode(TRUE);
+        IF NOT ExflowValidateOCR.RUN(ExFPurchDocHeader) THEN BEGIN
+          GET("Inbound Document No.");
+          "Validation Error" := TRUE;
+          "Error Message" := COPYSTR(GETLASTERRORTEXT,1,MAXSTRLEN("Error Message"));
+          MODIFY;
+          COMMIT;
+          EXIT;
+        END;
+
+        // Creates warning records, does not contain any ERROR
+        ExflowCheckHeadWarning.RUN(ExFPurchDocHeader);
+
+        GET("Inbound Document No.");
+        COMMIT;
+        IF NOT ExflowCheckHead.RUN(ExFPurchDocHeader) THEN BEGIN
+          "Validation Error" := TRUE;
+          "Error Message" := COPYSTR(GETLASTERRORTEXT,1,MAXSTRLEN("Error Message"));
+          MODIFY;
+        END;
+
+
+        IF (ExFPurchDocHeader."Pre Posting" = ExFPurchDocHeader."Pre Posting"::"Pre Post") AND (NOT "Validation Error")  THEN BEGIN
+          COMMIT;
+          IF NOT ExFlowPrePost.RUN(ExFPurchDocHeader) THEN BEGIN
+            "Validation Error" := TRUE;
+            "Error Message" := COPYSTR(GETLASTERRORTEXT,1,MAXSTRLEN("Error Message"));
+            MODIFY;
+          END;
+          GET("Inbound Document No.");
+        END;
+
+        IF NOT "Validation Error" THEN BEGIN
+          COMMIT;
+          IF NOT ExflowCheckHeadLine.RUN(ExFPurchDocHeader) THEN BEGIN
+            "Validation Error" := TRUE;
+            "Error Message" := COPYSTR(GETLASTERRORTEXT,1,MAXSTRLEN("Error Message"));
+            MODIFY;
+          END;
+        END;
+
+        ExfWorkflowMgt.PrePostUpdateApprovers(ExFPurchDocHeader);
+
+        lrecExfPurchLine.RESET;
+        lrecExfPurchLine.SETRANGE("Inbound Document No.","Inbound Document No.");
+        IF lrecExfPurchLine.FINDSET(TRUE) THEN
+          REPEAT
+            lrecExfPurchLine2 := lrecExfPurchLine;
+
+            ExfWorkflowMgt.UpdateMatchedOrderInfo(lrecExfPurchLine2);
+
+            IF NOT lrecExfPurchLine2."Line manually changed" THEN BEGIN
+              // Recreate the dimensions that were imported
+              // This because dimensions could have been overwritten by the proposal update
+              IF lrecExfPurchLine2."Dimension 1 (Import)" <> '' THEN
+                ExDimMgt.InsertDimToEXPurchLine(lrecExfPurchLine2,ExFlowSetup."OCR Dimension Code 1",
+                                                lrecExfPurchLine2."Dimension 1 (Import)");
+
+              IF lrecExfPurchLine2."Dimension 2 (Import)" <> '' THEN
+                ExDimMgt.InsertDimToEXPurchLine(lrecExfPurchLine2,ExFlowSetup."OCR Dimension Code 2",
+                                                lrecExfPurchLine2."Dimension 2 (Import)");
+            END;
+
+            lrecExfPurchLine2.MODIFY;
+          UNTIL lrecExfPurchLine.NEXT = 0;
+
+        lrecExfPurchLine.RESET;
+        lrecExfPurchLine.SETRANGE("Inbound Document No.","Inbound Document No.");
+        IF lrecExfPurchLine.FINDSET(TRUE) THEN
+        REPEAT
+          lrecExfPurchLine2 := lrecExfPurchLine;
+          COMMIT;
+          IF NOT ExflowCheckLine.RUN(lrecExfPurchLine2) THEN BEGIN
+            LineError := TRUE;
+            lrecExfPurchLine2."Validation Error" := TRUE;
+            lrecExfPurchLine2."Error Message" := COPYSTR(GETLASTERRORTEXT,1,MAXSTRLEN(lrecExfPurchLine2."Error Message"));
+            lrecExfPurchLine2.MODIFY;
+          END ELSE BEGIN
+            IF (lrecExfPurchLine2."Error Message" <> '') OR lrecExfPurchLine2."Validation Error" THEN BEGIN
+              lrecExfPurchLine2."Validation Error" := FALSE;
+              lrecExfPurchLine2."Error Message" := '';
+              lrecExfPurchLine2.MODIFY;
+            END;
+          END;
+        UNTIL lrecExfPurchLine.NEXT = 0;
+
+        IF LineError AND NOT "Validation Error" THEN BEGIN
+          "Validation Error" := TRUE;
+          "Error Message" := Text001;
+        END;
+
+        MODIFY;
+        COMMIT;
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

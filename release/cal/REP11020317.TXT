@@ -1,0 +1,193 @@
+OBJECT Report 11020317 Create Advice Order ProjObject
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    CaptionML=[DEU=Beratungsauftragsprojekt-Objekte erstellen;
+               ENU=Create Advice Orders Project Objects;
+               NLD=Adviesorders projectobjecten aanmaken];
+    ProcessingOnly=Yes;
+    OnPreReport=BEGIN
+                  CounterCreated := 0;
+                END;
+
+    OnPostReport=BEGIN
+                   MESSAGE(Text001, CounterCreated);
+                 END;
+
+  }
+  DATASET
+  {
+    { 1100529000;;DataItem;                  ;
+               DataItemTable=Table11229311;
+               DataItemTableView=SORTING(Project No.)
+                                 WHERE(Blocked=CONST(No),
+                                       Advised=CONST(No),
+                                       Quantity=FILTER(>0));
+               OnAfterGetRecord=BEGIN
+                                  CreateAdviceOrderLine;
+                                END;
+
+               ReqFilterFields=Project No.,No. }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+    }
+    CONTROLS
+    {
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      CounterCreated@1100525000 : Integer;
+      Text001@1100525001 : TextConst 'DEU=%1 Beratungsauftragszeile(n) erstellt;ENU=%1 Advice Order Line(s) created;NLD=%1 adviesorderregel(s) aangemaakt';
+
+    LOCAL PROCEDURE CreateAdviceOrderLine@1100529000();
+    VAR
+      AdviceOrderLine@1100529000 : Record 11012055;
+      Item@1100529001 : Record 27;
+      LastRefNo@1100528901 : Code[20];
+      RouteRefMgtCU@1100528900 : Codeunit 11012045;
+      ObjectQuantity@1100528903 : Decimal;
+      ObjectUnit@1100528902 : Text;
+      GetDefaultsAdviceOrder@1100528904 : Report 11229286;
+      Deliver@1100528910 : ' ,Location,Project Location';
+      LocationCode@1100528909 : Code[10];
+      ShippingDate@1100528908 : Date;
+      TransferCommentLines@1100528907 : Boolean;
+      CompressByElement@1100528906 : Boolean;
+      CompressByVariContract@1100528905 : Boolean;
+      CompressByPlotNo@1100527400 : Boolean;
+    BEGIN
+      WITH "Project Object" DO BEGIN
+        //DP02375.sn
+        IF CounterCreated = 0 THEN BEGIN
+          GetDefaultsAdviceOrder.SetSelection("Project No.",'',DATABASE::"Project Object");
+          GetDefaultsAdviceOrder.RUNMODAL;
+          GetDefaultsAdviceOrder.GetSelection(Deliver, LocationCode, ShippingDate, TransferCommentLines, CompressByElement, CompressByVariContract, CompressByPlotNo);
+        END;
+        //DP02375.en
+        //
+        AdviceOrderLine.INIT;
+        AdviceOrderLine."Record Type" := AdviceOrderLine."Record Type"::Project;
+        AdviceOrderLine.VALIDATE("Project No.", "Project No.");
+        AdviceOrderLine."Service Order No." := '';
+        AdviceOrderLine.VALIDATE("Line No.", 0);  // 0: then first free linenumber will be determined
+        AdviceOrderLine.TESTFIELD("Line No.");
+        AdviceOrderLine.InitRecord();
+        AdviceOrderLine.INSERT(TRUE);
+        CounterCreated := CounterCreated + 1;
+        IF Element <> '' THEN
+          AdviceOrderLine.VALIDATE(Element, Element);
+        AdviceOrderLine.VALIDATE("Plot No.", "Plot No.");
+        IF "Trade Item" <> '' THEN BEGIN
+          AdviceOrderLine.VALIDATE("Vendor (Trade Item)", "Vendor (Trade Item)");
+          AdviceOrderLine.VALIDATE("Trade Item", "Trade Item");
+        END ELSE BEGIN
+          IF "Basic Item" <> '' THEN BEGIN
+            AdviceOrderLine.VALIDATE(Manufacturer, Manufacturer);
+            AdviceOrderLine.VALIDATE("Basic Item", "Basic Item");
+          END ELSE BEGIN
+            IF "Item No." <> '' THEN
+              AdviceOrderLine.VALIDATE("Item No.", "Item No.");
+          END;
+        END;
+        IF "Cost Object" <> '' THEN  //DP02375: validate CostObject after Item
+          AdviceOrderLine.VALIDATE("Cost Object", "Cost Object");
+        IF AdviceOrderLine."Item No." <> '' THEN BEGIN
+          IF Item.GET(AdviceOrderLine."Item No.") THEN
+            AdviceOrderLine."Item Category Code" := Item."Item Category Code";
+        END;
+        IF "Vendor No." <> '' THEN
+          AdviceOrderLine.Vendor := "Vendor No.";
+        //DP02375.sn
+        ConvertQuantityToBaseUnit("Project Object", ObjectQuantity, ObjectUnit);
+        AdviceOrderLine.VALIDATE("Unit of Measure", ObjectUnit);
+        AdviceOrderLine.VALIDATE("Quantity (Advice)", ObjectQuantity);
+        AdviceOrderLine.Transaction := AdviceOrderLine.Transaction::Purchase;
+        AdviceOrderLine.Deliver := Deliver;
+        AdviceOrderLine."Ship To Location" := LocationCode;
+        AdviceOrderLine.VALIDATE("Delivery Period");
+        AdviceOrderLine.EvaluateStartDate(ShippingDate);
+        //DP02375.en
+
+        IF Description <> '' THEN BEGIN
+          AdviceOrderLine.Description := Description;
+          AdviceOrderLine."Description 2" := "Description 2";
+        END;
+        AdviceOrderLine."Project Object No." := "No.";
+        //DP02375.sn
+        IF "Purchase Route Reference" = '' THEN BEGIN
+          LastRefNo := RouteRefMgtCU.GetLastRefNo();
+          LastRefNo := INCSTR(LastRefNo);
+          "Purchase Route Reference" := LastRefNo;
+          RouteRefMgtCU.WriteLastRefNo(LastRefNo);
+        END;
+        AdviceOrderLine."Purchase Route Reference" := "Purchase Route Reference";
+        //DP02375.en
+        AdviceOrderLine.MODIFY(TRUE);
+        //
+        "Advice Order Line No." :=   AdviceOrderLine."Line No.";
+        Advised := TRUE;  //DP02375
+        MODIFY(FALSE);
+      END;
+    END;
+
+    LOCAL PROCEDURE ConvertQuantityToBaseUnit@1100528900(ProjectObject@1100528901 : Record 11229311;VAR ObjectQuantity@1100528900 : Decimal;VAR ObjectUnit@1100528907 : Text);
+    VAR
+      UnitFactor@1100528903 : Decimal;
+      BaseUnit@1100528902 : Code[20];
+      TradeItem@1100528904 : Record 11012317;
+      Item@1100528905 : Record 27;
+      ItemUnitofMeasure@1100528906 : Record 5404;
+    BEGIN
+      //DP02375
+      WITH ProjectObject DO BEGIN
+        UnitFactor := 1;
+        IF "Trade Item" <> '' THEN BEGIN
+          TradeItem.GET("Vendor (Trade Item)", "Trade Item");
+          IF "Unit of Measure" <> TradeItem."Application Unit" THEN BEGIN
+            TESTFIELD("Unit of Measure", TradeItem."Packaging Unit");  //db, 08-10-19
+            UnitFactor := TradeItem."Qty. per Unit of Measure";
+            BaseUnit := TradeItem."Application ID";
+          END;
+        END ELSE BEGIN
+          IF "Item No." <> '' THEN BEGIN
+            Item.GET("Item No.");
+            IF "Unit of Measure" <> Item."Base Unit of Measure" THEN BEGIN
+              ItemUnitofMeasure.GET("Item No.", "Unit of Measure");
+              UnitFactor := ItemUnitofMeasure."Qty. per Unit of Measure";
+              BaseUnit := Item."Base Unit of Measure";
+            END;
+          END;
+        END;
+        IF (UnitFactor <> 0) AND (UnitFactor <> 1) THEN BEGIN
+          ObjectQuantity := Quantity * UnitFactor;
+          ObjectUnit := BaseUnit;
+        END ELSE BEGIN
+          ObjectQuantity := Quantity;
+          ObjectUnit := "Unit of Measure";
+        END;
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

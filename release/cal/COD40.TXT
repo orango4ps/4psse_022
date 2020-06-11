@@ -1,0 +1,646 @@
+OBJECT Codeunit 40 LogInManagement
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.05,4PS14.00,NAVDK;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData 17=r,
+                TableData 18=r,
+                TableData 23=r,
+                TableData 27=r,
+                TableData 51=rimd,
+                TableData 9150=rimd,
+                TableData 9151=rimd,
+                TableData 9152=rimd,
+                TableData 9153=rimd;
+    SingleInstance=Yes;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      PartnerAgreementNotAcceptedErr@1001 : TextConst 'ENU=Partner Agreement has not been accepted.;NOR=Partneravtale for sluttbruker er ikke godtatt.;SVE=Partneravtalet har inte accepterats.';
+      PasswordChangeNeededErr@1007 : TextConst 'ENU=You must change the password before you can continue.;NOR=Du m† endre passordet f›r du kan fortsette.;SVE=Du m†ste byta l”senordet f”r att kunna forts„tta.';
+      GLSetup@1011 : Record 98;
+      User@1003 : Record 2000000120 SECURITYFILTERING(Filtered);
+      NoOfEntries@1060002 : Integer;
+      LogInWorkDate@1006 : Date;
+      LogInDate@1005 : Date;
+      LogInTime@1004 : Time;
+      GLSetupRead@1012 : Boolean;
+      Text11012002@1100409000 : TextConst 'ENU=Create Company Setup from XML File?;NOR=Opprette selskapsinnstillinger fra XML-fil?;SVE=Skapa f”retagsinst„llningar fr†n XML-fil?';
+      LicenseOverLimitErrTxt@1060000 : TextConst 'ENU=Your program license does not allow more than %1 entries per fiscal year. %2 entries currently exist in the company.\\Contact your system administrator to update the program license.';
+      LicenseNearLimitMsg@1060001 : TextConst 'ENU=You are about to exceed the limit of entries allowed by the program license: %1 of %2 in this fiscal year.\\Contact your system administrator to update the program license.';
+      MicrosoftDynamicsC5Txt@1060003 : TextConst '@@@={Locked};ENU=Microsoft Dynamics C5';
+
+    [Internal]
+    PROCEDURE CompanyOpen@1();
+    VAR
+      LogonManagement@1000 : Codeunit 9802;
+      ClientTypeManagement@1001 : Codeunit 4030;
+    BEGIN
+      LogonManagement.SetLogonInProgress(TRUE);
+
+      // This needs to be the very first thing to run before company open
+      CODEUNIT.RUN(CODEUNIT::"Azure AD User Management");
+      CODEUNIT.RUN(CODEUNIT::"SaaS Log In Management");
+
+      OnBeforeCompanyOpen;
+
+      IF GUIALLOWED AND (ClientTypeManagement.GetCurrentClientType <> CLIENTTYPE::Background) THEN
+        LogInStart;
+
+      OnAfterCompanyOpen;
+
+      LogonManagement.SetLogonInProgress(FALSE);
+    END;
+
+    [External]
+    PROCEDURE CompanyClose@2();
+    VAR
+      ClientTypeManagement@1000 : Codeunit 4030;
+    BEGIN
+      OnBeforeCompanyClose;
+      IF GUIALLOWED OR (ClientTypeManagement.GetCurrentClientType IN [CLIENTTYPE::Web,CLIENTTYPE::Phone,CLIENTTYPE::Tablet]) THEN
+        LogInEnd;
+      OnAfterCompanyClose;
+    END;
+
+    LOCAL PROCEDURE LogInStart@3();
+    VAR
+      Language@1005 : Record 2000000045;
+      LicenseAgreement@1008 : Record 140;
+      UserLogin@1010 : Record 9008;
+      ApplicationAreaMgmtFacade@1007 : Codeunit 9179;
+      GLEntry@11001 : Record 17;
+      AccountingPeriod@1060000 : Record 50;
+      IdentityManagement@1002 : Codeunit 9801;
+      CompanyInformationMgt@1000 : Codeunit 1306;
+      LanguageManagement@1001 : Codeunit 43;
+      WorkDatePage@1100409000 : Page 11020220;
+    BEGIN
+      IF NOT CompanyInformationMgt.IsDemoCompany THEN
+        IF LicenseAgreement.GET THEN
+          IF LicenseAgreement.GetActive AND NOT LicenseAgreement.Accepted THEN BEGIN
+            PAGE.RUNMODAL(PAGE::"Additional Customer Terms");
+            LicenseAgreement.GET;
+            IF NOT LicenseAgreement.Accepted THEN
+              ERROR(PartnerAgreementNotAcceptedErr)
+          END;
+
+      Language.SETRANGE("Localization Exist",TRUE);
+      Language.SETRANGE("Globally Enabled",TRUE);
+      Language."Language ID" := GLOBALLANGUAGE;
+      IF NOT Language.FIND THEN BEGIN
+        Language."Language ID" := WINDOWSLANGUAGE;
+        IF NOT Language.FIND THEN
+          Language."Language ID" := LanguageManagement.ApplicationLanguage;
+      END;
+      GLOBALLANGUAGE := Language."Language ID";
+
+      // Check if the logged in user must change login before allowing access.
+      IF NOT User.ISEMPTY THEN BEGIN
+        IF IdentityManagement.IsUserNamePasswordAuthentication THEN BEGIN
+          User.SETRANGE("User Security ID",USERSECURITYID);
+          User.FINDFIRST;
+          IF User."Change Password" THEN BEGIN
+            PAGE.RUNMODAL(PAGE::"Change Password");
+            SELECTLATESTVERSION;
+            User.FINDFIRST;
+            IF User."Change Password" THEN
+              ERROR(PasswordChangeNeededErr);
+          END;
+        END;
+
+        User.SETRANGE("User Security ID");
+      END;
+
+      OnBeforeLogInStart;
+
+      InitializeCompany;
+      UpdateUserPersonalization;
+      CreateProfiles;
+
+      LogInDate := TODAY;
+      LogInTime := TIME;
+      LogInWorkDate := 0D;
+      UserLogin.UpdateLastLoginInfo;
+
+      WORKDATE := GetDefaultWorkDate;
+
+      //>>NAVDK
+      IF GLSetup."Danish Localization Active" AND GLEntry.READPERMISSION AND AccountingPeriod.READPERMISSION THEN
+        CheckLicenseWarning(LastTransactionNo,TODAY);
+      //<<NAVDK
+
+      //**4PS.sn
+      IF GLSetup."Force Setting Work Date" THEN BEGIN
+        WorkDatePage.LOOKUPMODE(TRUE);
+        WorkDatePage.RUNMODAL;
+      END;
+      //**4PS.en
+
+      SetupMyRecords;
+
+      ApplicationAreaMgmtFacade.SetupApplicationArea;
+
+      OnAfterLogInStart;
+    END;
+
+    LOCAL PROCEDURE LogInEnd@4();
+    VAR
+      UserSetup@1000 : Record 91;
+      UserTimeRegister@1001 : Record 51;
+      LogOutDate@1002 : Date;
+      LogOutTime@1003 : Time;
+      Minutes@1004 : Integer;
+      UserSetupFound@1005 : Boolean;
+      RegisterTime@1006 : Boolean;
+      RepUsageMgt@1100529900 : Codeunit 11012362;
+    BEGIN
+      IF LogInDate = 0D THEN
+        EXIT;
+
+      IF LogInWorkDate <> 0D THEN
+        IF LogInWorkDate = LogInDate THEN
+          WORKDATE := TODAY
+        ELSE
+          WORKDATE := LogInWorkDate;
+
+      IF LogInDate <> 0D THEN BEGIN //**4PS.n call 17229; remove check as soon as platform fix is released f.e. NAV2009SP2
+        IF USERID <> '' THEN BEGIN
+          IF UserSetup.GET(USERID) THEN BEGIN
+            UserSetupFound := TRUE;
+            RegisterTime := UserSetup."Register Time";
+          END;
+          IF NOT UserSetupFound THEN
+            IF GetGLSetup THEN
+              RegisterTime := GLSetup."Register Time";
+          IF RegisterTime THEN BEGIN
+            LogOutDate := TODAY;
+            LogOutTime := TIME;
+            IF (LogOutDate > LogInDate) OR (LogOutDate = LogInDate) AND (LogOutTime > LogInTime) THEN
+              Minutes := ROUND((1440 * (LogOutDate - LogInDate)) + ((LogOutTime - LogInTime) / 60000),1);
+            IF Minutes = 0 THEN
+              Minutes := 1;
+            UserTimeRegister.INIT;
+            UserTimeRegister."User ID" := USERID;
+            UserTimeRegister.Date := LogInDate;
+            IF UserTimeRegister.FIND THEN BEGIN
+              UserTimeRegister.Minutes := UserTimeRegister.Minutes + Minutes;
+              UserTimeRegister.MODIFY;
+            END ELSE BEGIN
+              UserTimeRegister.Minutes := Minutes;
+              UserTimeRegister.INSERT;
+            END;
+          END;
+        END;
+      END; //**4PS.n
+
+      //**4PS.sn DJN DP00309
+      RepUsageMgt.SaveUsage;
+      CLEAR(RepUsageMgt);
+      //**4PS.en DJN
+
+      OnAfterLogInEnd;
+    END;
+
+    [External]
+    PROCEDURE InitializeCompany@10();
+    BEGIN
+      IF NOT GLSetup.GET THEN
+      //**4PS.sn
+      BEGIN
+        IF CONFIRM(Text11012002) THEN
+          REPORT.RUNMODAL(REPORT::"Import Data From XML File");
+      //**4PS.en
+        CODEUNIT.RUN(CODEUNIT::"Company-Initialize");
+      END; //**4PS.n
+    END;
+
+    [Internal]
+    PROCEDURE CreateProfiles@12();
+    VAR
+      Profile@1001 : Record 2000000072;
+    BEGIN
+      IF Profile.ISEMPTY THEN BEGIN
+        CODEUNIT.RUN(CODEUNIT::"Conf./Personalization Mgt.");
+        COMMIT;
+      END;
+    END;
+
+    LOCAL PROCEDURE GetGLSetup@5() : Boolean;
+    BEGIN
+      IF NOT GLSetupRead THEN
+        GLSetupRead := GLSetup.GET;
+      EXIT(GLSetupRead);
+    END;
+
+    [External]
+    PROCEDURE GetDefaultWorkDate@6() : Date;
+    VAR
+      GLEntry@1000 : Record 17;
+      CompanyInformationMgt@1002 : Codeunit 1306;
+    BEGIN
+      IF CompanyInformationMgt.IsDemoCompany THEN
+        IF GLEntry.READPERMISSION THEN BEGIN
+          GLEntry.SETCURRENTKEY("Posting Date");
+          IF GLEntry.FINDLAST THEN BEGIN
+            LogInWorkDate := NORMALDATE(GLEntry."Posting Date");
+            EXIT(NORMALDATE(GLEntry."Posting Date"));
+          END;
+        END;
+
+      EXIT(WORKDATE);
+    END;
+
+    LOCAL PROCEDURE SetupMyRecords@17();
+    VAR
+      CompanyInformationMgt@1000 : Codeunit 1306;
+    BEGIN
+      IF NOT CompanyInformationMgt.IsDemoCompany THEN
+        EXIT;
+
+      IF SetupMyCustomer THEN
+        EXIT;
+
+      IF SetupMyItem THEN
+        EXIT;
+
+      IF SetupMyVendor THEN
+        EXIT;
+
+      SetupMyAccount;
+    END;
+
+    PROCEDURE CheckLicense@1060000(TransactionNo@1060000 : Integer;TransactionDate@1060002 : Date);
+    VAR
+      TransactionsThisYear@1060001 : Integer;
+    BEGIN
+      IF NOT LicenseHasTransactionLimit THEN
+        EXIT;
+      IF TransactionNo <= MaxNoOfTransactions THEN
+        EXIT;
+      IF TransactionsInFY(TransactionNo,TransactionDate) <= MaxNoOfTransactions THEN
+        EXIT;
+      ERROR(LicenseOverLimitErrTxt,MaxNoOfTransactions);
+    END;
+
+    LOCAL PROCEDURE CheckLicenseWarning@1060009(TransactionNo@1060000 : Integer;TransactionDate@1060002 : Date);
+    VAR
+      TransactInYear@1060001 : Integer;
+    BEGIN
+      //NAVDK
+      IF NOT LicenseHasTransactionLimit THEN
+        EXIT;
+      IF TransactionNo < NearMaxNoOfTransactions THEN
+        EXIT;
+
+      TransactInYear := TransactionsInFY(TransactionNo,TransactionDate);
+      IF TransactInYear < NearMaxNoOfTransactions THEN
+        EXIT;
+
+      IF TransactInYear >= MaxNoOfTransactions THEN
+        MESSAGE(LicenseOverLimitErrTxt,MaxNoOfTransactions)
+      ELSE
+        MESSAGE(LicenseNearLimitMsg,TransactInYear,MaxNoOfTransactions);
+    END;
+
+    LOCAL PROCEDURE TransactionsInFY@1060011(TransactionNo@1060001 : Integer;TransactionDate@1060000 : Date) : Integer;
+    BEGIN
+      //NAVDK
+      EXIT(TransactionNo - FirstTransactionFY(TransactionNo,TransactionDate));
+    END;
+
+    LOCAL PROCEDURE FirstTransactionFY@1060107(TransactionNo@1060003 : Integer;TransactionDate@1060001 : Date) : Integer;
+    VAR
+      GLEntry@1060000 : Record 17;
+      FYStartDate@1060002 : Date;
+    BEGIN
+      FYStartDate := FiscalYearStartDate(TransactionDate);
+
+      IF FYStartDate = 0D THEN
+        EXIT(TransactionNo);
+
+      GLEntry.SETCURRENTKEY("Transaction No.");
+      GLEntry.SETRANGE("Posting Date",FYStartDate,TransactionDate);
+      IF GLEntry.FINDFIRST THEN
+        EXIT(GLEntry."Transaction No.");
+
+      EXIT(LastTransactionPrevFY(FYStartDate));
+    END;
+
+    LOCAL PROCEDURE LastTransactionPrevFY@1060110(FYStartDate@1060001 : Date) : Integer;
+    VAR
+      GLEntry@1060000 : Record 17;
+    BEGIN
+      GLEntry.SETCURRENTKEY("Transaction No.");
+      GLEntry.SETRANGE("Posting Date",0D,CALCDATE('<-1D>',FYStartDate));
+      IF GLEntry.FINDLAST THEN
+        EXIT(GLEntry."Transaction No.");
+      EXIT(0);
+    END;
+
+    LOCAL PROCEDURE FiscalYearStartDate@1060014(TransactionDate@1060001 : Date) : Date;
+    VAR
+      AccountingPeriod@1060000 : Record 50;
+    BEGIN
+      //NAVDK
+      AccountingPeriod.SETCURRENTKEY(Closed);
+      AccountingPeriod.SETRANGE(Closed,FALSE);
+      IF AccountingPeriod.FINDFIRST THEN
+        IF TransactionDate >= AccountingPeriod."Starting Date" THEN
+          EXIT(AccountingPeriod."Starting Date");
+      EXIT(0D);
+    END;
+
+    LOCAL PROCEDURE LastTransactionNo@1060006() : Integer;
+    VAR
+      GLEntry@1060000 : Record 17;
+    BEGIN
+      //NAVDK
+      GLEntry.SETCURRENTKEY("Transaction No.");
+      IF GLEntry.FINDLAST THEN
+        EXIT(GLEntry."Transaction No.");
+      EXIT(0);
+    END;
+
+    LOCAL PROCEDURE MaxNoOfTransactions@1060001() : Integer;
+    BEGIN
+      //NAVDK
+      EXIT(2500);
+    END;
+
+    LOCAL PROCEDURE NearMaxNoOfTransactions@1060002() : Integer;
+    BEGIN
+      //NAVDK
+      EXIT(ROUND(MaxNoOfTransactions * 0.95,1));
+    END;
+
+    LOCAL PROCEDURE LicenseHasTransactionLimit@1060003() : Boolean;
+    VAR
+      LicensePermission@1060000 : Record 2000000043;
+    BEGIN
+      //NAVDK
+      LicensePermission.SETRANGE("Object Type",LicensePermission."Object Type"::System);
+      LicensePermission.SETRANGE("Execute Permission",LicensePermission."Execute Permission"::Yes);
+      LicensePermission.SETRANGE("Object Number",LimitedTransactionsSysID);
+      IF LicensePermission.ISEMPTY THEN
+        EXIT(FALSE);
+
+      LicensePermission.SETRANGE("Object Number",UnlimitedTransactionsSysID);
+      EXIT(LicensePermission.ISEMPTY);
+    END;
+
+    LOCAL PROCEDURE LimitedTransactionsSysID@1060004() : Integer;
+    BEGIN
+      //NAVDK
+      EXIT(6010);
+    END;
+
+    LOCAL PROCEDURE UnlimitedTransactionsSysID@1060005() : Integer;
+    BEGIN
+      //NAVDK
+      EXIT(6011);
+    END;
+
+    PROCEDURE IsC5License@1060007() : Boolean;
+    VAR
+      LicenseInformation@1060000 : Record 2000000040;
+    BEGIN
+      LicenseInformation.SETFILTER(Text,'''@*'+ MicrosoftDynamicsC5Txt + '*''');
+      EXIT(LicenseInformation.FINDFIRST);
+    END;
+
+    LOCAL PROCEDURE SetupMyCustomer@7() : Boolean;
+    VAR
+      Customer@1000 : Record 18;
+      MyCustomer@1001 : Record 9150;
+      MaxCustomersToAdd@1002 : Integer;
+      I@1003 : Integer;
+    BEGIN
+      IF NOT Customer.READPERMISSION THEN
+        EXIT;
+
+      MyCustomer.SETRANGE("User ID",USERID);
+      IF NOT MyCustomer.ISEMPTY THEN
+        EXIT(TRUE);
+
+      I := 0;
+      MaxCustomersToAdd := 5;
+      Customer.SETFILTER(Balance,'<>0');
+      IF Customer.FINDSET THEN
+        REPEAT
+          I += 1;
+          MyCustomer."User ID" := USERID;
+          MyCustomer.VALIDATE("Customer No.",Customer."No.");
+          IF MyCustomer.INSERT THEN;
+        UNTIL (Customer.NEXT = 0) OR (I >= MaxCustomersToAdd);
+    END;
+
+    LOCAL PROCEDURE SetupMyItem@8() : Boolean;
+    VAR
+      Item@1000 : Record 27;
+      MyItem@1001 : Record 9152;
+      MaxItemsToAdd@1002 : Integer;
+      I@1003 : Integer;
+    BEGIN
+      IF NOT Item.READPERMISSION THEN
+        EXIT;
+
+      MyItem.SETRANGE("User ID",USERID);
+      IF NOT MyItem.ISEMPTY THEN
+        EXIT(TRUE);
+
+      I := 0;
+      MaxItemsToAdd := 5;
+
+      Item.SETFILTER("Unit Price",'<>0');
+      IF Item.FINDSET THEN
+        REPEAT
+          I += 1;
+          MyItem."User ID" := USERID;
+          MyItem.VALIDATE("Item No.",Item."No.");
+          IF MyItem.INSERT THEN;
+        UNTIL (Item.NEXT = 0) OR (I >= MaxItemsToAdd);
+    END;
+
+    LOCAL PROCEDURE SetupMyVendor@9() : Boolean;
+    VAR
+      Vendor@1000 : Record 23;
+      MyVendor@1001 : Record 9151;
+      MaxVendorsToAdd@1002 : Integer;
+      I@1003 : Integer;
+    BEGIN
+      IF NOT Vendor.READPERMISSION THEN
+        EXIT;
+
+      MyVendor.SETRANGE("User ID",USERID);
+      IF NOT MyVendor.ISEMPTY THEN
+        EXIT(TRUE);
+
+      I := 0;
+      MaxVendorsToAdd := 5;
+      Vendor.SETFILTER(Balance,'<>0');
+      IF Vendor.FINDSET THEN
+        REPEAT
+          I += 1;
+          MyVendor."User ID" := USERID;
+          MyVendor.VALIDATE("Vendor No.",Vendor."No.");
+          IF MyVendor.INSERT THEN;
+        UNTIL (Vendor.NEXT = 0) OR (I >= MaxVendorsToAdd);
+    END;
+
+    LOCAL PROCEDURE SetupMyAccount@11() : Boolean;
+    VAR
+      GLAccount@1000 : Record 15;
+      MyAccount@1001 : Record 9153;
+      MaxAccountsToAdd@1002 : Integer;
+      I@1003 : Integer;
+    BEGIN
+      IF NOT GLAccount.READPERMISSION THEN
+        EXIT;
+
+      MyAccount.SETRANGE("User ID",USERID);
+      IF NOT MyAccount.ISEMPTY THEN
+        EXIT(TRUE);
+
+      I := 0;
+      MaxAccountsToAdd := 5;
+      GLAccount.SETRANGE("Reconciliation Account",TRUE);
+      IF GLAccount.FINDSET THEN
+        REPEAT
+          I += 1;
+          MyAccount."User ID" := USERID;
+          MyAccount.VALIDATE("Account No.",GLAccount."No.");
+          IF MyAccount.INSERT THEN;
+        UNTIL (GLAccount.NEXT = 0) OR (I >= MaxAccountsToAdd);
+    END;
+
+    [External]
+    PROCEDURE AnyUserLoginExistsWithinPeriod@14(PeriodType@1002 : 'Day,Week,Month,Quarter,Year,Accounting Period';NoOfPeriods@1001 : Integer) : Boolean;
+    VAR
+      UserLogin@1000 : Record 9008;
+      PeriodFormManagement@1004 : Codeunit 359;
+      FromEventDateTime@1003 : DateTime;
+    BEGIN
+      FromEventDateTime := CREATEDATETIME(PeriodFormManagement.MoveDateByPeriod(TODAY,PeriodType,-NoOfPeriods),TIME);
+      UserLogin.SETFILTER("Last Login Date",'>=%1',FromEventDateTime);
+      EXIT(NOT UserLogin.ISEMPTY);
+    END;
+
+    [External]
+    PROCEDURE UserLoggedInAtOrAfterDateTime@24(FromEventDateTime@1000 : DateTime) : Boolean;
+    VAR
+      UserLogin@1002 : Record 9008;
+    BEGIN
+      EXIT(UserLogin.UserLoggedInAtOrAfter(FromEventDateTime));
+    END;
+
+    [EventSubscriber(Codeunit,2000000004,GetSystemIndicator)]
+    LOCAL PROCEDURE GetSystemIndicator@27(VAR Text@1000 : Text[250];VAR Style@1001 : 'Standard,Accent1,Accent2,Accent3,Accent4,Accent5,Accent6,Accent7,Accent8,Accent9');
+    VAR
+      CompanyInformation@1002 : Record 79;
+    BEGIN
+      IF CompanyInformation.GET THEN;
+      CompanyInformation.GetSystemIndicator(Text,Style);
+    END;
+
+    LOCAL PROCEDURE UpdateUserPersonalization@15();
+    VAR
+      UserPersonalization@1001 : Record 2000000073;
+      Profile@1002 : Record 2000000178;
+      AllObjWithCaption@1003 : Record 2000000058;
+      PermissionManager@1004 : Codeunit 9002;
+      ProfileScope@1005 : 'System,Tenant';
+      AppID@1006 : GUID;
+    BEGIN
+      IF NOT UserPersonalization.GET(USERSECURITYID) THEN
+        EXIT;
+
+      IF Profile.GET(UserPersonalization.Scope,UserPersonalization."App ID",UserPersonalization."Profile ID") THEN BEGIN
+        AllObjWithCaption.SETRANGE("Object Type",AllObjWithCaption."Object Type"::Page);
+        AllObjWithCaption.SETRANGE("Object Subtype",'RoleCenter');
+        AllObjWithCaption.SETRANGE("Object ID",Profile."Role Center ID");
+        IF AllObjWithCaption.ISEMPTY THEN BEGIN
+          UserPersonalization."Profile ID" := '';
+          UserPersonalization.MODIFY;
+          COMMIT;
+        END;
+      END ELSE
+        IF PermissionManager.SoftwareAsAService THEN BEGIN
+          Profile.RESET;
+          PermissionManager.GetDefaultProfileID(USERSECURITYID,Profile);
+
+          IF NOT Profile.ISEMPTY THEN BEGIN
+            UserPersonalization."Profile ID" := Profile."Profile ID";
+            UserPersonalization.Scope := Profile.Scope;
+            UserPersonalization."App ID" := Profile."App ID";
+            UserPersonalization.MODIFY;
+          END ELSE BEGIN
+            UserPersonalization."Profile ID" := '';
+            UserPersonalization.Scope := ProfileScope::System;
+            UserPersonalization."App ID" := AppID;
+            UserPersonalization.MODIFY;
+          END;
+        END;
+    END;
+
+    [EventSubscriber(Codeunit,2000000003,OnCompanyOpen)]
+    LOCAL PROCEDURE OnCompanyOpen@26();
+    BEGIN
+      CompanyOpen;
+    END;
+
+    [EventSubscriber(Codeunit,2000000003,OnCompanyClose)]
+    LOCAL PROCEDURE OnCompanyClose@25();
+    BEGIN
+      CompanyClose;
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterLogInStart@16();
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterLogInEnd@18();
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeLogInStart@20();
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeCompanyOpen@23();
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterCompanyOpen@22();
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeCompanyClose@21();
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnAfterCompanyClose@19();
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

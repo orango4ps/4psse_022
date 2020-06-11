@@ -1,0 +1,496 @@
+OBJECT Table 11128101 ROT/RUT Information
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PSSE;
+  }
+  PROPERTIES
+  {
+    OnInsert=VAR
+               CompanyInformation@1100285000 : Record 79;
+               ROTRUTInformation@1100285100 : Record 11128101;
+             BEGIN
+               TESTFIELD("Personal No.");
+
+               IF ("VAT Registration No." = '') THEN BEGIN
+                  CompanyInformation.GET();
+                  VALIDATE("VAT Registration No.", CompanyInformation."VAT Registration No.");
+               END;
+               //VALIDATE("Quote of ROT Amount");  //RFC188
+
+               VALIDATE("Application Type");
+
+               //>>RFC-240
+               //Type,Document No.,Invoice No.,Personal No.,Application Type
+               ROTRUTInformation.RESET;
+               ROTRUTInformation.SETRANGE(Type,Type);
+               ROTRUTInformation.SETRANGE("Document No.","Document No.");
+               ROTRUTInformation.SETRANGE("Invoice No.","Invoice No.");
+               ROTRUTInformation.SETRANGE("Application Type","Application Type");
+               ROTRUTInformation.SETFILTER("Personal No.",'<>%1',"Personal No.");
+               IF ROTRUTInformation.ISEMPTY THEN
+                 "Quote of ROT Amount" := 100;
+               //<<RFC-240
+             END;
+
+    OnDelete=VAR
+               ExtendedROTInformation@1100285500 : Record 11128102;
+             BEGIN
+               // 150320 <<
+               ExtendedROTInformation.SETRANGE(Type, Type);
+               ExtendedROTInformation.SETRANGE("Invoice No.","Invoice No.");
+               ExtendedROTInformation.SETRANGE("Document No.", "Document No.");
+               ExtendedROTInformation.SETRANGE("Personal No.", "Document No.");
+               ExtendedROTInformation.SETRANGE("Application Type","Application Type");
+               ExtendedROTInformation.DELETEALL;
+               // 150320 >>
+             END;
+
+    CaptionML=[ENU=ROT/RUT Information;
+               SVE=ROT/RUT Information];
+  }
+  FIELDS
+  {
+    { 1   ;   ;Type                ;Option        ;CaptionML=[ENU=Type;
+                                                              NOR=Radtype;
+                                                              SVE=Radtyp];
+                                                   OptionCaptionML=[ENU=Try-Out Quote,Quick Estimate,Project,Invoice,Posted Invoice,Service Order;
+                                                                    NOR=Tilbudsforesp›rsel,Hurtigkalkyle,Prosjekt,Faktura,Bokf›rt faktura,Serviceordre;
+                                                                    SVE=Anbudsf”rfr†gan,Snabbkalkyl,Projekt,Faktura,Bokf”rd faktura,Serviceorder];
+                                                   OptionString=Try-Out Quote,Quick Estimate,Project,Invoice,Posted Invoice,Service Order }
+    { 2   ;   ;Document No.        ;Code30        ;TableRelation=IF (Type=FILTER(Project)) Job.No.
+                                                                 ELSE IF (Type=FILTER(Service Order)) "Service Order".No.
+                                                                 ELSE IF (Type=CONST(Quick Estimate)) Estimate.No.
+                                                                 ELSE IF (Type=CONST(Try-Out Quote)) "Try-out Quote".Code;
+                                                   OnValidate=VAR
+                                                                lvJob@1100285500 : Record 11072003;
+                                                                lvServiceOrder@1100285501 : Record 11012823;
+                                                                lvBillCust@1100285100 : Record 18;
+                                                              BEGIN
+                                                                IF (Type = Type::Project) AND (lvJob.GET("Document No.")) THEN BEGIN
+                                                                   IF ("Description of Work" = '') THEN "Description of Work" := lvJob.Description;
+                                                                   IF ("Starting Date" = 0D) THEN "Starting Date" := lvJob."Starting Date";
+                                                                   IF ("Ending Date" = 0D) THEN "Ending Date" := lvJob."Ending Date";
+                                                                   IF ("Project Principle" = '') THEN "Project Principle" := lvJob."Bill-to Customer No.";
+                                                                   "Invoice Relation" := "Invoice Relation"::Project;
+                                                                   //>>RFC188
+                                                                   IF lvBillCust.GET("Project Principle") THEN BEGIN
+                                                                     "Personal No." := lvBillCust."COC Registration No.";
+                                                                     Name := lvBillCust.Name;
+                                                                   END;
+                                                                   //<<RFC188
+                                                                END ELSE IF (Type = Type::"Service Order") AND (lvServiceOrder.GET("Document No.")) THEN BEGIN
+                                                                   IF ("Description of Work" = '') THEN "Description of Work" := lvServiceOrder.Description;
+                                                                   IF ("Starting Date" = 0D) THEN "Starting Date" := lvServiceOrder."Starting Date";
+                                                                   IF ("Ending Date" = 0D) THEN "Ending Date" := lvServiceOrder."Ending Date";
+                                                                   "Invoice Relation" := "Invoice Relation"::"Service Order";
+                                                                END;
+                                                              END;
+
+                                                   CaptionML=[ENU=No.;
+                                                              NOR=Nr;
+                                                              SVE=Nr] }
+    { 3   ;   ;Invoice No.         ;Code30        ;TableRelation=IF (Type=CONST(Invoice)) "Sales Header".No. WHERE (Document Type=CONST(Invoice))
+                                                                 ELSE IF (Type=CONST(Posted Invoice)) "Sales Invoice Header".No.;
+                                                   CaptionML=[ENU=Invoice No.;
+                                                              NOR=Fakturanr.;
+                                                              SVE=Fakturanr] }
+    { 4   ;   ;Personal No.        ;Code12        ;OnValidate=VAR
+                                                                StringLen@1000000005 : Integer;
+                                                                StartNo@1000000004 : Text[3];
+                                                                Counter@1000000003 : Integer;
+                                                                SingelDigit@1000000002 : Integer;
+                                                                CheckDigit@1000000001 : Integer;
+                                                                CalculatedCheckDigit@1000000000 : Integer;
+                                                                PersonalNoStr@1000000006 : Text[12];
+                                                              BEGIN
+                                                                EXIT; //Ej klar f”r leverans
+                                                                //********************************************************//
+                                                                // The last digit in the personal identity number is a    //
+                                                                // check digit. It is calculated from the personalnumber. //
+                                                                // This is how you calculate the check digit.             //
+                                                                //                                                        //
+                                                                // The digits in the date of birth and the birth number   //
+                                                                // are multiplied alternatively by 2 and 1.               //
+                                                                //                                                        //
+                                                                // 6   4  0  8  2  3  - 3  2  3                           //
+                                                                // *   *  *  *  *  *    *  *  *                           //
+                                                                // 2   1  2  1  2  1    2  1  2                           //
+                                                                // =   =  =  =  =  =    =  =  =                           //
+                                                                // 12 ,4, 0, 8, 4, 3    6, 2, 6                           //
+                                                                //                                                        //
+                                                                // Add the figures in the products.                       //
+                                                                // Note! 12 counts as 1 + 2.                              //
+                                                                //                                                        //
+                                                                // 1 + 2 + 4 + 0 + 8 + 4 + 3 + 6 + 2 + 6 = 36.            //
+                                                                //                                                        //
+                                                                // The single digit (6) in the total is deducted from     //
+                                                                // the number 10. 10 - 6 = 4.                             //
+                                                                //                                                        //
+                                                                // The difference (4) becomes the check digit, which      //
+                                                                // means that the personal identity number in the         //
+                                                                // example becomes 640823-3234.                           //
+                                                                //********************************************************//
+
+                                                                PersonalNoStr := DELCHR("Personal No." , '=',' -+');
+                                                                StringLen := STRLEN(PersonalNoStr);
+
+                                                                IF StringLen < 10 THEN
+                                                                  ERROR(TEXT001);
+
+                                                                IF StringLen = 11 THEN
+                                                                  ERROR(TEXT002);
+
+                                                                IF StringLen = 12 THEN BEGIN
+                                                                  StartNo := COPYSTR(PersonalNoStr, 1, 2);
+                                                                  IF (StartNo <> '19') AND (StartNo <> '20') THEN
+                                                                    ERROR(TEXT003);
+                                                                  PersonalNoStr := DELSTR(PersonalNoStr,1,2);
+                                                                END;
+
+                                                                IF StringLen > 12 THEN
+                                                                  ERROR(TEXT004);
+
+                                                                EVALUATE(CheckDigit ,COPYSTR(PersonalNoStr, 10, 1));
+                                                                FOR Counter := 1 TO 9 DO BEGIN
+                                                                  EVALUATE(SingelDigit, FORMAT(PersonalNoStr[Counter]));
+                                                                  IF ((Counter MOD 2) = 1) THEN BEGIN       // Check if odd or even
+                                                                    SingelDigit := SingelDigit * 2;
+                                                                    IF SingelDigit >= 10 THEN               // If the product is grater than 10, then split to two digits
+                                                                      SingelDigit := (SingelDigit -10) + 1;
+                                                                  END;
+                                                                  CalculatedCheckDigit := CalculatedCheckDigit + SingelDigit;
+                                                                END;
+
+                                                                CalculatedCheckDigit := (10 - (CalculatedCheckDigit MOD 10)); // Get the last digit of the Calculated Check Digit and substract with 10
+                                                                IF CalculatedCheckDigit = 10 THEN
+                                                                  CalculatedCheckDigit := 0;
+
+                                                                IF CalculatedCheckDigit <> CheckDigit THEN
+                                                                  ERROR(TEXT005);
+                                                              END;
+
+                                                   CaptionML=[ENU=Social Security No.;
+                                                              NOR=Personnr;
+                                                              SVE=Personnr] }
+    { 5   ;   ;VAT Registration No.;Code20        ;CaptionML=[ENU=VAT Registration No.;
+                                                              NOR=Momsregistreringsnr;
+                                                              SVE=Momsregistreringsnr];
+                                                   Description=10->20 IME-026 }
+    { 6   ;   ;Building/Apartment  ;Option        ;CaptionML=[ENU=Building / Apartment;
+                                                              NOR=Bygning / leilighet;
+                                                              SVE=Fastighet / Bostadsr„tt];
+                                                   OptionCaptionML=[ENU=Building,Apartment;
+                                                                    NOR=Bygning,Leilighet;
+                                                                    SVE=Fastighet,Bostadsr„tt];
+                                                   OptionString=Building,Apartment }
+    { 7   ;   ;Building No.        ;Code100       ;CaptionML=[ENU=Building No. / Apartment No.;
+                                                              NOR=Bygningnr / Leilighetsnr;
+                                                              SVE=Fastighetsbeteckning / L„genhetsnr] }
+    { 8   ;   ;Apartment Organisation No.;Code12  ;CaptionML=[ENU=Apartment Organisation No. (if Appartment);
+                                                              NOR=Leilighetsorganisasjonsnr (om leilighet);
+                                                              SVE=Bostadsr„ttsf”reningens org.nr. (om bostadsr„tt)] }
+    { 9   ;   ;Name                ;Text100       ;CaptionML=[ENU=Name;
+                                                              NOR=Navn;
+                                                              SVE=Namn] }
+    { 10  ;   ;Amount              ;Decimal       ;OnValidate=VAR
+                                                                SumOfSales@1100285101 : Decimal;
+                                                                SalesReceivablesSetup@1100285100 : Record 311;
+                                                                lvRotInfo@1100285102 : Record 11128101;
+                                                              BEGIN
+                                                                //RFC188
+                                                                //set max RUT+ROT amount
+
+                                                                SalesReceivablesSetup.GET;
+
+                                                                lvRotInfo.SETRANGE(Type, Type);
+                                                                lvRotInfo.SETRANGE("Document No.", "Document No.");
+                                                                lvRotInfo.SETRANGE("Personal No.","Personal No.");
+                                                                lvRotInfo.SETFILTER("Application Type",'<>%1',"Application Type");
+                                                                SumOfSales:=Amount;
+                                                                IF lvRotInfo.FINDSET(FALSE) THEN
+                                                                REPEAT
+                                                                  SumOfSales += lvRotInfo.Amount;
+                                                                UNTIL lvRotInfo.NEXT=0;
+                                                                IF SumOfSales > SalesReceivablesSetup."ROT+RUT Amount Max" THEN BEGIN
+                                                                  Amount := Amount - (SumOfSales - SalesReceivablesSetup."ROT+RUT Amount Max");
+                                                                END;
+                                                              END;
+
+                                                   CaptionML=[ENU=ROT/RUT Reduction;
+                                                              NOR=ROT/RUT Bel›p;
+                                                              SVE=ROT/RUT avdrag];
+                                                   Editable=No }
+    { 11  ;   ;Description of Work ;Text250       ;CaptionML=[ENU=Description of Work;
+                                                              NOR=Arbeidsbeskrivelse;
+                                                              SVE=Arbetsbeskrivning] }
+    { 12  ;   ;Starting Date       ;Date          ;CaptionML=[ENU=Starting Date;
+                                                              NOR=Startdato;
+                                                              SVE=Startdatum] }
+    { 13  ;   ;Ending Date         ;Date          ;CaptionML=[ENU=Ending Date;
+                                                              NOR=Sluttdato;
+                                                              SVE=Slutdatum] }
+    { 14  ;   ;Quote of ROT Amount ;Decimal       ;OnValidate=VAR
+                                                                lvRotInfo@1100285500 : Record 11128101;
+                                                                lvRotQuote@1100285501 : Decimal;
+                                                                lvCount@1100285502 : Integer;
+                                                              BEGIN
+                                                                //140206 <<<
+                                                                IF ("Quote of ROT Amount" > 100) THEN "Quote of ROT Amount" := 100; // Max 100
+                                                                IF ("Quote of ROT Amount" < 0) THEN "Quote of ROT Amount" := 0;     // Min 0
+
+                                                                lvRotInfo.SETRANGE(Type, Type);
+                                                                lvRotInfo.SETRANGE("Document No.", "Document No.");
+                                                                IF (Type = Type::Project) THEN lvRotInfo.SETRANGE("Project Principle", "Project Principle");
+                                                                lvRotInfo.SETFILTER("Personal No.", '<>%1', "Personal No.");
+                                                                lvRotInfo.SETRANGE("Application Type" ,"Application Type");  //RFC188
+                                                                lvCount := lvRotInfo.COUNT;
+
+                                                                IF (lvCount = 0) THEN BEGIN
+                                                                   "Quote of ROT Amount" := 100; // If only one person, set default 100%
+                                                                END ELSE BEGIN
+                                                                   lvRotQuote := ROUND((100 - "Quote of ROT Amount") / lvCount, 0.001, '<');
+
+                                                                   IF (lvRotInfo.FINDSET(TRUE)) THEN REPEAT   // If more than 1 person, change the other ones to adjust for present value.
+                                                                      lvRotInfo."Quote of ROT Amount" := lvRotQuote;
+                                                                      lvRotInfo.MODIFY(FALSE);
+                                                                   UNTIL lvRotInfo.NEXT = 0;
+                                                                END;
+                                                                //140206 >>>
+
+                                                                // 140410
+                                                                VALIDATE("Labour Cost");
+                                                              END;
+
+                                                   CaptionML=[ENU=Quote of ROT/RUT Amount (%);
+                                                              NOR=Andel av ROT/RUT Bel›p (%);
+                                                              SVE=Andel av ROT/RUT belopp (%)];
+                                                   DecimalPlaces=0:3;
+                                                   MinValue=0;
+                                                   MaxValue=100 }
+    { 15  ;   ;Labour Cost         ;Decimal       ;OnValidate=VAR
+                                                                lvRotInfo@1100285502 : Record 11128101;
+                                                                lvRotAmount@1100285501 : Decimal;
+                                                                lvCount@1100285500 : Integer;
+                                                                lvJob@1100285503 : Record 11072003;
+                                                                lvServiceOrder@1100285506 : Record 11012823;
+                                                                lvSalesLine@1100285504 : Record 37;
+                                                                SumOfSales@1100285505 : Decimal;
+                                                                SalesReceivablesSetup@1100285100 : Record 311;
+                                                                ROTAmountMax@1100285101 : Decimal;
+                                                                ROTPercentage@1100285102 : Integer;
+                                                              BEGIN
+
+                                                                //IF (AllowValidation) THEN  // Removed Itero.AC 151215
+                                                                GetAndTestROTMax(ROTAmountMax, ROTPercentage); // RFC065
+
+                                                                lvRotInfo.SETRANGE(Type, Type);
+                                                                lvRotInfo.SETRANGE("Document No.", "Document No.");
+                                                                lvRotInfo.SETRANGE("Application Type","Application Type");  //RFC188
+                                                                CASE Type OF
+                                                                  Type::Project:
+                                                                    BEGIN
+                                                                      lvJob.GET("Document No.");
+                                                                      IF ("Labour Cost" <> 0) AND (NOT AllowValidation) THEN
+                                                                        lvJob.TESTFIELD("Settlement Method", lvJob."Settlement Method"::"Fixed Price");
+                                                                      lvRotInfo.SETRANGE("Project Principle", "Project Principle");
+                                                                    END;
+                                                                  Type::"Service Order":
+                                                                    BEGIN
+                                                                      lvServiceOrder.GET("Document No.");
+                                                                      IF ("Labour Cost" <> 0) AND (NOT AllowValidation) THEN
+                                                                        lvServiceOrder.TESTFIELD("Settlement Method", lvServiceOrder."Settlement Method"::"Fixed Price");
+                                                                    END;
+                                                                  Type::Invoice:
+                                                                    BEGIN
+                                                                      lvSalesLine.SETRANGE("Document Type", lvSalesLine."Document Type"::Invoice);
+                                                                      lvSalesLine.SETRANGE("Document No.", "Invoice No.");
+                                                                      SumOfSales := 0;
+                                                                      IF (lvSalesLine.FINDSET(FALSE)) THEN
+                                                                      REPEAT
+                                                                         SumOfSales += lvSalesLine."Amount Including VAT";
+                                                                      UNTIL lvSalesLine.NEXT = 0;
+                                                                      IF ("Labour Cost" > SumOfSales) THEN
+                                                                        "Labour Cost" := SumOfSales;
+                                                                    END;
+                                                                END;
+
+                                                                lvRotInfo.SETFILTER("Personal No.", '<>%1', "Personal No.");
+                                                                lvCount := lvRotInfo.COUNT;
+
+                                                                IF (lvCount = 0) THEN BEGIN
+                                                                  VALIDATE(Amount, (ROTPercentage / 100) * "Labour Cost"); // RFC065
+                                                                  IF (Amount > ROTAmountMax) THEN
+                                                                    VALIDATE(Amount, ROTAmountMax); // RFC065
+                                                                  "ROT Percentage" := ROTPercentage;   // ITERO.AC 151215 RFC-065 Bugfix
+                                                                END ELSE BEGIN
+                                                                  // Divide ROT Amount according to the Rot-Quote
+                                                                  // RFC-065: Added Maxamount and percentage calculation from variables instead of fixed values.
+
+                                                                  lvRotAmount := (ROTPercentage / 100) * "Labour Cost"; // RFC-065
+                                                                  VALIDATE(Amount, ROUND(lvRotAmount * "Quote of ROT Amount" / 100, 1, '<'));
+                                                                  IF (Amount > ROTAmountMax) THEN
+                                                                    VALIDATE(Amount, ROTAmountMax);
+
+                                                                  IF lvRotInfo.FINDSET(TRUE) THEN
+                                                                  REPEAT   // If more than 1 person, change the other ones to adjust for present value.
+                                                                    lvRotInfo."Labour Cost" := "Labour Cost";
+                                                                    lvRotInfo.VALIDATE(Amount, ROUND(lvRotAmount * lvRotInfo."Quote of ROT Amount" / 100, 1, '<'));
+                                                                    IF (lvRotInfo.Amount > ROTAmountMax) THEN
+                                                                      lvRotInfo.VALIDATE(Amount,ROTAmountMax);
+                                                                    lvRotInfo."ROT Percentage" := ROTPercentage;   // ITERO.AC 151215 RFC-065 Bugfix
+                                                                    lvRotInfo.MODIFY(FALSE);
+                                                                  UNTIL lvRotInfo.NEXT = 0;
+                                                                END;
+                                                              END;
+
+                                                   CaptionML=[ENU=Labour Cost (fixed price inc. VAT);
+                                                              NOR=Arbeidskost (fast pris inkl. mva.);
+                                                              SVE=Arbetskostnad (fastpris inkl. moms)] }
+    { 16  ;   ;Project Principle   ;Code20        ;TableRelation="Project Principal".Principal WHERE (Project No.=FIELD(Document No.));
+                                                   CaptionML=[ENU=Project Principal;
+                                                              NOR=Prosjektoppdragsgiver;
+                                                              SVE=Projektuppdragsgivare] }
+    { 17  ;   ;Invoice Relation    ;Option        ;CaptionML=[ENU=Invoice Relation Type;
+                                                              SVE=Fakturarelationstyp];
+                                                   OptionCaptionML=[ENU=Project,Service Order;
+                                                                    NOR=Prosjekt,Serviceordre;
+                                                                    SVE=Projekt,Serviceorder];
+                                                   OptionString=Project,Service Order }
+    { 18  ;   ;Extension Lines     ;Integer       ;FieldClass=FlowField;
+                                                   CalcFormula=Count("Extended ROT/RUT Information" WHERE (Type=FIELD(Type),
+                                                                                                           Document No.=FIELD(Document No.),
+                                                                                                           Invoice No.=FIELD(Invoice No.),
+                                                                                                           Personal No.=FIELD(Personal No.),
+                                                                                                           Application Type=FIELD(Application Type))) }
+    { 20  ;   ;Application Type    ;Option        ;OnValidate=VAR
+                                                                ExtROTInfo@1100285100 : Record 11128102;
+                                                                SalesSetup@1100285101 : Record 311;
+                                                              BEGIN
+                                                                ExtROTInfo.SETRANGE(Type, Type);
+                                                                ExtROTInfo.SETRANGE("Document No.", "Document No.");
+                                                                ExtROTInfo.SETRANGE("Invoice No.", "Invoice No.");
+                                                                ExtROTInfo.SETRANGE("Personal No.", "Personal No.");
+                                                                ExtROTInfo.SETRANGE("Application Type", "Application Type");
+                                                                IF ExtROTInfo.ISEMPTY THEN BEGIN
+                                                                  SalesSetup.GET;
+                                                                  ExtROTInfo.INIT;
+                                                                  ExtROTInfo.Type := Type;
+                                                                  ExtROTInfo."Document No." := "Document No.";
+                                                                  ExtROTInfo."Invoice No." := "Invoice No.";
+                                                                  ExtROTInfo."Personal No." := "Personal No.";
+                                                                  ExtROTInfo.VALIDATE("Application Type", "Application Type");
+                                                                  CASE "Application Type" OF
+                                                                    "Application Type"::ROT: ExtROTInfo."ROT/RUT Type" := SalesSetup."ROT default worktype" - 1;
+                                                                    "Application Type"::RUT: ExtROTInfo."ROT/RUT Type" := SalesSetup."RUT default worktype" + 19;
+                                                                  END;
+                                                                  ExtROTInfo.INSERT;
+                                                                END;
+                                                              END;
+
+                                                   CaptionML=[ENU=Application Type;
+                                                              NOR=Programtype;
+                                                              SVE=Avdragstyp];
+                                                   OptionString=ROT,RUT }
+    { 11128578;;ROT Percentage     ;Decimal       ;Description=RFC065 }
+  }
+  KEYS
+  {
+    {    ;Type,Document No.,Invoice No.,Personal No.,Application Type;
+                                                   Clustered=Yes }
+    {    ;Application Type,Personal No.            }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+    VAR
+      AllowValidation@1100285500 : Boolean;
+      TEXT001@1000000004 : TextConst 'ENU=This is not a valid Swedish Personal No.: Too short;SVE=Detta „r inte ett giltigt svenskt personnummer, det „r f”r kort.';
+      TEXT002@1000000003 : TextConst 'ENU="This is not a valid Swedish Personal No. Can''t contain 11 digits ";SVE=Detta „r inte ett giltigt svenskt personnummer, det kan inte best† av 11 siffror.';
+      TEXT003@1000000002 : TextConst 'ENU=This is not a valid Swedish Personal No. must start with 19 or 20;SVE=Detta „r inte ett giltigt svenskt personnummer, m†ste starta med 19 eller 20';
+      TEXT004@1000000001 : TextConst 'ENU=This is not a valid Swedish Personal No.: Too long;SVE=Detta „r inte ett giltigt svenskt personnummer, det „r f”r l†ngt.';
+      TEXT005@1000000000 : TextConst 'ENU=This is not at valid Swedish Personal No.;SVE=Detta „r inte ett giltigt svenskt personnummer';
+
+    PROCEDURE ValidateLaborCost@1100285500();
+    BEGIN
+      AllowValidation := TRUE;
+    END;
+
+    PROCEDURE CopyExtendedROTInformation@1100285501(VAR ROTInformation@1100285500 : Record 11128101);
+    VAR
+      ExtendedROTInformation@1100285501 : Record 11128102;
+      ExtendedROTInformation2@1100285502 : Record 11128102;
+    BEGIN
+      // 150320 <<
+      ExtendedROTInformation.SETRANGE(Type, ROTInformation.Type);
+      ExtendedROTInformation.SETRANGE("Invoice No.", ROTInformation."Invoice No.");
+      ExtendedROTInformation.SETRANGE("Document No.", ROTInformation."Document No.");
+      ExtendedROTInformation.SETRANGE("Personal No.", ROTInformation."Personal No.");
+      ExtendedROTInformation.SETRANGE("Application Type", ROTInformation."Application Type");  //RFC188
+      IF (ExtendedROTInformation.FINDSET(FALSE)) THEN REPEAT
+         ExtendedROTInformation2 := ExtendedROTInformation;
+         ExtendedROTInformation2.Type := Type;                     // 150525
+         ExtendedROTInformation2."Document No." := "Document No."; // 150525
+         ExtendedROTInformation2."Invoice No." := "Invoice No.";   // 150525
+         ExtendedROTInformation2."Personal No." := "Personal No."; // 150525
+         ExtendedROTInformation2.INSERT();
+      UNTIL ExtendedROTInformation.NEXT = 0;
+      // 150320 >>
+    END;
+
+    PROCEDURE GetAndTestROTMax@1100285100(VAR RotMax@1100285100 : Decimal;VAR RotPercentage@1100285101 : Integer);
+    VAR
+      SalesReceivablesSetup@1100285102 : Record 311;
+    BEGIN
+      //RFC-065
+      SalesReceivablesSetup.GET();
+
+      //>>RFC188
+      //SalesReceivablesSetup.TESTFIELD("ROT Amount Max");
+      //SalesReceivablesSetup.TESTFIELD("ROT Percentage");
+      //RotMax := SalesReceivablesSetup."ROT Amount Max";
+      //RotPercentage := SalesReceivablesSetup."ROT Percentage";     // ITERO.AC 151215 RFC-065 Bugfix
+      CASE "Application Type" OF
+        "Application Type"::ROT:
+          BEGIN
+            SalesReceivablesSetup.TESTFIELD("ROT Amount Max");
+            SalesReceivablesSetup.TESTFIELD("ROT Percentage");
+
+            RotMax := SalesReceivablesSetup."ROT Amount Max";
+            RotPercentage := SalesReceivablesSetup."ROT Percentage";     // ITERO.AC 151215 RFC-065 Bugfix
+          END;
+        "Application Type"::RUT:
+          BEGIN
+            SalesReceivablesSetup.TESTFIELD("RUT Amount Max");
+            SalesReceivablesSetup.TESTFIELD("RUT Percentage");
+
+            RotMax := SalesReceivablesSetup."RUT Amount Max";
+            RotPercentage := SalesReceivablesSetup."RUT Percentage";
+          END;
+      END;
+      //<<RFC188
+    END;
+
+    BEGIN
+    {
+      140206 4PSSE.I012 ITERO.MH New Field "Quote of ROT Amount" with code onValidate
+      140410 4PSSE.I012 ITERO.MH New field "Labour Cost" for fixed price ROT handeling
+      141210 ITERO.MH Added new field for service order handeling - added code for Service order handeling - changed talble relation of Document No.
+      150320 ITERO.MH Extended ROT Information addition
+      150323 ITERO.MH Check of Personal No. when inserted
+      151215 ITERO.AC Bug fixes regarding RFC065 Added field ROT Percentage in order to save used percentage
+      161220 ITERO.FH RAD026 Added function CheckPersonalNo, for checking Swedish PersonalNo.
+      170405 ITERO.DL RFC188 enhance ROT-handling and extend with RUT
+      170512 ITERO.DL RFC188 corrections after test
+      171031 ITERO.DL RFC240 first person within the same project/document/application gets 100% as default
+      190118 ORANGO.DL IME1157 unable to assign "ROT/RUT Type"::Construction
+      190128 ORANGO.DL #21180 Show entered ROT-information in FSA and able to correct them if nessesary
+    }
+    END.
+  }
+}
+

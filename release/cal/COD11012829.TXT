@@ -1,0 +1,3588 @@
+OBJECT Codeunit 11012829 Maintenance Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00,4PSSE;
+  }
+  PROPERTIES
+  {
+    OnRun=VAR
+            ServiceContract@1100528600 : Record 11012812;
+            ServiceLocation@1100528601 : Record 11012801;
+            Building@1100528602 : Record 11071819;
+            ServiceObject@1100528603 : Record 11071691;
+            ServiceContractArrangement@1100528605 : Record 11071705;
+            RecRef@1100528604 : RecordRef;
+          BEGIN
+            IF NOT GivenSource.ISRECORD THEN
+              EXIT;
+            RecRef.GETTABLE(GivenSource);
+
+            ClearTempMaintProposalLines;
+            CASE RecRef.NUMBER OF
+              DATABASE::"Service-Contract":
+                BEGIN
+                  RecRef.SETTABLE(ServiceContract);
+                  CreateMaintProposalFromContract(ServiceContract, GivenEndDate, GivenClusterFilter, GivenClusterSeqn, GivenUsedFilters, GivenLastProposalCode, GivenMaxNoOfWorkingHours);
+                END;
+              DATABASE::"Service Location":
+                BEGIN
+                  RecRef.SETTABLE(ServiceLocation);
+                  CreateMaintProposalFromLocation(ServiceLocation, GivenEndDate, GivenUsedFilters, GivenLastProposalCode, GivenMaxNoOfWorkingHours);
+                END;
+              DATABASE::Building:
+                BEGIN
+                  RecRef.SETTABLE(Building);
+                  CreateMaintProposalFromBuilding(Building, GivenEndDate, GivenUsedFilters, GivenLastProposalCode, GivenMaxNoOfWorkingHours);
+                END;
+              DATABASE::"Service-Object":
+                BEGIN
+                  RecRef.SETTABLE(ServiceObject);
+                  CreateMaintProposalFromObject(ServiceObject, GivenEndDate, GivenUsedFilters, GivenLastProposalCode, GivenMaxNoOfWorkingHours);
+                END;
+              DATABASE::"Service Contract Arrangement":
+                BEGIN
+                  RecRef.SETTABLE(ServiceContractArrangement);
+                  CreateMaintPropFromContrArrangement(ServiceContractArrangement, GivenClusterFilter, GivenClusterSeqn, GivenUsedFilters, GivenLastProposalCode, GivenMaxNoOfWorkingHours);
+                END;
+            END;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      TmpOccupiedTimeBuffer@1100528603 : TEMPORARY Record 11071809;
+      TmpMaintenanceProposalLine@1100528610 : TEMPORARY Record 11071696;
+      ServiceSetup@1100528800 : Record 11012800;
+      StatusDialog@1100526203 : Dialog;
+      gvTempMaintProposalLineRec@1100525000 : TEMPORARY Record 11071696;
+      Text002@1100526202 : TextConst 'ENU=Progress: @1@@@@@@@@@@@;NOR=Fremdrift: @1@@@@@@@@@@@;SVE=Fîrlopp: @1@@@@@@@@@@@';
+      RecordCount@1100526204 : Integer;
+      RecordsProcessed@1100526205 : Integer;
+      Text003@1100528600 : TextConst 'ENU=No Overlap Conflicts found;NOR=Ingen overlappingskonflikter funnet;SVE=Inga îverlappningskonflikter hittades';
+      Text004@1100528601 : TextConst 'ENU=Overlap Conflict with Service Contract %1;NOR=Overlappingskonflikt med servicekontrakt %1;SVE=ôverlappande konflikt med servicekontrakt %1';
+      LastEntryNo@1100528604 : Integer;
+      OccupiedType@1100528605 : ' ,Base Calendar,Employee Time Table,Pause,Service Time Table,Employee Absence,Planned Service Order,Maintenance Proposal,Reserved for Calls,Outside Maintenance Window';
+      Text005a@1100525001 : TextConst 'ENU=Select lines first;NOR=Velg rader fõrst;SVE=VÑlj rader fîrst';
+      Text006@1100528606 : TextConst 'ENU=Processed %1 of %2 lines.;NOR=Prosessert %1 av %2 rader;SVE=%1 av %2 rader har behandlats.';
+      Text007@1100528607 : TextConst 'ENU=All Lines Processed;NOR=Alle rader prosessert;SVE=Alla rader har behandlats';
+      Text011@1100525002 : TextConst 'ENU=must be < Invoice;NOR=mÜ vëre < faktura;SVE=mÜste vara < Faktura';
+      Text012@1100525003 : TextConst 'ENU=must be Order or Invoicing Allowed;NOR=mÜ vëre ordre eller fakturering tillatt';
+      Text013a@1100525004 : TextConst 'ENU=Cannot create Maintenance Proposal for Selected Lines;NOR=Kan ikke opprette vedlikeholdsforslag for de valgte radene';
+      Text014@1100525005 : TextConst 'ENU=Conversion between Interval and Time Quantity not available in current Language';
+      Text015@1100528602 : TextConst 'ENU=Service Order %1 created;SVE=Serviceorder %1 skapad';
+      Text016@1100528613 : TextConst 'ENU=No Service Order created';
+      Text017@1100528614 : TextConst 'ENU=Service Orders %1..%2 created;SVE=Serviceordrar %1..%2 Ñr skapade';
+      Text018@1100528615 : TextConst 'ENU=There are lines present with Maintenance Date in the past, use today as maintenance date?';
+      Text019@1100528611 : TextConst 'ENU=Reserved Hours for Calls is 100%';
+      Text020@1100528612 : TextConst 'ENU=No Budget Working Hours present';
+      Text021@1100528616 : TextConst 'ENU=Not enough available hours with given period';
+      Text022@1100528617 : TextConst 'ENU=Service Order already exists;SVE=Serviceorder finns redan';
+      Text023@1100528618 : TextConst 'ENU=Line is Firm Planned';
+      Text024@1100528619 : TextConst 'ENU=Line is Expired';
+      GivenSource@1100528608 : Variant;
+      GivenEndDate@1100528609 : Date;
+      GivenClusterFilter@1100528620 : Code[250];
+      GivenClusterSeqn@1100528621 : Integer;
+      Text025@1100528624 : TextConst 'ENU=Errors detected, view these?';
+      GivenLastProposalCode@1100528626 : Code[20];
+      GivenUsedFilters@1100528623 : Text[250];
+      Text026@1100528622 : TextConst 'ENU=Period of %1 %2 expired';
+      TmpBuffer@1100529601 : TEMPORARY Record 11012875;
+      UseTmpBuffer@1100529600 : Boolean;
+      GivenMaxNoOfWorkingHours@1100529602 : Decimal;
+
+    PROCEDURE SetTryCatchGlobalVars@1100528645(ISource@1100528604 : Variant;IEndDate@1100528603 : Date;IClusterFilter@1100528602 : Code[250];IClusterSeqn@1100528601 : Integer;IUsedFilters@1100528607 : Text[250];ILastProposalCode@1100528606 : Code[20];MaxNoOfWorkingHours@1100529600 : Decimal);
+    BEGIN
+      GivenSource := ISource;
+      GivenEndDate := IEndDate;
+      GivenClusterFilter := IClusterFilter;
+      GivenClusterSeqn := IClusterSeqn;
+      GivenUsedFilters := IUsedFilters;
+      GivenLastProposalCode := ILastProposalCode;
+      GivenMaxNoOfWorkingHours := MaxNoOfWorkingHours;
+    END;
+
+    LOCAL PROCEDURE CreateMaintProposalFromContract@1100525000(IServiceContract@1100525000 : Record 11012812;IEndDate@1100525002 : Date;IClusterFilter@1100528600 : Code[250];IClusterSeqn@1100528601 : Integer;IUsedFilters@1100528605 : Text[250];VAR OLastProposalCode@1100528604 : Code[20];MaxNoOfWorkingHours@1100529600 : Decimal);
+    VAR
+      ContractObjectMaintenance@1100525001 : Record 11071692;
+      Customer@1100526201 : Record 18;
+      ObjectEndDate@1100525004 : Date;
+      ObjectStartDate@1100525005 : Date;
+      ProposalCodeFrom@1100525006 : Code[20];
+      ProposalCodeTo@1100528603 : Code[20];
+      NoOfWorkingHours@1100529601 : Decimal;
+    BEGIN
+      IF NOT Customer.GET(IServiceContract."Customer No.") THEN
+        Customer.INIT;
+
+      IF Customer.Blocked >= Customer.Blocked::Invoice THEN
+        Customer.FIELDERROR(Blocked, Text011);
+      IServiceContract.TESTFIELD(Blocked, FALSE);
+      IF NOT (IServiceContract.Status IN [IServiceContract.Status::Order, IServiceContract.Status::"Invoicing Allowed"]) THEN
+        IServiceContract.FIELDERROR(Status, Text012);
+      IF IServiceContract."Contract Form" = IServiceContract."Contract Form"::"Framework Contract" THEN
+        IServiceContract.FIELDERROR("Contract Form");
+
+      ContractObjectMaintenance.SETRANGE("Service Contract No.", IServiceContract."No.");
+      IF IClusterFilter <> '' THEN
+        ContractObjectMaintenance.SETFILTER(Cluster, IClusterFilter);
+      IF ContractObjectMaintenance.FINDSET THEN BEGIN
+        IF MaxNoOfWorkingHours <> 0 THEN
+          NoOfWorkingHours := GetMaintenanceProposalTotalWorkingHours(OLastProposalCode);
+        REPEAT
+          IF ContractObjectMaintenance."Maintenance Scheme" <> '' THEN BEGIN
+            CheckStartEndDate(IServiceContract, ContractObjectMaintenance, 0D, IEndDate, ObjectStartDate, ObjectEndDate);
+            CreateTempMaintProposalLines(ContractObjectMaintenance, IServiceContract, ObjectStartDate, ObjectEndDate, IClusterSeqn, MaxNoOfWorkingHours, NoOfWorkingHours);
+          END;
+        UNTIL ContractObjectMaintenance.NEXT = 0;
+      END;
+
+      ProposalCodeFrom := OLastProposalCode;
+      IF NOT gvTempMaintProposalLineRec.ISEMPTY THEN BEGIN
+        CreateMaintProposal(IUsedFilters, 0, IEndDate, ProposalCodeFrom, ProposalCodeTo);
+        OLastProposalCode := ProposalCodeTo;
+      END;
+    END;
+
+    PROCEDURE CreateMaintProposalFromContracts@1100528642(VAR IServiceContract@1100528604 : Record 11012812;IEndDate@1100528603 : Date;IClusterFilter@1100528602 : Code[250];IClusterSeqn@1100528601 : Integer;ISplitPerContract@1100528600 : Boolean;MaxNoOfWorkingHours@1100529600 : Decimal) : Text[50];
+    VAR
+      TmpErrorMessage@1100528607 : TEMPORARY Record 700;
+      MaintenanceManagement@1100528605 : Codeunit 11012829;
+      LastProposalCode@1100528609 : Code[20];
+      ProposalCodeFrom@1100528611 : Code[20];
+      ProposalCodeTo@1100528610 : Code[20];
+    BEGIN
+      IF IServiceContract.FINDSET THEN BEGIN
+        RecordsProcessed := 0;
+        RecordCount := IServiceContract.COUNT;
+        IF GUIALLOWED THEN
+          StatusDialog.OPEN(Text002);
+        REPEAT
+          IF GUIALLOWED THEN
+            StatusDialog.UPDATE(1, ROUND(RecordsProcessed / RecordCount * 9999, 1));
+          IF ISplitPerContract THEN
+            LastProposalCode := '';
+          MaintenanceManagement.SetTryCatchGlobalVars(IServiceContract, IEndDate, IClusterFilter, IClusterSeqn, IServiceContract.GETFILTERS, LastProposalCode, MaxNoOfWorkingHours);
+          CLEARLASTERROR;
+          IF NOT MaintenanceManagement.RUN THEN
+            TmpErrorMessage.LogMessage(IServiceContract.RECORDID, 0, TmpErrorMessage."Message Type"::Error, GETLASTERRORTEXT);
+          MaintenanceManagement.GetLastProposalCode(LastProposalCode);
+          IF ProposalCodeFrom = '' THEN
+            ProposalCodeFrom := LastProposalCode;
+          ProposalCodeTo := LastProposalCode;
+          COMMIT;
+          RecordsProcessed += 1;
+        UNTIL IServiceContract.NEXT = 0;
+        IF GUIALLOWED THEN
+          StatusDialog.CLOSE;
+      END;
+      IF GUIALLOWED THEN
+        IF TmpErrorMessage.HasErrors(FALSE) THEN
+          IF CONFIRM(Text025) THEN
+            TmpErrorMessage.ShowErrorMessages(FALSE);
+
+      IF ProposalCodeFrom = ProposalCodeTo THEN
+        EXIT(ProposalCodeFrom)
+      ELSE
+        EXIT(STRSUBSTNO('%1..%2', ProposalCodeFrom, ProposalCodeTo));
+    END;
+
+    PROCEDURE GetLastProposalCode@1100528646(VAR OLastProposalCode@1100528600 : Code[20]);
+    BEGIN
+      OLastProposalCode := GivenLastProposalCode;
+    END;
+
+    LOCAL PROCEDURE CreateMaintProposalFromLocation@1100525003(IServiceLocation@1100525000 : Record 11012801;IEndDate@1100525001 : Date;IUsedFilters@1100528603 : Text[250];VAR OLastProposalCode@1100528602 : Code[20];MaxNoOfWorkingHours@1100529600 : Decimal);
+    VAR
+      ContractObjectMaintenance@1100525003 : Record 11071692;
+      ServiceObject@1100525004 : Record 11071691;
+      ServiceContract@1100528600 : Record 11012812;
+      Customer@1100526201 : Record 18;
+      ObjectEndDate@1100525006 : Date;
+      ObjectStartDate@1100525005 : Date;
+      ProposalCodeFrom@1100525008 : Code[20];
+      ProposalCodeTo@1100528601 : Code[20];
+      NoOfWorkingHours@1100529601 : Decimal;
+    BEGIN
+      ServiceObject.SETCURRENTKEY("Service Location No.");
+      ContractObjectMaintenance.SETCURRENTKEY("Object No.");
+      ServiceObject.SETRANGE("Service Location No.", IServiceLocation."No.");
+      IF ServiceObject.FINDSET THEN BEGIN
+        IF MaxNoOfWorkingHours <> 0 THEN
+          NoOfWorkingHours := GetMaintenanceProposalTotalWorkingHours(OLastProposalCode);
+        REPEAT
+          ContractObjectMaintenance.SETRANGE("Object No.", ServiceObject."No.");
+          IF ContractObjectMaintenance.FINDSET THEN BEGIN
+            REPEAT
+              IF ServiceContract.GET(ContractObjectMaintenance."Service Contract No.") THEN BEGIN
+                IF NOT Customer.GET(ServiceContract."Customer No.") THEN
+                  Customer.INIT;
+                IF (Customer.Blocked < Customer.Blocked::Invoice) AND //mg, 03-02-11: M25301
+                  NOT ServiceContract.Blocked AND
+                  (ServiceContract.Status IN [ServiceContract.Status::Order, ServiceContract.Status::"Invoicing Allowed"]) AND
+                  (ServiceContract."Contract Form" <> ServiceContract."Contract Form"::"Framework Contract")
+                THEN BEGIN
+                  IF ContractObjectMaintenance."Maintenance Scheme" <> '' THEN BEGIN
+                    CheckStartEndDate(ServiceContract, ContractObjectMaintenance, 0D, IEndDate, ObjectStartDate, ObjectEndDate);
+                    CreateTempMaintProposalLines(ContractObjectMaintenance, ServiceContract, ObjectStartDate, ObjectEndDate, 0, MaxNoOfWorkingHours, NoOfWorkingHours);
+                  END;
+                END;
+              END;
+            UNTIL ContractObjectMaintenance.NEXT = 0;
+          END;
+        UNTIL ServiceObject.NEXT = 0;
+      END;
+
+      ProposalCodeFrom := OLastProposalCode;
+      IF NOT gvTempMaintProposalLineRec.ISEMPTY THEN BEGIN
+        CreateMaintProposal(IUsedFilters, 1, IEndDate, ProposalCodeFrom, ProposalCodeTo);
+        OLastProposalCode := ProposalCodeTo;
+      END;
+    END;
+
+    PROCEDURE CreateMaintProposalFromLocations@1100528649(VAR IServiceLocation@1100528604 : Record 11012801;IEndDate@1100528603 : Date;MaxNoOfWorkingHours@1100529600 : Decimal) : Text[50];
+    VAR
+      TmpErrorMessage@1100528607 : TEMPORARY Record 700;
+      MaintenanceManagement@1100528605 : Codeunit 11012829;
+      LastProposalCode@1100528609 : Code[20];
+      ProposalCodeFrom@1100528611 : Code[20];
+      ProposalCodeTo@1100528610 : Code[20];
+    BEGIN
+      IF IServiceLocation.FINDSET THEN BEGIN
+        RecordsProcessed := 0;
+        RecordCount := IServiceLocation.COUNT;
+        IF GUIALLOWED THEN
+          StatusDialog.OPEN(Text002);
+        REPEAT
+          IF GUIALLOWED THEN
+            StatusDialog.UPDATE(1, ROUND(RecordsProcessed / RecordCount * 9999, 1));
+          MaintenanceManagement.SetTryCatchGlobalVars(IServiceLocation, IEndDate, '', 0, IServiceLocation.GETFILTERS, LastProposalCode, MaxNoOfWorkingHours);
+          CLEARLASTERROR;
+          IF NOT MaintenanceManagement.RUN THEN
+            TmpErrorMessage.LogMessage(IServiceLocation.RECORDID, 0, TmpErrorMessage."Message Type"::Error, GETLASTERRORTEXT);
+          MaintenanceManagement.GetLastProposalCode(LastProposalCode);
+          IF ProposalCodeFrom = '' THEN
+            ProposalCodeFrom := LastProposalCode;
+          ProposalCodeTo := LastProposalCode;
+          COMMIT;
+          RecordsProcessed += 1;
+        UNTIL IServiceLocation.NEXT = 0;
+        IF GUIALLOWED THEN
+          StatusDialog.CLOSE;
+      END;
+      IF GUIALLOWED THEN
+        IF TmpErrorMessage.HasErrors(FALSE) THEN
+          IF CONFIRM(Text025) THEN
+            TmpErrorMessage.ShowErrorMessages(FALSE);
+
+      IF ProposalCodeFrom = ProposalCodeTo THEN
+        EXIT(ProposalCodeFrom)
+      ELSE
+        EXIT(STRSUBSTNO('%1..%2', ProposalCodeFrom, ProposalCodeTo));
+    END;
+
+    LOCAL PROCEDURE CreateMaintProposalFromBuilding@1100528300(IBuilding@1100525000 : Record 11071819;IEndDate@1100525001 : Date;IUsedFilters@1100528602 : Text[250];VAR OLastProposalCode@1100528601 : Code[20];MaxNoOfWorkingHours@1100529600 : Decimal);
+    VAR
+      BuildingObjectRelation@1100528300 : Record 11071820;
+      ContractObjectMaintenance@1100525003 : Record 11071692;
+      ServiceObject@1100525004 : Record 11071691;
+      TmpServiceObject@1100528301 : TEMPORARY Record 11071691;
+      Customer@1100526201 : Record 18;
+      ObjectEndDate@1100525006 : Date;
+      ObjectStartDate@1100525005 : Date;
+      ServiceContract@1100525007 : Record 11012812;
+      ProposalCodeFrom@1100525008 : Code[20];
+      ProposalCodeTo@1100528600 : Code[20];
+      NoOfWorkingHours@1100529601 : Decimal;
+    BEGIN
+      ContractObjectMaintenance.SETCURRENTKEY("Object No.");
+      BuildingObjectRelation.SETRANGE("Building Code", IBuilding.Code);
+      IF BuildingObjectRelation.FINDSET THEN BEGIN
+        IF MaxNoOfWorkingHours <> 0 THEN
+          NoOfWorkingHours := GetMaintenanceProposalTotalWorkingHours(OLastProposalCode);
+        REPEAT
+          IF ServiceObject.GET(BuildingObjectRelation."Object No.") AND
+              NOT TmpServiceObject.GET(BuildingObjectRelation."Object No.")
+          THEN BEGIN
+            ContractObjectMaintenance.SETRANGE("Object No.", ServiceObject."No.");
+            IF ContractObjectMaintenance.FINDSET THEN BEGIN
+              REPEAT
+                IF ServiceContract.GET(ContractObjectMaintenance."Service Contract No.") THEN BEGIN
+                  IF NOT Customer.GET(ServiceContract."Customer No.") THEN
+                    Customer.INIT;
+                  IF (Customer.Blocked < Customer.Blocked::Invoice) AND //mg, 03-02-11: M25301
+                    NOT ServiceContract.Blocked AND
+                    (ServiceContract.Status IN [ServiceContract.Status::Order, ServiceContract.Status::"Invoicing Allowed"]) AND
+                    (ServiceContract."Contract Form" <> ServiceContract."Contract Form"::"Framework Contract")
+                  THEN BEGIN
+                    IF ContractObjectMaintenance."Maintenance Scheme" <> '' THEN BEGIN
+                      CheckStartEndDate(ServiceContract, ContractObjectMaintenance, 0D, IEndDate, ObjectStartDate, ObjectEndDate);
+                      CreateTempMaintProposalLines(ContractObjectMaintenance, ServiceContract, ObjectStartDate, ObjectEndDate, 0, MaxNoOfWorkingHours, NoOfWorkingHours);
+                    END;
+                  END;
+                END;
+              UNTIL ContractObjectMaintenance.NEXT = 0;
+            END;
+            TmpServiceObject := ServiceObject;
+            TmpServiceObject.INSERT;
+          END;
+        UNTIL BuildingObjectRelation.NEXT = 0;
+      END;
+
+      ProposalCodeFrom := OLastProposalCode;
+      IF NOT gvTempMaintProposalLineRec.ISEMPTY THEN BEGIN
+        CreateMaintProposal(IUsedFilters, 3, IEndDate, ProposalCodeFrom, ProposalCodeTo);
+        OLastProposalCode := ProposalCodeTo;
+      END;
+    END;
+
+    PROCEDURE CreateMaintProposalFromBuildings@1100528652(VAR IBuilding@1100528604 : Record 11071819;IEndDate@1100528603 : Date;MaxNoOfWorkingHours@1100529600 : Decimal) : Text[50];
+    VAR
+      TmpErrorMessage@1100528607 : TEMPORARY Record 700;
+      MaintenanceManagement@1100528605 : Codeunit 11012829;
+      LastProposalCode@1100528609 : Code[20];
+      ProposalCodeFrom@1100528611 : Code[20];
+      ProposalCodeTo@1100528610 : Code[20];
+    BEGIN
+      IF IBuilding.FINDSET THEN BEGIN
+        RecordsProcessed := 0;
+        RecordCount := IBuilding.COUNT;
+        IF GUIALLOWED THEN
+          StatusDialog.OPEN(Text002);
+        REPEAT
+          IF GUIALLOWED THEN
+            StatusDialog.UPDATE(1, ROUND(RecordsProcessed / RecordCount * 9999, 1));
+          MaintenanceManagement.SetTryCatchGlobalVars(IBuilding, IEndDate, '', 0, IBuilding.GETFILTERS, LastProposalCode, MaxNoOfWorkingHours);
+          CLEARLASTERROR;
+          IF NOT MaintenanceManagement.RUN THEN
+            TmpErrorMessage.LogMessage(IBuilding.RECORDID, 0, TmpErrorMessage."Message Type"::Error, GETLASTERRORTEXT);
+          MaintenanceManagement.GetLastProposalCode(LastProposalCode);
+          IF ProposalCodeFrom = '' THEN
+            ProposalCodeFrom := LastProposalCode;
+          ProposalCodeTo := LastProposalCode;
+          COMMIT;
+          RecordsProcessed += 1;
+        UNTIL IBuilding.NEXT = 0;
+        IF GUIALLOWED THEN
+          StatusDialog.CLOSE;
+      END;
+      IF GUIALLOWED THEN
+        IF TmpErrorMessage.HasErrors(FALSE) THEN
+          IF CONFIRM(Text025) THEN
+            TmpErrorMessage.ShowErrorMessages(FALSE);
+
+      IF ProposalCodeFrom = ProposalCodeTo THEN
+        EXIT(ProposalCodeFrom)
+      ELSE
+        EXIT(STRSUBSTNO('%1..%2', ProposalCodeFrom, ProposalCodeTo));
+    END;
+
+    LOCAL PROCEDURE CreateMaintProposalFromObject@1100525004(VAR IServiceObject@1100525000 : Record 11071691;IEndDate@1100525001 : Date;IUsedFilters@1100528603 : Text[250];VAR OLastProposalCode@1100528602 : Code[20];MaxNoOfWorkingHours@1100529600 : Decimal);
+    VAR
+      ContractObjectMaintenance@1100525003 : Record 11071692;
+      Customer@1100526201 : Record 18;
+      ServiceContract@1100528600 : Record 11012812;
+      ObjectEndDate@1100525006 : Date;
+      ObjectStartDate@1100525005 : Date;
+      ProposalCodeFrom@1100525004 : Code[20];
+      ProposalCodeTo@1100528601 : Code[20];
+      NoOfWorkingHours@1100529601 : Decimal;
+    BEGIN
+      ContractObjectMaintenance.SETCURRENTKEY("Object No.");
+      ContractObjectMaintenance.SETRANGE("Object No.", IServiceObject."No.");
+      IF ContractObjectMaintenance.FINDSET THEN BEGIN
+        IF MaxNoOfWorkingHours <> 0 THEN
+          NoOfWorkingHours := GetMaintenanceProposalTotalWorkingHours(OLastProposalCode);
+        REPEAT
+          IF ServiceContract.GET(ContractObjectMaintenance."Service Contract No.") THEN BEGIN
+            IF NOT Customer.GET(ServiceContract."Customer No.") THEN
+              Customer.INIT;
+            IF (Customer.Blocked < Customer.Blocked::Invoice) AND //mg, 03-02-11: M25301
+              NOT ServiceContract.Blocked AND
+              (ServiceContract.Status IN [ServiceContract.Status::Order, ServiceContract.Status::"Invoicing Allowed"]) AND
+              (ServiceContract."Contract Form" <> ServiceContract."Contract Form"::"Framework Contract")
+            THEN BEGIN
+              IF ContractObjectMaintenance."Maintenance Scheme" <> '' THEN BEGIN
+                CheckStartEndDate(ServiceContract, ContractObjectMaintenance, 0D, IEndDate, ObjectStartDate, ObjectEndDate);
+                CreateTempMaintProposalLines(ContractObjectMaintenance, ServiceContract, ObjectStartDate, ObjectEndDate, 0, MaxNoOfWorkingHours, NoOfWorkingHours);
+              END;
+            END;
+          END;
+        UNTIL ContractObjectMaintenance.NEXT = 0;
+      END;
+
+      ProposalCodeFrom := OLastProposalCode;
+      IF NOT gvTempMaintProposalLineRec.ISEMPTY THEN BEGIN
+        CreateMaintProposal(IUsedFilters, 2, IEndDate, ProposalCodeFrom, ProposalCodeTo);
+        OLastProposalCode := ProposalCodeTo;
+      END;
+    END;
+
+    PROCEDURE CreateMaintProposalFromObjects@1100528657(VAR IServiceObject@1100528604 : Record 11071691;IEndDate@1100528603 : Date;MaxNoOfWorkingHours@1100529600 : Decimal) : Text[50];
+    VAR
+      TmpErrorMessage@1100528607 : TEMPORARY Record 700;
+      MaintenanceManagement@1100528605 : Codeunit 11012829;
+      LastProposalCode@1100528609 : Code[20];
+      ProposalCodeFrom@1100528611 : Code[20];
+      ProposalCodeTo@1100528610 : Code[20];
+    BEGIN
+      IF IServiceObject.FINDSET THEN BEGIN
+        RecordsProcessed := 0;
+        RecordCount := IServiceObject.COUNT;
+        IF GUIALLOWED THEN
+          StatusDialog.OPEN(Text002);
+        REPEAT
+          IF GUIALLOWED THEN
+            StatusDialog.UPDATE(1, ROUND(RecordsProcessed / RecordCount * 9999, 1));
+          MaintenanceManagement.SetTryCatchGlobalVars(IServiceObject, IEndDate, '', 0, IServiceObject.GETFILTERS, LastProposalCode, MaxNoOfWorkingHours);
+          CLEARLASTERROR;
+          IF NOT MaintenanceManagement.RUN THEN
+            TmpErrorMessage.LogMessage(IServiceObject.RECORDID, 0, TmpErrorMessage."Message Type"::Error, GETLASTERRORTEXT);
+          MaintenanceManagement.GetLastProposalCode(LastProposalCode);
+          IF ProposalCodeFrom = '' THEN
+            ProposalCodeFrom := LastProposalCode;
+          ProposalCodeTo := LastProposalCode;
+          COMMIT;
+          RecordsProcessed += 1;
+        UNTIL IServiceObject.NEXT = 0;
+        IF GUIALLOWED THEN
+          StatusDialog.CLOSE;
+      END;
+      IF GUIALLOWED THEN
+        IF TmpErrorMessage.HasErrors(FALSE) THEN
+          IF CONFIRM(Text025) THEN
+            TmpErrorMessage.ShowErrorMessages(FALSE);
+
+      IF ProposalCodeFrom = ProposalCodeTo THEN
+        EXIT(ProposalCodeFrom)
+      ELSE
+        EXIT(STRSUBSTNO('%1..%2', ProposalCodeFrom, ProposalCodeTo));
+    END;
+
+    LOCAL PROCEDURE CreateMaintPropFromContrArrangement@1100528628(IServiceContractArrangement@1100528600 : Record 11071705;IClusterFilter@1100528603 : Code[250];IClusterSeqn@1100528602 : Integer;IUsedFilters@1100528612 : Text[250];VAR OLastProposalCode@1100528611 : Code[20];MaxNoOfWorkingHours@1100529600 : Decimal);
+    VAR
+      ContractObjectMaintenance@1100528604 : Record 11071692;
+      ServiceContract@1100528605 : Record 11012812;
+      ObjectStartDate@1100528606 : Date;
+      ObjectEndDate@1100528607 : Date;
+      MaintenanceDate@1100528608 : Date;
+      ProposalCodeFrom@1100528609 : Code[20];
+      ProposalCodeTo@1100528610 : Code[20];
+      NoOfWorkingHours@1100529601 : Decimal;
+    BEGIN
+      ContractObjectMaintenance.SETRANGE("Service Contract No.", IServiceContractArrangement."Service Contract No.");
+      ContractObjectMaintenance.SETRANGE("Object No.", IServiceContractArrangement."Object No.");
+      ContractObjectMaintenance.SETRANGE("Maintenance Scheme", IServiceContractArrangement."Maintenance Scheme");
+      IF IClusterFilter <> '' THEN
+        ContractObjectMaintenance.SETFILTER(Cluster, IClusterFilter);
+      IF ContractObjectMaintenance.FINDFIRST THEN BEGIN
+        ServiceContract.GET(IServiceContractArrangement."Service Contract No.");
+        CheckStartEndDate(ServiceContract, ContractObjectMaintenance, 0D, 99991231D, ObjectStartDate, ObjectEndDate);
+        IF MaxNoOfWorkingHours <> 0 THEN
+          NoOfWorkingHours := GetMaintenanceProposalTotalWorkingHours(OLastProposalCode);
+
+        MaintenanceDate := IServiceContractArrangement.GetMaintenanceDate;
+        IF (MaintenanceDate >= ObjectStartDate) AND (MaintenanceDate <= ObjectEndDate) THEN
+          InsertTempMaintProposalLine(ContractObjectMaintenance, ServiceContract, IServiceContractArrangement, IClusterSeqn, MaxNoOfWorkingHours, NoOfWorkingHours);
+      END;
+
+      ProposalCodeFrom := OLastProposalCode;
+      IF NOT gvTempMaintProposalLineRec.ISEMPTY THEN BEGIN
+        CreateMaintProposal(IUsedFilters, 4, 0D, ProposalCodeFrom, ProposalCodeTo);
+        OLastProposalCode := ProposalCodeTo;
+      END;
+    END;
+
+    PROCEDURE CreateMaintPropFromContrArrangements@1100528666(VAR IServiceContractArrangement@1100528604 : Record 11071705;IClusterFilter@1100528601 : Code[250];IClusterSeqn@1100528600 : Integer;MaxNoOfWorkingHours@1100529600 : Decimal) : Text[50];
+    VAR
+      TmpErrorMessage@1100528607 : TEMPORARY Record 700;
+      MaintenanceManagement@1100528605 : Codeunit 11012829;
+      LastProposalCode@1100528609 : Code[20];
+      ProposalCodeFrom@1100528611 : Code[20];
+      ProposalCodeTo@1100528610 : Code[20];
+    BEGIN
+      IServiceContractArrangement.SETRANGE("Maintenance Proposal No.", '');
+      IServiceContractArrangement.SETRANGE("Service Order No.", '');
+      IServiceContractArrangement.SETRANGE(Cancelled, FALSE);
+      IF IServiceContractArrangement.FINDSET THEN BEGIN
+        RecordsProcessed := 0;
+        RecordCount := IServiceContractArrangement.COUNT;
+        IF GUIALLOWED THEN
+          StatusDialog.OPEN(Text002);
+        REPEAT
+          IF GUIALLOWED THEN
+            StatusDialog.UPDATE(1, ROUND(RecordsProcessed / RecordCount * 9999, 1));
+          MaintenanceManagement.SetTryCatchGlobalVars(IServiceContractArrangement, 0D, IClusterFilter, IClusterSeqn, IServiceContractArrangement.GETFILTERS, LastProposalCode, MaxNoOfWorkingHours);
+          CLEARLASTERROR;
+          IF NOT MaintenanceManagement.RUN THEN
+            TmpErrorMessage.LogMessage(IServiceContractArrangement.RECORDID, 0, TmpErrorMessage."Message Type"::Error, GETLASTERRORTEXT);
+          MaintenanceManagement.GetLastProposalCode(LastProposalCode);
+          IF ProposalCodeFrom = '' THEN
+            ProposalCodeFrom := LastProposalCode;
+          ProposalCodeTo := LastProposalCode;
+          COMMIT;
+          RecordsProcessed += 1;
+        UNTIL IServiceContractArrangement.NEXT = 0;
+        IF GUIALLOWED THEN
+          StatusDialog.CLOSE;
+      END;
+      IF GUIALLOWED THEN
+        IF TmpErrorMessage.HasErrors(FALSE) THEN
+          IF CONFIRM(Text025) THEN
+            TmpErrorMessage.ShowErrorMessages(FALSE);
+
+      IF ProposalCodeFrom = ProposalCodeTo THEN
+        EXIT(ProposalCodeFrom)
+      ELSE
+        EXIT(STRSUBSTNO('%1..%2', ProposalCodeFrom, ProposalCodeTo));
+    END;
+
+    PROCEDURE CreateSOFromContrArr@1100528634(VAR IServiceContractArrangement@1100528600 : Record 11071705);
+    VAR
+      ServiceContractArrangement@1100528607 : Record 11071705;
+      ContractObjectMaintenance@1100528606 : Record 11071692;
+      ServiceContract@1100528605 : Record 11012812;
+      CreateServiceOrdersCU@1100528608 : Codeunit 11012831;
+      ObjectStartDate@1100528604 : Date;
+      ObjectEndDate@1100528603 : Date;
+      MaintenanceDate@1100528602 : Date;
+      FirstServiceOrderNo@1100528611 : Code[20];
+      LastServiceOrderNo@1100528612 : Code[20];
+      UseTodayAsMaintenanceDate@1100528613 : Boolean;
+      StartingDateMaintenance@1100528614 : Date;
+      DummyDec@1100529600 : Decimal;
+    BEGIN
+      ServiceContractArrangement.COPY(IServiceContractArrangement);
+      IF NOT ServiceContractArrangement.FINDSET THEN
+        ERROR(Text005a);
+      ServiceContractArrangement.SETRANGE("Maintenance Proposal No.", '');
+      ServiceContractArrangement.SETRANGE("Service Order No.", '');
+      ServiceContractArrangement.SETRANGE(Cancelled, FALSE);
+      IF NOT ServiceContractArrangement.FINDSET THEN
+        ERROR(Text013a);
+      RecordsProcessed := 0;
+      RecordCount := ServiceContractArrangement.COUNT;
+      REPEAT
+        ContractObjectMaintenance.SETRANGE("Service Contract No.", ServiceContractArrangement."Service Contract No.");
+        ContractObjectMaintenance.SETRANGE("Object No.", ServiceContractArrangement."Object No.");
+        ContractObjectMaintenance.SETRANGE("Maintenance Scheme", ServiceContractArrangement."Maintenance Scheme");
+        IF ContractObjectMaintenance.FINDFIRST THEN BEGIN
+          ServiceContract.GET(ServiceContractArrangement."Service Contract No.");
+          CheckStartEndDate(ServiceContract, ContractObjectMaintenance, 0D, 99991231D, ObjectStartDate, ObjectEndDate);
+
+          MaintenanceDate := ServiceContractArrangement.GetMaintenanceDate;
+          IF (MaintenanceDate >= ObjectStartDate) AND (MaintenanceDate <= ObjectEndDate) THEN
+            InsertTempMaintProposalLine(ContractObjectMaintenance, ServiceContract, ServiceContractArrangement, 0, 0, DummyDec);
+        END;
+        RecordsProcessed += 1;
+      UNTIL ServiceContractArrangement.NEXT = 0;
+
+      IF gvTempMaintProposalLineRec.FINDSET THEN BEGIN
+        gvTempMaintProposalLineRec.SETFILTER("Starting Date Maintenance", '<%1', TODAY);
+        IF NOT gvTempMaintProposalLineRec.ISEMPTY THEN
+          UseTodayAsMaintenanceDate := CONFIRM(Text018);
+        gvTempMaintProposalLineRec.SETRANGE("Starting Date Maintenance");
+        REPEAT
+          StartingDateMaintenance := gvTempMaintProposalLineRec."Starting Date Maintenance";
+          IF UseTodayAsMaintenanceDate AND (StartingDateMaintenance < TODAY) THEN
+            StartingDateMaintenance := TODAY;
+          CreateServiceOrdersCU.CreateServiceOrdersMaintProp(gvTempMaintProposalLineRec, StartingDateMaintenance, 0, '', FALSE, FALSE, FALSE, '', 0, FALSE);
+        UNTIL gvTempMaintProposalLineRec.NEXT = 0;
+        ServiceContractArrangement.SETFILTER("Service Order No.", '<>%1', '');
+        IF ServiceContractArrangement.FINDSET THEN
+          REPEAT
+            ServiceContractArrangement.CALCFIELDS("Service Order No.");
+            IF FirstServiceOrderNo = '' THEN
+              FirstServiceOrderNo := ServiceContractArrangement."Service Order No.";
+            LastServiceOrderNo := ServiceContractArrangement."Service Order No.";
+          UNTIL ServiceContractArrangement.NEXT = 0;
+        IF FirstServiceOrderNo <> '' THEN BEGIN
+          IF FirstServiceOrderNo = LastServiceOrderNo THEN
+            MESSAGE(Text015, FirstServiceOrderNo)
+          ELSE
+            MESSAGE(Text017, FirstServiceOrderNo, LastServiceOrderNo);
+        END ELSE
+          MESSAGE(Text016);
+      END ELSE
+        MESSAGE(Text016);
+    END;
+
+    PROCEDURE CheckStartEndDate@1100525007(IServiceContract@1100525000 : Record 11012812;IContractObjectMaintenance@1100525003 : Record 11071692;IStartDate@1100525002 : Date;IEndDate@1100525001 : Date;VAR IStartObjectDate@1100525005 : Date;VAR IEndObjectDate@1100525004 : Date);
+    VAR
+      ContractObject@1100526200 : Record 11071702;
+    BEGIN
+      ContractObject.GET(IContractObjectMaintenance."Service Contract No.", IContractObjectMaintenance."Object No.");
+
+      IStartObjectDate := IStartDate;
+      IF IServiceContract."Starting Date" > IStartDate THEN
+        IStartObjectDate := IServiceContract."Starting Date";
+
+      IF IContractObjectMaintenance."Starting Date Maintenance" > IStartObjectDate THEN
+       IStartObjectDate := IContractObjectMaintenance."Starting Date Maintenance";
+
+      IEndObjectDate := IEndDate;
+      IF IServiceContract."Ending Date" <> 0D THEN
+        IF IServiceContract."Ending Date" < IEndDate THEN
+          IEndObjectDate := IServiceContract."Ending Date";
+
+      IF ContractObject."Ending Date" <> 0D THEN
+        IF ContractObject."Ending Date" < IEndObjectDate THEN
+          IEndObjectDate := ContractObject."Ending Date";
+    END;
+
+    PROCEDURE CreateTempMaintProposalLines@1100525001(VAR IContractObjectsMaintenance@1100525000 : Record 11071692;IServContractRec@1100525002 : Record 11012812;IStartDate@1100526201 : Date;IEndDate@1100525001 : Date;IClusterSeqn@1100528600 : Integer;MaxNoOfWorkingHours@1100529600 : Decimal;VAR NoOfWorkingHours@1100529601 : Decimal);
+    VAR
+      MaintenanceDate@1100525003 : Date;
+      ServiceContractArrangement@1100526200 : Record 11071705;
+    BEGIN
+      IContractObjectsMaintenance.UpdateServiceContractArr(IEndDate, TRUE, TRUE, TRUE);
+
+      ServiceContractArrangement.SETCURRENTKEY("Service Contract No.", "Object No.", "Maintenance Scheme", "Maintenance Year");
+      ServiceContractArrangement.SETRANGE("Service Contract No.", IContractObjectsMaintenance."Service Contract No.");
+      ServiceContractArrangement.SETRANGE("Object No.", IContractObjectsMaintenance."Object No.");
+      ServiceContractArrangement.SETRANGE("Service Package", IContractObjectsMaintenance."Service Package");
+      ServiceContractArrangement.SETRANGE("Maintenance Scheme", IContractObjectsMaintenance."Maintenance Scheme");
+      ServiceContractArrangement.SETRANGE("Maintenance Proposal No.", '');
+      ServiceContractArrangement.SETRANGE("Service Order No.", '');
+      ServiceContractArrangement.SETRANGE(Cancelled, FALSE);
+      IF ServiceContractArrangement.FINDSET THEN
+        REPEAT
+          MaintenanceDate := ServiceContractArrangement.GetMaintenanceDate;
+          IF (MaintenanceDate >= IStartDate) AND (MaintenanceDate <= IEndDate) THEN
+            InsertTempMaintProposalLine(IContractObjectsMaintenance, IServContractRec, ServiceContractArrangement, IClusterSeqn, MaxNoOfWorkingHours, NoOfWorkingHours);
+        UNTIL (ServiceContractArrangement.NEXT = 0) OR (MaintenanceDate >= IEndDate) OR
+              ((NoOfWorkingHours >= MaxNoOfWorkingHours) AND (MaxNoOfWorkingHours <> 0));
+    END;
+
+    PROCEDURE InsertTempMaintProposalLine@1100525006(VAR IOContractObjectMaintenance@1100525000 : Record 11071692;IServiceContract@1100525001 : Record 11012812;IServiceContractArrangement@1100526201 : Record 11071705;IClusterSeqn@1100528601 : Integer;MaxNoOfWorkingHours@1100529601 : Decimal;VAR NoOfWorkingHours@1100529600 : Decimal);
+    VAR
+      ContractObject@1100526203 : Record 11071702;
+      SubcontractorService@1100528600 : Record 11071789;
+      PreferredEmployee@1100528800 : Record 11012843;
+      LineNo@1100525002 : Integer;
+      OPreferredEmployeeLevel@1100528801 : ' ,Contract,Location,Object,Contract Object Maintenance,Complex';
+      Origin@1100528802 : ' ,Call,Service Order';
+    BEGIN
+      IF (MaxNoOfWorkingHours <> 0) AND (NoOfWorkingHours > MaxNoOfWorkingHours) THEN
+        EXIT;
+      WITH gvTempMaintProposalLineRec DO BEGIN
+        SETRANGE("Maintenance Proposal",'999999999');
+        IF FINDLAST THEN
+          LineNo := "Line No." + 10000
+        ELSE
+          LineNo := 10000;
+
+        INIT;
+        "Maintenance Proposal" := '999999999';
+        "Line No." := LineNo;
+        VALIDATE("Service Contract No.", IOContractObjectMaintenance."Service Contract No.");
+        IF IServiceContractArrangement.Cluster <> '' THEN
+          VALIDATE(Cluster, IServiceContractArrangement.Cluster)
+        ELSE
+          VALIDATE(Cluster, IOContractObjectMaintenance.Cluster);
+        "Cluster Seqn." := IClusterSeqn;
+        VALIDATE("Object No.", IOContractObjectMaintenance."Object No.");
+        VALIDATE("Service Location No.", GetPrefServiceLocationNo(TRUE));
+        "Maintenance Day" := IServiceContractArrangement."Maintenance Day";
+        VALIDATE("Starting Date Maintenance", GetStartingDateMaintenance(gvTempMaintProposalLineRec, IServiceContractArrangement));
+        VALIDATE("Maintenance Scheme", IOContractObjectMaintenance."Maintenance Scheme");
+        "Service Package" := IOContractObjectMaintenance."Service Package";
+
+        OPreferredEmployeeLevel := OPreferredEmployeeLevel::" ";
+        "Preferred Employee" :=
+          PreferredEmployee.GetPreferredEmployee("Service Contract No.", "Service Location No.", "Object No.", "Maintenance Scheme",
+            '', Discipline, "Trade Speciality", "Starting Date Maintenance", OPreferredEmployeeLevel, Origin::" ");
+        "Preferred Employee Level" := OPreferredEmployeeLevel;
+
+        "Service Contract Arr. Line No." := IServiceContractArrangement."Line No.";
+        "Service Category" := IOContractObjectMaintenance."Service Category";
+
+        GetMaintLinesWorkTravelHours(
+          "Object No.", "Maintenance Scheme", IServiceContractArrangement."Theoretical Maintenance Date",
+          IServiceContract."No.", "Budget Working Hours", "Budget Travel Hours", "Budget Material Present");
+
+        "Theoretical Maintenance Date" := IServiceContractArrangement."Theoretical Maintenance Date";
+        IF "Cluster Seqn." = 0 THEN BEGIN
+          IF FORMAT(IServiceContractArrangement."Maintenance Bandwidth") <> '' THEN
+            "Last Possible Maint. Date" :=
+              CALCDATE(IServiceContractArrangement."Maintenance Bandwidth", "Theoretical Maintenance Date") -1;
+        END ELSE BEGIN
+          "Last Possible Maint. Date" := GetClusterEndingDate(GetClusterContractNo, Cluster, "Cluster Seqn.");
+        END;
+
+        IF MaintLinesSubcontractingExist(IOContractObjectMaintenance, IServiceContractArrangement."Theoretical Maintenance Date") THEN
+          VALIDATE(Subcontractor, SubcontractorService.GetSubcontractor(
+            "Service Contract No.", "Service Location No.", "Object No.", "Maintenance Scheme", Discipline, "Trade Speciality"));
+
+        IF MaintLinesLaborExist(IOContractObjectMaintenance, IServiceContractArrangement."Theoretical Maintenance Date") THEN
+          IF (ServiceSetup.GET) AND (ServiceSetup."Use Pref. Employee as Employee") THEN
+            VALIDATE("Employee No.", "Preferred Employee");
+
+        IF ContractObject.GET(IOContractObjectMaintenance."Service Contract No.", IOContractObjectMaintenance."Object No.") THEN
+          "Overlap Conflict" := ContractObject.HasOverlapConflicts();
+
+        "Maintenance Day" := IServiceContractArrangement."Maintenance Day";
+        "Starting Time Maint. Window" := IServiceContractArrangement."Starting Time Maint. Window";
+        "Ending Time Maint. Window" := IServiceContractArrangement."Ending Time Maint. Window";
+        "Use Maintenance Window" := ("Starting Time Maint. Window" <> 0T) OR ("Ending Time Maint. Window" <> 0T);
+        "Starting Time Maintenance" := "Starting Time Maint. Window";
+        "Ending Time Maintenance" := "Ending Time Maint. Window";
+        "Firm Planned" := IServiceContractArrangement."Firm Planned";
+
+        "Customer No." := IServiceContract."Customer No.";
+
+        NoOfWorkingHours += "Budget Working Hours";
+        IF (MaxNoOfWorkingHours = 0) OR (NoOfWorkingHours <= MaxNoOfWorkingHours) THEN
+          INSERT;
+      END;
+    END;
+
+    PROCEDURE GetOrderKindForMaintProposal@1100528000(iClusterOrderKind@1100528000 : Code[10]) : Code[10];
+    VAR
+      ServiceSourceTypeSetup@1100528001 : Record 11071726;
+    BEGIN
+      IF iClusterOrderKind <> '' THEN
+        EXIT(iClusterOrderKind);
+
+      IF ServiceSourceTypeSetup.GET(ServiceSourceTypeSetup."Source Type"::Contract) THEN
+        IF ServiceSourceTypeSetup."Order Kind" <> '' THEN
+          EXIT(ServiceSourceTypeSetup."Order Kind");
+    END;
+
+    PROCEDURE GetOrderTypeForMaintProposal@1100528001(iClusterOrderType@1100528000 : Code[10]) : Code[10];
+    VAR
+      ServiceSourceTypeSetup@1100528001 : Record 11071726;
+    BEGIN
+      IF iClusterOrderType <> '' THEN
+        EXIT(iClusterOrderType);
+
+      IF ServiceSourceTypeSetup.GET(ServiceSourceTypeSetup."Source Type"::Contract) THEN
+        IF ServiceSourceTypeSetup."Order Type" <> '' THEN
+          EXIT(ServiceSourceTypeSetup."Order Type");
+    END;
+
+    PROCEDURE UpdateServContrObjLine@1100525016(VAR IOContractObjectMaintenance@1100525000 : Record 11071692;INextMaintenanceDate@1100525001 : Date);
+    BEGIN
+      IOContractObjectMaintenance.VALIDATE("Next Maintenance Date", INextMaintenanceDate);
+      IOContractObjectMaintenance.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE "DetermineNextMaintDate.old"@1100525009(VAR IOContractObjectMaintenance@1100525000 : Record 11071692) NextMaintDate : Date;
+    VAR
+      Year@1100525001 : Integer;
+      Week@1100525002 : Integer;
+      NextMaintenanceDate@1100525003 : Date;
+    BEGIN
+      IF (IOContractObjectMaintenance."Starting Date Maintenance" <> 0D) AND (FORMAT(IOContractObjectMaintenance."Maintenance Interval") <> '') THEN BEGIN
+        IOContractObjectMaintenance."Last Maintenance Date" := IOContractObjectMaintenance."Next Maintenance Date";
+        IF IOContractObjectMaintenance."Last Maintenance Date" = 0D THEN
+          IOContractObjectMaintenance."Last Maintenance Date" := IOContractObjectMaintenance."Starting Date Maintenance";
+        NextMaintenanceDate := CALCDATE(IOContractObjectMaintenance."Maintenance Interval", IOContractObjectMaintenance."Last Maintenance Date");
+        Week := DATE2DWY(NextMaintenanceDate, 2);
+        Year := DATE2DWY(NextMaintenanceDate, 3);
+        EXIT(DWY2DATE(IOContractObjectMaintenance."Maintenance Day" +1, Week, Year));
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateMaintProposal@1100525012(IFilterTxt@1100525000 : Text[250];ICreatedFrom@1100525002 : 'Contract,Location,Object,Building,Arrangement';IDateUntil@1100525003 : Date;VAR OProposalCodeFrom@1100525004 : Code[20];VAR OProposalCodeTo@1100528602 : Code[20]);
+    VAR
+      NewProposalCode@1100528600 : Code[20];
+    BEGIN
+      IF OProposalCodeFrom <> '' THEN
+        NewProposalCode := OProposalCodeFrom
+      ELSE
+        NewProposalCode := InsertMaintProposalHeader(IFilterTxt, ICreatedFrom, IDateUntil);
+      IF gvTempMaintProposalLineRec.FINDSET THEN
+        REPEAT
+          InsertMaintProposalLines(NewProposalCode);
+          IF OProposalCodeFrom = '' THEN
+            OProposalCodeFrom := NewProposalCode;
+          OProposalCodeTo := NewProposalCode;
+        UNTIL gvTempMaintProposalLineRec.NEXT = 0;
+      IF OProposalCodeTo = '' THEN
+        OProposalCodeTo := NewProposalCode;
+    END;
+
+    PROCEDURE InsertMaintProposalHeader@1100525017(FilterTxt@1100525001 : Text[250];ICreatedFromOpt@1100525000 : 'Contract,Location,Object,Building';IDateUntil@1100525003 : Date) ProposalCde : Code[20];
+    VAR
+      MaintenanceProposalHeader@1100525002 : Record 11071695;
+    BEGIN
+      MaintenanceProposalHeader.INIT;
+      MaintenanceProposalHeader."Input by" := USERID;
+      MaintenanceProposalHeader."Input Date" := CURRENTDATETIME;
+      MaintenanceProposalHeader."Created from" := ICreatedFromOpt;
+      MaintenanceProposalHeader."Applied filter" := FilterTxt;
+      MaintenanceProposalHeader."Until Date" := IDateUntil;
+      MaintenanceProposalHeader.INSERT(TRUE);
+      EXIT(MaintenanceProposalHeader."No.");
+    END;
+
+    PROCEDURE InsertMaintProposalLines@1100525018(lvProposalCde@1100525001 : Code[20]);
+    VAR
+      MaintenanceProposalLine@1100525000 : Record 11071696;
+      LineNo@1100528600 : Integer;
+    BEGIN
+      MaintenanceProposalLine.SETRANGE("Maintenance Proposal", lvProposalCde);
+      IF MaintenanceProposalLine.FINDLAST THEN
+        LineNo := MaintenanceProposalLine."Line No.";
+      LineNo += 10000;
+      MaintenanceProposalLine.COPY(gvTempMaintProposalLineRec);
+      MaintenanceProposalLine."Maintenance Proposal" := lvProposalCde;
+      MaintenanceProposalLine."Line No." := LineNo;
+      MaintenanceProposalLine.INSERT(TRUE);
+    END;
+
+    LOCAL PROCEDURE ClearTempMaintProposalLines@1100528643();
+    BEGIN
+      gvTempMaintProposalLineRec.RESET;
+      gvTempMaintProposalLineRec.DELETEALL;
+    END;
+
+    PROCEDURE GetNextStartingDateByObject@1100526202(IObjectRec@1100525001 : Record 11071691;VAR ONextDate@1100525003 : Date;VAR ONextOrderCde@1100525004 : Code[20]);
+    VAR
+      ServiceOrder@1100525000 : Record 11012823;
+      ServiceOrderObject@1100525002 : Record 11071724;
+    BEGIN
+      ONextOrderCde := '';
+      ONextDate := 0D;
+      ServiceOrder.SETCURRENTKEY("Service Location No.", Status, "Starting Date");
+      ServiceOrder.SETRANGE("Service Location No.", IObjectRec."Service Location No.");
+      ServiceOrder.SETRANGE(Status, ServiceOrder.Status::Open);
+      ServiceOrder.SETFILTER("Starting Date", '<>%1', 0D);
+      IF ServiceOrder.FINDSET THEN BEGIN
+        REPEAT
+          ServiceOrderObject.SETRANGE("Service Order No.", ServiceOrder."No.");
+          ServiceOrderObject.SETRANGE("Object No.", IObjectRec."No.");
+          IF NOT ServiceOrderObject.ISEMPTY THEN BEGIN
+            ONextOrderCde := ServiceOrder."No.";
+            ONextDate := ServiceOrder."Starting Date";
+            EXIT;
+          END;
+        UNTIL ServiceOrder.NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE GetNextMaintDateByLocation@1100525002(ILocationRec@1100525002 : Record 11012801;VAR ONextDate@1100525001 : Date;VAR ONextOrderCde@1100525000 : Code[20]);
+    VAR
+      ServiceOrder@1100525003 : Record 11012823;
+    BEGIN
+      ServiceOrder.SETCURRENTKEY("Service Location No.", Status, "Starting Date");
+      ServiceOrder.SETRANGE("Service Location No.", ILocationRec."No.");
+      ServiceOrder.SETRANGE(Status, ServiceOrder.Status::Open);
+      ServiceOrder.SETFILTER("Starting Date", '<>%1', 0D);
+      IF ServiceOrder.FINDFIRST THEN BEGIN
+        ONextOrderCde := ServiceOrder."No.";
+        ONextDate := ServiceOrder."Starting Date";
+      END ELSE BEGIN
+        ONextOrderCde := '';
+        ONextDate := 0D;
+      END;
+    END;
+
+    PROCEDURE GetNextMaintDateByContract@1100526201(IServiceContract@1100525002 : Record 11012812;VAR ONextDate@1100525001 : Date;VAR ONextOrderCde@1100525000 : Code[20]);
+    VAR
+      ServiceOrder@1100525003 : Record 11012823;
+    BEGIN
+      ServiceOrder.SETCURRENTKEY("Service Contract No.", Status, "Starting Date");
+      ServiceOrder.SETRANGE("Service Contract No.", IServiceContract."No.");
+      ServiceOrder.SETRANGE(Status, ServiceOrder.Status::Open);
+      ServiceOrder.SETFILTER("Starting Date", '<>%1', 0D);
+      IF ServiceOrder.FINDFIRST THEN BEGIN
+        ONextOrderCde := ServiceOrder."No.";
+        ONextDate := ServiceOrder."Starting Date";
+      END ELSE BEGIN
+        ONextOrderCde := '';
+        ONextDate := 0D;
+      END;
+    END;
+
+    PROCEDURE GetActualContractForObject@1100526200(IObjectNo@1100526200 : Code[20];IActualDate@1100526201 : Date) : Code[20];
+    VAR
+      ContractObject@1100526202 : Record 11071702;
+    BEGIN
+      IF IObjectNo = '' THEN
+        EXIT;
+
+      ContractObject.SETCURRENTKEY("Service Object No.", "Service Contract No.");
+      ContractObject.SETRANGE("Service Object No.", IObjectNo);
+      ContractObject.SETFILTER("Starting Date", '<=%1', IActualDate);
+      ContractObject.SETFILTER("Ending Date", '%1|>=%2', 0D, IActualDate);
+      IF ContractObject.FINDSET THEN
+        REPEAT
+          ContractObject.CALCFIELDS("Service Contract Status", "Service Contract Blocked");
+          IF NOT ContractObject."Service Contract Blocked" AND
+             (ContractObject."Service Contract Status" IN [ContractObject."Service Contract Status"::Order, ContractObject."Service Contract Status"::"Invoicing Allowed"])
+          THEN
+            EXIT(ContractObject."Service Contract No.");
+        UNTIL ContractObject.NEXT = 0;
+    END;
+
+    PROCEDURE GetActualContractsForObject@1100526208(IObjectNo@1100526200 : Code[20];IActualDate@1100526201 : Date) OContractCode : Code[20];
+    VAR
+      NoOfContracts@1100526203 : Integer;
+    BEGIN
+      NoOfContracts := GetNoOfActualContractsForObj(IObjectNo, IActualDate, OContractCode);
+      IF NoOfContracts > 1 THEN
+        EXIT('[' + FORMAT(NoOfContracts) + ']');
+    END;
+
+    PROCEDURE IsActualContractForObject@1100526205(IActualContractNo@1100526203 : Code[20];IObjectNo@1100526201 : Code[20];IActualDate@1100526200 : Date) : Boolean;
+    VAR
+      ContractObject@1100526202 : Record 11071702;
+    BEGIN
+      ContractObject.SETCURRENTKEY("Service Object No.");
+      ContractObject.SETRANGE("Service Object No.", IObjectNo);
+      ContractObject.SETFILTER("Starting Date", '<=%1', IActualDate);
+      ContractObject.SETFILTER("Ending Date", '%1|>=%2', 0D, IActualDate);
+      ContractObject.SETRANGE("Service Contract No.", IActualContractNo);
+      IF ContractObject.FINDFIRST THEN BEGIN
+        ContractObject.CALCFIELDS("Service Contract Status", "Service Contract Blocked");
+        IF NOT ContractObject."Service Contract Blocked" AND
+             (ContractObject."Service Contract Status" IN [ContractObject."Service Contract Status"::Order, ContractObject."Service Contract Status"::"Invoicing Allowed"])
+          THEN
+            EXIT(NOT ContractObject.ISEMPTY);
+      END;
+    END;
+
+    PROCEDURE GetNoOfActualContractsForObj@1100526204(IObjectNo@1100526200 : Code[20];IActualDate@1100526201 : Date;VAR OActualContractNo@1100526204 : Code[20]) : Integer;
+    VAR
+      ContractObject@1100526202 : Record 11071702;
+      NoOfContracts@1100526203 : Integer;
+      ActualContractNo@1100528600 : Code[20];
+    BEGIN
+      OActualContractNo := '';
+      ContractObject.SETCURRENTKEY("Service Object No.", "Service Contract No.");
+      ContractObject.SETRANGE("Service Object No.", IObjectNo);
+      ContractObject.SETFILTER("Starting Date", '<=%1', IActualDate);
+      ContractObject.SETFILTER("Ending Date", '%1|>=%2', 0D, IActualDate);
+      IF ContractObject.FINDSET THEN
+        REPEAT
+          ContractObject.CALCFIELDS("Service Contract Status", "Service Contract Blocked");
+          IF NOT ContractObject."Service Contract Blocked" AND
+             (ContractObject."Service Contract Status" IN [ContractObject."Service Contract Status"::Order, ContractObject."Service Contract Status"::"Invoicing Allowed"])
+          THEN BEGIN
+            NoOfContracts += 1;
+            ActualContractNo := ContractObject."Service Contract No."
+          END;
+        UNTIL ContractObject.NEXT = 0;
+      IF NoOfContracts = 1 THEN
+        OActualContractNo := ActualContractNo;
+      EXIT(NoOfContracts);
+    END;
+
+    PROCEDURE GetActualContractDSForObject@1100528635(IObjectNo@1100528602 : Code[20];IActualDate@1100528600 : Date;VAR IServiceContract@1100528603 : Record 11012812) : Integer;
+    VAR
+      ContractObject@1100528601 : Record 11071702;
+    BEGIN
+      IServiceContract.RESET;
+      ContractObject.SETCURRENTKEY("Service Object No.");
+      ContractObject.SETRANGE("Service Object No.", IObjectNo);
+      ContractObject.SETFILTER("Starting Date", '<=%1', IActualDate);
+      ContractObject.SETFILTER("Ending Date", '%1|>=%2', 0D, IActualDate);
+      IF ContractObject.FINDSET THEN
+        REPEAT
+          ContractObject.CALCFIELDS("Service Contract Status", "Service Contract Blocked");
+          IF NOT ContractObject."Service Contract Blocked" AND
+             (ContractObject."Service Contract Status" IN [ContractObject."Service Contract Status"::Order, ContractObject."Service Contract Status"::"Invoicing Allowed"])
+          THEN BEGIN
+            IServiceContract."No." := ContractObject."Service Contract No.";
+            IServiceContract.MARK(TRUE);
+          END;
+        UNTIL ContractObject.NEXT = 0;
+      IServiceContract.MARKEDONLY(TRUE);
+      EXIT(IServiceContract.COUNT);
+    END;
+
+    PROCEDURE ShowActualContractsForObject@1100526210(IObjectNo@1100526201 : Code[20];ICustomerNo@1100525001 : Code[20];IActualDate@1100526200 : Date;ILookupMode@1100526204 : Boolean;ISelectedServiceContractNo@1100528600 : Code[20]) retValue : Code[20];
+    VAR
+      ContractObject@1100526203 : Record 11071702;
+      ServiceContract@1100526202 : Record 11012812;
+      ServiceContract2@1100525000 : Record 11012812;
+    BEGIN
+      ContractObject.SETCURRENTKEY("Service Object No.");
+      ContractObject.SETRANGE("Service Object No.", IObjectNo);
+      ContractObject.SETFILTER("Starting Date", '<=%1', IActualDate);
+      ContractObject.SETFILTER("Ending Date", '%1|>=%2', 0D, IActualDate);
+      IF ContractObject.FINDSET THEN
+        REPEAT
+          ContractObject.CALCFIELDS("Service Contract Status", "Service Contract Blocked");
+          IF NOT ContractObject."Service Contract Blocked" AND
+             (ContractObject."Service Contract Status" IN [ContractObject."Service Contract Status"::Order, ContractObject."Service Contract Status"::"Invoicing Allowed"])
+          THEN BEGIN
+            ServiceContract."No." := ContractObject."Service Contract No.";
+            ServiceContract.MARK(TRUE);
+          END;
+        UNTIL ContractObject.NEXT = 0;
+
+      ServiceContract2.SETCURRENTKEY("Customer No.");
+      ServiceContract2.SETRANGE("Customer No.", ICustomerNo);
+      ServiceContract2.SETRANGE("Contract Form", ServiceContract2."Contract Form"::"Framework Contract");
+      ServiceContract2.SETRANGE(Status, ServiceContract2.Status::Order, ServiceContract2.Status::"Invoicing Allowed");
+      IF ServiceContract2.FINDSET THEN
+        REPEAT
+          ServiceContract."No." := ServiceContract2."No.";
+          ServiceContract.MARK(TRUE);
+        UNTIL ServiceContract2.NEXT = 0;
+
+      ServiceContract.MARKEDONLY(TRUE);
+      IF ISelectedServiceContractNo <> '' THEN
+        IF ServiceContract.GET(ISelectedServiceContractNo) THEN;
+      IF NOT ILookupMode THEN BEGIN
+        IF ServiceContract.COUNT = 1 THEN
+          PAGE.RUNMODAL(PAGE::"Service Contract Card", ServiceContract)
+        ELSE
+          PAGE.RUNMODAL(PAGE::"Service Contracts List", ServiceContract);
+      END ELSE BEGIN
+        IF PAGE.RUNMODAL(PAGE::"Service Contracts List", ServiceContract) = ACTION::LookupOK THEN
+          EXIT(ServiceContract."No.");
+      END;
+    END;
+
+    PROCEDURE GetConcurrentContractObjInfo@1100526207(IObjectNo@1100526202 : Code[20];IActualDate@1100526205 : Date;IExceptContractNo@1100526204 : Code[20];VAR OContractNo@1100526200 : Code[20];VAR OObjectEndingDate@1100526201 : Date) : Boolean;
+    VAR
+      ContractObject@1100526203 : Record 11071702;
+    BEGIN
+      ContractObject.SETCURRENTKEY("Service Object No.", "Service Contract No.");
+      ContractObject.SETRANGE("Service Object No.", IObjectNo);
+      ContractObject.SETFILTER("Service Contract No.", '<>%1', IExceptContractNo);
+      ContractObject.SETFILTER("Starting Date", '<=%1', IActualDate);
+      ContractObject.SETFILTER("Ending Date", '%1|>=%2', 0D, IActualDate);
+      IF ContractObject.FINDSET THEN
+        REPEAT
+          ContractObject.CALCFIELDS("Service Contract Status", "Service Contract Blocked");
+          IF NOT ContractObject."Service Contract Blocked" AND
+             (ContractObject."Service Contract Status" IN [ContractObject."Service Contract Status"::Order, ContractObject."Service Contract Status"::"Invoicing Allowed"])
+          THEN BEGIN
+            OContractNo := ContractObject."Service Contract No.";
+            OObjectEndingDate := ContractObject."Ending Date";
+            EXIT(TRUE);
+          END;
+        UNTIL ContractObject.NEXT = 0;
+    END;
+
+    PROCEDURE ShowMaintWorkListContract@1100526203(VAR IContractObjectMaintenance@1100526200 : Record 11071692);
+    VAR
+      ServiceContract@1100528600 : Record 11012812;
+      lvSchemeTypeOpt@1100526203 : 'Maintenance Scheme,Modification,Standard Object,Standard Object Deinstallation,Standard Object Installation,Object Installation,Object';
+      MaintenanceLineList@1100528601 : Page 11125161;
+    BEGIN
+      ServiceContract.GET(IContractObjectMaintenance."Service Contract No.");
+      MaintenanceLineList.SetObjectSelection(
+        lvSchemeTypeOpt::Object, IContractObjectMaintenance."Object No.", IContractObjectMaintenance."Maintenance Scheme", WORKDATE, IContractObjectMaintenance."Service Contract No.");
+      MaintenanceLineList.RUN;
+    END;
+
+    PROCEDURE ShowMaintWorkListProposal@1100526206(VAR IMaintenanceProposalLine@1100526200 : Record 11071696);
+    VAR
+      ServiceContract@1100528600 : Record 11012812;
+      MaintenanceLineList@1100528601 : Page 11125161;
+      SchemeType@1100526205 : 'Maintenance Scheme,Modification,Standard Object,Standard Object Deinstallation,Standard Object Installation,Object Installation,Object';
+    BEGIN
+      ServiceContract.GET(IMaintenanceProposalLine."Service Contract No.");
+      MaintenanceLineList.SetObjectSelection(
+        SchemeType::Object, IMaintenanceProposalLine."Object No.", IMaintenanceProposalLine."Maintenance Scheme",
+        IMaintenanceProposalLine."Starting Date Maintenance", IMaintenanceProposalLine."Service Contract No.");
+      MaintenanceLineList.RUN;
+    END;
+
+    PROCEDURE ShowWorklistReplacement@1100526209(VAR IReplacementLine@1100526200 : Record 11071710);
+    VAR
+      TmpMaintSchemeVersionLine@1100526203 : TEMPORARY Record 11071744;
+      ServiceContract@1100528600 : Record 11012812;
+      ReplacementLine@1100526204 : Record 11071710;
+      SchemeType@1100526205 : 'Maintenance Scheme,Modification,Standard Object,Standard Object Deinstallation,Standard Object Installation,Object Installation,Object';
+    BEGIN
+      ServiceContract.GET(IReplacementLine."Contract No. Replacement");
+      ReplacementLine.COPY(IReplacementLine);
+      ReplacementLine.CALCFIELDS("Standard Object No.");
+      GetTempWorklist(TmpMaintSchemeVersionLine, SchemeType::"Standard Object Deinstallation", ReplacementLine."Standard Object No.",
+        '', ReplacementLine."Object No.", TODAY, '', SchemeType::"Object Installation", ReplacementLine."Object No.",
+        '', TODAY, FALSE, FALSE);
+      GetTempWorklist(TmpMaintSchemeVersionLine, SchemeType::"Standard Object Installation", ReplacementLine."Replace with Std. Object No.",
+        '', ReplacementLine."Object No.", TODAY, '', SchemeType::"Object Installation", ReplacementLine."Object No.",
+        '', TODAY, FALSE, FALSE);
+      PAGE.RUN(PAGE::"Maintenance Line List", TmpMaintSchemeVersionLine);
+    END;
+
+    PROCEDURE GetTempWorklist@1100528630(VAR IOTempMaintWorkListRec@1100526201 : TEMPORARY Record 11071744;ISchemeTypeOpt@1100526203 : 'Maintenance Scheme,Modification,Standard Object,Standard Object Deinstallation,Standard Object Installation,Object Installation,Object';ITypeCde@1100526204 : Code[20];IBelongstoSchemeCde@1100526206 : Code[20];IObjectCde@1100526205 : Code[20];ISeekDate@1100409000 : Date;IServiceContractNo@1100528601 : Code[20];IOriginalSchemeTypeOpt@1100525001 : 'Maintenance Scheme,Modification,Standard Object,Standard Object Deinstallation,Standard Object Installation,Object Installation,Object';IOriginalTypeCde@1100525002 : Code[20];IOriginalBelongstoSchemeCde@1100525003 : Code[20];IOriginalSeekDate@1100525004 : Date;IIncludeCancelled@1100525005 : Boolean;INormInclAdjustment@1100528607 : Boolean);
+    VAR
+      MaintenanceHeader@1100528600 : Record 11071743;
+      MaintenanceSchemeLine@1100526200 : Record 11071744;
+      ServiceObject@1100528604 : Record 11071691;
+      BudgetHourRateManagement@1100528602 : Codeunit 11012358;
+      MaintenanceManagement@1100525000 : Codeunit 11012829;
+      BudgetRateFoundAt@1100528603 : Text[250];
+      DepartmentCode@1100528605 : Code[20];
+      CancellationLevel@1100525006 : Option;
+      AdjustmentFactorNormLevel@1100528606 : Option;
+    BEGIN
+      IF NOT ServiceObject.GET(IObjectCde) THEN
+        ServiceObject.INIT;
+
+      MaintenanceHeader.SETRANGE("Line Type", ISchemeTypeOpt);
+      MaintenanceHeader.SETRANGE(Code, ITypeCde);
+      MaintenanceHeader.SETRANGE(Expired, FALSE);
+      MaintenanceHeader.SETRANGE("Index Date", 0D, ISeekDate);
+      MaintenanceHeader.SETRANGE("Belongs to Scheme", IBelongstoSchemeCde);
+      IF MaintenanceHeader.FINDLAST THEN BEGIN
+        IF (IObjectCde <> '') AND (IServiceContractNo = '') THEN
+          IServiceContractNo := MaintenanceManagement.GetActualContractForObject(IObjectCde, ISeekDate);
+        IF ServiceObject.GET(IObjectCde) THEN
+          DepartmentCode := ServiceObject.GetDepartmentCode(IServiceContractNo);
+
+        MaintenanceSchemeLine.SETRANGE("Line Type", MaintenanceHeader."Line Type");
+        MaintenanceSchemeLine.SETRANGE("Type Code", MaintenanceHeader.Code);
+        MaintenanceSchemeLine.SETRANGE("Index Date", MaintenanceHeader."Index Date");
+        MaintenanceSchemeLine.SETRANGE("Belongs to Scheme", MaintenanceHeader."Belongs to Scheme");
+        IF MaintenanceSchemeLine.FINDSET THEN BEGIN
+          REPEAT
+            IF (IIncludeCancelled OR NOT MaintenanceSchemeLine.IsCancelled(IOriginalSchemeTypeOpt, IOriginalTypeCde, IOriginalBelongstoSchemeCde,
+              IOriginalSeekDate, IOriginalSeekDate, CancellationLevel)) AND NOT (IsMaintSchemeSurveyTemplate(MaintenanceHeader.Code))
+            THEN BEGIN
+              IOTempMaintWorkListRec := MaintenanceSchemeLine;
+              IOTempMaintWorkListRec.Code := IObjectCde;
+              IF IOTempMaintWorkListRec."Cost Type" = IOTempMaintWorkListRec."Cost Type"::Labor THEN
+                IOTempMaintWorkListRec.VALIDATE(Norm,
+                  IOTempMaintWorkListRec.Norm *
+                    IOTempMaintWorkListRec.GetAdjustmentFactorNorm(
+                      IOriginalSchemeTypeOpt,
+                      IOriginalTypeCde,
+                      IOriginalBelongstoSchemeCde,
+                      IOriginalSeekDate,
+                    IOriginalSeekDate,
+                      AdjustmentFactorNormLevel));
+              IF IOTempMaintWorkListRec."Rate Code" <> '' THEN
+                IOTempMaintWorkListRec.VALIDATE(Rate,
+                  BudgetHourRateManagement.GetBudgetRate(
+                    1, '', '', '', DepartmentCode, IOTempMaintWorkListRec."Rate Code", ISeekDate, BudgetRateFoundAt));
+              IF NOT INormInclAdjustment THEN
+                IOTempMaintWorkListRec.Norm := MaintenanceSchemeLine.Norm;
+              IOTempMaintWorkListRec."Additional Cost" :=
+                DetermineAdditionalCost(IServiceContractNo, IObjectCde, ISeekDate, IOTempMaintWorkListRec);
+              IOTempMaintWorkListRec.INSERT;
+            END;
+          UNTIL MaintenanceSchemeLine.NEXT = 0;
+        END;
+      END;
+      IF ISchemeTypeOpt = ISchemeTypeOpt::Object THEN
+        GetTempWorklist(IOTempMaintWorkListRec, ISchemeTypeOpt::"Standard Object", ServiceObject."Standard Object No.",
+          IBelongstoSchemeCde, IObjectCde, IOriginalSeekDate, IServiceContractNo, IOriginalSchemeTypeOpt, IOriginalTypeCde,
+          IOriginalBelongstoSchemeCde, IOriginalSeekDate, IIncludeCancelled, INormInclAdjustment);
+      IF ISchemeTypeOpt = ISchemeTypeOpt::"Standard Object" THEN
+        GetTempWorklist(IOTempMaintWorkListRec, ISchemeTypeOpt::"Maintenance Scheme", IBelongstoSchemeCde, '', IObjectCde,
+          IOriginalSeekDate, IServiceContractNo, IOriginalSchemeTypeOpt, IOriginalTypeCde, IOriginalBelongstoSchemeCde, IOriginalSeekDate,
+          IIncludeCancelled, INormInclAdjustment);
+      IF ISchemeTypeOpt = ISchemeTypeOpt::"Object Installation" THEN
+        GetTempWorklist(IOTempMaintWorkListRec, ISchemeTypeOpt::"Standard Object Installation", ServiceObject."Standard Object No.",
+          '', '', IOriginalSeekDate, '', IOriginalSchemeTypeOpt, IOriginalTypeCde, IOriginalBelongstoSchemeCde, IOriginalSeekDate,
+          IIncludeCancelled, INormInclAdjustment);
+    END;
+
+    PROCEDURE CalculateMaintBudgetVisit@1100526211(IContractObjectMaintenance@1100526200 : Record 11071692;IServContractRec@1100528603 : Record 11012812;VAR OLabor@1100526201 : Decimal;VAR OHours@1100526202 : Decimal;VAR OMaterial@1100526203 : Decimal;VAR OSubcontracting@1100526204 : Decimal;VAR OPlant@1100526205 : Decimal;VAR OSundry@1100526206 : Decimal;VAR OTotalCost@1100528601 : Decimal;VAR OSurcharge@1100528605 : Decimal;IStartDatePeriod@1100526208 : Date;IEndDatePeriod@1100526207 : Date);
+    VAR
+      ServiceContractArrangement@1100526209 : Record 11071705;
+      ServiceSurchargeVersion@1100528613 : Record 11071783;
+      ServiceObject@1100528614 : Record 11071691;
+      lvStartObjectDate@1100526211 : Date;
+      lvEndObjectDate@1100526212 : Date;
+      lvLineTypeOpt@1100528602 : 'Maintenance Scheme,Modification,Standard Object,Standard Object Deinstallation,Standard Object Installation,Object Installation,Object';
+      Labor@1100528607 : Decimal;
+      Hours@1100528608 : Decimal;
+      Material@1100528609 : Decimal;
+      SubcontractingAmt@1100528610 : Decimal;
+      Plant@1100528611 : Decimal;
+      Sundry@1100528612 : Decimal;
+      TotalCost@1100528606 : Decimal;
+      DepartmentCode@1100528615 : Code[20];
+      SurchargeAmount@1100529600 : Decimal;
+    BEGIN
+      ServiceObject.GET(IContractObjectMaintenance."Object No.");
+      DepartmentCode := ServiceObject.GetDepartmentCode(IContractObjectMaintenance."Service Contract No.");
+      CheckStartEndDate(IServContractRec, IContractObjectMaintenance, IStartDatePeriod, IEndDatePeriod,
+                        lvStartObjectDate, lvEndObjectDate);
+      IContractObjectMaintenance.CALCFIELDS("Standard Object No.", "Object Quantity");
+      ServiceContractArrangement.SETCURRENTKEY("Service Contract No.","Object No.","Maintenance Scheme",
+        "Theoretical Maintenance Date");
+      ServiceContractArrangement.SETRANGE("Service Contract No.", IContractObjectMaintenance."Service Contract No.");
+      ServiceContractArrangement.SETRANGE("Object No.", IContractObjectMaintenance."Object No.");
+      ServiceContractArrangement.SETRANGE("Maintenance Scheme", IContractObjectMaintenance."Maintenance Scheme");
+      ServiceContractArrangement.SETRANGE("Theoretical Maintenance Date",lvStartObjectDate,lvEndObjectDate);
+      ServiceContractArrangement.SETRANGE(Cancelled, FALSE);
+      IF ServiceContractArrangement.FINDSET THEN
+        REPEAT
+          Labor := 0;
+          Hours := 0;
+          Material := 0;
+          SubcontractingAmt := 0;
+          Plant := 0;
+          Sundry := 0;
+          TotalCost := 0;
+          SurchargeAmount := 0;
+
+          CalcBudgetLines2(
+            lvLineTypeOpt::Object, IContractObjectMaintenance."Object No.", IContractObjectMaintenance."Maintenance Scheme",
+            IContractObjectMaintenance."Service Contract No.",
+            ServiceContractArrangement."Theoretical Maintenance Date", IContractObjectMaintenance."Object Quantity", DepartmentCode, 0,
+            0, TRUE, ServiceSurchargeVersion."Source Type"::Contract,
+            Labor, Hours, Material, SubcontractingAmt, Plant, Sundry, TotalCost, SurchargeAmount);
+
+          OLabor += Labor;
+          OHours += Hours;
+          OMaterial += Material;
+          OSubcontracting += SubcontractingAmt;
+          OPlant += Plant;
+          OSundry += Sundry;
+          OTotalCost += TotalCost;
+          OSurcharge += SurchargeAmount;
+        UNTIL ServiceContractArrangement.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CalcBudgetLines_OLD@1100528601(ILineType@1100528607 : 'Maintenance Scheme,Modification,Standard Object,Standard Object Deinstallation,Standard Object Installation,Object Installation,Object';IType@1100528608 : Code[20];IMaintenanceScheme@1100528609 : Code[20];IIndexDate@1100528610 : Date;IQuantity@1100528613 : Integer;IDepartmentCode@1100528611 : Code[20];VAR OLabor@1100528606 : Decimal;VAR OHours@1100528605 : Decimal;VAR OMaterial@1100528604 : Decimal;VAR OSubcontracting@1100528603 : Decimal;VAR OPlant@1100528602 : Decimal;VAR OSundry@1100528601 : Decimal;VAR OTotalCost@1100528600 : Decimal);
+    BEGIN
+      CalcBudgetLinesByCostObject(
+        ILineType, IType, IMaintenanceScheme, IIndexDate, IQuantity, '',  IDepartmentCode,
+        OLabor, OHours, OMaterial, OSubcontracting, OPlant, OSundry, OTotalCost);
+    END;
+
+    PROCEDURE CalcBudgetLines2@1100528631(ILineType@1100528612 : 'Maintenance Scheme,Modification,Standard Object,Standard Object Deinstallation,Standard Object Installation,Object Installation,Object';ITypeCode@1100528611 : Code[20];IMaintenanceScheme@1100528610 : Code[20];IServiceContractNo@1100528619 : Code[20];ISeekDate@1100528609 : Date;IQuantity@1100528608 : Integer;IDepartmentCode@1100528607 : Code[20];IAdditionCost@1100528618 : 'Both,Yes,No';CostType@1100529606 : ' ,Labor,Material,Subcontracting,Plant,Sundry';CalcSurchargeAmount@1100529601 : Boolean;SourceType@1100529600 : Option;VAR OLabor@1100528606 : Decimal;VAR OHours@1100528605 : Decimal;VAR OMaterial@1100528604 : Decimal;VAR OSubcontracting@1100528603 : Decimal;VAR OPlant@1100528602 : Decimal;VAR OSundry@1100528601 : Decimal;VAR OTotalCost@1100528600 : Decimal;VAR SurchargeAmount@1100529602 : Decimal);
+    VAR
+      TmpMaintSchemeVersionLine@1100528613 : TEMPORARY Record 11071744;
+      ServiceSurchargeManagement@1100529603 : Codeunit 11012834;
+      CancellationLevel@1100528614 : Option;
+      LaborAmount@1100528617 : Decimal;
+      CostAmount@1100529604 : Decimal;
+    BEGIN
+      GetTempWorklist(TmpMaintSchemeVersionLine, ILineType, ITypeCode, IMaintenanceScheme, ITypeCode, ISeekDate, IServiceContractNo, ILineType,
+        ITypeCode, IMaintenanceScheme, ISeekDate, FALSE, TRUE);
+
+      CASE IAdditionCost OF
+        IAdditionCost::Yes:
+          TmpMaintSchemeVersionLine.SETRANGE("Additional Cost", TRUE);
+        IAdditionCost::No:
+          TmpMaintSchemeVersionLine.SETRANGE("Additional Cost", FALSE);
+      END;
+      IF CostType <> CostType::" " THEN
+        TmpMaintSchemeVersionLine.SETRANGE("Cost Type", CostType - 1);
+      ClearTmpBuffer;
+
+      IF TmpMaintSchemeVersionLine.FINDSET THEN
+        REPEAT
+         IF NOT TmpMaintSchemeVersionLine.IsCancelled(ILineType, ITypeCode, IMaintenanceScheme, ISeekDate, ISeekDate, CancellationLevel)
+          THEN BEGIN
+            CASE TmpMaintSchemeVersionLine."Cost Type" OF
+              TmpMaintSchemeVersionLine."Cost Type"::Labor:
+                BEGIN
+                  OHours += TmpMaintSchemeVersionLine."Hours per Service" * IQuantity;
+                  IF TmpMaintSchemeVersionLine."Rate Code" <> '' THEN
+                    LaborAmount := TmpMaintSchemeVersionLine."Hours per Service" * IQuantity * TmpMaintSchemeVersionLine.Rate
+                  ELSE
+                    LaborAmount := TmpMaintSchemeVersionLine."Cost per Service" * IQuantity;
+                  OLabor += LaborAmount;
+                  OTotalCost += LaborAmount;
+                END;
+              TmpMaintSchemeVersionLine."Cost Type"::Material:
+                BEGIN
+                  OMaterial += TmpMaintSchemeVersionLine."Cost per Service" * IQuantity;
+                  OTotalCost += TmpMaintSchemeVersionLine."Cost per Service" * IQuantity;
+                END;
+              TmpMaintSchemeVersionLine."Cost Type"::Subcontracting:
+                BEGIN
+                  OSubcontracting += TmpMaintSchemeVersionLine."Cost per Service" * IQuantity;
+                  OTotalCost += TmpMaintSchemeVersionLine."Cost per Service" * IQuantity;
+                END;
+              TmpMaintSchemeVersionLine."Cost Type"::Plant:
+                BEGIN
+                  OPlant += TmpMaintSchemeVersionLine."Cost per Service" * IQuantity;
+                  OTotalCost += TmpMaintSchemeVersionLine."Cost per Service" * IQuantity;
+                END;
+              TmpMaintSchemeVersionLine."Cost Type"::Sundry:
+                BEGIN
+                  OSundry += TmpMaintSchemeVersionLine."Cost per Service" * IQuantity;
+                  OTotalCost += TmpMaintSchemeVersionLine."Cost per Service" * IQuantity;
+                END;
+            END;
+
+            IF TmpMaintSchemeVersionLine."Cost Type" = TmpMaintSchemeVersionLine."Cost Type"::Labor THEN
+              CostAmount := LaborAmount
+            ELSE
+              CostAmount := TmpMaintSchemeVersionLine."Cost per Service" * IQuantity;
+
+            IF CalcSurchargeAmount OR UseTmpBuffer THEN
+              ServiceSurchargeManagement.InsertTmpBuffer(
+                TmpBuffer, TmpMaintSchemeVersionLine."Cost Type", TmpMaintSchemeVersionLine."Cost Object", CostAmount,
+                TmpMaintSchemeVersionLine."Hours per Service" * IQuantity, FALSE);
+          END;
+        UNTIL TmpMaintSchemeVersionLine.NEXT = 0;
+
+      IF CalcSurchargeAmount THEN
+        SurchargeAmount := ServiceSurchargeManagement.CalculateSCSurchargeAmountCostObject(IServiceContractNo, SourceType, ISeekDate, TmpBuffer);
+    END;
+
+    PROCEDURE CalcBudgetLinesByCostObject@1100528617(ILineType@1100528611 : 'Maintenance Scheme,Modification,Standard Object,Standard Object Deinstallation,Standard Object Installation,Object Installation,Object';IType@1100528610 : Code[20];IMaintenanceScheme@1100528609 : Code[20];IIndexDate@1100528608 : Date;IQuantity@1100528607 : Integer;ICostObject@1100528612 : Code[20];IDepartmentCode@1100528617 : Code[20];VAR OLabor@1100528606 : Decimal;VAR OHours@1100528605 : Decimal;VAR OMaterial@1100528604 : Decimal;VAR OSubcontracting@1100528603 : Decimal;VAR OPlant@1100528602 : Decimal;VAR OSundry@1100528601 : Decimal;VAR OTotalCost@1100528600 : Decimal);
+    VAR
+      MaintenanceSchemeVersion@1100528614 : Record 11071743;
+      MaintSchemeVersionLine@1100528613 : Record 11071744;
+      BudgetHourRateManagement@1100528615 : Codeunit 11012358;
+      BudgetRateFoundAt@1100528616 : Text[250];
+      LaborAmount@1100528618 : Decimal;
+      CancellationLevel@1100525000 : Option;
+    BEGIN
+      MaintenanceSchemeVersion.SETRANGE("Line Type", ILineType);
+      MaintenanceSchemeVersion.SETRANGE(Code, IType);
+      MaintenanceSchemeVersion.SETFILTER("Index Date",'..%1', IIndexDate);
+      MaintenanceSchemeVersion.SETRANGE(Expired, FALSE);
+      IF MaintenanceSchemeVersion.FINDLAST THEN BEGIN
+        IF IMaintenanceScheme <> '' THEN
+          MaintSchemeVersionLine.SETRANGE("Belongs to Scheme", IMaintenanceScheme);
+        MaintSchemeVersionLine.SETRANGE("Line Type", ILineType);
+        MaintSchemeVersionLine.SETRANGE("Type Code", IType);
+        MaintSchemeVersionLine.SETRANGE("Index Date", MaintenanceSchemeVersion."Index Date");
+        IF ICostObject <> '' THEN
+          MaintSchemeVersionLine.SETRANGE("Cost Object", ICostObject);
+        IF MaintSchemeVersionLine.FINDSET THEN
+          REPEAT
+            IF NOT MaintSchemeVersionLine.IsCancelled(MaintenanceSchemeVersion."Line Type", MaintenanceSchemeVersion.Code,
+              IMaintenanceScheme, MaintenanceSchemeVersion."Index Date", IIndexDate, CancellationLevel)
+            THEN BEGIN
+              CASE MaintSchemeVersionLine."Cost Type" OF
+                MaintSchemeVersionLine."Cost Type"::Labor:
+                  BEGIN
+                    OHours += MaintSchemeVersionLine."Hours per Service" * IQuantity;
+                    IF MaintSchemeVersionLine."Rate Code" <> '' THEN
+                      LaborAmount := MaintSchemeVersionLine."Hours per Service" * IQuantity *
+                        BudgetHourRateManagement.GetBudgetRate(1, '', '', '', IDepartmentCode,
+                          MaintSchemeVersionLine."Rate Code", IIndexDate, BudgetRateFoundAt)
+                    ELSE
+                      LaborAmount := MaintSchemeVersionLine."Cost per Service" * IQuantity;
+                    OLabor += LaborAmount;
+                    OTotalCost += LaborAmount;
+                  END;
+                MaintSchemeVersionLine."Cost Type"::Material:
+                  BEGIN
+                    OMaterial += MaintSchemeVersionLine."Cost per Service" * IQuantity;
+                    OTotalCost += MaintSchemeVersionLine."Cost per Service" * IQuantity;
+                  END;
+                MaintSchemeVersionLine."Cost Type"::Subcontracting:
+                  BEGIN
+                    OSubcontracting += MaintSchemeVersionLine."Cost per Service" * IQuantity;
+                    OTotalCost += MaintSchemeVersionLine."Cost per Service" * IQuantity;
+                  END;
+                MaintSchemeVersionLine."Cost Type"::Plant:
+                  BEGIN
+                    OPlant += MaintSchemeVersionLine."Cost per Service" * IQuantity;
+                    OTotalCost += MaintSchemeVersionLine."Cost per Service" * IQuantity;
+                  END;
+                MaintSchemeVersionLine."Cost Type"::Sundry:
+                  BEGIN
+                    OSundry += MaintSchemeVersionLine."Cost per Service" * IQuantity;
+                    OTotalCost += MaintSchemeVersionLine."Cost per Service" * IQuantity;
+                  END;
+              END;
+            END;
+          UNTIL MaintSchemeVersionLine.NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE UpdateVisitScheme@1100528600(VAR IServiceContract@1100528600 : Record 11012812);
+    VAR
+      ContractObjectMaintenance@1100528601 : Record 11071692;
+      EndingDateAppointment@1100528602 : Date;
+    BEGIN
+      ContractObjectMaintenance.SETRANGE("Service Contract No.", IServiceContract."No.");
+      IF ContractObjectMaintenance.FINDSET THEN BEGIN
+        REPEAT
+          IF IServiceContract.GETFILTER("Period Filter") <> '' THEN
+            EndingDateAppointment := IServiceContract.GETRANGEMAX("Period Filter")
+          ELSE BEGIN
+            EndingDateAppointment := ContractObjectMaintenance.GetMaintEndingDate();
+            IF EndingDateAppointment = 0D THEN
+              EndingDateAppointment := DMY2DATE(31, 12, DATE2DMY(TODAY, 3));
+          END;
+          ContractObjectMaintenance.UpdateServiceContractArr(EndingDateAppointment, TRUE, FALSE, TRUE);
+        UNTIL ContractObjectMaintenance.NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE CopyMaintHeaderAndLines@1100528602(IMaintenanceHeader@1100528600 : Record 11071743;INewIndexDate@1100528601 : Date;VAR OMaintenanceHeader@1100528605 : Record 11071743);
+    VAR
+      MaintenanceSchemeLine@1100528603 : Record 11071744;
+      NewMaintenanceSchemeLine@1100528604 : Record 11071744;
+      CancelledMaintSchemeLine@1100525000 : Record 11071954;
+      NewCancelledMaintSchemeLine@1100525001 : Record 11071954;
+    BEGIN
+      OMaintenanceHeader := IMaintenanceHeader;
+      OMaintenanceHeader."Index Date" := INewIndexDate; // No validate due to central data management
+      OMaintenanceHeader.INSERT(TRUE);
+
+      MaintenanceSchemeLine.SETRANGE("Line Type", IMaintenanceHeader."Line Type");
+      MaintenanceSchemeLine.SETRANGE("Type Code", IMaintenanceHeader.Code);
+      MaintenanceSchemeLine.SETRANGE("Belongs to Scheme", IMaintenanceHeader."Belongs to Scheme");
+      MaintenanceSchemeLine.SETRANGE("Index Date", IMaintenanceHeader."Index Date");
+      IF MaintenanceSchemeLine.FINDSET(TRUE) THEN
+        REPEAT
+          NewMaintenanceSchemeLine := MaintenanceSchemeLine;
+          NewMaintenanceSchemeLine.VALIDATE("Index Date", OMaintenanceHeader."Index Date");
+          NewMaintenanceSchemeLine.INSERT(TRUE);
+        UNTIL MaintenanceSchemeLine.NEXT = 0;
+
+      CancelledMaintSchemeLine.SETRANGE("Line Type", IMaintenanceHeader."Line Type");
+      CancelledMaintSchemeLine.SETRANGE("Type Code", IMaintenanceHeader.Code);
+      CancelledMaintSchemeLine.SETRANGE("Belongs to Scheme", IMaintenanceHeader."Belongs to Scheme");
+      CancelledMaintSchemeLine.SETRANGE("Index Date", IMaintenanceHeader."Index Date");
+      IF CancelledMaintSchemeLine.FINDSET THEN BEGIN
+        REPEAT
+          NewCancelledMaintSchemeLine := CancelledMaintSchemeLine;
+          NewCancelledMaintSchemeLine."Index Date" := OMaintenanceHeader."Index Date";
+          NewCancelledMaintSchemeLine.INSERT(TRUE);
+        UNTIL CancelledMaintSchemeLine.NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE IndexMaintLinesViaHeader@1100528622(IMaintenanceHeader@1100528600 : Record 11071743;IMaterialPerc@1100528601 : Decimal;ILaborPerc@1100528603 : Decimal;ISubcontrPerc@1100528605 : Decimal;IPlantPerc@1100528604 : Decimal;ISundryPerc@1100528606 : Decimal;IRoundAmounts@1100528607 : Decimal);
+    VAR
+      MaintSchemeVersionLine@1100528602 : Record 11071744;
+    BEGIN
+      IF IRoundAmounts = 0 THEN
+        IRoundAmounts := 0.01;
+      MaintSchemeVersionLine.SETRANGE("Line Type", IMaintenanceHeader."Line Type");
+      MaintSchemeVersionLine.SETRANGE("Type Code", IMaintenanceHeader.Code);
+      MaintSchemeVersionLine.SETRANGE("Belongs to Scheme", IMaintenanceHeader."Belongs to Scheme");
+      MaintSchemeVersionLine.SETRANGE("Index Date", IMaintenanceHeader."Index Date");
+      MaintSchemeVersionLine.SETRANGE("Price Agreement", FALSE);
+      IF MaintSchemeVersionLine.FINDSET(TRUE) THEN
+        REPEAT
+          MaintSchemeVersionLine.VALIDATE("Index Date");
+          CASE MaintSchemeVersionLine."Cost Type" OF
+            MaintSchemeVersionLine."Cost Type"::Labor:
+              IF MaintSchemeVersionLine."Rate Code" = '' THEN BEGIN
+                MaintSchemeVersionLine.Rate *= (100 + ILaborPerc) / 100;
+                MaintSchemeVersionLine.Rate := ROUND(MaintSchemeVersionLine.Rate, IRoundAmounts);
+                MaintSchemeVersionLine.VALIDATE(Rate);
+              END;
+          ELSE
+            CASE MaintSchemeVersionLine."Cost Type" OF
+              MaintSchemeVersionLine."Cost Type"::Material:
+                IF (MaintSchemeVersionLine."Item No." + MaintSchemeVersionLine."Basic Item" + MaintSchemeVersionLine."Trade Item" = '')
+                THEN
+                  MaintSchemeVersionLine."Gross Price" *= (100 + IMaterialPerc) / 100;
+              MaintSchemeVersionLine."Cost Type"::Subcontracting:
+                MaintSchemeVersionLine."Gross Price" *= (100 + ISubcontrPerc) / 100;
+              MaintSchemeVersionLine."Cost Type"::Plant:
+                MaintSchemeVersionLine."Gross Price" *= (100 + IPlantPerc) / 100;
+              MaintSchemeVersionLine."Cost Type"::Sundry:
+                MaintSchemeVersionLine."Gross Price" *= (100 + ISundryPerc) / 100;
+            END;
+            MaintSchemeVersionLine."Gross Price" := ROUND(MaintSchemeVersionLine."Gross Price", IRoundAmounts);
+            MaintSchemeVersionLine.VALIDATE("Gross Price");
+          END;
+          MaintSchemeVersionLine.MODIFY(TRUE);
+        UNTIL MaintSchemeVersionLine.NEXT = 0;
+    END;
+
+    PROCEDURE ShowContractObjOverlapConflict@1100528603(IContractNo@1100526200 : Code[20];IObjectNo@1100526206 : Code[20]);
+    VAR
+      ServiceContract@1100528601 : Record 11012812;
+      OrigContractObject@1100526205 : Record 11071702;
+      ContractObject@1100526203 : Record 11071702;
+      Error@1100526201 : Record 11012051;
+      MaintenanceInvoiceMgtCU@1100528600 : Codeunit 11012828;
+      LineNo@1100526202 : Integer;
+      OrigContractObjEndingDate@1100526207 : Date;
+      ContractObjEndingDate@1100526208 : Date;
+    BEGIN
+      Error.SETRANGE("User ID", USERID);
+      Error.SETRANGE("Source Type", Error."Source Type"::"Contract Object");
+      Error.DELETEALL;
+
+      LineNo := 1;
+
+      IF NOT ServiceContract.GET(IContractNo) THEN
+        ServiceContract.INIT;
+      IF NOT (ServiceContract.Status IN [ServiceContract.Status::Order, ServiceContract.Status::"Invoicing Allowed"]) THEN
+        EXIT;
+      OrigContractObject.SETRANGE("Service Contract No.", IContractNo);
+      IF IObjectNo <> '' THEN
+        OrigContractObject.SETRANGE("Service Object No.", IObjectNo);
+
+      IF OrigContractObject.FINDSET THEN
+        REPEAT
+          OrigContractObject.CALCFIELDS(Blocked);
+          IF NOT OrigContractObject.Blocked THEN BEGIN
+            ContractObject.SETCURRENTKEY("Service Object No.", "Service Contract No.");
+            ContractObject.SETRANGE("Service Object No.", OrigContractObject."Service Object No.");
+            ContractObject.SETFILTER("Service Contract No.", '<>%1', OrigContractObject."Service Contract No.");
+            IF ContractObject.FINDSET THEN
+              REPEAT
+                ContractObject.CALCFIELDS("Service Contract Status", "Service Contract Blocked", Blocked);
+                IF NOT ContractObject."Service Contract Blocked" AND
+                   NOT ContractObject.Blocked AND
+                   (ContractObject."Service Contract Status" IN
+                   [ContractObject."Service Contract Status"::Order, ContractObject."Service Contract Status"::"Invoicing Allowed"])
+                THEN BEGIN
+                  OrigContractObjEndingDate := MaintenanceInvoiceMgtCU.GetContractObjectEndingDate(OrigContractObject);
+                  ContractObjEndingDate := MaintenanceInvoiceMgtCU.GetContractObjectEndingDate(ContractObject);
+                  IF ((OrigContractObjEndingDate = 0D) OR (ContractObject."Invoice From" <= OrigContractObjEndingDate)) AND
+                     ((ContractObjEndingDate = 0D) OR (ContractObjEndingDate >= OrigContractObject."Starting Date")) THEN BEGIN
+                    Error.INIT;
+                    Error."User ID" := USERID;
+                    Error."Source Type" := Error."Source Type"::"Contract Object";
+                    Error."Line No." := LineNo;
+                    Error."Service Contract No." := OrigContractObject."Service Contract No.";
+                    Error."Object No." := OrigContractObject."Service Object No.";
+                    LineNo += 1;
+                    Error."Error message" := STRSUBSTNO(Text004, ContractObject."Service Contract No.");
+                    Error.INSERT;
+                  END;
+                END;
+              UNTIL ContractObject.NEXT = 0;
+          END;
+        UNTIL OrigContractObject.NEXT = 0;
+
+      IF NOT Error.ISEMPTY THEN BEGIN
+        COMMIT;
+        PAGE.RUNMODAL(PAGE::Errors, Error);
+      END ELSE
+        MESSAGE(Text003);
+    END;
+
+    PROCEDURE GetDOWCaption@1100528604(DOW@1100528600 : Integer) : Text[30];
+    VAR
+      ServiceContractArrangement@1100528601 : Record 11071705;
+    BEGIN
+      ServiceContractArrangement.INIT;
+      ServiceContractArrangement."Maintenance Day" := DOW;
+      EXIT(FORMAT(ServiceContractArrangement."Maintenance Day"));
+    END;
+
+    PROCEDURE GetDOWCaptionOfDate@1100528605(IDate@1100528600 : Date) : Text[30];
+    VAR
+      DOW@1100528601 : Integer;
+    BEGIN
+      IF IDate = 0D THEN
+        EXIT('');
+      DOW := DATE2DWY(IDate, 1);
+      EXIT(GetDOWCaption(DOW));
+    END;
+
+    PROCEDURE CopyServiceUnitPrice@1100528606(IServiceUnitPrice@1100528600 : Record 11071768;INewIndexDate@1100528601 : Date;VAR OServiceUnitPrice@1100528602 : Record 11071768);
+    VAR
+      ServiceUnitPriceManagement@1100528400 : Codeunit 11012846;
+    BEGIN
+      OServiceUnitPrice := IServiceUnitPrice;
+      OServiceUnitPrice.VALIDATE("Index Date", INewIndexDate);
+      OServiceUnitPrice.INSERT;
+
+      ServiceUnitPriceManagement.CopyUnitPrice(
+        IServiceUnitPrice.Type, IServiceUnitPrice.Code, IServiceUnitPrice."Index Date", IServiceUnitPrice.Description,
+        OServiceUnitPrice.Type, OServiceUnitPrice.Code, OServiceUnitPrice."Index Date", OServiceUnitPrice.Description, TRUE);
+    END;
+
+    PROCEDURE IndexServiceUnitPrice@1100528623(IServiceUnitPrice@1100528600 : Record 11071768;IMaterialPerc@1100528601 : Decimal;ILaborPerc@1100528602 : Decimal;ISubcontrPerc@1100528610 : Decimal;IPlantPerc@1100528611 : Decimal;ISundryPerc@1100528612 : Decimal;IRoundAmounts@1100528606 : Decimal;IUnitPricesPerc@1100528604 : Decimal;IRoundUnitPrices@1100528607 : Decimal);
+    VAR
+      ServiceUnitPriceLine@1100528603 : Record 11071769;
+      UnitPriceBudgetInternal@1100528605 : Record 11071770;
+    BEGIN
+      IF IRoundAmounts = 0 THEN
+        IRoundAmounts := 0.01;
+      IF IRoundUnitPrices = 0 THEN
+        IRoundUnitPrices := 0.01;
+
+      ServiceUnitPriceLine.SETRANGE("Price Book Type", IServiceUnitPrice.Type);
+      ServiceUnitPriceLine.SETRANGE("Price Book Code", IServiceUnitPrice.Code);
+      ServiceUnitPriceLine.SETRANGE("Index Date", IServiceUnitPrice."Index Date");
+      IF ServiceUnitPriceLine.FINDSET(TRUE) THEN
+        REPEAT
+          ServiceUnitPriceLine.VALIDATE("Index Date");
+          ServiceUnitPriceLine."Unit Price" *= (100 + IUnitPricesPerc) / 100;
+          ServiceUnitPriceLine."Unit Price" := ROUND(ServiceUnitPriceLine."Unit Price", IRoundUnitPrices);
+          ServiceUnitPriceLine.VALIDATE("Unit Price");
+          ServiceUnitPriceLine.MODIFY(TRUE);
+        UNTIL (ServiceUnitPriceLine.NEXT = 0);
+
+      UnitPriceBudgetInternal.SETRANGE("Price Book Type", IServiceUnitPrice.Type);
+      UnitPriceBudgetInternal.SETRANGE("Price Book Code", IServiceUnitPrice.Code);
+      UnitPriceBudgetInternal.SETRANGE("Index Date", IServiceUnitPrice."Index Date");
+      IF (UnitPriceBudgetInternal.FINDSET(TRUE)) THEN
+        REPEAT
+          UnitPriceBudgetInternal.VALIDATE("Index Date");
+          CASE UnitPriceBudgetInternal."Cost Type" OF
+            UnitPriceBudgetInternal."Cost Type"::Labor:
+              IF UnitPriceBudgetInternal."Rate Code" = '' THEN BEGIN
+                UnitPriceBudgetInternal.Rate *= (100 + ILaborPerc) / 100;
+                UnitPriceBudgetInternal.Rate := ROUND(UnitPriceBudgetInternal.Rate, IRoundAmounts);
+                UnitPriceBudgetInternal.VALIDATE(Rate);
+              END;
+          ELSE
+            CASE UnitPriceBudgetInternal."Cost Type" OF
+              UnitPriceBudgetInternal."Cost Type"::Material:
+                IF (UnitPriceBudgetInternal."Item No." + UnitPriceBudgetInternal."Basic Item" +
+                    UnitPriceBudgetInternal."Trade Item" = '')
+                THEN
+                  UnitPriceBudgetInternal."Gross Price" *= (100 + IMaterialPerc) / 100;
+              UnitPriceBudgetInternal."Cost Type"::Subcontracting:
+                UnitPriceBudgetInternal."Gross Price" *= (100 + ISubcontrPerc) / 100;
+              UnitPriceBudgetInternal."Cost Type"::Plant:
+                UnitPriceBudgetInternal."Gross Price" *= (100 + IPlantPerc) / 100;
+              UnitPriceBudgetInternal."Cost Type"::Sundry:
+                UnitPriceBudgetInternal."Gross Price" *= (100 + ISundryPerc) / 100;
+            END;
+            UnitPriceBudgetInternal."Gross Price" := ROUND(UnitPriceBudgetInternal."Gross Price", IRoundAmounts);
+            UnitPriceBudgetInternal.VALIDATE("Gross Price");
+          END;
+          UnitPriceBudgetInternal.MODIFY(TRUE);
+        UNTIL (UnitPriceBudgetInternal.NEXT = 0);
+    END;
+
+    PROCEDURE MaintLinesSubcontractingExist@1210190000(IContractObjectMaintenance@1210190000 : Record 11071692;IIndexDate@1210190001 : Date) : Boolean;
+    VAR
+      TmpMaintSchemeVersionLine@1210190002 : TEMPORARY Record 11071744;
+    BEGIN
+      GetTempWorklist(
+        TmpMaintSchemeVersionLine, TmpMaintSchemeVersionLine."Line Type"::Object, IContractObjectMaintenance."Object No.",
+        IContractObjectMaintenance."Maintenance Scheme", IContractObjectMaintenance."Object No.", IIndexDate,
+        IContractObjectMaintenance."Service Contract No.", TmpMaintSchemeVersionLine."Line Type"::Object,
+        IContractObjectMaintenance."Object No.", IContractObjectMaintenance."Maintenance Scheme", IIndexDate, FALSE, TRUE);
+
+      IF TmpMaintSchemeVersionLine.ISEMPTY THEN
+        EXIT(FALSE);
+
+      TmpMaintSchemeVersionLine.SETRANGE("Cost Type", TmpMaintSchemeVersionLine."Cost Type"::Subcontracting);
+      IF NOT TmpMaintSchemeVersionLine.ISEMPTY THEN
+        EXIT(TRUE);
+    END;
+
+    PROCEDURE MaintLinesLaborExist@1100528800(IContractObjectMaintenance@1100528801 : Record 11071692;IIndexDate@1100528800 : Date) : Boolean;
+    VAR
+      TmpMaintSchemeVersionLine@1100528802 : TEMPORARY Record 11071744;
+    BEGIN
+      GetTempWorklist(
+        TmpMaintSchemeVersionLine, TmpMaintSchemeVersionLine."Line Type"::Object, IContractObjectMaintenance."Object No.",
+        IContractObjectMaintenance."Maintenance Scheme", IContractObjectMaintenance."Object No.", IIndexDate,
+        IContractObjectMaintenance."Service Contract No.", TmpMaintSchemeVersionLine."Line Type"::Object,
+        IContractObjectMaintenance."Object No.", IContractObjectMaintenance."Maintenance Scheme", IIndexDate, FALSE, TRUE);
+
+      IF TmpMaintSchemeVersionLine.ISEMPTY THEN
+        EXIT(TRUE);
+
+      TmpMaintSchemeVersionLine.SETRANGE("Cost Type", TmpMaintSchemeVersionLine."Cost Type"::Labor);
+         IF NOT TmpMaintSchemeVersionLine.ISEMPTY THEN
+          EXIT(TRUE);
+    END;
+
+    PROCEDURE GetMaintLinesWorkTravelHours@1100528624(IServiceObjectNo@1100528600 : Code[20];IMaintenanceSchemeCode@1100528604 : Code[20];ISeekDate@1100409000 : Date;IServiceContractNo@1100528609 : Code[20];VAR OWorkingHours@1100528607 : Decimal;VAR OTravelHours@1100528608 : Decimal;VAR OMaterialPresent@1100525000 : Boolean);
+    VAR
+      TmpMaintSchemeVersionLine@1100528601 : TEMPORARY Record 11071744;
+      ServiceObject@1100528605 : Record 11071691;
+      ServiceSetup@1100528606 : Record 11012800;
+      SchemeType@1100528603 : 'Maintenance Scheme,Modification,Standard Object,Standard Object Deinstallation,Standard Object Installation,Object Installation,Object';
+      DepartmentCode@1100528610 : Code[20];
+    BEGIN
+      OWorkingHours := 0;
+      OTravelHours := 0;
+      OMaterialPresent := FALSE;
+      IF NOT ServiceObject.GET(IServiceObjectNo) THEN
+        EXIT;
+      DepartmentCode := ServiceObject.GetDepartmentCode(IServiceContractNo);
+
+      GetTempWorklist(TmpMaintSchemeVersionLine, SchemeType::Object, ServiceObject."No.", IMaintenanceSchemeCode,
+         ServiceObject."No.",
+        ISeekDate, IServiceContractNo, SchemeType::Object, ServiceObject."No.", IMaintenanceSchemeCode, ISeekDate, FALSE, TRUE);
+
+      ServiceSetup.GET;
+      IF TmpMaintSchemeVersionLine.FINDSET THEN BEGIN
+        REPEAT
+          IF (ServiceSetup."Cost Object Travel Time" <> '') AND
+             (TmpMaintSchemeVersionLine."Cost Object" = ServiceSetup."Cost Object Travel Time")
+          THEN
+            OTravelHours += TmpMaintSchemeVersionLine."Hours per Service" * ServiceObject.Quantity
+          ELSE
+            OWorkingHours += TmpMaintSchemeVersionLine."Hours per Service" * ServiceObject.Quantity;
+
+          IF (TmpMaintSchemeVersionLine."Cost Type" = TmpMaintSchemeVersionLine."Cost Type"::Material) AND
+             (TmpMaintSchemeVersionLine.Quantity <> 0)
+          THEN
+            OMaterialPresent := TRUE;
+        UNTIL TmpMaintSchemeVersionLine.NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE GetMaintLinesCostObjectAmounts@1100528627(IServiceObjectNo@1100528600 : Code[20];IMaintenanceSchemeCode@1100528604 : Code[20];ISeekDate@1100409000 : Date;IServiceContractNo@1100528609 : Code[20];VAR OMaterialAmount@1100528611 : Decimal;VAR OLaborAmount@1100528612 : Decimal;VAR OWorkingHours@1100528607 : Decimal;VAR OTravelHours@1100528608 : Decimal;VAR OSubcontractingAmount@1100528613 : Decimal;VAR OPlantAmount@1100528614 : Decimal;VAR OSundryAmount@1100528615 : Decimal;VAR OMaterialPresent@1100528616 : Boolean);
+    VAR
+      TmpMaintSchemeVersionLine@1100528601 : TEMPORARY Record 11071744;
+      ServiceObject@1100528605 : Record 11071691;
+      ServiceSetup@1100528606 : Record 11012800;
+      SchemeType@1100528603 : 'Maintenance Scheme,Modification,Standard Object,Standard Object Deinstallation,Standard Object Installation,Object Installation,Object';
+      DepartmentCode@1100528610 : Code[20];
+    BEGIN
+      OWorkingHours := 0;
+      OTravelHours := 0;
+      OMaterialAmount := 0;
+      OLaborAmount := 0;
+      OSubcontractingAmount := 0;
+      OPlantAmount := 0;
+      OSundryAmount := 0;
+      IF NOT ServiceObject.GET(IServiceObjectNo) THEN
+        EXIT;
+      DepartmentCode := ServiceObject.GetDepartmentCode(IServiceContractNo);
+
+      GetTempWorklist(TmpMaintSchemeVersionLine, SchemeType::Object, ServiceObject."No.", IMaintenanceSchemeCode,
+         ServiceObject."No.",
+        ISeekDate, IServiceContractNo, SchemeType::Object, ServiceObject."No.", IMaintenanceSchemeCode, ISeekDate, FALSE, TRUE);
+
+      ServiceSetup.GET;
+      IF TmpMaintSchemeVersionLine.FINDSET THEN BEGIN
+        REPEAT
+          CASE TmpMaintSchemeVersionLine."Cost Type" OF
+            TmpMaintSchemeVersionLine."Cost Type"::Labor:
+              BEGIN
+                OLaborAmount += TmpMaintSchemeVersionLine."Cost per Service" * ServiceObject.Quantity;
+                IF (ServiceSetup."Cost Object Travel Time" <> '') AND
+                   (TmpMaintSchemeVersionLine."Cost Object" = ServiceSetup."Cost Object Travel Time")
+                THEN
+                  OTravelHours += TmpMaintSchemeVersionLine."Hours per Service" * ServiceObject.Quantity
+                ELSE
+                  OWorkingHours += TmpMaintSchemeVersionLine."Hours per Service" * ServiceObject.Quantity;
+              END;
+            TmpMaintSchemeVersionLine."Cost Type"::Material:
+              BEGIN
+                OMaterialAmount += TmpMaintSchemeVersionLine."Cost per Service" * ServiceObject.Quantity;
+                IF TmpMaintSchemeVersionLine.Quantity <> 0 THEN
+                  OMaterialPresent := TRUE;
+              END;
+            TmpMaintSchemeVersionLine."Cost Type"::Subcontracting:
+              BEGIN
+                OSubcontractingAmount += TmpMaintSchemeVersionLine."Cost per Service" * ServiceObject.Quantity;
+              END;
+            TmpMaintSchemeVersionLine."Cost Type"::Plant:
+              BEGIN
+                OPlantAmount += TmpMaintSchemeVersionLine."Cost per Service" * ServiceObject.Quantity;
+              END;
+            TmpMaintSchemeVersionLine."Cost Type"::Sundry:
+              BEGIN
+                OSundryAmount += TmpMaintSchemeVersionLine."Cost per Service" * ServiceObject.Quantity;
+              END;
+          END;
+        UNTIL TmpMaintSchemeVersionLine.NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE CopyMaintenenanceScheme@1100528625(IMaintenanceSchemeCode@1100528600 : Code[20];IIndexDate@1100528601 : Date;INewMaintenanceSchemeCode@1100528602 : Code[20];INewIndexDate@1100528609 : Date);
+    VAR
+      MaintenanceScheme@1100528603 : Record 11071745;
+      ToMaintenanceScheme@1100528604 : Record 11071745;
+      MaintenanceSchemeVersion@1100528605 : Record 11071743;
+      ToMaintenanceSchemeVersion@1100528606 : Record 11071743;
+      MaintSchemeVersionLine@1100528607 : Record 11071744;
+      ToMaintSchemeVersionLine@1100528608 : Record 11071744;
+      CancelledMaintSchemeLine@1100525000 : Record 11071954;
+      ToCancelledMaintSchemeLine@1100525001 : Record 11071954;
+    BEGIN
+      MaintenanceScheme.GET(IMaintenanceSchemeCode);
+      ToMaintenanceScheme := MaintenanceScheme;
+      ToMaintenanceScheme.Code := INewMaintenanceSchemeCode;
+      ToMaintenanceScheme.INSERT(TRUE);
+
+      MaintenanceSchemeVersion.SETRANGE("Line Type", MaintenanceSchemeVersion."Line Type"::"Maintenance Scheme");
+      MaintenanceSchemeVersion.SETRANGE(Code, IMaintenanceSchemeCode);
+      MaintenanceSchemeVersion.SETRANGE("Belongs to Scheme", '');
+      MaintenanceSchemeVersion.SETFILTER("Index Date", '<=%1', IIndexDate);
+      IF MaintenanceSchemeVersion.FINDLAST THEN BEGIN
+        ToMaintenanceSchemeVersion := MaintenanceSchemeVersion;
+        ToMaintenanceSchemeVersion.Code := INewMaintenanceSchemeCode;
+        ToMaintenanceSchemeVersion."Index Date" := INewIndexDate;
+        ToMaintenanceSchemeVersion.INSERT(TRUE);
+
+        MaintSchemeVersionLine.SETRANGE("Line Type", MaintenanceSchemeVersion."Line Type");
+        MaintSchemeVersionLine.SETRANGE("Type Code", MaintenanceSchemeVersion.Code);
+        MaintSchemeVersionLine.SETRANGE("Belongs to Scheme", MaintenanceSchemeVersion."Belongs to Scheme");
+        MaintSchemeVersionLine.SETRANGE("Index Date", MaintenanceSchemeVersion."Index Date");
+        IF MaintSchemeVersionLine.FINDSET THEN
+          REPEAT
+            ToMaintSchemeVersionLine := MaintSchemeVersionLine;
+            ToMaintSchemeVersionLine."Type Code" := ToMaintenanceSchemeVersion.Code;
+            ToMaintSchemeVersionLine.VALIDATE("Index Date", ToMaintenanceSchemeVersion."Index Date");
+            ToMaintSchemeVersionLine.INSERT(TRUE);
+          UNTIL MaintSchemeVersionLine.NEXT = 0;
+      END;
+
+      CancelledMaintSchemeLine.SETRANGE("Line Type", MaintenanceSchemeVersion."Line Type");
+      CancelledMaintSchemeLine.SETRANGE("Type Code", MaintenanceSchemeVersion.Code);
+      CancelledMaintSchemeLine.SETRANGE("Belongs to Scheme", MaintenanceSchemeVersion."Belongs to Scheme");
+      CancelledMaintSchemeLine.SETRANGE("Index Date", MaintenanceSchemeVersion."Index Date");
+      IF CancelledMaintSchemeLine.FINDSET THEN
+        REPEAT
+          ToCancelledMaintSchemeLine := CancelledMaintSchemeLine;
+          ToCancelledMaintSchemeLine."Type Code" := ToMaintenanceSchemeVersion.Code;
+          ToCancelledMaintSchemeLine.VALIDATE("Index Date", ToMaintenanceSchemeVersion."Index Date");
+          ToCancelledMaintSchemeLine.INSERT(TRUE);
+        UNTIL CancelledMaintSchemeLine.NEXT = 0;
+    END;
+
+    PROCEDURE UpdateSOBudgetBySOObject@1100409000(IServiceOrderObject@1100409000 : Record 11071724);
+    VAR
+      MaintenanceScheme@1100409009 : Record 11071745;
+      TmpMaintSchemeVersionLine@1100409001 : TEMPORARY Record 11071744;
+      ServiceOrderBudgetLine@1100409005 : Record 11012875;
+      ServiceOrder@1100409007 : Record 11012823;
+      ServiceObject@1100409008 : Record 11071691;
+      SubcontractorService@1100409011 : Record 11071789;
+      CreateServiceOrders@1100409006 : Codeunit 11012831;
+      LineNo@1100409002 : Integer;
+      SchemeType@1100409003 : 'Maintenance Scheme,Modification,Standard Object,Standard Object Deinstallation,Standard Object Installation,Object Installation,Object';
+      Subcontractor@1100409010 : Code[20];
+      Discipline@1100528600 : Code[10];
+      TradeSpeciality@1100528601 : Code[10];
+    BEGIN
+      IF (IServiceOrderObject."Service Order No." = '') OR
+         (IServiceOrderObject."Object No." = '') OR
+         (IServiceOrderObject."Maintenance Scheme" = '') OR
+         (IServiceOrderObject.Finished)
+      THEN
+        EXIT;
+      IF NOT ServiceOrder.GET(IServiceOrderObject."Service Order No.") THEN
+        EXIT;
+      IF ServiceOrder.Status <> ServiceOrder.Status::Open THEN
+        EXIT;
+      IF NOT ServiceObject.GET(IServiceOrderObject."Object No.") THEN
+       EXIT;
+      IServiceOrderObject.CALCFIELDS("Theoretical Maintenance Date");
+      IF IServiceOrderObject."Theoretical Maintenance Date" = 0D THEN
+        EXIT;
+
+      ServiceOrderBudgetLine.SETRANGE("Budget Type", ServiceOrderBudgetLine."Budget Type"::Order);
+      ServiceOrderBudgetLine.SETRANGE("Service Order No.", IServiceOrderObject."Service Order No.");
+      ServiceOrderBudgetLine.SETRANGE("Object No.", IServiceOrderObject."Object No.");
+      ServiceOrderBudgetLine.SETRANGE("Maintenance Scheme", IServiceOrderObject."Maintenance Scheme");
+      ServiceOrderBudgetLine.SETRANGE(Finished, TRUE);
+      IF NOT ServiceOrderBudgetLine.ISEMPTY THEN
+        EXIT;
+      ServiceOrderBudgetLine.SETRANGE(Finished);
+      ServiceOrderBudgetLine.DELETEALL(TRUE);
+
+      GetTempWorklist(TmpMaintSchemeVersionLine, SchemeType::Object, IServiceOrderObject."Object No.",
+        IServiceOrderObject."Maintenance Scheme", IServiceOrderObject."Object No.",
+        IServiceOrderObject."Theoretical Maintenance Date",
+        ServiceOrder."Service Contract No.", SchemeType::Object, IServiceOrderObject."Object No.",
+        IServiceOrderObject."Maintenance Scheme", IServiceOrderObject."Theoretical Maintenance Date", FALSE, TRUE);
+
+      ServiceOrderBudgetLine.SETRANGE("Object No.");
+      ServiceOrderBudgetLine.SETRANGE("Maintenance Scheme");
+      IF ServiceOrderBudgetLine.FINDLAST THEN
+        LineNo := ServiceOrderBudgetLine."Line No.";
+      LineNo += 10000;
+
+      IF NOT MaintenanceScheme.GET(IServiceOrderObject."Maintenance Scheme") THEN
+        MaintenanceScheme.INIT;
+
+      DetermineDisciplineAndTradeSpeciality(IServiceOrderObject."Object No.", IServiceOrderObject."Maintenance Scheme", Discipline, TradeSpeciality);
+      IF TmpMaintSchemeVersionLine.FINDSET THEN BEGIN
+        TmpMaintSchemeVersionLine.SETFILTER("Cost Type", '<>%1', TmpMaintSchemeVersionLine."Cost Type"::Subcontracting);
+        IF TmpMaintSchemeVersionLine.ISEMPTY THEN BEGIN
+          Subcontractor := SubcontractorService.GetSubcontractor(
+            ServiceOrder."Service Contract No.", ServiceOrder."Service Location No.", IServiceOrderObject."Object No.",
+            IServiceOrderObject."Maintenance Scheme", Discipline, TradeSpeciality);
+        END;
+        TmpMaintSchemeVersionLine.RESET;
+
+        REPEAT
+          CreateServiceOrders.InsertBudgetLine(
+            ServiceOrder, ServiceObject,
+            TradeSpeciality,
+            MaintenanceScheme."Trade Expertise",
+            Discipline,
+            Subcontractor, LineNo, TmpMaintSchemeVersionLine);
+        UNTIL TmpMaintSchemeVersionLine.NEXT = 0;
+      END;
+
+      ServiceOrder.UpdateSOSurchageBudgetLines;
+      ServiceOrder.FIND('-');
+      ServiceOrder.CALCFIELDS("Budget Hours");
+      IF ServiceOrder."Expected Hours" < ServiceOrder."Budget Hours" THEN BEGIN
+        ServiceOrder."Expected Hours" := ServiceOrder."Budget Hours";
+        ServiceOrder.MODIFY(TRUE);
+      END;
+    END;
+
+    PROCEDURE ConvPeriodToTimesPerYear@1100525010(PeriodFormula@1100525000 : DateFormula) : Decimal;
+    VAR
+      PeriodPartList@1100529602 : TEMPORARY Record 11020579;
+      NumberPart@1100485001 : Integer;
+      SignPos@1100529600 : Integer;
+      MinusSignPos@1100529604 : Integer;
+      SignInt@1100529603 : Integer;
+      MinPeriod@1100529605 : Integer;
+      PeriodFormText@1100529606 : Text[30];
+      FormulaPart@1100529601 : Text;
+    BEGIN
+      //db, 16-03-11: M26299
+      PeriodFormText := FORMAT(PeriodFormula);
+      IF PeriodFormText = '' THEN
+        EXIT(1);
+
+      PeriodPartList."Key Code1" := '0';
+      SignInt := 1;
+      REPEAT
+        PeriodPartList.INIT;
+        PeriodPartList."Key Code1" := INCSTR( PeriodPartList."Key Code1");
+        PeriodPartList.Int1 := SignInt; //sign
+        PeriodPartList.Int2 := 1; //period number: 1 - day, 2 - week, 3 - month, 4 - quarter, 5 - year
+        PeriodPartList.INSERT;
+        SignPos := STRPOS(PeriodFormText, '+');
+        SignInt := 1;
+        MinusSignPos := STRPOS(PeriodFormText, '-');
+        IF MinusSignPos <> 0 THEN
+          IF (SignPos = 0) OR (SignPos > MinusSignPos) THEN BEGIN
+            SignInt := -1;
+            SignPos := MinusSignPos;
+          END;
+
+        IF SignPos = 0 THEN BEGIN
+          FormulaPart := PeriodFormText;
+          PeriodFormText := '';
+        END ELSE BEGIN
+          FormulaPart := COPYSTR(PeriodFormText, 1, SignPos - 1);
+          PeriodFormText := COPYSTR(PeriodFormText, SignPos + 1);
+        END;
+
+        IF NOT ConvertPeriodPart(FormulaPart, PeriodPartList) THEN BEGIN
+          MESSAGE(Text014);
+          EXIT(0);
+        END;
+      UNTIL PeriodFormText = '';
+
+      IF PeriodPartList.ISEMPTY THEN
+        EXIT(0);
+
+      MinPeriod := 0;
+      REPEAT
+        MinPeriod += 1;
+        PeriodPartList.SETRANGE(Int2, MinPeriod);
+      UNTIL (NOT PeriodPartList.ISEMPTY) OR (MinPeriod = 5);
+
+      PeriodPartList.RESET;
+      CASE MinPeriod OF
+        1: //day
+          BEGIN
+            PeriodPartList.CALCSUMS(Int3);
+            NumberPart := PeriodPartList.Int3;
+            IF NumberPart <> 0 THEN
+              EXIT(365 / NumberPart);
+          END;
+        2: //week
+          BEGIN
+            PeriodPartList.CALCSUMS(Int4);
+            NumberPart := PeriodPartList.Int4;
+            IF NumberPart <> 0 THEN
+              EXIT(52 / NumberPart);
+          END;
+        3: //month
+          BEGIN
+            PeriodPartList.CALCSUMS(Int5);
+            NumberPart := PeriodPartList.Int5;
+            IF NumberPart <> 0 THEN
+              EXIT(12 / NumberPart);
+          END;
+        4: //quarter
+          BEGIN
+            PeriodPartList.CALCSUMS(Int6);
+            NumberPart := PeriodPartList.Int6;
+            IF NumberPart <> 0 THEN
+              EXIT(4 / NumberPart);
+          END;
+        5: //year
+          BEGIN
+            PeriodPartList.CALCSUMS(Int7);
+            NumberPart := PeriodPartList.Int7;
+            IF NumberPart <> 0 THEN
+              EXIT(1 / NumberPart);
+          END;
+      END;
+
+      EXIT(0);
+    END;
+
+    LOCAL PROCEDURE ConvertPeriodPart@1100529605(FormulaPart@1100529600 : Text;VAR PeriodPartList@1100529603 : TEMPORARY Record 11020579) : Boolean;
+    VAR
+      PeriodPart@1100529601 : Text;
+      NumberPart@1100529602 : Integer;
+    BEGIN
+      IF FormulaPart = '' THEN
+        EXIT(TRUE);
+
+      PeriodPart := DELCHR(FormulaPart, '=', '0123456789');
+      IF PeriodPart = '' THEN
+        EXIT(TRUE);
+
+      IF FormulaPart = PeriodPart THEN
+        NumberPart := 1
+      ELSE
+        IF STRPOS(FormulaPart, PeriodPart) = 1 THEN BEGIN
+          IF NOT EVALUATE(NumberPart, COPYSTR(FormulaPart, STRLEN(PeriodPart) + 1)) THEN
+            EXIT(TRUE);
+        END ELSE
+          IF NOT EVALUATE(NumberPart, COPYSTR(FormulaPart, 1, STRPOS(FormulaPart, PeriodPart) - 1)) THEN
+            EXIT(TRUE);
+
+      IF NumberPart = 0 THEN
+        EXIT(TRUE);
+
+      CASE GLOBALLANGUAGE OF
+        1031:  //DEU
+          CASE PeriodPart OF
+            'T': PeriodPartList.Int2 := 1;  //tag
+            'W': PeriodPartList.Int2 := 2;  //woche
+            'M': PeriodPartList.Int2 := 3;  //monat
+            'V': PeriodPartList.Int2 := 4;  //viertel
+            'J': PeriodPartList.Int2 := 5;  //jahr
+            ELSE
+              EXIT(FALSE);
+          END;
+        1033,  //ENU
+        2057:  //ENG
+          CASE PeriodPart OF
+            'D': PeriodPartList.Int2 := 1;  //day
+            'W': PeriodPartList.Int2 := 2;  //week
+            'M': PeriodPartList.Int2 := 3;  //month
+            'Q': PeriodPartList.Int2 := 4;  //quarter
+            'Y': PeriodPartList.Int2 := 5;  //year
+            ELSE
+              EXIT(FALSE);
+          END;
+        1036,  //FRA
+        2060:  //FRB
+          CASE PeriodPart OF
+            'J': PeriodPartList.Int2 := 1;  //jour
+            'S': PeriodPartList.Int2 := 2;  //semaine
+            'M': PeriodPartList.Int2 := 3;  //mois
+            'T': PeriodPartList.Int2 := 4;  //trimestre
+            'A': PeriodPartList.Int2 := 5;  //annee
+            ELSE
+              EXIT(FALSE);
+          END;
+        1043,  //NLD
+        2067:  //NLB
+          CASE PeriodPart OF
+            'D': PeriodPartList.Int2 := 1;  //dag
+            'W': PeriodPartList.Int2 := 2;  //week
+            'M': PeriodPartList.Int2 := 3;  //maand
+            'K': PeriodPartList.Int2 := 4;  //kwartaal
+            'J': PeriodPartList.Int2 := 5;  //jaar
+            ELSE
+              EXIT(FALSE);
+          END;
+      //>>190925, #24813
+        1053:  //SVE
+          BEGIN
+            CASE PeriodPart OF
+            'D': PeriodPartList.Int2 := 1;  //dag
+            'V': PeriodPartList.Int2 := 2;  //week
+            'M': PeriodPartList.Int2 := 3;  //maand
+            'K': PeriodPartList.Int2 := 4;  //kwartaal
+            'è': PeriodPartList.Int2 := 5;  //jaar
+            END;
+          END;
+        1030,  //DAN
+        1044:  //NOR
+          BEGIN
+            CASE PeriodPart OF
+            'D': PeriodPartList.Int2 := 1;  //dag
+            'U': PeriodPartList.Int2 := 2;  //week
+            'M': PeriodPartList.Int2 := 3;  //maand
+            'K': PeriodPartList.Int2 := 4;  //kwartaal
+            'è': PeriodPartList.Int2 := 5;  //jaar
+            END;
+          END;
+      //<<190925, #24813
+        ELSE
+          EXIT(FALSE);
+      END;
+
+      CASE PeriodPartList.Int2 OF
+        1: //day
+          PeriodPartList.Int3 := PeriodPartList.Int1 * NumberPart;         //no. of days
+        2: //week
+          BEGIN
+            PeriodPartList.Int3 := 7 * PeriodPartList.Int1 * NumberPart;   //no. of days
+            PeriodPartList.Int4 := PeriodPartList.Int1 * NumberPart;       //no. of weeks
+          END;
+        3: //month
+          BEGIN
+            PeriodPartList.Int3 := 30 * PeriodPartList.Int1 * NumberPart;  //no. of days
+            PeriodPartList.Int4 := 4 * PeriodPartList.Int1 * NumberPart;   //no. of weeks
+            PeriodPartList.Int5 := PeriodPartList.Int1 * NumberPart;       //no. of months
+          END;
+        4: //quarter
+          BEGIN
+            PeriodPartList.Int3 := 90 * PeriodPartList.Int1 * NumberPart;  //no. of days
+            PeriodPartList.Int4 := 12 * PeriodPartList.Int1 * NumberPart;  //no. of weeks
+            PeriodPartList.Int5 := 3 * PeriodPartList.Int1 * NumberPart;   //no. of months
+            PeriodPartList.Int6 := PeriodPartList.Int1 * NumberPart;       //no. of quarters
+          END;
+        5: //year
+          BEGIN
+            PeriodPartList.Int3 := 365 * PeriodPartList.Int1 * NumberPart; //no. of days
+            PeriodPartList.Int4 := 52 * PeriodPartList.Int1 * NumberPart;  //no. of weeks
+            PeriodPartList.Int5 := 12 * PeriodPartList.Int1 * NumberPart;  //no. of months
+            PeriodPartList.Int6 := 4 * PeriodPartList.Int1 * NumberPart;   //no. of quarters
+            PeriodPartList.Int7 := PeriodPartList.Int1 * NumberPart;       //no. of years
+          END;
+      END;
+
+      PeriodPartList.MODIFY;
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE "---"@1100528629();
+    BEGIN
+    END;
+
+    PROCEDURE PlanMaintPropLinesByResource@1100528607(VAR IMaintenanceProposalLine@1100528600 : Record 11071696;IResourceNo@1100528601 : Code[20];IStartingDate@1100528602 : Date;IEndingDate@1100528607 : Date;ITravelDuration@1100528603 : Duration;IMinimalUnoccupiedHours@1100528608 : Decimal;IOccupySeveralDays@1100528609 : Boolean;IClusterSeqn@1100528605 : Integer);
+    VAR
+      MaintenanceProposalLine@1100528604 : Record 11071696;
+      Resource@1100529000 : Record 11229278;
+      ServiceClusterSeq@1100528619 : Record 11071966;
+      ServiceClusterEmployee@1100528618 : Record 11071967;
+      StartingDate@1100528606 : Date;
+      LinesToProcess@1100528612 : Integer;
+      LinesProcessed@1100528613 : Integer;
+      ProgressDialog@1100528614 : Dialog;
+      PlanType@1100528615 : 'Maintenance Window,Other';
+      OriginalStartingDate@1100528616 : Date;
+      ResourceNo@1100528610 : Code[20];
+    BEGIN
+      MaintenanceProposalLine.COPY(IMaintenanceProposalLine);
+      IF IMaintenanceProposalLine.FINDSET THEN
+        REPEAT
+          MaintenanceProposalLine := IMaintenanceProposalLine;
+          MaintenanceProposalLine.MARK(TRUE);
+          PreCheckMaintenanceProposalLine(MaintenanceProposalLine, 0D, '');
+        UNTIL IMaintenanceProposalLine.NEXT = 0;
+      MaintenanceProposalLine.MARKEDONLY(TRUE);
+      //MaintenanceProposalLine.COPY(IMaintenanceProposalLine);
+      IF MaintenanceProposalLine.ISEMPTY THEN
+        ERROR(Text005a);
+      MaintenanceProposalLine.SETRANGE("Service Order No.", '');
+      MaintenanceProposalLine.SETRANGE("Firm Planned", FALSE);
+      MaintenanceProposalLine.SETRANGE(Expired, FALSE);
+
+      IF IClusterSeqn = 0 THEN
+        Resource.SETRANGE("No.", IResourceNo)  //DP00465.c
+      ELSE BEGIN
+        MaintenanceProposalLine.CALCFIELDS("Contract Cluster");
+        IF MaintenanceProposalLine."Contract Cluster" THEN
+          ServiceClusterSeq.GET(
+            ServiceClusterSeq.Type::Contract, MaintenanceProposalLine.GetClusterContractNo, ServiceClusterSeq."Source Type"::" ",
+              MaintenanceProposalLine.Cluster, MaintenanceProposalLine."Cluster Seqn.")
+        ELSE
+          ServiceClusterSeq.GET(
+            ServiceClusterSeq.Type::" ", '', ServiceClusterSeq."Source Type"::" ", MaintenanceProposalLine.Cluster, MaintenanceProposalLine."Cluster Seqn.");
+        IStartingDate := ServiceClusterSeq."Execution Period Start Date";
+        IF IStartingDate < TODAY THEN
+          IStartingDate := TODAY;
+        IEndingDate := ServiceClusterSeq."Execution Period Ending Date";
+        IF IStartingDate > IEndingDate THEN
+          ERROR(Text026, ServiceClusterSeq.TABLECAPTION, ServiceClusterSeq."Seq. No.");
+        ServiceClusterEmployee.SETRANGE(Type, ServiceClusterSeq.Type);
+        ServiceClusterEmployee.SETRANGE("Type Code", ServiceClusterSeq."Type Code");
+        ServiceClusterEmployee.SETRANGE("Source Type", ServiceClusterSeq."Source Type");
+        ServiceClusterEmployee.SETRANGE("Cluster Code", MaintenanceProposalLine.Cluster);
+        ServiceClusterEmployee.SETRANGE("Seq. No.", MaintenanceProposalLine."Cluster Seqn.");
+        IF ServiceClusterEmployee.FINDSET THEN BEGIN
+          REPEAT
+            Resource."No." := ServiceClusterEmployee."Resource No.";  //DP00465.c
+            Resource.MARK(TRUE);  //DP00465.c
+          UNTIL ServiceClusterEmployee.NEXT = 0;
+        END ELSE BEGIN
+          Resource."No." := ServiceClusterSeq.Subcontractor;
+          Resource.MARK(TRUE);
+        END;
+        Resource.MARKEDONLY(TRUE);
+        //Employee.MARKEDONLY(TRUE);  //DP00465.c
+      END;
+
+      ProgressDialog.OPEN(Text002);
+      OriginalStartingDate := IStartingDate;
+      IF MaintenanceProposalLine.FINDSET THEN
+        REPEAT
+          MaintenanceProposalLine."Resource No." := '';
+          MaintenanceProposalLine."Starting Time Maintenance" := 0T;
+          MaintenanceProposalLine."Ending Time Maintenance" := 0T;
+          MaintenanceProposalLine.MODIFY(TRUE);
+        UNTIL MaintenanceProposalLine.NEXT = 0;
+
+      IF NOT Resource.FINDSET THEN  //DP00465.c
+        EXIT;
+      REPEAT
+        ResourceNo := Resource."No.";  //DP00465.c
+        LinesProcessed := 0;
+        FOR PlanType := PlanType::"Maintenance Window" TO PlanType::Other DO BEGIN
+          IStartingDate := OriginalStartingDate;
+          TmpMaintenanceProposalLine.RESET;
+          TmpMaintenanceProposalLine.DELETEALL;
+          MaintenanceProposalLine.SETRANGE("Use Maintenance Window", PlanType = PlanType::"Maintenance Window");
+          MaintenanceProposalLine.SETRANGE("Starting Time Maintenance", 0T);
+          MaintenanceProposalLine.SETRANGE("Ending Time Maintenance", 0T);
+          IF MaintenanceProposalLine.FINDSET THEN
+            REPEAT
+              TmpMaintenanceProposalLine.COPY(MaintenanceProposalLine);
+              TmpMaintenanceProposalLine.INSERT;
+              LinesToProcess += 1;
+            UNTIL MaintenanceProposalLine.NEXT = 0;
+
+          IF PlanType = PlanType::Other THEN
+            ClearOccupiedTimeBuffer;
+
+          IF TmpMaintenanceProposalLine.FINDSET THEN BEGIN
+            IF NOT IOccupySeveralDays THEN BEGIN
+              StartingDate := IStartingDate;
+              REPEAT
+                IF PlanType = PlanType::Other THEN
+                  FillOccupiedTimeBuffer(TmpMaintenanceProposalLine, StartingDate, ResourceNo);
+                TmpMaintenanceProposalLine.FINDSET;
+                REPEAT
+                  PreCheckMaintenanceProposalLine(TmpMaintenanceProposalLine, StartingDate, ResourceNo);
+                  IF PlanType = PlanType::"Maintenance Window" THEN BEGIN
+                    ClearOccupiedTimeBuffer;
+                    FillOccupiedTimeBuffer(TmpMaintenanceProposalLine, StartingDate, ResourceNo);
+                  END;
+                  IF PlanSingleMaintPropLine(
+                    TmpMaintenanceProposalLine, StartingDate, IEndingDate, ResourceNo, ITravelDuration,
+                    FALSE, FALSE, 0)
+                  THEN BEGIN
+                    IF PlanType = PlanType::"Maintenance Window" THEN
+                      ProcessOccWorkingHours(ResourceNo);
+                    TmpMaintenanceProposalLine.DELETE;
+                    LinesProcessed += 1;
+                    ProgressDialog.UPDATE(1, ROUND(LinesProcessed / LinesToProcess * 9999, 1));
+                  END;
+                UNTIL TmpMaintenanceProposalLine.NEXT = 0;
+                StartingDate := StartingDate + 1;
+              UNTIL (TmpMaintenanceProposalLine.COUNT = 0) OR (StartingDate > IEndingDate);
+            END ELSE BEGIN
+              TmpMaintenanceProposalLine.FINDSET;
+              REPEAT
+                StartingDate := IStartingDate;
+                PreCheckMaintenanceProposalLine(TmpMaintenanceProposalLine, StartingDate, ResourceNo);
+                REPEAT
+                  IF PlanType = PlanType::"Maintenance Window" THEN
+                    ClearOccupiedTimeBuffer;
+                  FillOccupiedTimeBuffer(TmpMaintenanceProposalLine, StartingDate, ResourceNo);
+                  PlanSingleMaintPropLine(
+                    TmpMaintenanceProposalLine, StartingDate, IEndingDate, ResourceNo,
+                    ITravelDuration, IOccupySeveralDays, IOccupySeveralDays, IMinimalUnoccupiedHours);
+                  IF TmpMaintenanceProposalLine."Budget Working Hours" > 0 THEN
+                    StartingDate := StartingDate + 1;
+                UNTIL (TmpMaintenanceProposalLine."Budget Working Hours" = 0) OR (StartingDate > IEndingDate) OR NOT IOccupySeveralDays;
+                IF TmpMaintenanceProposalLine."Budget Working Hours" > 0 THEN // Could not occupy enough hours
+                  RemoveOccupiedTimeEntries(TmpMaintenanceProposalLine, IStartingDate, IEndingDate)
+                ELSE BEGIN
+                  IF PlanType = PlanType::"Maintenance Window" THEN
+                    ProcessOccWorkingHours(ResourceNo);
+                  TmpMaintenanceProposalLine.DELETE;
+                  IStartingDate := StartingDate;
+                  UpdateUnoccupiedTimeEntries(IStartingDate);
+                  LinesProcessed += 1;
+                  ProgressDialog.UPDATE(1, ROUND(LinesProcessed / LinesToProcess * 9999, 1));
+                END;
+              UNTIL (TmpMaintenanceProposalLine.NEXT = 0) OR (IStartingDate > IEndingDate);
+            END;
+
+            ProcessOccWorkingHours(ResourceNo);
+          END;
+        END;
+      UNTIL Resource.NEXT = 0; //DP00465.c
+      ProgressDialog.CLOSE;
+
+      MaintenanceProposalLine.RESET;
+      MaintenanceProposalLine.COPY(IMaintenanceProposalLine);
+      LinesToProcess := MaintenanceProposalLine.COUNT;
+      MaintenanceProposalLine.SETRANGE("Message Text", '');
+      LinesProcessed := MaintenanceProposalLine.COUNT;
+      IF LinesToProcess <> LinesProcessed THEN
+        MESSAGE(Text006,  LinesProcessed, LinesToProcess)
+      ELSE
+        MESSAGE(Text007);
+    END;
+
+    LOCAL PROCEDURE FillOccupiedTimeBuffer@1100528610(IMaintenanceProposalLine@1100528616 : Record 11071696;IDate@1100528601 : Date;IResourceNo@1100528606 : Code[20]);
+    VAR
+      CompanyInformation@1100528602 : Record 79;
+      EmployeeTimeTable@1100528600 : Record 11012923;
+      BaseCalendar@1100528607 : Record 11072014;
+      EmployeeAbsence@1100528609 : Record 5207;
+      ServiceOrder@1100528611 : Record 11012823;
+      MaintenanceProposalLine@1100528612 : Record 11071696;
+      Resource@1100529000 : Record 11229278;
+      CauseAbcence@1100529002 : Record 5206;
+      WorkOrder@1100525000 : Record 11229279;
+      CompanyPlanGroup@1100528617 : Record 11229300;
+      CalendarManagement@1100528604 : Codeunit 7600;
+      NonWorking@1100528603 : Boolean;
+      EmployeeNo@1100529001 : Code[20];
+      Description@1100528605 : Text[30];
+      DOW@1100528610 : Integer;
+      StartingTime@1100528614 : Time;
+      EndingTime@1100528615 : Time;
+      SubcontractorNo@1100528613 : Code[20];
+      SetupCompanyName@1100528618 : Text[30];
+    BEGIN
+      ResetOccupiedTimeBufferFilter(TmpOccupiedTimeBuffer);
+      TmpOccupiedTimeBuffer.SETRANGE("Starting Date", IDate);
+      IF NOT TmpOccupiedTimeBuffer.ISEMPTY THEN
+        EXIT;
+
+      SetupCompanyName := CompanyPlanGroup.GetSetupCompanyOfCurrentCompanyPlanGroup();
+      IF SetupCompanyName <> COMPANYNAME THEN BEGIN
+        CompanyInformation.CHANGECOMPANY(SetupCompanyName);
+        BaseCalendar.CHANGECOMPANY(SetupCompanyName);
+      END;
+
+      CompanyInformation.GET;
+      NonWorking := CalendarManagement.CheckDateStatus(CompanyInformation."Base Calendar Code", IDate, Description);
+      IF NonWorking THEN BEGIN
+        InsertOccupiedTimeEntry(IDate, 0T, 235959T, OccupiedType::"Base Calendar");
+        EXIT;
+      END;
+
+      DOW := DATE2DWY(IDate, 1);
+      //DP00465.sn
+      EmployeeNo := '';
+      IF IResourceNo <> '' THEN BEGIN
+        IF Resource.GET(IResourceNo) THEN BEGIN
+          CASE Resource.Type OF
+            Resource.Type::Employee:
+              EmployeeNo := Resource."Source No.";
+            Resource.Type::Subcontractor:
+              SubcontractorNo := Resource."Source No.";
+          END;
+        END;
+      END;
+      IF (EmployeeNo <> '') AND (Resource.Company <> COMPANYNAME) THEN BEGIN
+        EmployeeTimeTable.CHANGECOMPANY(Resource.Company);
+        EmployeeAbsence.CHANGECOMPANY(Resource.Company);
+        CauseAbcence.CHANGECOMPANY(Resource.Company);
+      END;
+      //DP00465.en
+      EmployeeTimeTable.SETRANGE("Employee No.", EmployeeNo);  //DP00465.c
+      EmployeeTimeTable.SETFILTER("Effective Date", '..%1', IDate);
+      IF (EmployeeNo <> '') AND EmployeeTimeTable.FINDLAST THEN BEGIN  //DP00465.c
+        CASE DOW OF
+          1:
+            BEGIN
+              IF EmployeeTimeTable."Monday Work From" <> 0T THEN BEGIN
+                InsertOccupiedTimeEntry(IDate, 0T, EmployeeTimeTable."Monday Work From", OccupiedType::"Employee Time Table");
+                InsertOccupiedTimeEntry(IDate, EmployeeTimeTable."Monday Work Until", 235959T, OccupiedType::"Employee Time Table");
+              END ELSE
+                InsertOccupiedTimeEntry(IDate, 0T, 235959T, OccupiedType::"Employee Time Table");
+              IF (EmployeeTimeTable."Monday Pause From" <> 0T) AND (EmployeeTimeTable."Monday Pause Until" <> 0T) THEN
+                InsertOccupiedTimeEntry(
+                  IDate, EmployeeTimeTable."Monday Pause From", EmployeeTimeTable."Monday Pause Until", OccupiedType::Pause);
+            END;
+          2:
+            BEGIN
+              IF EmployeeTimeTable."Tuesday Work From" <> 0T THEN BEGIN
+                InsertOccupiedTimeEntry(IDate, 0T, EmployeeTimeTable."Tuesday Work From", OccupiedType::"Employee Time Table");
+                InsertOccupiedTimeEntry(IDate, EmployeeTimeTable."Tuesday Work Until", 235959T, OccupiedType::"Employee Time Table");
+              END ELSE
+                InsertOccupiedTimeEntry(IDate, 0T, 235959T, OccupiedType::"Employee Time Table");
+              IF (EmployeeTimeTable."Tuesday Pause From" <> 0T) AND (EmployeeTimeTable."Tuesday Pause Until" <> 0T) THEN
+                InsertOccupiedTimeEntry(
+                  IDate, EmployeeTimeTable."Tuesday Pause From", EmployeeTimeTable."Tuesday Pause Until", OccupiedType::Pause);
+            END;
+          3:
+            BEGIN
+              IF EmployeeTimeTable."Wednesday Work From" <> 0T THEN BEGIN
+                InsertOccupiedTimeEntry(IDate, 0T, EmployeeTimeTable."Wednesday Work From", OccupiedType::"Employee Time Table");
+                InsertOccupiedTimeEntry(IDate, EmployeeTimeTable."Wednesday Work Until", 235959T, OccupiedType::"Employee Time Table");
+              END ELSE
+                InsertOccupiedTimeEntry(IDate, 0T, 235959T, OccupiedType::"Employee Time Table");
+              IF (EmployeeTimeTable."Wednesday Pause From" <> 0T) AND (EmployeeTimeTable."Wednesday Pause Until" <> 0T) THEN
+                InsertOccupiedTimeEntry(
+                  IDate, EmployeeTimeTable."Wednesday Pause From", EmployeeTimeTable."Wednesday Pause Until", OccupiedType::Pause);
+            END;
+          4:
+            BEGIN
+              IF EmployeeTimeTable."Thursday Work From" <> 0T THEN BEGIN
+                InsertOccupiedTimeEntry(IDate, 0T, EmployeeTimeTable."Thursday Work From", OccupiedType::"Employee Time Table");
+                InsertOccupiedTimeEntry(IDate, EmployeeTimeTable."Thursday Work Until", 235959T, OccupiedType::"Employee Time Table");
+              END ELSE
+                InsertOccupiedTimeEntry(IDate, 0T, 235959T, OccupiedType::"Employee Time Table");
+              IF (EmployeeTimeTable."Thursday Pause From" <> 0T) AND (EmployeeTimeTable."Thursday Pause Until" <> 0T) THEN
+                InsertOccupiedTimeEntry(
+                  IDate, EmployeeTimeTable."Thursday Pause From", EmployeeTimeTable."Thursday Pause Until", OccupiedType::Pause);
+            END;
+          5:
+            BEGIN
+              IF EmployeeTimeTable."Friday Work From" <> 0T THEN BEGIN
+                InsertOccupiedTimeEntry(IDate, 0T, EmployeeTimeTable."Friday Work From", OccupiedType::"Employee Time Table");
+                InsertOccupiedTimeEntry(IDate, EmployeeTimeTable."Friday Work Until", 235959T, OccupiedType::"Employee Time Table");
+              END ELSE
+                InsertOccupiedTimeEntry(IDate, 0T, 235959T, OccupiedType::"Employee Time Table");
+              IF (EmployeeTimeTable."Friday Pause From" <> 0T) AND (EmployeeTimeTable."Friday Pause Until" <> 0T) THEN
+                InsertOccupiedTimeEntry(
+                  IDate, EmployeeTimeTable."Friday Pause From", EmployeeTimeTable."Friday Pause Until", OccupiedType::Pause);
+            END;
+          6:
+            BEGIN
+              IF EmployeeTimeTable."Saturday Work From" <> 0T THEN BEGIN
+                InsertOccupiedTimeEntry(IDate, 0T, EmployeeTimeTable."Saturday Work From", OccupiedType::"Employee Time Table");
+                InsertOccupiedTimeEntry(IDate, EmployeeTimeTable."Saturday Work Until", 235959T, OccupiedType::"Employee Time Table");
+              END ELSE
+                InsertOccupiedTimeEntry(IDate, 0T, 235959T, OccupiedType::"Employee Time Table");
+              IF (EmployeeTimeTable."Saturday Pause From" <> 0T) AND (EmployeeTimeTable."Saturday Pause Until" <> 0T) THEN
+                InsertOccupiedTimeEntry(
+                  IDate, EmployeeTimeTable."Saturday Pause From", EmployeeTimeTable."Saturday Pause Until", OccupiedType::Pause);
+            END;
+          7:
+            BEGIN
+              IF EmployeeTimeTable."Sunday Work From" <> 0T THEN BEGIN
+                InsertOccupiedTimeEntry(IDate, 0T, EmployeeTimeTable."Sunday Work From", OccupiedType::"Employee Time Table");
+                InsertOccupiedTimeEntry(IDate, EmployeeTimeTable."Sunday Work Until", 235959T, OccupiedType::"Employee Time Table");
+              END ELSE
+                InsertOccupiedTimeEntry(IDate, 0T, 235959T, OccupiedType::"Employee Time Table");
+              IF (EmployeeTimeTable."Sunday Pause From" <> 0T) AND (EmployeeTimeTable."Sunday Pause Until" <> 0T) THEN
+                InsertOccupiedTimeEntry(
+                  IDate, EmployeeTimeTable."Sunday Pause From", EmployeeTimeTable."Sunday Pause Until", OccupiedType::Pause);
+            END;
+        END;
+      END ELSE BEGIN
+        CompanyInformation.GET;
+        IF BaseCalendar.GET(CompanyInformation."Base Calendar Code") THEN BEGIN
+          CASE DOW OF
+            1:
+              BEGIN
+                IF BaseCalendar."Monday Work From" <> 0T THEN BEGIN
+                  InsertOccupiedTimeEntry(IDate, 0T, BaseCalendar."Monday Work From", OccupiedType::"Employee Time Table");
+                  InsertOccupiedTimeEntry(IDate, BaseCalendar."Monday Work Until", 235959T, OccupiedType::"Employee Time Table");
+                END ELSE
+                  InsertOccupiedTimeEntry(IDate, 0T, 235959T, OccupiedType::"Employee Time Table");
+                IF (BaseCalendar."Monday Pause From" <> 0T) AND (BaseCalendar."Monday Pause Until" <> 0T) THEN
+                  InsertOccupiedTimeEntry(
+                    IDate, BaseCalendar."Monday Pause From", BaseCalendar."Monday Pause Until", OccupiedType::Pause);
+              END;
+            2:
+              BEGIN
+                IF BaseCalendar."Tuesday Work From" <> 0T THEN BEGIN
+                  InsertOccupiedTimeEntry(IDate, 0T, BaseCalendar."Tuesday Work From", OccupiedType::"Employee Time Table");
+                  InsertOccupiedTimeEntry(IDate, BaseCalendar."Tuesday Work Until", 235959T, OccupiedType::"Employee Time Table");
+                END ELSE
+                  InsertOccupiedTimeEntry(IDate, 0T, 235959T, OccupiedType::"Employee Time Table");
+                IF (BaseCalendar."Tuesday Pause From" <> 0T) AND (BaseCalendar."Tuesday Pause Until" <> 0T) THEN
+                  InsertOccupiedTimeEntry(
+                    IDate, BaseCalendar."Tuesday Pause From", BaseCalendar."Tuesday Pause Until", OccupiedType::Pause);
+              END;
+            3:
+              BEGIN
+                IF BaseCalendar."Wednesday Work From" <> 0T THEN BEGIN
+                  InsertOccupiedTimeEntry(IDate, 0T, BaseCalendar."Wednesday Work From", OccupiedType::"Employee Time Table");
+                  InsertOccupiedTimeEntry(
+                   IDate, BaseCalendar."Wednesday Work Until", 235959T, OccupiedType::"Employee Time Table");
+                END ELSE
+                  InsertOccupiedTimeEntry(IDate, 0T, 235959T, OccupiedType::"Employee Time Table");
+                IF (BaseCalendar."Wednesday Pause From" <> 0T) AND (BaseCalendar."Wednesday Pause Until" <> 0T) THEN
+                  InsertOccupiedTimeEntry(
+                    IDate, BaseCalendar."Wednesday Pause From", BaseCalendar."Wednesday Pause Until", OccupiedType::Pause);
+              END;
+            4:
+              BEGIN
+                IF BaseCalendar."Thursday Work From" <> 0T THEN BEGIN
+                  InsertOccupiedTimeEntry(IDate, 0T, BaseCalendar."Thursday Work From", OccupiedType::"Employee Time Table");
+                  InsertOccupiedTimeEntry(
+                    IDate, BaseCalendar."Thursday Work Until", 235959T, OccupiedType::"Employee Time Table");
+                END ELSE
+                  InsertOccupiedTimeEntry(IDate, 0T, 235959T, OccupiedType::"Employee Time Table");
+                IF (BaseCalendar."Thursday Pause From" <> 0T) AND (BaseCalendar."Thursday Pause Until" <> 0T) THEN
+                  InsertOccupiedTimeEntry(
+                    IDate, BaseCalendar."Thursday Pause From", BaseCalendar."Thursday Pause Until", OccupiedType::Pause);
+              END;
+            5:
+              BEGIN
+                IF BaseCalendar."Friday Work From" <> 0T THEN BEGIN
+                  InsertOccupiedTimeEntry(IDate, 0T, BaseCalendar."Friday Work From", OccupiedType::"Employee Time Table");
+                  InsertOccupiedTimeEntry(IDate, BaseCalendar."Friday Work Until", 235959T, OccupiedType::"Employee Time Table");
+                END ELSE
+                  InsertOccupiedTimeEntry(IDate, 0T, 235959T, OccupiedType::"Employee Time Table");
+                IF (BaseCalendar."Friday Pause From" <> 0T) AND (BaseCalendar."Friday Pause Until" <> 0T) THEN
+                  InsertOccupiedTimeEntry(
+                    IDate, BaseCalendar."Friday Pause From", BaseCalendar."Friday Pause Until", OccupiedType::Pause);
+              END;
+            6:
+              BEGIN
+                IF BaseCalendar."Saturday Work From" <> 0T THEN BEGIN
+                  InsertOccupiedTimeEntry(IDate, 0T, BaseCalendar."Saturday Work From", OccupiedType::"Employee Time Table");
+                  InsertOccupiedTimeEntry(
+                    IDate, BaseCalendar."Saturday Work Until", 235959T, OccupiedType::"Employee Time Table");
+                END ELSE
+                  InsertOccupiedTimeEntry(IDate, 0T, 235959T, OccupiedType::"Employee Time Table");
+                IF (BaseCalendar."Saturday Pause From" <> 0T) AND (BaseCalendar."Saturday Pause Until" <> 0T) THEN
+                  InsertOccupiedTimeEntry(
+                    IDate, BaseCalendar."Saturday Pause From", BaseCalendar."Saturday Pause Until", OccupiedType::Pause);
+              END;
+            7:
+              BEGIN
+                IF BaseCalendar."Sunday Work From" <> 0T THEN BEGIN
+                  InsertOccupiedTimeEntry(IDate, 0T, BaseCalendar."Sunday Work From", OccupiedType::"Employee Time Table");
+                  InsertOccupiedTimeEntry(IDate, BaseCalendar."Sunday Work Until", 235959T, OccupiedType::"Employee Time Table");
+                END ELSE
+                  InsertOccupiedTimeEntry(IDate, 0T, 235959T, OccupiedType::"Employee Time Table");
+                IF (BaseCalendar."Sunday Pause From" <> 0T) AND (BaseCalendar."Sunday Pause Until" <> 0T) THEN
+                  InsertOccupiedTimeEntry(
+                    IDate, BaseCalendar."Sunday Pause From", BaseCalendar."Sunday Pause Until", OccupiedType::Pause);
+              END;
+          END;
+        END;
+      END;
+
+      IF EmployeeNo <> '' THEN BEGIN  //DP00465.c
+        EmployeeAbsence.SETCURRENTKEY("Employee No.", "From Date");
+        EmployeeAbsence.SETRANGE("Employee No.", EmployeeNo);  //DP00465.c
+        EmployeeAbsence.SETFILTER("From Date", '<=%1', IDate);
+        EmployeeAbsence.SETFILTER("To Date", '>=%1', IDate);
+        IF EmployeeAbsence.FINDFIRST THEN BEGIN
+          IF EmployeeAbsence."From Date" < IDate THEN
+            StartingTime := 0T
+          ELSE
+            StartingTime := EmployeeAbsence."From Time";
+          IF EmployeeAbsence."To Date" > IDate THEN
+            EndingTime := 0T
+          ELSE
+            EndingTime := EmployeeAbsence."Until Time";
+          EmployeeAbsence.CALCFIELDS(Plannable);
+          //DP00465.sn
+          IF (Resource.Company <> COMPANYNAME) THEN BEGIN
+            IF CauseAbcence.GET(EmployeeAbsence."Cause of Absence Code") THEN
+              EmployeeAbsence.Plannable := CauseAbcence.Plannable;
+          END;
+          //DP00465.en
+          IF NOT EmployeeAbsence.Plannable THEN
+            InsertOccupiedTimeEntry(IDate, StartingTime, EndingTime, OccupiedType::"Employee Absence");
+        END;
+      END;
+
+      RemoveDoubleOccTimeEntries(IDate);
+      UpdateUnoccupiedTimeEntries(IDate);
+
+      InsertResLaborPercForCalls(
+        IDate, IResourceNo, IMaintenanceProposalLine.Discipline, IMaintenanceProposalLine."Trade Speciality", IMaintenanceProposalLine.GetClusterContractNo,
+        IMaintenanceProposalLine.Cluster, IMaintenanceProposalLine."Cluster Seqn.");
+      IF IMaintenanceProposalLine."Use Maintenance Window" THEN BEGIN
+        IF IMaintenanceProposalLine."Starting Time Maint. Window" <> 0T THEN BEGIN
+          StartingTime := 0T;
+          EndingTime := IMaintenanceProposalLine."Starting Time Maint. Window";
+          InsertOccupiedTimeEntry(IDate, StartingTime, EndingTime, OccupiedType::"Outside Maintenance Window");
+        END;
+        IF IMaintenanceProposalLine."Ending Time Maint. Window" <> 0T THEN BEGIN
+          StartingTime := IMaintenanceProposalLine."Ending Time Maint. Window";
+          EndingTime := 235959T;
+          InsertOccupiedTimeEntry(IDate, StartingTime, EndingTime, OccupiedType::"Outside Maintenance Window");
+        END;
+      END;
+
+      WorkOrder.SETCURRENTKEY("Resource No.", "Starting Date/Time", "Ending Date/Time");
+      WorkOrder.SETRANGE("Resource No.", IResourceNo);
+      WorkOrder.SETFILTER("Starting Date/Time", '<=%1', DATI2VARIANT(IDate, 235959.999T));
+      WorkOrder.SETFILTER("Ending Date/Time", '>=%1', DATI2VARIANT(IDate, 0T));
+      IF WorkOrder.FINDSET THEN
+        REPEAT
+          IF DT2DATE(WorkOrder."Starting Date/Time") < IDate THEN
+            StartingTime := 0T
+          ELSE
+            StartingTime := DT2TIME(WorkOrder."Starting Date/Time");
+          IF DT2DATE(WorkOrder."Ending Date/Time") > IDate THEN
+            EndingTime := 0T
+          ELSE
+            EndingTime := DT2TIME(WorkOrder."Ending Date/Time");
+          IF WorkOrder."Source Type" = WorkOrder."Source Type"::ServiceOrder THEN BEGIN
+            IF WorkOrder."Source Company" <> ServiceOrder.CURRENTCOMPANY THEN
+              ServiceOrder.CHANGECOMPANY(WorkOrder."Source Company");
+            ServiceOrder.GET(WorkOrder."Source No.");
+          END ELSE
+            CLEAR(ServiceOrder);
+          IF (ServiceOrder."No." = '') OR (ServiceOrder.Status < ServiceOrder.Status::Cancelled) THEN
+            InsertOccupiedTimeEntry(IDate, StartingTime, EndingTime, OccupiedType::"Planned Service Order");
+        UNTIL WorkOrder.NEXT = 0;
+
+      MaintenanceProposalLine.SETCURRENTKEY("Resource No.", "Starting Date Maintenance", "Starting Time Maintenance");
+      MaintenanceProposalLine.SETRANGE("Resource No.", IResourceNo);  //DP00465.c
+      MaintenanceProposalLine.SETFILTER("Starting Date Maintenance", '<=%1', IDate);
+      MaintenanceProposalLine.SETFILTER("Ending Date Maintenance", '>=%1', IDate);
+      MaintenanceProposalLine.SETRANGE("Service Order No.", '');
+      IF MaintenanceProposalLine.FINDSET THEN
+        REPEAT
+          IF MaintenanceProposalLine."Starting Date Maintenance" < IDate THEN
+            StartingTime := 0T
+          ELSE
+            StartingTime := MaintenanceProposalLine."Starting Time Maintenance";
+          IF MaintenanceProposalLine."Ending Date Maintenance" > IDate THEN
+            EndingTime := 0T
+          ELSE
+            EndingTime := MaintenanceProposalLine."Ending Time Maintenance";
+          InsertOccupiedTimeEntry(IDate, StartingTime, EndingTime, OccupiedType::"Maintenance Proposal");
+        UNTIL MaintenanceProposalLine.NEXT = 0;
+
+      RemoveDoubleOccTimeEntries(IDate);
+      UpdateUnoccupiedTimeEntries(IDate);
+    END;
+
+    PROCEDURE ClearOccupiedTimeBuffer@1100528619();
+    BEGIN
+      TmpOccupiedTimeBuffer.RESET;
+      TmpOccupiedTimeBuffer.DELETEALL;
+    END;
+
+    LOCAL PROCEDURE InsertOccupiedTimeEntry@1100528608(IStartingDate@1100528600 : Date;IStartTime@1100528601 : Time;IEndTime@1100528603 : Time;IOccupiedType@1100528605 : Option);
+    BEGIN
+      TmpOccupiedTimeBuffer.INIT;
+      LastEntryNo += 1;
+      TmpOccupiedTimeBuffer."Entry No." := LastEntryNo;
+      TmpOccupiedTimeBuffer."Starting Date" := IStartingDate;
+      TmpOccupiedTimeBuffer."Starting Time" := IStartTime;
+      IF (IStartTime = IEndTime) AND (IStartTime = 0T) THEN
+        TmpOccupiedTimeBuffer."Ending Time" := 235959T
+      ELSE
+        TmpOccupiedTimeBuffer."Ending Time" := IEndTime;
+      TmpOccupiedTimeBuffer."Occupied Type" := IOccupiedType;
+      TmpOccupiedTimeBuffer.INSERT(TRUE);
+    END;
+
+    PROCEDURE RemoveDoubleOccTimeEntries@1100528609(IStartingDate@1100528602 : Date);
+    VAR
+      TmpOccupiedTimeBuffer2@1100528603 : TEMPORARY Record 11071809;
+      StartingTime@1100528600 : Time;
+      EndingTime@1100528601 : Time;
+    BEGIN
+      TmpOccupiedTimeBuffer2.COPY(TmpOccupiedTimeBuffer, TRUE);
+      ResetOccupiedTimeBufferFilter(TmpOccupiedTimeBuffer2);
+      TmpOccupiedTimeBuffer2.SETRANGE("Starting Date", IStartingDate);
+      IF TmpOccupiedTimeBuffer2.FINDFIRST THEN
+        REPEAT
+          IF TmpOccupiedTimeBuffer2."Ending Time" > EndingTime THEN BEGIN
+            IF TmpOccupiedTimeBuffer2."Starting Time" > EndingTime THEN
+              StartingTime := TmpOccupiedTimeBuffer2."Starting Time";
+            EndingTime := TmpOccupiedTimeBuffer2."Ending Time";
+          END
+          ELSE
+          IF TmpOccupiedTimeBuffer2."Ending Time" <= EndingTime THEN BEGIN
+            TmpOccupiedTimeBuffer2.Deleted := TRUE;
+            TmpOccupiedTimeBuffer2.MODIFY;
+          END;
+        UNTIL TmpOccupiedTimeBuffer2.NEXT = 0;
+    END;
+
+    PROCEDURE UpdateUnoccupiedTimeEntries@1100528615(IStartingDate@1100528602 : Date);
+    VAR
+      TmpOccupiedTimeBuffer2@1100528605 : TEMPORARY Record 11071809;
+      LastOccupiedTimeBuffer@1100528601 : TEMPORARY Record 11071809;
+      DatetimeMgt@1100528606 : Codeunit 11020218;
+      EndingTime@1100528600 : Time;
+      TimeDuration@1100528603 : Duration;
+      PauseStartingTime@1100528604 : Time;
+    BEGIN
+      EndingTime := 0T;
+      LastOccupiedTimeBuffer.COPY(TmpOccupiedTimeBuffer, TRUE);
+      TmpOccupiedTimeBuffer2.COPY(TmpOccupiedTimeBuffer, TRUE);
+      ResetOccupiedTimeBufferFilter(TmpOccupiedTimeBuffer2);
+      TmpOccupiedTimeBuffer2.SETRANGE("Starting Date", IStartingDate);
+      TmpOccupiedTimeBuffer2.SETFILTER("Occupied Type", '<>%1', TmpOccupiedTimeBuffer2."Occupied Type"::Pause);
+      IF TmpOccupiedTimeBuffer2.FINDSET THEN BEGIN
+        REPEAT
+          IF EndingTime > 0T THEN BEGIN
+            IF TmpOccupiedTimeBuffer2."Starting Time" >= EndingTime THEN
+              TimeDuration := TmpOccupiedTimeBuffer2."Starting Time" - EndingTime
+            ELSE
+              TimeDuration := 0;
+            LastOccupiedTimeBuffer."Unoccupied Hours" :=
+              DatetimeMgt.DurationToHours(TimeDuration) -
+              GetPauseHours(IStartingDate, EndingTime, TmpOccupiedTimeBuffer2."Starting Time", PauseStartingTime);
+            LastOccupiedTimeBuffer.MODIFY;
+          END;
+          EndingTime := TmpOccupiedTimeBuffer2."Ending Time";
+          LastOccupiedTimeBuffer := TmpOccupiedTimeBuffer2;
+        UNTIL TmpOccupiedTimeBuffer2.NEXT = 0;
+        TimeDuration := 235959T - EndingTime;
+        LastOccupiedTimeBuffer."Unoccupied Hours" :=
+          DatetimeMgt.DurationToHours(TimeDuration) -
+          GetPauseHours(IStartingDate, TmpOccupiedTimeBuffer2."Starting Time", EndingTime, PauseStartingTime);
+        LastOccupiedTimeBuffer.MODIFY;
+      END;
+    END;
+
+    PROCEDURE RemoveOccupiedTimeEntries@1100528620(IMaintenanceProposalLine@1100528600 : Record 11071696;IStartingDate@1100528602 : Date;IEndingDate@1100528603 : Date);
+    VAR
+      TmpOccupiedTimeBuffer2@1100528604 : TEMPORARY Record 11071809;
+    BEGIN
+      TmpOccupiedTimeBuffer2.COPY(TmpOccupiedTimeBuffer, TRUE);
+      ResetOccupiedTimeBufferFilter(TmpOccupiedTimeBuffer2);
+      TmpOccupiedTimeBuffer2.SETRANGE("Maintenance Proposal No.", IMaintenanceProposalLine."Maintenance Proposal");
+      TmpOccupiedTimeBuffer2.SETRANGE("Line No.", IMaintenanceProposalLine."Line No.");
+      WHILE IStartingDate <= IEndingDate DO BEGIN
+        TmpOccupiedTimeBuffer2.SETRANGE("Starting Date", IStartingDate);
+        IF NOT TmpOccupiedTimeBuffer2.ISEMPTY THEN BEGIN
+          TmpOccupiedTimeBuffer2.DELETEALL;
+          UpdateUnoccupiedTimeEntries(IStartingDate);
+        END;
+        IStartingDate := IStartingDate +1;
+      END;
+    END;
+
+    PROCEDURE ProcessOccWorkingHours@1100528612(IResourceNo@1100528601 : Code[20]);
+    VAR
+      MaintenanceProposalLine@1100528600 : Record 11071696;
+    BEGIN
+      ResetOccupiedTimeBufferFilter(TmpOccupiedTimeBuffer);
+      TmpOccupiedTimeBuffer.SETCURRENTKEY("Maintenance Proposal No.", "Line No.", "Starting Date", "Starting Time");
+      TmpOccupiedTimeBuffer.SETFILTER("Maintenance Proposal No.", '<>%1', '');
+      IF TmpOccupiedTimeBuffer.FINDSET THEN
+        REPEAT
+          IF MaintenanceProposalLine.GET(TmpOccupiedTimeBuffer."Maintenance Proposal No.", TmpOccupiedTimeBuffer."Line No.") THEN
+          BEGIN
+            MaintenanceProposalLine."Ending Date Maintenance" :=
+              TmpOccupiedTimeBuffer."Starting Date Maintenance"; // prevent error on next validate
+
+            MaintenanceProposalLine.VALIDATE("Starting Date Maintenance", TmpOccupiedTimeBuffer."Starting Date Maintenance");
+            MaintenanceProposalLine.VALIDATE("Starting Time Maintenance", TmpOccupiedTimeBuffer."Starting Time");
+            MaintenanceProposalLine."Resource No." := IResourceNo;
+            MaintenanceProposalLine."Calculated Travel Hours" := TmpOccupiedTimeBuffer."Travel Hours";
+
+            TmpOccupiedTimeBuffer.SETRANGE("Maintenance Proposal No.", TmpOccupiedTimeBuffer."Maintenance Proposal No.");
+            TmpOccupiedTimeBuffer.SETRANGE("Line No.", TmpOccupiedTimeBuffer."Line No.");
+            TmpOccupiedTimeBuffer.FINDLAST;
+
+            MaintenanceProposalLine."Ending Date Maintenance" := TmpOccupiedTimeBuffer."Ending Date Maintenance";
+            MaintenanceProposalLine."Ending Time Maintenance" := TmpOccupiedTimeBuffer."Ending Time";
+            IF (MaintenanceProposalLine."Message Text" <> '') AND (MaintenanceProposalLine."Starting Time Maintenance" <> 0T) THEN
+              MaintenanceProposalLine."Message Text" := '';
+            MaintenanceProposalLine.MODIFY(TRUE);
+
+            TmpOccupiedTimeBuffer.SETFILTER("Maintenance Proposal No.", '<>%1', '');
+            TmpOccupiedTimeBuffer.SETRANGE("Line No.");
+          END;
+        UNTIL TmpOccupiedTimeBuffer.NEXT = 0;
+      TmpOccupiedTimeBuffer.SETRANGE("Maintenance Proposal No.");
+    END;
+
+    PROCEDURE ResetOccupiedTimeBufferFilter@1100528614(VAR OBuffer@1100528600 : TEMPORARY Record 11071809);
+    BEGIN
+      OBuffer.RESET;
+      OBuffer.SETCURRENTKEY("Starting Date", "Starting Time");
+    END;
+
+    PROCEDURE PlanSingleMaintPropLine@1100528611(VAR IMaintenanceProposalLine@1100528600 : Record 11071696;IStartingDate@1100528601 : Date;IEndingDate@1100528609 : Date;IResourceNo@1100528611 : Code[20];ITravelDuration@1100528605 : Duration;IOccupySeveralDays@1100528614 : Boolean;IOrigOccupySeveralDays@1100528619 : Boolean;IMinimalUnoccupiedHours@1100528613 : Decimal) : Boolean;
+    VAR
+      MaintenanceProposalLine@1100528612 : Record 11071696;
+      DatetimeMgt@1100528610 : Codeunit 11020218;
+      StartingTime@1100528602 : Time;
+      EndingTime@1100528603 : Time;
+      TimeDuration@1100528604 : Duration;
+      PauseDuration@1100528620 : Duration;
+      PauseStartingTime@1100528606 : Time;
+      DOW@1100528607 : Integer;
+      HoursToOccupy@1100528608 : Decimal;
+      TravelDuration@1100528615 : Duration;
+      UseTravelTime@1100528616 : Boolean;
+      FirstInLine@1100528617 : Boolean;
+      MustCombine@1100528618 : Boolean;
+    BEGIN
+      DOW := DATE2DWY(IStartingDate, 1);
+      //IMaintenanceProposalLine.CALCFIELDS("Maintenance Day");
+      CASE IMaintenanceProposalLine."Maintenance Day" OF
+        IMaintenanceProposalLine."Maintenance Day"::Monday..IMaintenanceProposalLine."Maintenance Day"::Sunday:
+          BEGIN
+            IF DOW <> IMaintenanceProposalLine."Maintenance Day" THEN
+              EXIT;
+          END;
+        IMaintenanceProposalLine."Maintenance Day"::Weekday:
+          BEGIN
+            IF NOT (DOW IN [1..5]) THEN
+              EXIT;
+          END;
+        IMaintenanceProposalLine."Maintenance Day"::Weekend:
+          BEGIN
+            IF NOT (DOW IN [6..7]) THEN
+              EXIT;
+          END;
+      END;
+      IF IMaintenanceProposalLine."Budget Working Hours" = 0 THEN
+        EXIT;
+      IF (IMaintenanceProposalLine."Last Possible Maint. Date" <> 0D) AND
+         (IStartingDate > IMaintenanceProposalLine."Last Possible Maint. Date") THEN
+        EXIT;
+
+      UseTravelTime :=
+        NOT WorkerOnLocation(IStartingDate, IResourceNo, IMaintenanceProposalLine."Service Location No.");
+      IF UseTravelTime THEN
+        IF ITravelDuration <> 0 THEN
+          TravelDuration := ITravelDuration
+        ELSE
+          TravelDuration := DatetimeMgt.HoursToDuration(IMaintenanceProposalLine."Budget Travel Hours");
+      TravelDuration := DatetimeMgt.RoundDurationByMinutes(TravelDuration, 1);
+
+      IF NOT IOccupySeveralDays AND NOT IOrigOccupySeveralDays THEN
+        HoursToOccupy :=
+          GetWorkingHoursByLocation(IMaintenanceProposalLine, FirstInLine, MustCombine) +
+          DatetimeMgt.DurationToHours(TravelDuration)
+      ELSE
+        HoursToOccupy :=
+          IMaintenanceProposalLine."Budget Working Hours" +
+          DatetimeMgt.DurationToHours(TravelDuration);
+      HoursToOccupy := DatetimeMgt.RoundHoursByMinutes(HoursToOccupy, 1);
+
+      ResetOccupiedTimeBufferFilter(TmpOccupiedTimeBuffer);
+      TmpOccupiedTimeBuffer.SETFILTER("Occupied Type", '<>%1', TmpOccupiedTimeBuffer."Occupied Type"::Pause);
+      TmpOccupiedTimeBuffer.SETFILTER("Unoccupied Hours", '>=%1', HoursToOccupy);
+      IF MustCombine AND NOT FirstInLine AND NOT IOrigOccupySeveralDays THEN BEGIN
+        IMaintenanceProposalLine.TESTFIELD("Service Location No.");
+        TmpOccupiedTimeBuffer.SETRANGE("Service Location No.", IMaintenanceProposalLine."Service Location No.")
+      END ELSE
+        TmpOccupiedTimeBuffer.SETRANGE("Starting Date", IStartingDate);
+      IF TmpOccupiedTimeBuffer.FINDFIRST THEN BEGIN
+        StartingTime := TmpOccupiedTimeBuffer."Ending Time";
+        TimeDuration :=
+          DatetimeMgt.HoursToDuration(
+            DatetimeMgt.RoundHoursByMinutes(IMaintenanceProposalLine."Budget Working Hours", 1)) + TravelDuration;
+        EndingTime := StartingTime + TimeDuration;
+        PauseDuration :=
+          DatetimeMgt.HoursToDuration(
+            DatetimeMgt.RoundHoursByMinutes(GetPauseHours(IStartingDate, StartingTime, EndingTime, PauseStartingTime), 1));
+        IF PauseDuration > 0 THEN BEGIN
+          IF StartingTime = PauseStartingTime THEN
+            StartingTime := StartingTime + PauseDuration;
+          EndingTime := EndingTime + PauseDuration;
+        END;
+
+        InsertOccupiedTimeEntry(IStartingDate, StartingTime, EndingTime, OccupiedType::"Maintenance Proposal");
+        TmpOccupiedTimeBuffer."Maintenance Proposal No." := IMaintenanceProposalLine."Maintenance Proposal";
+        TmpOccupiedTimeBuffer."Line No." := IMaintenanceProposalLine."Line No.";
+        IF UseTravelTime THEN
+          TmpOccupiedTimeBuffer."Travel Hours" := DatetimeMgt.DurationToHours(TravelDuration);
+        TmpOccupiedTimeBuffer."Starting Date Maintenance" := IStartingDate;
+        TmpOccupiedTimeBuffer."Ending Date Maintenance" := IStartingDate;
+        TmpOccupiedTimeBuffer."Service Location No." := IMaintenanceProposalLine."Service Location No.";
+        TmpOccupiedTimeBuffer.MODIFY;
+
+        IMaintenanceProposalLine."Budget Working Hours" := 0;
+        UpdateUnoccupiedTimeEntries(IStartingDate);
+        EXIT(TRUE);
+      END ELSE BEGIN
+        IF NOT IOccupySeveralDays THEN
+          EXIT;
+
+        // Occupy all unoccupied hourparts
+        TmpOccupiedTimeBuffer.SETFILTER("Unoccupied Hours", '>=%1', IMinimalUnoccupiedHours);
+        IF TmpOccupiedTimeBuffer.FINDSET THEN BEGIN
+          REPEAT
+            StartingTime := TmpOccupiedTimeBuffer."Ending Time";
+            TimeDuration := DatetimeMgt.HoursToDuration(TmpOccupiedTimeBuffer."Unoccupied Hours");
+            EndingTime := StartingTime + TimeDuration;
+            MaintenanceProposalLine := IMaintenanceProposalLine;
+            IF MaintenanceProposalLine."Budget Working Hours" +
+               DatetimeMgt.DurationToHours(TravelDuration) > TmpOccupiedTimeBuffer."Unoccupied Hours"
+            THEN
+              MaintenanceProposalLine."Budget Working Hours" :=
+                TmpOccupiedTimeBuffer."Unoccupied Hours" - DatetimeMgt.DurationToHours(TravelDuration);
+            HoursToOccupy := MaintenanceProposalLine."Budget Working Hours";
+            IF PlanSingleMaintPropLine(
+              MaintenanceProposalLine, IStartingDate, IEndingDate, IResourceNo,
+              TravelDuration, FALSE, IOrigOccupySeveralDays, 0)
+            THEN
+              IMaintenanceProposalLine."Budget Working Hours" -= HoursToOccupy;
+          UNTIL (TmpOccupiedTimeBuffer.NEXT = 0) OR (IMaintenanceProposalLine."Budget Working Hours" = 0);
+        END;
+      END;
+    END;
+
+    PROCEDURE GetPauseHours@1100528613(IStartingDate@1100528605 : Date;IStartingTime@1100528601 : Time;IEndingTime@1100528602 : Time;VAR OPauseStartingTime@1100528600 : Time) : Decimal;
+    VAR
+      TmpOccupiedTimeBuffer2@1100528603 : TEMPORARY Record 11071809;
+      DatetimeMgt@1100528606 : Codeunit 11020218;
+      TimeDuration@1100528604 : Duration;
+    BEGIN
+      TmpOccupiedTimeBuffer2.COPY(TmpOccupiedTimeBuffer, TRUE);
+      ResetOccupiedTimeBufferFilter(TmpOccupiedTimeBuffer2);
+      TmpOccupiedTimeBuffer2.SETRANGE("Starting Date", IStartingDate);
+      TmpOccupiedTimeBuffer2.SETRANGE("Occupied Type", TmpOccupiedTimeBuffer2."Occupied Type"::Pause);
+      IF TmpOccupiedTimeBuffer2.FINDSET THEN
+        REPEAT
+          IF
+            ((IEndingTime > TmpOccupiedTimeBuffer2."Starting Time") AND
+            (IEndingTime < TmpOccupiedTimeBuffer2."Ending Time")) OR
+            ((IStartingTime > TmpOccupiedTimeBuffer2."Starting Time") AND
+            (IStartingTime < TmpOccupiedTimeBuffer2."Starting Time")) OR
+            ((IStartingTime <= TmpOccupiedTimeBuffer2."Starting Time") AND
+            (IEndingTime >= TmpOccupiedTimeBuffer2."Ending Time"))
+          THEN BEGIN
+            TimeDuration := TmpOccupiedTimeBuffer2."Ending Time" - TmpOccupiedTimeBuffer2."Starting Time";
+            OPauseStartingTime := TmpOccupiedTimeBuffer2."Starting Time";
+            EXIT(DatetimeMgt.DurationToHours(TimeDuration));
+          END;
+        UNTIL TmpOccupiedTimeBuffer2.NEXT = 0;
+    END;
+
+    PROCEDURE InsertResLaborPercForCalls@1100528616(IStartingDate@1100528600 : Date;IResourceNo@1100528605 : Code[20];IDiscipline@1100525000 : Code[10];ITradeSpeciality@1100525001 : Code[10];IServiceContractNo@1100528615 : Code[20];ICluster@1100528614 : Code[20];IClusterSeqn@1100528613 : Integer);
+    VAR
+      ServiceContract@1100528617 : Record 11012812;
+      TmpOccupiedTimeBuffer2@1100528601 : TEMPORARY Record 11071809;
+      ServiceSetup@1100528610 : Record 11012800;
+      ServiceClusterSeq@1100528616 : Record 11071966;
+      DatetimeMgt@1100528619 : Codeunit 11020218;
+      TotalUnoccupiedHours@1100528602 : Decimal;
+      ResLaborPerc@1100528603 : Decimal;
+      StartingTime@1100528606 : Time;
+      EndingTime@1100528607 : Time;
+      HoursToReserve@1100528604 : Decimal;
+      OpenHoursToReserve@1100528612 : Decimal;
+      PauseStartingTime@1100528608 : Time;
+      PauseDuration@1100528609 : Duration;
+      DayPartLoop@1100528611 : 'Morning,Afternone';
+    BEGIN
+      IF IResourceNo <> '' THEN
+        ResLaborPerc := GetResLaborPerc(IStartingDate, IResourceNo, IDiscipline, ITradeSpeciality);
+
+      IF ResLaborPerc = 0 THEN BEGIN
+        IF NOT ServiceContract.GET(IServiceContractNo) THEN
+          ServiceContract.INIT;
+        IF ServiceContract."Use Contract Clusters" THEN BEGIN
+          IF NOT ServiceClusterSeq.GET(ServiceClusterSeq.Type::Contract, IServiceContractNo, ServiceClusterSeq."Source Type"::" ", ICluster, IClusterSeqn) THEN
+            EXIT;
+        END ELSE BEGIN
+          IF NOT ServiceClusterSeq.GET(ServiceClusterSeq.Type::" ", IServiceContractNo, ServiceClusterSeq."Source Type"::" ", ICluster, IClusterSeqn) THEN
+            EXIT;
+        END;
+        ResLaborPerc := ServiceClusterSeq."Plan Margin Perc.";
+      END;
+
+      TmpOccupiedTimeBuffer2.COPY(TmpOccupiedTimeBuffer, TRUE);
+      ResetOccupiedTimeBufferFilter(TmpOccupiedTimeBuffer2);
+      TmpOccupiedTimeBuffer2.SETRANGE("Starting Date", IStartingDate);
+      TmpOccupiedTimeBuffer2.SETFILTER("Unoccupied Hours", '>%1', 0);
+      IF TmpOccupiedTimeBuffer2.FINDSET THEN
+        REPEAT
+          TotalUnoccupiedHours += TmpOccupiedTimeBuffer2."Unoccupied Hours";
+        UNTIL TmpOccupiedTimeBuffer2.NEXT = 0;
+      IF TotalUnoccupiedHours = 0 THEN
+        EXIT;
+      IF ResLaborPerc <> 0 THEN
+        HoursToReserve := ROUND(TotalUnoccupiedHours * ResLaborPerc / 100, 0.1)
+      ELSE
+        HoursToReserve := ServiceClusterSeq."Plan Margin Hours";
+      IF HoursToReserve = 0 THEN
+        EXIT;
+
+      ServiceSetup.GET;
+      IF ServiceSetup."Reserve Hours for Calls" = ServiceSetup."Reserve Hours for Calls"::"Per Daypart" THEN BEGIN
+        GetPauseHours(IStartingDate, 000000T, 235900T, PauseStartingTime);
+        HoursToReserve := ROUND(HoursToReserve / 2, 0.1);
+        DayPartLoop := DayPartLoop::Morning;
+      END ELSE
+        DayPartLoop := DayPartLoop::Afternone;
+
+      FOR DayPartLoop := DayPartLoop TO DayPartLoop::Afternone DO BEGIN
+        OpenHoursToReserve := HoursToReserve;
+        IF ServiceSetup."Reserve Hours for Calls" = ServiceSetup."Reserve Hours for Calls"::"Per Daypart" THEN BEGIN
+          IF DayPartLoop = DayPartLoop::Morning THEN
+            TmpOccupiedTimeBuffer2.SETFILTER("Ending Time", '<%1', PauseStartingTime)
+          ELSE
+            TmpOccupiedTimeBuffer2.SETFILTER("Ending Time", '>=%1', PauseStartingTime);
+        END;
+        IF TmpOccupiedTimeBuffer2.FINDLAST THEN BEGIN
+          REPEAT
+            EndingTime := TmpOccupiedTimeBuffer2."Ending Time" +
+              DatetimeMgt.HoursToDuration(TmpOccupiedTimeBuffer2."Unoccupied Hours");
+            PauseDuration :=
+              DatetimeMgt.HoursToDuration(
+                GetPauseHours(IStartingDate, TmpOccupiedTimeBuffer2."Ending Time", EndingTime, PauseStartingTime));
+            EndingTime := EndingTime + PauseDuration;
+            IF DayPartLoop = DayPartLoop::Morning THEN BEGIN
+              IF (EndingTime > PauseStartingTime) AND (TmpOccupiedTimeBuffer2."Ending Time" < PauseStartingTime) THEN
+                EndingTime := PauseStartingTime;
+              IF OpenHoursToReserve > ROUND((EndingTime - TmpOccupiedTimeBuffer2."Ending Time") / 1000 / 60 / 60, 0.1) THEN
+                StartingTime := TmpOccupiedTimeBuffer2."Ending Time"
+              ELSE
+                StartingTime := EndingTime - DatetimeMgt.HoursToDuration(OpenHoursToReserve);
+            END ELSE BEGIN
+              IF OpenHoursToReserve > TmpOccupiedTimeBuffer2."Unoccupied Hours" THEN
+                StartingTime := TmpOccupiedTimeBuffer2."Ending Time"
+              ELSE
+                StartingTime := EndingTime - DatetimeMgt.HoursToDuration(OpenHoursToReserve);
+            END;
+            PauseDuration :=
+              DatetimeMgt.HoursToDuration(GetPauseHours(IStartingDate, StartingTime, EndingTime, PauseStartingTime));
+            IF PauseDuration > 0 THEN
+              StartingTime := StartingTime - PauseDuration;
+            InsertOccupiedTimeEntry(IStartingDate, StartingTime, EndingTime, OccupiedType::"Reserved for Calls");
+            OpenHoursToReserve -= DatetimeMgt.DurationToHours(EndingTime - StartingTime);
+          UNTIL (TmpOccupiedTimeBuffer2.NEXT(-1) = 0) OR (OpenHoursToReserve <= 0);
+        END;
+        UpdateUnoccupiedTimeEntries(IStartingDate);
+      END;
+    END;
+
+    PROCEDURE GetResLaborPerc@1100528618(IStartingDate@1100528604 : Date;IResourceNo@1100528602 : Code[20];IDiscipline@1100525001 : Code[10];ITradeSpeciality@1100525000 : Code[10]) : Decimal;
+    VAR
+      ReservedHoursforCalls@1100528603 : Record 11071915;
+      Month@1100528605 : Integer;
+      UseEmployee@1100525003 : Boolean;
+    BEGIN
+      Month := DATE2DMY(IStartingDate, 2);
+      FOR UseEmployee := TRUE DOWNTO FALSE DO BEGIN
+        ReservedHoursforCalls.SETFILTER(Month, '%1|%2', Month, ReservedHoursforCalls.Month::" ");
+        IF UseEmployee THEN BEGIN
+          ReservedHoursforCalls.SETCURRENTKEY(Month, "Resource No.");
+          ReservedHoursforCalls.SETRANGE("Resource No.", IResourceNo);
+        END ELSE BEGIN
+          ReservedHoursforCalls.SETCURRENTKEY(Month, Discipline);
+          ReservedHoursforCalls.SETRANGE("Resource No.", '');
+        END;
+        ReservedHoursforCalls.SETRANGE(Discipline, IDiscipline);
+        ReservedHoursforCalls.SETRANGE("Trade Speciality", ITradeSpeciality);
+        IF ReservedHoursforCalls.FINDLAST THEN
+          EXIT(ReservedHoursforCalls."Reserved Percentage");
+        ReservedHoursforCalls.SETRANGE("Trade Speciality", '');
+        IF ReservedHoursforCalls.FINDLAST THEN
+          EXIT(ReservedHoursforCalls."Reserved Percentage");
+        ReservedHoursforCalls.SETRANGE(Discipline, '');
+        IF ReservedHoursforCalls.FINDLAST THEN
+          EXIT(ReservedHoursforCalls."Reserved Percentage");
+      END;
+    END;
+
+    PROCEDURE GetControlPeriod@1100528302(ContractNo@1100528302 : Code[20];DateField@1100528301 : Date) : Code[20];
+    VAR
+      ServiceContractCtrlPeriod@1100528300 : Record 11071746;
+    BEGIN
+      ServiceContractCtrlPeriod.SETRANGE("Service Contract No.", ContractNo);
+      ServiceContractCtrlPeriod.SETFILTER("Starting Date", '<=%1', DateField);
+      ServiceContractCtrlPeriod.SETFILTER("Ending Date", '>=%1|%2', DateField, 0D);
+      IF (ServiceContractCtrlPeriod.FINDLAST) THEN
+        EXIT(ServiceContractCtrlPeriod.Code);
+      EXIT('');
+    END;
+
+    PROCEDURE GetProgressPercentage@1100528301(ServiceContractNo@1100526200 : Code[20];ReportingDate@1100526209 : Date) : Decimal;
+    VAR
+      ServiceContractArrangement@1100526201 : Record 11071705;
+      ServiceObject@1100526202 : Record 11071691;
+      ServiceContractCtrlPeriod@1100528300 : Record 11071746;
+      MaintenanceManagement@1100528600 : Codeunit 11012829;
+      LaborAmount@1100528601 : Decimal;
+      Hours@1100528602 : Decimal;
+      Material@1100528603 : Decimal;
+      Subcontracting@1100528604 : Decimal;
+      Plant@1100528605 : Decimal;
+      Sundry@1100528606 : Decimal;
+      TotalCost@1100528610 : Decimal;
+      RevenueHours@1100528301 : Decimal;
+      TotalHours@1100528302 : Decimal;
+      DepartmentCode@1100528607 : Code[20];
+      Finished@1100529500 : Boolean;
+      DummyDec@1100529600 : Decimal;
+    BEGIN
+      ServiceContractCtrlPeriod.GET(ServiceContractNo, GetControlPeriod(ServiceContractNo, ReportingDate));
+
+      ServiceContractArrangement.SETRANGE("Service Contract No.", ServiceContractNo);
+      ServiceContractArrangement.SETRANGE("Theoretical Maintenance Date",
+          ServiceContractCtrlPeriod."Starting Date",
+          ServiceContractCtrlPeriod."Ending Date");
+      ServiceContractArrangement.SETRANGE(Cancelled, FALSE);
+      IF (NOT ServiceContractArrangement.FINDFIRST) THEN
+       EXIT(0);
+
+      RevenueHours := 0;
+      TotalHours := 0;
+      Finished := TRUE;
+      REPEAT
+        LaborAmount := 0;
+        Hours := 0;
+        Material := 0;
+        Subcontracting := 0;
+        Sundry := 0;
+        Plant := 0;
+        TotalCost := 0;
+
+        ServiceContractArrangement.CALCFIELDS(
+          "Service Order No.", "Planned Maintenance Date", Finished, "Service Order Execution Date", "Service Order Status",
+          "Service Package");
+        Finished := Finished AND ServiceContractArrangement.Finished;
+        ServiceObject.GET(ServiceContractArrangement."Object No.");
+        DepartmentCode := ServiceObject.GetDepartmentCode(ServiceContractNo);
+
+        MaintenanceManagement.CalcBudgetLines2(
+          6, ServiceContractArrangement."Object No.", ServiceContractArrangement."Maintenance Scheme",
+          ServiceContractArrangement."Service Contract No.",
+          ServiceContractArrangement."Theoretical Maintenance Date",
+          1, DepartmentCode, 0, 0, FALSE, 0, LaborAmount, Hours, Material, Subcontracting, Plant, Sundry, TotalCost, DummyDec);
+
+        IF (ServiceContractArrangement.Finished) THEN
+          RevenueHours += Hours;
+        TotalHours += Hours;
+      UNTIL ServiceContractArrangement.NEXT = 0;
+
+      IF TotalHours = 0 THEN
+        IF Finished THEN
+          EXIT(100)
+        ELSE
+          EXIT(0);
+      EXIT(ROUND((RevenueHours / TotalHours) * 100, 0.01));
+    END;
+
+    PROCEDURE WorkerOnLocation@1100528621(IStartingDate@1100528600 : Date;IResourceNo@1100528601 : Code[20];IServiceLocationNo@1100528603 : Code[20]) : Boolean;
+    VAR
+      MaintenanceProposalLine@1100528602 : Record 11071696;
+      ServiceOrder@1100528604 : Record 11012823;
+      Workorder@1100528605 : Record 11229279;
+    BEGIN
+      ResetOccupiedTimeBufferFilter(TmpOccupiedTimeBuffer);
+      TmpOccupiedTimeBuffer.SETCURRENTKEY("Maintenance Proposal No.", "Line No.", "Starting Date", "Starting Time");
+      TmpOccupiedTimeBuffer.SETRANGE("Starting Date", IStartingDate);
+      TmpOccupiedTimeBuffer.SETFILTER("Maintenance Proposal No.", '<>%1', '');
+      TmpOccupiedTimeBuffer.SETFILTER("Travel Hours", '<>%1', 0); //mg, 16-10-12: C003153
+      IF TmpOccupiedTimeBuffer.FINDSET THEN
+        REPEAT
+          IF MaintenanceProposalLine.GET(TmpOccupiedTimeBuffer."Maintenance Proposal No.", TmpOccupiedTimeBuffer."Line No.")
+          THEN BEGIN
+            IF MaintenanceProposalLine."Service Location No." = IServiceLocationNo THEN
+              EXIT(TRUE);
+          END;
+        UNTIL TmpOccupiedTimeBuffer.NEXT = 0;
+
+      Workorder.SETCURRENTKEY("Resource No.");
+      Workorder.SETRANGE("Resource No.", IResourceNo);
+      Workorder.SETRANGE("Source Type", Workorder."Source Type"::ServiceOrder);
+      Workorder.SETFILTER("Starting Date/Time", '<=%1', DATI2VARIANT(IStartingDate, 235959.999T));
+      Workorder.SETFILTER("Ending Date/Time", '>=%1', DATI2VARIANT(IStartingDate, 0T));
+      IF Workorder.FINDSET THEN
+        REPEAT
+          IF Workorder."Source Company" <> COMPANYNAME THEN
+            ServiceOrder.CHANGECOMPANY(Workorder."Source Company");
+          ServiceOrder.GET(Workorder."Source No.");
+          IF (ServiceOrder."Service Location No." = IServiceLocationNo) AND (ServiceOrder.Status < ServiceOrder.Status::"Technical Finished") THEN
+            EXIT(TRUE);
+        UNTIL Workorder.NEXT = 0;
+
+      MaintenanceProposalLine.SETCURRENTKEY("Resource No.", "Starting Date Maintenance", "Starting Time Maintenance");
+      MaintenanceProposalLine.SETRANGE("Resource No.", IResourceNo);
+      MaintenanceProposalLine.SETFILTER("Starting Date Maintenance", '<=%1', IStartingDate);
+      MaintenanceProposalLine.SETFILTER("Ending Date Maintenance", '>=%1', IStartingDate);
+      MaintenanceProposalLine.SETRANGE("Service Order No.", '');
+      MaintenanceProposalLine.SETRANGE("Service Location No.", IServiceLocationNo);
+      MaintenanceProposalLine.SETFILTER("Calculated Travel Hours", '<>%1', 0); //mg, 16-10-12: C003153
+      IF NOT MaintenanceProposalLine.ISEMPTY THEN
+        EXIT(TRUE);
+    END;
+
+    PROCEDURE GetWorkingHoursByLocation@1100528626(VAR IMaintenanceProposalLine@1100528600 : Record 11071696;VAR OFirstInLine@1100528602 : Boolean;VAR OMustCombine@1100528603 : Boolean) WorkingHours : Decimal;
+    VAR
+      TmpMaintenanceProposalLine2@1100528601 : TEMPORARY Record 11071696;
+    BEGIN
+      WorkingHours := 0;
+      OFirstInLine := FALSE;
+      TmpMaintenanceProposalLine2.COPY(TmpMaintenanceProposalLine, TRUE);
+      TmpMaintenanceProposalLine2.SETRANGE("Maintenance Proposal", IMaintenanceProposalLine."Maintenance Proposal");
+      TmpMaintenanceProposalLine2.SETRANGE("Service Contract No.", IMaintenanceProposalLine."Service Contract No.");
+      TmpMaintenanceProposalLine2.SETRANGE("Service Location No.", IMaintenanceProposalLine."Service Location No.");
+      TmpMaintenanceProposalLine2.SETFILTER("Budget Working Hours", '>%1', 0);
+      IF TmpMaintenanceProposalLine2.FINDSET THEN
+        IF IMaintenanceProposalLine."Line No." = TmpMaintenanceProposalLine2."Line No." THEN BEGIN
+          REPEAT
+            WorkingHours += TmpMaintenanceProposalLine2."Budget Working Hours";
+            OFirstInLine := TRUE;
+          UNTIL TmpMaintenanceProposalLine2.NEXT = 0;
+        END ELSE
+          WorkingHours := TmpMaintenanceProposalLine2."Budget Working Hours";
+      OMustCombine := TmpMaintenanceProposalLine2.COUNT > 1;
+    END;
+
+    PROCEDURE UpdateDatesOnContractObjMaint@1100525008(IServiceContractNo@1100525001 : Code[20];IObjectNo@1100525002 : Code[20];IMaintenanceScheme@1100525003 : Code[20]);
+    VAR
+      ContractObjectMaintenance@1100525000 : Record 11071692;
+    BEGIN
+      ContractObjectMaintenance.SETRANGE("Service Contract No.", IServiceContractNo);
+      IF IObjectNo <> '' THEN
+        ContractObjectMaintenance.SETRANGE("Object No.", IObjectNo);
+      IF IMaintenanceScheme <> '' THEN
+        ContractObjectMaintenance.SETRANGE("Maintenance Scheme", IMaintenanceScheme);
+      IF ContractObjectMaintenance.FINDSET THEN
+        REPEAT
+          ContractObjectMaintenance.UpdateLastAndNextMaintDate;
+          ContractObjectMaintenance.MODIFY;
+        UNTIL ContractObjectMaintenance.NEXT = 0;
+    END;
+
+    PROCEDURE GetStartingDateMaintenance@1100528632(IMaintenanceProposalLine@1100528600 : Record 11071696;IServiceContractArrangement@1100528601 : Record 11071705) : Date;
+    VAR
+      ServiceClusterSeq@1100528603 : Record 11071966;
+      Day@1100528602 : Integer;
+      MaintenanceDate@1100528604 : Date;
+      MaintenanceDay@1100528605 : Integer;
+      MaintenanceWeek@1100528606 : Integer;
+      MaintenanceYear@1100528607 : Integer;
+    BEGIN
+      IF IMaintenanceProposalLine."Cluster Seqn." = 0 THEN
+        EXIT(IServiceContractArrangement.GetMaintenanceDate);
+      IMaintenanceProposalLine.CALCFIELDS("Contract Cluster");
+      IF IMaintenanceProposalLine."Contract Cluster" THEN BEGIN
+        IF NOT ServiceClusterSeq.GET(ServiceClusterSeq.Type::Contract, IMaintenanceProposalLine.GetClusterContractNo, ServiceClusterSeq."Source Type"::" ",
+          IMaintenanceProposalLine.Cluster, IMaintenanceProposalLine."Cluster Seqn.")
+        THEN
+          EXIT(IServiceContractArrangement.GetMaintenanceDate);
+      END ELSE BEGIN
+        IF NOT ServiceClusterSeq.GET(ServiceClusterSeq.Type::" ", '', ServiceClusterSeq."Source Type"::" ", IMaintenanceProposalLine.Cluster,
+          IMaintenanceProposalLine."Cluster Seqn.")
+        THEN
+          EXIT(IServiceContractArrangement.GetMaintenanceDate);
+      END;
+
+      MaintenanceDate := ServiceClusterSeq."Execution Period Start Date";
+      Day := DATE2DWY(MaintenanceDate, 1);
+      CASE IMaintenanceProposalLine."Maintenance Day" OF
+        IMaintenanceProposalLine."Maintenance Day"::Monday..IMaintenanceProposalLine."Maintenance Day"::Sunday:
+          BEGIN
+            MaintenanceDay := IMaintenanceProposalLine."Maintenance Day";
+            IF MaintenanceDay < Day THEN
+              MaintenanceDate := CALCDATE('+1W', MaintenanceDate);
+          END;
+        IMaintenanceProposalLine."Maintenance Day"::Weekday:
+          BEGIN
+            IF Day >= 6 THEN BEGIN
+              MaintenanceDay := 1;
+              MaintenanceDate := CALCDATE('+1W', MaintenanceDate);
+            END;
+          END;
+        IMaintenanceProposalLine."Maintenance Day"::Weekend:
+          BEGIN
+            IF Day IN [1..5] THEN
+              MaintenanceDay := 6;
+          END;
+      END;
+      IF MaintenanceDay <> IMaintenanceProposalLine."Maintenance Day"::" " THEN BEGIN
+        MaintenanceYear := DATE2DWY(MaintenanceDate, 3);
+        MaintenanceWeek := DATE2DWY(MaintenanceDate, 2);
+        MaintenanceDate := DWY2DATE(MaintenanceDay, MaintenanceWeek, MaintenanceYear);
+      END;
+      EXIT(MaintenanceDate);
+    END;
+
+    PROCEDURE GetClusterEndingDate@1100528633(IServiceContractNo@1100528600 : Code[20];IClusterNo@1100528601 : Code[20];IClusterSeqn@1100528602 : Integer) : Date;
+    VAR
+      ServiceContract@1100528604 : Record 11012812;
+      ServiceClusterSeq@1100528603 : Record 11071966;
+    BEGIN
+      IF NOT ServiceContract.GET(IServiceContractNo) THEN
+        ServiceContract.INIT;
+      IF ServiceContract."Use Contract Clusters" THEN BEGIN
+        IF ServiceClusterSeq.GET(ServiceClusterSeq.Type::Contract, IServiceContractNo, ServiceClusterSeq."Source Type"::" ", IClusterNo, IClusterSeqn) THEN
+          EXIT(ServiceClusterSeq."Execution Period Ending Date");
+      END ELSE BEGIN
+        IF ServiceClusterSeq.GET(ServiceClusterSeq.Type::" ", '', ServiceClusterSeq."Source Type"::" ", IClusterNo, IClusterSeqn) THEN
+          EXIT(ServiceClusterSeq."Execution Period Ending Date");
+      END;
+    END;
+
+    PROCEDURE GetServiceClusterDS@1100528637(IServiceContractNo@1100528600 : Code[20];IServiceClusterCode@1100528601 : Code[20];VAR OServiceCluster@1100528602 : Record 11071742);
+    VAR
+      ServiceContract@1100528603 : Record 11012812;
+    BEGIN
+      OServiceCluster.INIT;
+      ServiceContract.GET(IServiceContractNo);
+      IF NOT ServiceContract."Use Contract Clusters" THEN BEGIN
+        IF NOT OServiceCluster.GET(OServiceCluster.Type::" ", '', OServiceCluster."Source Type"::" ", IServiceClusterCode) THEN
+          OServiceCluster.INIT;
+      END ELSE
+        IF NOT OServiceCluster.GET(OServiceCluster.Type::Contract, IServiceContractNo, OServiceCluster."Source Type"::" ", IServiceClusterCode) THEN
+          OServiceCluster.INIT;
+    END;
+
+    PROCEDURE SetSCArrangementCancelled@1100528636(VAR IServiceContractArrangement@1100528600 : Record 11071705);
+    VAR
+      ServiceContractArrangement@1100528601 : Record 11071705;
+      TmpServContrArrCommentLine@1100529602 : TEMPORARY Record 11072560;
+    BEGIN
+      ServiceContractArrangement.COPY(IServiceContractArrangement);
+      ServiceContractArrangement.SETRANGE("Maintenance Proposal No.", '');
+      ServiceContractArrangement.SETRANGE("Service Order No.", '');
+      ServiceContractArrangement.SETRANGE(Cancelled, FALSE);
+      IF ServiceContractArrangement.ISEMPTY THEN
+        EXIT;
+      IF GUIALLOWED THEN
+        PAGE.RUNMODAL(0, TmpServContrArrCommentLine);
+      ServiceContractArrangement.FINDSET(TRUE);
+      REPEAT
+        ServiceContractArrangement.VALIDATE(Cancelled, TRUE);
+        ServiceContractArrangement.MODIFY(TRUE);
+        ServiceContractArrangement.CopyCancelCommentLines(TmpServContrArrCommentLine);
+      UNTIL ServiceContractArrangement.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE PreCheckMaintenanceProposalLine@1100528639(ITmpMaintenanceProposalLine@1100528600 : Record 11071696;IDate@1100528603 : Date;IResourceNo@1100528601 : Code[20]);
+    VAR
+      ServiceClusterSeq@1100528604 : Record 11071966;
+      MaintenanceProposalLine@1100528605 : Record 11071696;
+      ResLaborPerc@1100528602 : Decimal;
+    BEGIN
+      IF NOT MaintenanceProposalLine.GET(ITmpMaintenanceProposalLine."Maintenance Proposal", ITmpMaintenanceProposalLine."Line No.") THEN
+        EXIT;
+      MaintenanceProposalLine."Message Text" := '';
+
+      IF IResourceNo <> '' THEN
+        ResLaborPerc := GetResLaborPerc(IDate, IResourceNo, MaintenanceProposalLine.Discipline, MaintenanceProposalLine."Trade Speciality")
+      ELSE BEGIN
+        MaintenanceProposalLine.CALCFIELDS("Contract Cluster");
+        IF MaintenanceProposalLine."Contract Cluster" THEN BEGIN
+          IF ServiceClusterSeq.GET(ServiceClusterSeq.Type::Contract, MaintenanceProposalLine.GetClusterContractNo, ServiceClusterSeq."Source Type"::" ",
+            MaintenanceProposalLine.Cluster, MaintenanceProposalLine."Cluster Seqn.")
+          THEN
+            ResLaborPerc := ServiceClusterSeq."Plan Margin Perc.";
+        END ELSE BEGIN
+          IF ServiceClusterSeq.GET(ServiceClusterSeq.Type::" ", '', ServiceClusterSeq."Source Type"::" ", MaintenanceProposalLine.Cluster,
+            MaintenanceProposalLine."Cluster Seqn.")
+          THEN
+            ResLaborPerc := ServiceClusterSeq."Plan Margin Perc.";
+        END;
+      END;
+      IF ResLaborPerc = 100 THEN
+        MaintenanceProposalLine."Message Text" := Text019;
+
+      IF MaintenanceProposalLine."Budget Working Hours" = 0 THEN
+        MaintenanceProposalLine."Message Text" := Text020;
+
+      IF MaintenanceProposalLine."Service Order No." <> '' THEN
+        MaintenanceProposalLine."Message Text" := Text022;
+
+      IF MaintenanceProposalLine."Firm Planned" THEN
+        MaintenanceProposalLine."Message Text" := Text023;
+
+      IF MaintenanceProposalLine.Expired THEN
+        MaintenanceProposalLine."Message Text" := Text024;
+
+      IF MaintenanceProposalLine."Message Text" = '' THEN
+        MaintenanceProposalLine."Message Text" := Text021; // Defaults to no available hours found
+
+      MaintenanceProposalLine.MODIFY;
+    END;
+
+    PROCEDURE DetermineDisciplineAndTradeSpeciality@1100528640(IServiceObjectNo@1100528600 : Code[20];IMaintenanceSchemeCode@1100528601 : Code[20];VAR ODiscipline@1100528602 : Code[10];VAR OTradeSpeciality@1100528603 : Code[10]);
+    VAR
+      ServiceObject@1100528604 : Record 11071691;
+      MaintenanceScheme@1100528605 : Record 11071745;
+    BEGIN
+      ODiscipline := '';
+      OTradeSpeciality := '';
+      IF MaintenanceScheme.GET(IMaintenanceSchemeCode) THEN BEGIN
+        IF (MaintenanceScheme.Discipline <> '') OR (MaintenanceScheme."Trade Speciality" <> '') THEN BEGIN
+          ODiscipline := MaintenanceScheme.Discipline;
+          OTradeSpeciality := MaintenanceScheme."Trade Speciality";
+          EXIT;
+        END;
+      END;
+      IF ServiceObject.GET(IServiceObjectNo) THEN BEGIN
+        ServiceObject.CALCFIELDS(Discipline, "Trade Speciality");
+        ODiscipline := ServiceObject.Discipline;
+        OTradeSpeciality := ServiceObject."Trade Speciality";
+      END;
+    END;
+
+    PROCEDURE ResourceCanDoMaintenanceProposalLines@1100528638(IResourceNo@1100528604 : Code[20];VAR IMaintenanceProposalLine@1100528603 : Record 11071696;IPlanDateFrom@1100528602 : Date;IPlanDateUntil@1100528601 : Date;IPlanSeqNo@1100528600 : Integer) : Boolean;
+    VAR
+      MaintenanceProposalLine@1100528605 : Record 11071696;
+      TmpServiceOrder@1100528606 : TEMPORARY Record 11012823;
+      ServiceOrderPlanManagement@1100528607 : Codeunit 11012868;
+    BEGIN
+      MaintenanceProposalLine.COPY(IMaintenanceProposalLine);
+      IF MaintenanceProposalLine.FINDSET THEN
+        REPEAT
+          TmpServiceOrder.INIT;
+          TmpServiceOrder.Discipline := MaintenanceProposalLine.Discipline;
+          TmpServiceOrder."Trade Speciality" := MaintenanceProposalLine."Trade Speciality";
+          TmpServiceOrder."Territory Code" := MaintenanceProposalLine."Territory Code";
+          TmpServiceOrder."Source Type" := TmpServiceOrder."Source Type"::Contract;
+          TmpServiceOrder."Order Kind" := MaintenanceProposalLine."Order Kind";
+          TmpServiceOrder."Order Type" := MaintenanceProposalLine."Order Type";
+          IF NOT ServiceOrderPlanManagement.ServiceOrderMeetsPlanData(TmpServiceOrder, IResourceNo, IPlanDateFrom, IPlanDateUntil, IPlanSeqNo) THEN
+            EXIT(FALSE);
+        UNTIL MaintenanceProposalLine.NEXT = 0;
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE GetResourceDSByMaintenanceProposalLineDS@1100528641(VAR IMaintenanceProposalLine@1100528600 : Record 11071696;VAR OResourceWOP@1100528601 : Record 11229278;IPlanDateFrom@1100528608 : Date;IPlanDateUntil@1100528609 : Date;IPlanSeqNo@1100528610 : Integer;IDisciplineFilter@1100528606 : Text[250];ITradeSpecialityFilter@1100528611 : Text[250];ITerritoryFilter@1100528607 : Text[250]);
+    VAR
+      ResourcePlanData@1100528603 : Record 11229287;
+      TempResourceWOP@1100528604 : TEMPORARY Record 11229278;
+      ResourceWOP@1100528605 : Record 11229278;
+      MaintenanceManagement@1100528602 : Codeunit 11012829;
+    BEGIN
+      IF ResourceWOP.UseVisibleResources THEN BEGIN
+        ResourceWOP.SETFILTER("User ID Filter", USERID);
+        ResourceWOP.SETRANGE("Visible in Navision", TRUE);
+      END;
+      ResourceWOP.SetCompanyPlanGroupFilters;
+
+      ResourceWOP.SETFILTER(Schedule, '%1|%2', ResourceWOP.Schedule::ServiceOrder, ResourceWOP.Schedule::Both);
+      ResourceWOP.SETRANGE(Type, ResourceWOP.Type::Employee);
+      IF ResourceWOP.FINDSET THEN
+        REPEAT
+          TempResourceWOP."No." := ResourceWOP."No.";
+          TempResourceWOP.INSERT;
+          ResourceWOP.CALCFIELDS("Plan Data Exist");
+          IF NOT ResourceWOP."Plan Data Exist" THEN
+            TempResourceWOP.MARK(TRUE);
+        UNTIL ResourceWOP.NEXT = 0;
+
+      IF (IDisciplineFilter <> '') OR (ITerritoryFilter <> '') THEN BEGIN
+        ResourcePlanData.SETCURRENTKEY("Plan Seq. No.", Discipline, "Territory Code");
+        ResourcePlanData.SETFILTER("Plan Seq. No.", '<=%1', IPlanSeqNo);
+        IF IDisciplineFilter <> '' THEN
+          ResourcePlanData.SETFILTER(Discipline, IDisciplineFilter);
+        IF ITradeSpecialityFilter <> '' THEN
+          ResourcePlanData.SETFILTER("Trade Speciality", '%1|%2', '', ITradeSpecialityFilter);
+        IF ITerritoryFilter <> '' THEN
+          ResourcePlanData.SETFILTER("Territory Code", ITerritoryFilter);
+        IF ResourcePlanData.FINDSET THEN
+          REPEAT
+            TempResourceWOP."No." := ResourcePlanData."Resource No.";
+            TempResourceWOP.MARK(TRUE);
+          UNTIL ResourcePlanData.NEXT = 0;
+        TempResourceWOP.MARKEDONLY(TRUE);
+      END;
+
+      OResourceWOP.RESET;
+      IF TempResourceWOP.FINDSET THEN
+        REPEAT
+          IF MaintenanceManagement.ResourceCanDoMaintenanceProposalLines(
+            TempResourceWOP."No.", IMaintenanceProposalLine, IPlanDateFrom, IPlanDateUntil, IPlanSeqNo)
+          THEN BEGIN
+            OResourceWOP."No." := TempResourceWOP."No.";
+            OResourceWOP.MARK(TRUE);
+          END;
+        UNTIL TempResourceWOP.NEXT = 0;
+      OResourceWOP.MARKEDONLY(TRUE);
+    END;
+
+    LOCAL PROCEDURE DetermineAdditionalCost@1100528644(IServiceContractNo@1100528600 : Code[20];IServiceObjectNo@1100528601 : Code[20];ISeekDate@1100528604 : Date;IMaintSchemeVersionLine@1100528602 : Record 11071744) : Boolean;
+    VAR
+      ServiceOrderCostPlusEntry@1100528603 : Record 11012825;
+    BEGIN
+      ServiceSetup.GET;
+      IF NOT ServiceSetup."Add.Cost Based On Contr.Disc." THEN
+        EXIT(FALSE);
+      ServiceOrderCostPlusEntry.SetOverruleServiceContractNo(IServiceContractNo);
+      ServiceOrderCostPlusEntry."Object No." := IServiceObjectNo;
+      ServiceOrderCostPlusEntry."Cost Object" := IMaintSchemeVersionLine."Cost Object";
+      ServiceOrderCostPlusEntry."Cost Component" := IMaintSchemeVersionLine."Cost Component";
+      ServiceOrderCostPlusEntry."Posting Date" := ISeekDate;
+      ServiceOrderCostPlusEntry.Quantity := IMaintSchemeVersionLine.Quantity;
+      ServiceOrderCostPlusEntry."Sales Price (LCY)" := IMaintSchemeVersionLine."Cost Price";
+      ServiceOrderCostPlusEntry."Item No." := IMaintSchemeVersionLine."Item No.";
+      ServiceOrderCostPlusEntry."Vendor (Trade Item)" := IMaintSchemeVersionLine."Vendor (Trade Item)";
+      ServiceOrderCostPlusEntry."Trade Item" := IMaintSchemeVersionLine."Trade Item";
+      ServiceOrderCostPlusEntry.Manufacturer := IMaintSchemeVersionLine.Manufacturer;
+      ServiceOrderCostPlusEntry."Basic Item" := IMaintSchemeVersionLine."Basic Item";
+      ServiceOrderCostPlusEntry.CALCFIELDS("Cost Type");
+      ServiceOrderCostPlusEntry.GetContractDiscount;
+      EXIT(ServiceOrderCostPlusEntry."Discount % (ServContr)" <> 100);
+    END;
+
+    LOCAL PROCEDURE IsMaintSchemeSurveyTemplate@1100528801(IMaintenanceSchemeCode@1100528800 : Code[20]) : Boolean;
+    VAR
+      MaintenanceScheme@1100528801 : Record 11071745;
+    BEGIN
+      IF MaintenanceScheme.GET(IMaintenanceSchemeCode) THEN
+        IF MaintenanceScheme."Survey Template" THEN
+          EXIT(TRUE);
+
+      EXIT(FALSE);
+    END;
+
+    PROCEDURE FilterActualContracts@1100527000(ServiceLocationNo@1100527000 : Code[20];CustomerNo@1100527005 : Code[20];ServiceContractNo@1100527006 : Code[20];VAR ServiceContract@1100527003 : Record 11012812);
+    VAR
+      ContractObject@1100527002 : Record 11071702;
+      ServiceObject@1100527001 : Record 11071691;
+      ServiceContract2@1100527004 : Record 11012812;
+    BEGIN
+      IF ServiceLocationNo <> '' THEN BEGIN
+        ContractObject.SETCURRENTKEY("Service Object No.");
+
+        ServiceObject.SETCURRENTKEY("Service Location No.");
+        ServiceObject.SETRANGE("Service Location No.", ServiceLocationNo);
+        IF ServiceObject.FINDSET THEN BEGIN
+          REPEAT
+            ContractObject.SETRANGE("Service Object No.", ServiceObject."No.");
+            IF ContractObject.FINDSET THEN
+              REPEAT
+                ServiceContract."No." := ContractObject."Service Contract No.";
+                ServiceContract.MARK(TRUE);
+              UNTIL ContractObject.NEXT = 0;
+          UNTIL ServiceObject.NEXT = 0;
+
+          ServiceContract2.SETCURRENTKEY("Customer No.");
+          ServiceContract2.SETRANGE("Customer No.", CustomerNo);
+          ServiceContract2.SETRANGE("Contract Form", ServiceContract2."Contract Form"::"Framework Contract");
+          IF ServiceContract2.FINDSET THEN
+            REPEAT
+              ServiceContract."No." := ServiceContract2."No.";
+              ServiceContract.MARK(TRUE);
+            UNTIL ServiceContract2.NEXT = 0;
+
+          ServiceContract.MARKEDONLY(TRUE);
+        END;
+      END;
+
+      IF (NOT ServiceContract.GET(ServiceContractNo)) OR (NOT ServiceContract.Blocked) THEN
+        ServiceContract.SETRANGE(Blocked, FALSE);
+      ServiceContract.SETFILTER("Customer No.", CustomerNo);
+    END;
+
+    PROCEDURE SetUseTmpBuffer@1100529603(NewUseTmpBuffer@1100529600 : Boolean);
+    BEGIN
+      UseTmpBuffer := NewUseTmpBuffer;
+    END;
+
+    LOCAL PROCEDURE ClearTmpBuffer@1100529602();
+    BEGIN
+      TmpBuffer.RESET;
+      TmpBuffer.DELETEALL;
+    END;
+
+    PROCEDURE GetTmpBuffer@1100529601(VAR TmpServicePrognosisByCostType@1100529601 : TEMPORARY Record 11072553);
+    BEGIN
+      IF NOT UseTmpBuffer THEN
+        EXIT;
+
+      TmpBuffer.RESET;
+      IF TmpBuffer.ISEMPTY THEN
+        EXIT;
+
+      IF NOT TmpServicePrognosisByCostType.FINDLAST THEN
+        CLEAR(TmpServicePrognosisByCostType);
+      TmpBuffer.FINDSET;
+      REPEAT
+        TmpServicePrognosisByCostType.INIT;
+        TmpServicePrognosisByCostType."Prognosis Line No." += 1;
+        TmpServicePrognosisByCostType."Cost Type" := TmpBuffer."Cost Type";
+        TmpServicePrognosisByCostType."Cost Object" := TmpBuffer."Cost Object";
+        TmpServicePrognosisByCostType."Budget Cost" := TmpBuffer.Amount;
+        TmpServicePrognosisByCostType."Budget Hours" := TmpBuffer.Hours;
+        TmpServicePrognosisByCostType.INSERT;
+      UNTIL TmpBuffer.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE GetMaintenanceProposalTotalWorkingHours@1100529600(LastProposalCode@1100529601 : Code[20]) : Decimal;
+    VAR
+      MaintenanceProposalHeader@1100529600 : Record 11071695;
+    BEGIN
+      IF LastProposalCode = '' THEN
+        EXIT(0);
+      IF NOT MaintenanceProposalHeader.GET(LastProposalCode) THEN
+        EXIT(0);
+      MaintenanceProposalHeader.CALCFIELDS("Total Budget Working Hours");
+      EXIT(MaintenanceProposalHeader."Total Budget Working Hours");
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

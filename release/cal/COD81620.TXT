@@ -1,0 +1,166 @@
+OBJECT Codeunit 81620 Sym. Round and Post PurcInv
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PSSE-SYMB;
+  }
+  PROPERTIES
+  {
+    OnRun=VAR
+            iCount@1100285000 : Integer;
+          BEGIN
+            PurchaseHeader.SETRANGE("Document Type", PurchaseHeader."Document Type"::Invoice);
+            iCount := 0;
+            IF (PurchaseHeader.FINDSET(TRUE)) THEN REPEAT
+                  ApplyRounding(PurchaseHeader);
+                  COMMIT;
+                  IF CODEUNIT.RUN(CODEUNIT::"Purch.-Post", PurchaseHeader) THEN iCount += 1;
+            UNTIL PurchaseHeader.NEXT = 0;
+            MESSAGE(FORMAT(iCount) + ' ink”psfakturor bokf”rda');
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      PurchaseHeader@1100285500 : Record 38;
+      SymbrioMgmt@1100285502 : Codeunit 11127976;
+      SymbrioSetup@1100285000 : Record 11127975;
+
+    PROCEDURE ApplyRounding@1100285507(VAR PurchaseHeaderInv@1100285503 : Record 38) : Boolean;
+    VAR
+      PurchSetup@1100285502 : Record 312;
+      Currency@1100285501 : Record 4;
+      TotSumFromLineSum@1100285506 : Decimal;
+      LineSumFrSymbrio@1100285505 : Decimal;
+      InvoiceRoundingAmount@1100285504 : Decimal;
+      TotalSum@1100285508 : Decimal;
+      VendPostingGr@1100285509 : Record 93;
+      lPurchaseLine@1100285510 : Record 39;
+      BiggestLineNo@1100285511 : Integer;
+      SavedStatusCheckSuspended@1100285512 : Boolean;
+      LineVAT@1100285513 : Decimal;
+      TotLineSum@1100285514 : Decimal;
+    BEGIN
+      //>>140219 ENHSYM001 ITERO.DJ
+      PurchSetup.GET;
+      IF NOT PurchSetup."Invoice Rounding" THEN
+      EXIT(FALSE);
+
+        IF PurchaseHeaderInv."Currency Code" = '' THEN
+          Currency.InitRoundingPrecision
+        ELSE BEGIN
+          Currency.GET(PurchaseHeaderInv."Currency Code");
+          Currency.TESTFIELD("Amount Rounding Precision");
+        END;
+
+        TotLineSum := 0;
+        //Fr†n purchaseline
+        lPurchaseLine.SETRANGE("Document Type",PurchaseHeaderInv."Document Type");
+        lPurchaseLine.SETRANGE("Document No.",PurchaseHeaderInv."No.");
+        IF lPurchaseLine.FINDSET THEN BEGIN
+          REPEAT
+            TotLineSum := TotLineSum + lPurchaseLine."Amount Including VAT";
+          UNTIL lPurchaseLine.NEXT=0;
+        lPurchaseLine.RESET;
+        END;
+
+        {
+        //for testing only
+        SymbrioPurchaseInvLine2.SETRANGE(InvoiceHeadID,SymbrioPurchaseInvHeader.InvoiceHeadID);
+        SymbrioPurchaseInvLine2.SETRANGE(OrderHeadID,SymbrioPurchaseInvHeader.OrderHeadID);
+
+        IF SymbrioPurchaseInvLine2.FINDSET THEN BEGIN
+          REPEAT
+            IF NOT EVALUATE(LineVAT, SymbrioPurchaseInvLine2.VAT) THEN LineVAT := 0;
+            IF EVALUATE(LineSumFrSymbrio,SymbrioPurchaseInvLine2.LineSum) THEN
+              TotSumFromLineSum := TotSumFromLineSum + (LineSumFrSymbrio * (1 + LineVAT));
+          UNTIL SymbrioPurchaseInvLine2.NEXT=0;
+        END;
+        //for testing only
+        }
+
+        //EVALUATE(TotalSum,SymbrioPurchaseInvHeader.TotalSum);
+        TotalSum := PurchaseHeader."Amount incl. VAT";
+        IF PurchaseHeaderInv."Document Type" = PurchaseHeaderInv."Document Type"::"Credit Memo" THEN
+          TotalSum := -TotalSum;
+
+        //MESSAGE('F”re %1', TotLineSum);  //test
+        //MESSAGE('Efter %1', TotalSum);   //test
+
+        InvoiceRoundingAmount :=
+          -ROUND(
+            TotLineSum -
+            ROUND(
+              TotalSum,
+              Currency."Invoice Rounding Precision",
+              Currency.InvoiceRoundingDirection),
+            Currency."Amount Rounding Precision");
+
+         // MESSAGE('SIsta %1\ -round(%2-round(%3,%4,%5),%6)', InvoiceRoundingAmount,
+         //   TotLineSum,TotalSum,Currency."Invoice Rounding Precision",Currency.InvoiceRoundingDirection,Currency."Amount Rounding Precision");//test
+
+      IF InvoiceRoundingAmount = 0 THEN
+        EXIT(FALSE);
+
+      //>>ENH-SYM-009
+      SymbrioSetup.GET;
+      IF (SymbrioSetup."Max Rounding Amount" <> 0) AND (SymbrioSetup."Max Rounding Amount"<ABS(InvoiceRoundingAmount)) THEN
+        EXIT(FALSE);
+      //>>ENH-SYM-009
+
+
+      VendPostingGr.GET(PurchaseHeaderInv."Vendor Posting Group");
+      VendPostingGr.TESTFIELD("Invoice Rounding Account");
+      BiggestLineNo := 0;
+
+      lPurchaseLine.SETRANGE("Document Type",PurchaseHeaderInv."Document Type");
+      lPurchaseLine.SETRANGE("Document No.",PurchaseHeaderInv."No.");
+      IF lPurchaseLine.FINDLAST THEN
+        BiggestLineNo := lPurchaseLine."Line No.";
+
+      WITH lPurchaseLine DO BEGIN
+        INIT;
+        "Document Type" := PurchaseHeaderInv."Document Type";
+        "Document No." := PurchaseHeaderInv."No.";
+        BiggestLineNo := BiggestLineNo + 10000;
+        "System-Created Entry" := TRUE;
+        SavedStatusCheckSuspended := GetStatusCheckSuspended;  //**4PS C002812
+        SuspendStatusCheck(TRUE);                              //**4PS C002812   must be True anycase
+        SetSkipCheckSigns(TRUE);  //*4PS.n C001910
+        "Line No." := BiggestLineNo;
+        VALIDATE(Type,Type::"G/L Account");
+        VALIDATE("No.",VendPostingGr."Invoice Rounding Account");
+        VALIDATE(Quantity,1);
+        IF "Document Type" IN ["Document Type"::"Return Order","Document Type"::"Credit Memo"] THEN
+          VALIDATE("Return Qty. to Ship",Quantity)
+        ELSE
+          VALIDATE("Qty. to Receive",Quantity);
+        IF PurchaseHeaderInv."Prices Including VAT" THEN
+          VALIDATE("Direct Unit Cost",InvoiceRoundingAmount)
+        ELSE
+          VALIDATE(
+            "Direct Unit Cost",
+            ROUND(
+              InvoiceRoundingAmount /
+              (1 + (1 - PurchaseHeader."VAT Base Discount %" / 100) * "VAT %" / 100),
+              Currency."Amount Rounding Precision"));
+        VALIDATE("Amount Including VAT",InvoiceRoundingAmount);
+        SetSkipCheckSigns(FALSE);  //*4PS.n C001910
+        SuspendStatusCheck(SavedStatusCheckSuspended);                              //**4PS C002812  reset to saved value
+
+        INSERT;
+      END;
+
+      EXIT(TRUE);
+
+      //>>140219 ENHSYM001 ITERO.DJ
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

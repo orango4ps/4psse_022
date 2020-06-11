@@ -1,0 +1,356 @@
+OBJECT Codeunit 11126707 Open Work Order Filter FSA WS
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      BelongsToCurrentCompanyPlanGroupCache@1100526000 : DotNet "'mscorlib, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Collections.Generic.Dictionary`2";
+      IsCacheInitialized@1100526001 : Boolean;
+
+    [External]
+    PROCEDURE GetOpenWorkOrdersCount@1100529900(ResourceNo@1100529908 : Code[20];CompanyNameFilter@1100529907 : Text;SourceTypeFilter@1100529906 : Integer;DescriptionFilter@1100529905 : Text;CustomerNameFilter@1100529904 : Text;AddressFilter@1100529903 : Text;PostCodeFilter@1100529902 : Text;CityFilter@1100529901 : Text;PriorityFilter@1100529900 : Text) : Integer;
+    VAR
+      ResourceWOP@1100528011 : Record 11229278;
+      WorkOrder@1100528010 : Record 11229279;
+      ServiceOrder@1100528009 : Record 11012823;
+      Job@1100528008 : Record 11072003;
+      Customer@1100528006 : Record 18;
+      ServicePriority@1100528005 : Record 11012829;
+      DepartmentAuthorizationMgt@1100528004 : Codeunit 11012783;
+      Skip@1100528003 : Boolean;
+      DPA_FiltersSetForServiceOrder@1100528002 : Boolean;
+      DPA_FiltersSetForJob@1100528001 : Boolean;
+      OpenWorkOrderFSAWS@1100528000 : Page 11229704;
+      OpenWorkOrderCount@1100528012 : Integer;
+    BEGIN
+      //if you change this code also change de code in the function FillOpenWorkOrders
+      IF NOT ResourceWOP.GET(ResourceNo) THEN
+        EXIT;
+
+      IF ResourceWOP.Company <>  ResourceWOP.CURRENTCOMPANY THEN
+        EXIT;
+
+      WorkOrder.SETCURRENTKEY("Resource No.","Export to FSA");
+      GetFilteredWorkOrders(WorkOrder, ResourceWOP, CompanyNameFilter, SourceTypeFilter, DescriptionFilter);
+      OpenWorkOrderCount := 0;
+
+      IF WorkOrder.FINDSET THEN BEGIN
+        REPEAT
+          IF BelongsCompanyToCurrentCompanyPlanGroup(WorkOrder."Source Company") THEN BEGIN
+            ServiceOrder.CHANGECOMPANY(WorkOrder."Source Company");
+            Job.CHANGECOMPANY(WorkOrder."Source Company");
+
+            Skip := FALSE;
+            IF (WorkOrder."Source Company" = ResourceWOP.Company) THEN BEGIN
+              IF (NOT DPA_FiltersSetForServiceOrder) THEN
+                ServiceOrder.DPA_SetFiltersForResource(OpenWorkOrderFSAWS.OBJECTID(FALSE), ResourceNo);
+              DPA_FiltersSetForServiceOrder := TRUE;
+
+              IF (NOT DPA_FiltersSetForJob) THEN
+                Job.DPA_SetFiltersForResource(OpenWorkOrderFSAWS.OBJECTID(FALSE), ResourceNo);
+              DPA_FiltersSetForJob := TRUE;
+
+              IF WorkOrder."Source Type" = WorkOrder."Source Type"::ServiceOrder THEN BEGIN
+                ServiceOrder.SETRANGE("No.", WorkOrder."Source No.");
+                IF NOT ServiceOrder.FINDFIRST THEN
+                  Skip := TRUE;
+              END;
+
+              IF WorkOrder."Source Type" = WorkOrder."Source Type"::Project THEN BEGIN
+                Job.SETRANGE("No.", WorkOrder."Source No.");
+                IF NOT Job.FINDFIRST THEN
+                  Skip := TRUE;
+              END;
+            END;
+
+            IF (NOT Skip) THEN
+              Skip := NOT MatchExportFilters(ResourceWOP, WorkOrder, ServiceOrder);
+
+            IF (NOT Skip) THEN BEGIN
+              Customer.CHANGECOMPANY(WorkOrder."Source Company");
+              ServicePriority.CHANGECOMPANY(WorkOrder."Source Company");
+              CASE WorkOrder."Source Type" OF
+                WorkOrder."Source Type"::ServiceOrder:
+                  BEGIN
+                    ServiceOrder.SETRANGE("No.", WorkOrder."Source No.");
+                    ServiceOrder.SETFILTER(Status,STRSUBSTNO('<%1',ServiceOrder.Status::"Technical Finished"));
+                    ServiceOrder.SETFILTER(City,'@*' + CityFilter + '*');
+                    ServiceOrder.SETFILTER(Address,'@*' + AddressFilter + '*');
+                    ServiceOrder.SETFILTER("Post Code",'@*' + PostCodeFilter + '*');
+                    IF ServiceOrder.FINDFIRST THEN BEGIN
+                      IF CustomerNameFilter <> '' THEN BEGIN
+                        Customer.SETRANGE("No.", ServiceOrder."Customer No.");
+                        Customer.SETFILTER(Name, '@*' + CustomerNameFilter + '*');
+                        IF Customer.ISEMPTY THEN
+                          Skip := TRUE;
+                      END;
+
+                      IF PriorityFilter <> '' THEN BEGIN
+                        ServicePriority.SETRANGE(ServicePriority.Code, ServiceOrder.Priority);
+                        ServicePriority.SETRANGE(ServicePriority.Description, PriorityFilter);
+                        IF ServicePriority.ISEMPTY THEN
+                          Skip := TRUE;
+                      END;
+                    END ELSE
+                      Skip := TRUE;
+                  END;
+                WorkOrder."Source Type"::Project:
+                  BEGIN
+                    Job.SETRANGE("No.", WorkOrder."Source No.");
+                    Job.SETFILTER(City,'@*' + CityFilter + '*');
+                    Job.SETFILTER(Address,'@*' + AddressFilter + '*');
+                    Job.SETFILTER("Post Code",'@*' + PostCodeFilter + '*');
+                    IF Job.FINDFIRST THEN BEGIN
+                      IF CustomerNameFilter <> '' THEN BEGIN
+                        Customer.SETRANGE("No.", Job."Bill-to Customer No.");
+                        Customer.SETFILTER(Name, '@*' + CustomerNameFilter + '*');
+                        IF Customer.ISEMPTY THEN
+                          Skip := TRUE;
+                      END;
+                    END ELSE
+                      Skip := TRUE;
+                  END;
+              END;
+
+              IF NOT Skip THEN
+                OpenWorkOrderCount += 1
+            END;
+          END;
+        UNTIL (WorkOrder.NEXT = 0) OR (OpenWorkOrderCount > 100);
+      END;
+      EXIT(OpenWorkOrderCount);
+    END;
+
+    [External]
+    PROCEDURE FillOpenWorkOrders@1100528000(VAR OpenWorkOrder@1100528012 : Record 11229867;ResourceNo@1100528021 : Code[20];CompanyNameFilter@1100528020 : Text;SourceTypeFilter@1100528019 : Integer;DescriptionFilter@1100528018 : Text;CustomerNameFilter@1100528017 : Text;AddressFilter@1100528016 : Text;PostCodeFilter@1100528015 : Text;CityFilter@1100528014 : Text;PriorityFilter@1100528013 : Text);
+    VAR
+      ResourceWOP@1100528000 : Record 11229278;
+      WorkOrder@1100528001 : Record 11229279;
+      ServiceOrder@1100528003 : Record 11012823;
+      Job@1100528004 : Record 11072003;
+      Customer@1100528008 : Record 18;
+      ServicePriority@1100528009 : Record 11012829;
+      DepartmentAuthorizationMgt@1100528002 : Codeunit 11012783;
+      Skip@1100528006 : Boolean;
+      DPA_FiltersSetForServiceOrder@1100528007 : Boolean;
+      DPA_FiltersSetForJob@1100528010 : Boolean;
+      OpenWorkOrderFSAWS@1100528022 : Page 11229704;
+      ResultSize@1100526000 : Integer;
+    BEGIN
+      //if you change this code also change de code in the function GetOpenWorkOrderCount
+      OpenWorkOrder.RESET;
+      OpenWorkOrder.DELETEALL;
+
+      WITH OpenWorkOrder DO BEGIN
+        IF NOT ResourceWOP.GET(ResourceNo) THEN
+          EXIT;
+
+        IF ResourceWOP.Company <> CURRENTCOMPANY THEN
+          EXIT;
+
+        WorkOrder.SETCURRENTKEY("Resource No.","Export to FSA");
+        GetFilteredWorkOrders(WorkOrder, ResourceWOP, CompanyNameFilter, SourceTypeFilter, DescriptionFilter);
+        ResultSize := 0;
+
+        IF WorkOrder.FINDSET THEN
+          REPEAT
+            IF BelongsCompanyToCurrentCompanyPlanGroup(WorkOrder."Source Company") THEN BEGIN
+              ServiceOrder.CHANGECOMPANY(WorkOrder."Source Company");
+              Job.CHANGECOMPANY(WorkOrder."Source Company");
+
+              Skip := FALSE;
+              IF (WorkOrder."Source Company" = ResourceWOP.Company) THEN BEGIN
+                IF (NOT DPA_FiltersSetForServiceOrder) THEN
+                  ServiceOrder.DPA_SetFiltersForResource(OpenWorkOrderFSAWS.OBJECTID(FALSE), ResourceNo);
+                DPA_FiltersSetForServiceOrder := TRUE;
+
+                IF (NOT DPA_FiltersSetForJob) THEN
+                  Job.DPA_SetFiltersForResource(OpenWorkOrderFSAWS.OBJECTID(FALSE), ResourceNo);
+                DPA_FiltersSetForJob := TRUE;
+
+                IF WorkOrder."Source Type" = WorkOrder."Source Type"::ServiceOrder THEN BEGIN
+                  ServiceOrder.SETRANGE("No.", WorkOrder."Source No.");
+                  IF NOT ServiceOrder.FINDFIRST THEN
+                    Skip := TRUE;
+                END;
+
+                IF WorkOrder."Source Type" = WorkOrder."Source Type"::Project THEN BEGIN
+                  Job.SETRANGE("No.", WorkOrder."Source No.");
+                  IF NOT Job.FINDFIRST THEN
+                    Skip := TRUE;
+                END;
+              END;
+
+              IF (NOT Skip) THEN
+                Skip := NOT MatchExportFilters(ResourceWOP, WorkOrder, ServiceOrder);
+
+              IF (NOT Skip) THEN BEGIN
+                Customer.CHANGECOMPANY(WorkOrder."Source Company");
+                ServicePriority.CHANGECOMPANY(WorkOrder."Source Company");
+
+                INIT;
+                "Resource No." := ResourceNo;
+                "Work Order No." := WorkOrder."No.";
+                "Source Company" := WorkOrder."Source Company";
+                "Source Type" := WorkOrder."Source Type";
+                "Source No." := WorkOrder."Source No.";
+                "Work Order Description" := WorkOrder.Description;
+                CASE WorkOrder."Source Type" OF
+                  WorkOrder."Source Type"::ServiceOrder:
+                    BEGIN
+                      IF ServiceOrder.GET(WorkOrder."Source No.") THEN BEGIN
+                        IF NOT (ServiceOrder.Status < ServiceOrder.Status::"Technical Finished") THEN
+                          Skip := TRUE;
+
+                        IF NOT Customer.GET(ServiceOrder."Customer No.") THEN
+                          Customer.INIT;
+                        IF NOT ServicePriority.GET(ServiceOrder.Priority) THEN
+                          ServicePriority.INIT;
+                      END ELSE
+                        ServiceOrder.INIT;
+
+                      "Customer Name" := Customer.Name;
+                      "Name Service Order" := ServiceOrder.Name;
+                      Address := ServiceOrder.Address;
+                      "Post Code" := ServiceOrder."Post Code";
+                      City := ServiceOrder.City;
+                      "Country/Region Code" := ServiceOrder."Country/Region Code";
+                      Priority := ServicePriority.Description;
+                      ServiceOrder.CALCFIELDS("Service Location Description");
+                      "Location Description" := ServiceOrder."Service Location Description";
+                    END;
+                  WorkOrder."Source Type"::Project:
+                    BEGIN
+                      IF Job.GET(WorkOrder."Source No.") THEN BEGIN
+                        IF NOT Customer.GET(Job."Bill-to Customer No.") THEN
+                          Customer.INIT;
+                      END ELSE
+                        Job.INIT;
+
+                      "Customer Name" := Customer.Name;
+                      Address := Job.Address;
+                      "Post Code" := Job."Post Code";
+                      City := Job.City;
+                      "Country/Region Code" := Job."Country/Region Code";
+                    END;
+                END;
+
+                IF NOT Skip THEN
+                  IF MatchFilters(OpenWorkOrder,ResourceNo,CompanyNameFilter,SourceTypeFilter,DescriptionFilter,CustomerNameFilter,AddressFilter,PostCodeFilter,CityFilter,PriorityFilter) THEN BEGIN
+                    INSERT;
+                    ResultSize += 1;
+                  END;
+              END;
+            END;
+          UNTIL (WorkOrder.NEXT = 0) OR (ResultSize > 100);
+      END;
+    END;
+
+    LOCAL PROCEDURE MatchFilters@1100528001(OpenWorkOrder@1100528002 : Record 11229867;ResourceNo@1100528011 : Code[20];CompanyNameFilter@1100528010 : Text;SourceTypeFilter@1100528009 : Integer;DescriptionFilter@1100528008 : Text;CustomerNameFilter@1100528007 : Text;AddressFilter@1100528006 : Text;PostCodeFilter@1100528005 : Text;CityFilter@1100528004 : Text;PriorityFilter@1100528003 : Text) : Boolean;
+    VAR
+      TempOpenWorkOrder@1100528000 : TEMPORARY Record 11229867;
+      test@1100528001 : Text;
+    BEGIN
+      TempOpenWorkOrder.TRANSFERFIELDS(OpenWorkOrder);
+      TempOpenWorkOrder.INSERT;
+      IF (CompanyNameFilter <> '') THEN
+        TempOpenWorkOrder.SETFILTER("Source Company", '@*' + CompanyNameFilter + '*');
+      IF FORMAT(SourceTypeFilter,0,9) <> '0' THEN
+        TempOpenWorkOrder.SETRANGE("Source Type", SourceTypeFilter);
+      IF (DescriptionFilter <> '') THEN
+        TempOpenWorkOrder.SETFILTER("Work Order Description", '@*' + DescriptionFilter + '*');
+      IF (CustomerNameFilter <> '') THEN
+        TempOpenWorkOrder.SETFILTER("Customer Name", '@*' + CustomerNameFilter + '*');
+      IF (AddressFilter <> '') THEN
+        TempOpenWorkOrder.SETFILTER(Address, '@*' + AddressFilter + '*');
+      IF (PostCodeFilter <> '') THEN
+        TempOpenWorkOrder.SETFILTER("Post Code", '@*' + PostCodeFilter + '*');
+      IF (CityFilter <> '') THEN
+        TempOpenWorkOrder.SETFILTER(City, '@*' + CityFilter + '*');
+      IF (PriorityFilter <> '') AND (TempOpenWorkOrder."Source Type" = TempOpenWorkOrder."Source Type"::ServiceOrder) THEN
+        TempOpenWorkOrder.SETFILTER(Priority, PriorityFilter);
+      EXIT(TempOpenWorkOrder.FINDFIRST);
+    END;
+
+    LOCAL PROCEDURE GetFilteredWorkOrders@1100528003(VAR WorkOrder@1100528000 : Record 11229279;ResourceWOP@1100528006 : Record 11229278;CompanyNameFilter@1100528001 : Text;SourceTypeFilter@1100528002 : Integer;DescriptionFilter@1100528003 : Text);
+    BEGIN
+      IF CompanyNameFilter <> '' THEN BEGIN
+        IF BelongsCompanyToCurrentCompanyPlanGroup(CompanyNameFilter) THEN
+          WorkOrder.SETFILTER("Source Company", CompanyNameFilter);
+      END;
+
+      IF FORMAT(SourceTypeFilter,0,9) <> '0' THEN
+        WorkOrder.SETRANGE("Source Type", SourceTypeFilter)
+      ELSE
+        WorkOrder.SETFILTER("Source Type", '%1|%2', WorkOrder."Source Type"::ServiceOrder, WorkOrder."Source Type"::Project);
+
+      WorkOrder.SETFILTER("Resource Type", '%1|%2', WorkOrder."Resource Type"::" ", WorkOrder."Resource Type"::Employee);
+      WorkOrder.SETFILTER("Resource No.", '%1|%2', '', ResourceWOP."No.");
+      WorkOrder.SETRANGE("Export to FSA", FALSE);
+      WorkOrder.SETRANGE("Date/Time Export to FSA", CREATEDATETIME(0D, 0T));
+
+      IF (DescriptionFilter <> '') THEN
+        WorkOrder.SETFILTER(Description,'@*' + DescriptionFilter + '*');
+    END;
+
+    LOCAL PROCEDURE MatchExportFilters@1100527001(ResourceWOP@1100527001 : Record 11229278;WorkOrder@1100527000 : Record 11229279;ServiceOrder@1100527002 : Record 11012823) : Boolean;
+    VAR
+      ExportFilterSetMgt@1100527003 : Codeunit 11012200;
+    BEGIN
+      IF ResourceWOP."Filter Set (Mobile)" = '' THEN
+        EXIT(TRUE);
+
+      WorkOrder.FILTERGROUP(8);
+      WorkOrder.SETRANGE("No.", WorkOrder."No.");
+      WorkOrder.FILTERGROUP(0);
+      ExportFilterSetMgt.SetExportFiltersOnWorkOrder(ResourceWOP."Filter Set (Mobile)", ResourceWOP.Company, WorkOrder);
+      IF WorkOrder.ISEMPTY THEN
+        EXIT(FALSE);
+
+      ServiceOrder.FILTERGROUP(8);
+      ServiceOrder.SETRANGE("No.", WorkOrder."Source No.");
+      ServiceOrder.FILTERGROUP(0);
+      ExportFilterSetMgt.SetExportFiltersOnServiceOrder(ResourceWOP."Filter Set (Mobile)", ResourceWOP.Company, ServiceOrder);
+      IF ServiceOrder.ISEMPTY THEN
+        EXIT(FALSE);
+
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE BelongsCompanyToCurrentCompanyPlanGroup@1100526000(WorkOrderSourceCompany@1100526000 : Text) : Boolean;
+    VAR
+      CompanyPlanGroup@1100526001 : Record 11229300;
+      DoesBelong@1100526002 : Boolean;
+      DoesBelongVariant@1100526003 : Variant;
+    BEGIN
+      IF NOT IsCacheInitialized THEN BEGIN
+        BelongsToCurrentCompanyPlanGroupCache := BelongsToCurrentCompanyPlanGroupCache.Dictionary;
+        IsCacheInitialized := TRUE;
+      END;
+
+      IF BelongsToCurrentCompanyPlanGroupCache.TryGetValue(WorkOrderSourceCompany, DoesBelongVariant) THEN BEGIN
+        DoesBelong := DoesBelongVariant;
+        EXIT(DoesBelong)
+      END ELSE BEGIN
+        DoesBelong := CompanyPlanGroup.BelongsCompanyToCurrentCompanyPlanGroup(WorkOrderSourceCompany);
+        BelongsToCurrentCompanyPlanGroupCache.Add(WorkOrderSourceCompany, DoesBelong);
+        EXIT(DoesBelong);
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

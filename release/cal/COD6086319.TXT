@@ -1,0 +1,265 @@
+OBJECT Codeunit 6086319 Expense NAV-version Mgt.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=EMW110.00.00.3.00.07,4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      BankFileFilters@1002 : TextConst 'DEU=Alle Dateien (*.*)|*.*;ENU=All Files (*.*)|*.*;NLD=Alle bestanden (*.*)|*.*;NOR=Alle filer (*.*)|*.*;SVE=Alla filer (*.*)|*.*';
+      SelectBankTxt@1001 : TextConst 'DEU=Bankdatei auswÑhlen;ENU=Select Bank File;NLD=Selecteer bankbestand';
+      PostPreviewErr@6086300 : TextConst 'DEU=Buchungsvorschau wird nur von MS Dynamics NAV 2016 unterstÅtzt.;ENU=Posting preview is only supported from MS Dynamics NAV 2016.;NLD=Boekingsvoorbeeld wordt alleen ondersteund vanuit MS Dynamics NAV 2016.';
+
+    PROCEDURE OpenBankfile@1() : Text;
+    VAR
+      FileMgt@1001 : Codeunit 419;
+      Filename@1000 : Text;
+    BEGIN
+      Filename := FileMgt.UploadFile(SelectBankTxt,Filename); // SOME BANKS NEED THE CORRECT FILENAME
+      EXIT(Filename);
+    END;
+
+    PROCEDURE GetApprovalHyperlink@161024016(_UserId@161024017 : Code[50]) : Text[1024];
+    VAR
+      Setup@161024016 : Record 6085573;
+      ContiniaUserSetup@161024018 : Record 6086002;
+      ActiveSession@6085573 : Record 2000000110;
+      ServerInstance@6085574 : Record 2000000112;
+      ContCompSetup@1000 : Record 6192773;
+      ContWebPortal@6086300 : Record 6192774;
+      EMSetup@1001 : Record 6086300;
+      LinkPath@1002 : Text[50];
+    BEGIN
+      ContCompSetup.GET;
+      EMSetup.GET;
+
+      IF ContiniaUserSetup.GET(_UserId) AND (ContiniaUserSetup."Approval Client" = ContiniaUserSetup."Approval Client"::"Continia Web Portal") THEN BEGIN
+        ContWebPortal.GET(ContCompSetup."Web Portal Code");
+        IF ContCompSetup."Company Code" <> '' THEN
+          EXIT(STRSUBSTNO('%1/%2/expense/approval/e',ContWebPortal."Web Site Url",LOWERCASE(ContCompSetup."Company Code")))
+        ELSE
+          EXIT(STRSUBSTNO('%1/expense/approval/e',ContWebPortal."Web Site Url"));
+      END ELSE
+        EXIT(GetNAVClientURL);
+    END;
+
+    LOCAL PROCEDURE GetNAVClientURL@6086304() : Text[1024];
+    VAR
+      EMSetup@6086300 : Record 6086300;
+      ActiveSession@6086302 : Record 2000000110;
+      ServerInstance@6086301 : Record 2000000112;
+      Url@6086303 : Text[1024];
+      LinkPath@6086304 : Text[50];
+    BEGIN
+      LinkPath := 'DynamicsNAV://%1:%2/%3/%4/runpage?page=%5';
+
+      EMSetup.GET;
+      IF EMSetup."Dynamics NAV Server Name" <> '' THEN
+        Url := STRSUBSTNO(LinkPath,EMSetup."Dynamics NAV Server Name",EMSetup."Dynamics NAV Server Port",EMSetup."Dynamics NAV Server Instance",COMPANYNAME,PAGE::"EM Approval Entries")
+      ELSE BEGIN
+        ActiveSession.SETRANGE("Session ID",SESSIONID);
+        ActiveSession.FINDFIRST;
+        ServerInstance.GET(ActiveSession."Server Instance ID");
+        Url := STRSUBSTNO(LinkPath,ServerInstance."Server Computer Name",ServerInstance."Server Port",ServerInstance."Server Instance Name",COMPANYNAME,PAGE::"EM Approval Entries");
+      END;
+
+      IF EMSetup."Dynamics NAV Server Tenant" <> '' THEN
+        EXIT(Url + '&tenant=' + EMSetup."Dynamics NAV Server Tenant")
+      ELSE
+        EXIT(Url);
+    END;
+
+    PROCEDURE BlobImport@1160040004(VAR BlobRef@1160040000 : Record 99008535) : Text[1024];
+    VAR
+      FileMgt@1160040001 : Codeunit 419;
+    BEGIN
+      EXIT(FileMgt.BLOBImport(BlobRef,'*.htm'));
+    END;
+
+    PROCEDURE BlobExport@1160040005(VAR BlobRef@1160040000 : Record 99008535;Filetypes@1160040002 : Text[100]);
+    VAR
+      FileMgt@1160040001 : Codeunit 419;
+    BEGIN
+      FileMgt.BLOBExport(BlobRef,Filetypes,TRUE);
+    END;
+
+    PROCEDURE HasPermission@1160040008(UserRoleID@1160040000 : Code[20]) : Boolean;
+    VAR
+      AccessControl@1002 : Record 2000000053;
+      User@1000 : Record 2000000120;
+    BEGIN
+      User.SETCURRENTKEY("User Name");
+      User.SETRANGE("User Name",USERID);
+      IF NOT User.FINDFIRST THEN
+        EXIT(FALSE);
+      IF AccessControl.GET(User."User Security ID",UserRoleID) THEN
+        EXIT(TRUE);
+      IF AccessControl.GET(User."User Security ID",UserRoleID,COMPANYNAME) THEN
+        EXIT(TRUE);
+    END;
+
+    PROCEDURE PostJnLineWithCheck@1160040037(VAR GenJnlPostLine@1160040004 : Codeunit 12;VAR GenJnlLine@1160040000 : Record 81;TableID@1007 : Integer;DocumentType@1006 : Integer;DocumentNo@1005 : Code[20];DocRefNo@1004 : Integer;ExpAllocationEntryNo@1003 : Integer;SaveDefDimToEMDim@1002 : Boolean;CreateDefaultDim@1001 : Boolean);
+    VAR
+      EMDim@1009 : Record 6086360;
+      EMAllocationDim@1010 : Record 6086357;
+      GLSetup@1008 : Record 98;
+      EmDimMgt@1000 : Codeunit 6086318;
+    BEGIN
+      IF CreateDefaultDim THEN
+        EmDimMgt.CreateJnlLineDefaultDim(GenJnlLine);
+      IF SaveDefDimToEMDim THEN
+        EmDimMgt.CopyGenJnlDimToEMDim(GenJnlLine."Dimension Set ID",TableID,DocumentType,DocumentNo,DocRefNo);
+      GLSetup.GET;
+      IF ExpAllocationEntryNo = 0 THEN BEGIN
+        EMDim.SETRANGE("Table ID",TableID);
+        EMDim.SETRANGE("Document Type",DocumentType);
+        EMDim.SETRANGE("Document No.",DocumentNo);
+        EMDim.SETRANGE("Doc. Ref. No.",DocRefNo);
+        EMDim.SETFILTER("Dimension Code",'<>%1','');
+        IF EMDim.FINDSET THEN
+          REPEAT
+            EMDim.TESTFIELD("Dimension Value Code");
+            CASE EMDim."Dimension Code" OF
+              GLSetup."Global Dimension 1 Code":
+                GenJnlLine.VALIDATE("Shortcut Dimension 1 Code",EMDim."Dimension Value Code");
+              GLSetup."Global Dimension 2 Code":
+                GenJnlLine.VALIDATE("Shortcut Dimension 2 Code",EMDim."Dimension Value Code");
+              ELSE
+                GenJnlLine."Dimension Set ID" :=
+                  EmDimMgt.UpdateDimension(
+                   GenJnlLine."Dimension Set ID",EMDim."Dimension Code",EMDim."Dimension Value Code");
+            END;
+          UNTIL EMDim.NEXT = 0;
+      END;
+      IF ExpAllocationEntryNo <> 0 THEN BEGIN
+        EMAllocationDim.SETRANGE("Expense Allocation Entry No.",ExpAllocationEntryNo);
+        EMAllocationDim.SETFILTER("Dimension Code",'<>%1','');
+        IF EMAllocationDim.FINDSET THEN
+          REPEAT
+            EMAllocationDim.TESTFIELD("Dimension Value Code");
+            CASE EMAllocationDim."Dimension Code" OF
+              GLSetup."Global Dimension 1 Code":
+                GenJnlLine.VALIDATE("Shortcut Dimension 1 Code",EMAllocationDim."Dimension Value Code");
+              GLSetup."Global Dimension 2 Code":
+                GenJnlLine.VALIDATE("Shortcut Dimension 2 Code",EMAllocationDim."Dimension Value Code");
+              ELSE
+                GenJnlLine."Dimension Set ID" :=
+                  EmDimMgt.UpdateDimension(
+                   GenJnlLine."Dimension Set ID",EMAllocationDim."Dimension Code",EMAllocationDim."Dimension Value Code");
+            END;
+          UNTIL EMAllocationDim.NEXT = 0;
+      END;
+      GenJnlPostLine.RunWithCheck(GenJnlLine);
+    END;
+
+    PROCEDURE CheckPreviewAllowed@6086300(ShowError@6086301 : Boolean) : Boolean;
+    VAR
+      ContiniaVersionMgt@6086300 : Codeunit 6192775;
+      EMSetup@6086302 : Record 6086300;
+      ContiniaVersMgt@6086303 : Codeunit 6192775;
+    BEGIN
+      IF (ContiniaVersMgt.NAVVersion < 90000) THEN
+        EXIT;
+
+      EMSetup.GET;
+      EXIT(EMSetup."Expense Posting" = EMSetup."Expense Posting"::"Use General Journal");
+    END;
+
+    PROCEDURE StartPostingPreviewMode@6086301();
+    BEGIN
+      //ONLY USED IN NAV 2016
+    END;
+
+    PROCEDURE FinishPostingPreviewMode@6086302();
+    BEGIN
+      //ONLY USED IN NAV 2016
+    END;
+
+    PROCEDURE StopPreviewMode@6086303();
+    VAR
+      GenJnlPostPreview@6086300 : Codeunit 19;
+      ContiniaVersMgt@6086301 : Codeunit 6192775;
+    BEGIN
+      GenJnlPostPreview.ThrowError;
+    END;
+
+    PROCEDURE PostJobJnlLineWithCheck@6086305(VAR JobJnlPostLine@6086300 : Codeunit 11072003;VAR JobJnlLine@6086301 : Record 11072008;TableID@6086302 : Integer;DocumentTYpe@6086303 : Integer;DocumentNo@6086304 : Code[20];DocRefNo@6086305 : Integer;ExpAllocationEntryNo@6086306 : Integer);
+    VAR
+      EMDim@6086307 : Record 6086360;
+      EMAllocationDim@6086308 : Record 6086357;
+      GLSetup@6086309 : Record 98;
+      EmDimMgt@6086310 : Codeunit 6086318;
+    BEGIN
+      EmDimMgt.CreateJoblLineDefaultDim(JobJnlLine);
+
+      GLSetup.GET;
+      IF ExpAllocationEntryNo = 0 THEN BEGIN
+        EMDim.SETRANGE("Table ID",TableID);
+        EMDim.SETRANGE("Document Type",DocumentTYpe);
+        EMDim.SETRANGE("Document No.",DocumentNo);
+        EMDim.SETRANGE("Doc. Ref. No.",DocRefNo);
+        EMDim.SETFILTER("Dimension Code",'<>%1','');
+        IF EMDim.FINDSET THEN
+          REPEAT
+            CASE EMDim."Dimension Code" OF
+              GLSetup."Global Dimension 1 Code":
+                JobJnlLine.VALIDATE("Shortcut Dimension 1 Code",EMDim."Dimension Value Code");
+              GLSetup."Global Dimension 2 Code":
+                JobJnlLine.VALIDATE("Shortcut Dimension 2 Code",EMDim."Dimension Value Code");
+              ELSE
+                JobJnlLine."Dimension Set ID" :=
+                  EmDimMgt.UpdateDimension(
+                    JobJnlLine."Dimension Set ID",EMDim."Dimension Code",EMDim."Dimension Value Code");
+            END;
+          UNTIL EMDim.NEXT = 0;
+      END;
+
+      IF ExpAllocationEntryNo <> 0 THEN BEGIN
+        EMAllocationDim.SETRANGE("Expense Allocation Entry No.",ExpAllocationEntryNo);
+        EMAllocationDim.SETFILTER("Dimension Code",'<>%1','');
+        IF EMAllocationDim.FINDSET THEN
+          REPEAT
+            CASE EMAllocationDim."Dimension Code" OF
+              GLSetup."Global Dimension 1 Code":
+                JobJnlLine.VALIDATE("Shortcut Dimension 1 Code",EMAllocationDim."Dimension Value Code");
+              GLSetup."Global Dimension 2 Code":
+                JobJnlLine.VALIDATE("Shortcut Dimension 2 Code",EMAllocationDim."Dimension Value Code");
+              ELSE
+                JobJnlLine."Dimension Set ID" :=
+                  EmDimMgt.UpdateDimension(
+                    JobJnlLine."Dimension Set ID",EMAllocationDim."Dimension Code",EMAllocationDim."Dimension Value Code");
+            END;
+          UNTIL EMAllocationDim.NEXT = 0;
+      END;
+
+      JobJnlPostLine.RunWithCheck(JobJnlLine);
+    END;
+
+    PROCEDURE MakePeriodFilter@1160040006(VAR Period@1160040000 : Text[30]);
+    VAR
+      DateRec@1160040002 : Record 2000000007;
+      TextMgt@1160040001 : Codeunit 41;
+    BEGIN
+      TextMgt.MakeDateFilter(Period);
+      DateRec.SETRANGE("Period Type",DateRec."Period Type"::Date);
+      DateRec.SETFILTER("Period Start",Period);
+      Period := DateRec.GETFILTER("Period Start");
+    END;
+
+    BEGIN
+    {
+      4PS, Objects renumbered
+    }
+    END.
+  }
+}
+

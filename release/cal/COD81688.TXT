@@ -1,0 +1,418 @@
+OBJECT Codeunit 81688 Personec  NAS and Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PSSE,SEEV.INF002A,AssNo501;
+  }
+  PROPERTIES
+  {
+    TableNo=472;
+    OnRun=BEGIN
+            CASE "Parameter String" OF
+              'TIME': ExportTime;    //can be called from rep81689
+              'WAGE': ImportWageCost;
+              'ABSENCE': ExportAbsence;  //190306
+              'ALL':
+                BEGIN
+                  ExportTime;
+                  ImportWageCost;
+                END;
+            END;
+
+            IF "Parameter String" = '' THEN
+                ImportWageCost;      //if no 'Job Queue Entry' or 'parameter string' has been supplied
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      OnlyNotExported@1100285002 : Boolean;
+      JobSetup@1100285001 : Record 315;
+      Job@1100409000 : Record 11072003;
+      DimVal@1100409001 : Record 349;
+      FileMgmt@1100409003 : Codeunit 419;
+      Filename@1100409004 : Text[250];
+      TAB@1100409005 : Char;
+      LF@1100285008 : Char;
+      CR@1100285009 : Char;
+      Status@1100409006 : Text[30];
+      Value@1100409008 : Text[30];
+      Text001@1100409010 : TextConst 'ENU=Done;NOR=Ferdig;SVE=Klar';
+      Employee@1100285000 : Record 5200;
+      DocumentFilter@1100285003 : Text[50];
+      EmployerFilter@1100285004 : Text[50];
+      gDateFilter@1100285500 : Text[50];
+      OutStr@1100285005 : OutStream;
+      TempBlob@1100285006 : Record 99008535;
+      txtNotAGDA@1100285007 : TextConst 'ENU=Salary Program  must be AGDA in Job setup > Salary Program;NOR=L›nnsprogram m† v‘re AGDA i prosjektinnstillinger > L›nnsprogram;SVE=L”neprogram m†ste vara AGDA i Projektinst„llningar > L”neprogram';
+      ExportedHour@1100285013 : Record 11012041;
+      TotLine@1100285014 : Text[30];
+      AmountLCY@1100285015 : Text[30];
+      WageComponent@1100285016 : Record 11012014;
+      txtNothing@1100285017 : TextConst 'ENU=No hours/abscence exported.;NOR=Ingen timer/frav‘r eksportert;SVE=Inga timmar/fr†nvaro exporterades.';
+      NoTimeExported@1100285018 : Boolean;
+      NoAbscenceExported@1100285501 : Boolean;
+      SEUtils@1100285503 : Codeunit 11128000;
+      CheckIfIndirect@1100285100 : Boolean;
+      txtIndirectTime@1100285101 : TextConst 'ENU=There is one or more %1 of type %2 for Employee: %3 %4 %5-%6;NOR=Det er en eller flere %1 av typen %2 for Ansatt: %3 %4 %5-%6;SVE=Det finns en eller flera %1 av typen %2 f”r Anst„lld: %3 %4 %5-%6';
+      HumanResourcesSetup@1100285102 : Record 5218;
+
+    PROCEDURE SetFilters@1100285111(DocFilter@1100285103 : Text[50];EmpFilter@1100285102 : Text[50];DateFilter@1100285101 : Text[50];NotExportedLines@1100285100 : Boolean);
+    BEGIN
+      OnlyNotExported := NotExportedLines;
+      EmployerFilter  := EmpFilter;
+      DocumentFilter  := DocFilter;
+      gDateFilter     := DateFilter;
+    END;
+
+    PROCEDURE ExportTime@1100285001();
+    VAR
+      lvTeamCode@1100285500 : Code[30];
+      lvWageCompSalaryApplication@1100285501 : Record 11128109;
+      PHLine@1100285100 : Record 11012039;
+      PHHead@1100285102 : Record 11012038;
+      ApprovedLine@1100285101 : Boolean;
+      TEMPErrorMessage@1100285103 : TEMPORARY Record 700;
+      i@1100285104 : Integer;
+      PersonnecWagecomponents@1101285000 : Record 81640;
+      ExportLine@1101285001 : Boolean;
+    BEGIN
+      // Exports AGDA time reports to a file
+
+      //>>161129
+      CR := 13;
+      LF := 10;
+      //<<161129
+
+      //We will make a copy of the present standard export of hours to Personec (= the same export as being used for AGDA in Sweden).
+      //We will change this export to be based on the non-posted hour lines (Hour Accounting Line, table 11012039) instead of the posted hour line.
+      JobSetup.GET;
+      HumanResourcesSetup.GET;
+
+      TempBlob.Blob.CREATEOUTSTREAM(OutStr);
+      Filename := HumanResourcesSetup."Pathname Files to Salary" + 'Personec-Tid-' + FORMAT(CURRENTDATETIME,0,'<Year4><Month,2><Day,2>-<Hours24><Minutes,2><Seconds,2>') + '.txt';
+
+      PHLine.RESET;
+      IF EmployerFilter <> '' THEN
+        PHLine.SETFILTER(Employer, EmployerFilter);
+      IF DocumentFilter <> '' THEN
+        PHLine.SETFILTER("Document No.", DocumentFilter);
+      IF gDateFilter <> '' THEN
+        PHLine.SETFILTER("Actual date of line", gDateFilter);
+      //IF (OnlyNotExported) THEN
+      //   PHLine.SETRANGE(Exported,FALSE);
+
+      //>>RFC259
+      //check lines
+      PHLine.SETRANGE(Type,PHLine.Type::Project);
+      IF PHLine.FINDSET(FALSE) AND CheckIfIndirect THEN REPEAT
+        PHHead.GET(PHLine.Year,PHLine.Week,PHLine."Employee No.");
+        ApprovedLine := TRUE;
+        IF ApprovedLine AND HumanResourcesSetup."Release Hours Mandatory" THEN
+          ApprovedLine := PHHead.Status = PHHead.Status::Released;
+      // TODO
+      //  IF ApprovedLine THEN
+      //    ApprovedLine := NOT PHHead.HasOpenapprovalLines;
+
+        ExportLine := ApprovedLine;
+        IF ExportLine AND WageComponent.GET(PHLine."Wage Component") THEN
+          ExportLine := WageComponent."Type of Day" = WageComponent."Type of Day"::Worked;
+
+        IF ExportLine THEN BEGIN
+          PersonnecWagecomponents.SETRANGE("Code timesheet",PHLine."Wage Component");
+          PersonnecWagecomponents.SETRANGE("Line type",PersonnecWagecomponents."Line type"::DefIndirect);
+          ExportLine := PersonnecWagecomponents.ISEMPTY ;
+        END;
+
+        IF (NOT ExportLine) AND ApprovedLine THEN BEGIN
+          i+=10;
+          TEMPErrorMessage.ID := i;
+          TEMPErrorMessage."Record ID" := PHHead.RECORDID;
+          TEMPErrorMessage."Table Number" := DATABASE::"Hour Accounting Line";
+          TEMPErrorMessage."Field Number" := PHLine.FIELDNO(Type);
+          TEMPErrorMessage.Description:=
+            STRSUBSTNO(txtIndirectTime,PHLine.TABLECAPTION,PHLine.Type,PHLine."Employee No.",PHHead.TABLECAPTION,PHLine.Year,PHLine.Week);
+          TEMPErrorMessage.INSERT;
+        END;
+      UNTIL PHLine.NEXT = 0;
+      PHLine.SETRANGE(Type);
+
+      IF NOT TEMPErrorMessage.ISEMPTY THEN BEGIN
+        PAGE.RUN(0,TEMPErrorMessage);
+        ERROR(txtNothing);
+      END;
+      //<<RFC259
+
+      PHLine.SETRANGE("Leave Type",'');
+
+      //IF PHLine.FINDSET(TRUE) THEN REPEAT
+      IF PHLine.FINDSET(FALSE) THEN REPEAT
+        PHHead.GET(PHLine.Year,PHLine.Week,PHLine."Employee No.");
+
+        Value := PHLine."Department Code";
+        Employee.GET(PHLine."Employee No.");
+
+        WageComponent.GET(PHLine."Wage Component");
+        //>>190529, RFC226
+        TotLine := '';
+        AmountLCY := '';
+        //<<190529
+        CASE WageComponent."Component Type" OF
+           WageComponent."Component Type"::Hours: BEGIN
+                  TotLine := FORMAT(PHLine."Total Line",0,9);
+                  AmountLCY := '';
+               END;
+           WageComponent."Component Type"::Days: BEGIN
+                  TotLine := FORMAT(PHLine.Quantity,0,9);
+                  AmountLCY := '';
+               END;
+           WageComponent."Component Type"::Expenses: BEGIN
+                  TotLine := FORMAT(PHLine.Quantity,0,9);
+                  AmountLCY := FORMAT(PHLine."Amount (LCY)", 0, 9);
+               END;
+           WageComponent."Component Type"::"Expense hours": BEGIN
+                  TotLine := FORMAT(PHLine."Total Line",0,9);
+                  AmountLCY := FORMAT(PHLine."Amount (LCY)", 0, 9);
+               END;
+
+      //>>RFC229 190529,190723
+           WageComponent."Component Type"::Addition: BEGIN
+                  TotLine := FORMAT(PHLine."Total Line",0,9);
+                  AmountLCY := FORMAT(PHLine."Unit Cost (LCY)", 0, 9);
+               END;
+      //<<190529
+
+
+        END;
+        lvTeamCode := PHLine."Team Code";
+        IF (PHLine.Type = PHLine.Type::Indirect) THEN
+           lvTeamCode := '';
+        IF Employee.UTA THEN
+           lvTeamCode := '';
+
+        IF Value = '' THEN
+          Value := PHLine."Department Code Employee";
+
+        ApprovedLine := TRUE;
+        IF ApprovedLine AND HumanResourcesSetup."Release Hours Mandatory" THEN
+          ApprovedLine := PHHead.Status = PHHead.Status::Released;
+      //  IF ApprovedLine THEN
+      //    ApprovedLine := NOT PHHead.HasOpenHoursConsentLines;
+
+        IF ApprovedLine THEN
+          OutStr.WRITETEXT(
+            SEUtils.Ascii2Ansi(HumanResourcesSetup."Receiving Company (SCAB)")
+            +';' +SEUtils.Ascii2Ansi(Employee."Salary No.")
+            +';' +SEUtils.Ascii2Ansi(PHLine."Wage Component")
+            +';' +SEUtils.Ascii2Ansi(PHLine."Project No.")
+            +';' +SEUtils.Ascii2Ansi(Value)
+            +';' +TotLine
+            +';' +FORMAT(PHLine."Actual date of line", 0, 9)
+            +';' +AmountLCY
+            //    +';' +SEUtils.Ascii2Ansi(lvTeamCode)
+            +';' +PHLine.Element
+            +';' +PHLine."Extension Contract"
+            +';' +PHLine."Cost Object"
+            +';' +FORMAT(PHLine."Line No.",0,9)
+            +FORMAT(CR) + FORMAT(LF)
+          );
+        IF lvWageCompSalaryApplication.GET(PHLine."Wage Component") AND ApprovedLine THEN BEGIN
+          IF (lvWageCompSalaryApplication."Generate Additional Line" = lvWageCompSalaryApplication."Generate Additional Line"::Always)
+             OR
+             ((lvWageCompSalaryApplication."Generate Additional Line" = lvWageCompSalaryApplication."Generate Additional Line"::"Non-UTA") AND (Employee.UTA = FALSE))
+          THEN BEGIN
+            OutStr.WRITETEXT(SEUtils.Ascii2Ansi(HumanResourcesSetup."Receiving Company (SCAB)")
+              +';' +SEUtils.Ascii2Ansi(Employee."Salary No.")
+              +';' +SEUtils.Ascii2Ansi(lvWageCompSalaryApplication."Wage Component Additional Line")
+              +';' +SEUtils.Ascii2Ansi(PHLine."Project No.")
+              +';' +SEUtils.Ascii2Ansi(Value)
+              +';' +TotLine
+              +';' +FORMAT(PHLine."Actual date of line", 0, 9)
+              +';' +AmountLCY
+      //        +';' +SEUtils.Ascii2Ansi(lvTeamCode)
+              +';' +PHLine.Element
+              +';' +PHLine."Extension Contract"
+              +';' +PHLine."Cost Object"
+              +';' +FORMAT(PHLine."Line No.",0,9)
+              +FORMAT(CR) + FORMAT(LF)
+             );
+          END;
+        END;
+      UNTIL PHLine.NEXT = 0 ELSE BEGIN
+        NoTimeExported := TRUE;
+      END;
+
+      IF NOT NoTimeExported THEN BEGIN
+        FileMgmt.BLOBExport4PS(TempBlob, Filename, FALSE, FALSE);
+      END;
+
+      CLEAR(TempBlob.Blob);
+
+      COMMIT;
+    END;
+
+    PROCEDURE ImportWageCost@1100285101();
+    VAR
+      ImportInterimwagecost@1100285100 : XMLport 81689;
+      DirectoryInfo@1000000008 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.DirectoryInfo";
+      FileInfo@1000000007 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.FileInfo";
+      List@1000000006 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Collections.Generic.List`1";
+      enumerator@1000000005 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Collections.IEnumerator";
+      errText@1000000004 : Text;
+      varXmlFile@1000000001 : File;
+      varInputStream@1000000000 : InStream;
+    BEGIN
+      //RFC112
+      JobSetup.GET;
+      HumanResourcesSetup.GET;
+      HumanResourcesSetup.TESTFIELD("Pathname Files from Salary");
+      HumanResourcesSetup.TESTFIELD("Pathname Salary Backup Files");
+
+      ImportInterimwagecost.TEXTENCODING := TEXTENCODING::Windows;
+
+      DirectoryInfo := DirectoryInfo.DirectoryInfo(HumanResourcesSetup."Pathname Files from Salary");
+      //List := DirectoryInfo.GetFiles('*.xml');
+      List := DirectoryInfo.GetFiles('*_to4ps.txt');
+      enumerator := List.GetEnumerator();
+
+      WHILE enumerator.MoveNext DO BEGIN
+        FileInfo:= enumerator.Current();
+
+        varXmlFile.OPEN(FileInfo.FullName);
+        varXmlFile.CREATEINSTREAM(varInputStream);
+        ImportInterimwagecost.SETSOURCE(varInputStream);
+        IF ImportInterimwagecost.IMPORT THEN BEGIN
+          varXmlFile.CLOSE;
+          //move to archive
+          IF (HumanResourcesSetup."Pathname Files from Salary" <> HumanResourcesSetup."Pathname Salary Backup Files") THEN BEGIN
+            IF EXISTS(HumanResourcesSetup."Pathname Salary Backup Files" + FileInfo.Name) THEN
+              ERASE(HumanResourcesSetup."Pathname Salary Backup Files" + FileInfo.Name);
+            FileInfo.MoveTo(HumanResourcesSetup."Pathname Salary Backup Files" + FileInfo.Name);
+          END;
+        END
+        ELSE BEGIN
+          varXmlFile.CLOSE;
+          //move to error-folder
+          IF EXISTS(HumanResourcesSetup."Pathname Salary Backup Files" + '\Error\' + FileInfo.Name) THEN
+            ERASE(HumanResourcesSetup."Pathname Salary Backup Files" + '\Error\' + FileInfo.Name);
+          FileInfo.MoveTo(HumanResourcesSetup."Pathname Salary Backup Files" + '\Error\' + FileInfo.Name);
+        END;
+        COMMIT;
+      END;
+    END;
+
+    LOCAL PROCEDURE FillLogBook@33(DocNo@1100285100 : Code[20]);
+    VAR
+      LineNoInt@1100285000 : Integer;
+    BEGIN
+      ExportedHour.RESET;
+      IF ExportedHour.FIND('+') THEN
+        LineNoInt := ExportedHour."Line No." + 1
+      ELSE
+        LineNoInt := 1;
+
+      ExportedHour.INIT;
+      ExportedHour."Line No." := LineNoInt;
+      ExportedHour."Document No." :=  DocNo;
+      ExportedHour."User ID" := USERID;
+      ExportedHour.Date := TODAY;
+      ExportedHour.Time := TIME;
+      ExportedHour.INSERT;
+    END;
+
+    PROCEDURE SetExtraTimeCheck@1100285102(pCheckIfIndirect@1100285100 : Boolean);
+    BEGIN
+      CheckIfIndirect := pCheckIfIndirect;
+    END;
+
+    PROCEDURE ExportAbsence@1100285002();
+    VAR
+      lvTeamCode@1100285500 : Code[20];
+      PHLine@1100285101 : Record 11012039;
+      PHLine2@1100285100 : Record 11012039;
+      ApprovedLine@1101285000 : Boolean;
+      PHHead@1101285001 : Record 11012038;
+    BEGIN
+      //190311
+      // Exports AGDA abscence to a file
+      //copy of cod11128271.ExportAbsence()
+      CR := 13;
+      LF := 10;
+      JobSetup.GET;
+      HumanResourcesSetup.GET;
+      TempBlob.Blob.CREATEOUTSTREAM(OutStr);
+
+      Filename := HumanResourcesSetup."Pathname Files to Salary" + 'Personec-TidFranvaro-' + DELCHR(FORMAT(TODAY), '=', '-') + '_' + DELCHR(FORMAT(TIME), '=', ':') + '.txt';
+
+      PHLine.RESET;
+      IF EmployerFilter <> '' THEN
+        PHLine.SETFILTER(Employer, EmployerFilter);
+      IF DocumentFilter <> '' THEN
+        PHLine.SETFILTER("Document No.", DocumentFilter);
+      IF gDateFilter <> '' THEN
+        PHLine.SETFILTER("Actual date of line", gDateFilter);
+      // IF OnlyNotExported THEN
+      //  PHLine.SETRANGE(Exported,FALSE);
+      PHLine.SETFILTER("Leave Type",'<>''''');
+
+      IF PHLine.FINDSET(FALSE) THEN REPEAT
+        PHHead.GET(PHLine.Year,PHLine.Week,PHLine."Employee No.");
+        Employee.GET(PHLine."Employee No.");
+        Value := PHLine."Department Code Employee";
+
+        lvTeamCode := PHLine."Team Code";
+        IF (PHLine.Type = PHLine.Type::Indirect) THEN
+           lvTeamCode := '';
+        IF Employee.UTA THEN
+           lvTeamCode := '';
+
+        ApprovedLine := TRUE;
+        IF ApprovedLine AND HumanResourcesSetup."Release Hours Mandatory" THEN
+          ApprovedLine := PHHead.Status = PHHead.Status::Released;
+      //  IF ApprovedLine THEN
+      //    ApprovedLine := NOT PHHead.HasOpenHoursConsentLines;
+
+        IF ApprovedLine THEN
+          OutStr.WRITETEXT(SEUtils.Ascii2Ansi(HumanResourcesSetup."Delivering Company (SCAB)"
+            +';' +Employee."Salary No."
+            +';' +PHLine."Wage Component"
+            +';' +PHLine."Project No."
+            +';' +Value
+            +';' +FORMAT(PHLine."Total Line",0,9)
+            +';' +FORMAT(PHLine."Actual date of line", 0, 9)
+            +';' +lvTeamCode
+            + FORMAT(CR) + FORMAT(LF)
+          ));
+      //  PHLine2.GET(PHLine.Year,PHLine.Week,PHLine."Employee No.",PHLine."Line No.");
+      //  PHLine2.Exported := TRUE;
+      //  PHLine2."Exported on" := CURRENTDATETIME;
+      //  PHLine2.MODIFY;
+      UNTIL PHLine.NEXT = 0 ELSE
+        NoAbscenceExported := TRUE;
+
+      IF NOT NoAbscenceExported THEN
+        FileMgmt.BLOBExport4PS(TempBlob, Filename, FALSE, FALSE);
+
+      CLEAR(TempBlob.Blob);
+
+      COMMIT;
+    END;
+
+    BEGIN
+    {
+      161025 ITERO.DL new codeunit, copy of cod11128271 Agda Management
+                      RFC-185 AssNo501 Export hours to Personec
+                      RFC-186 AssNo502 Import interim wage cost from Personnec
+      190117 ORANGO.DL RFC259 error if exporttimeline has indirect time
+      190226 ORANGO.DL RFC259 after tests
+      190311 ORANGO.DL RFC259 add ExportAbsence
+      190529 ORANGO.DL RFC226 handle new wagecomponent type 'addition'
+      190723 ORANGO.DL RFC226 corrections in ExportTime
+    }
+    END.
+  }
+}
+

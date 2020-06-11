@@ -1,0 +1,379 @@
+OBJECT Table 11020466 Linked Trade Item
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnInsert=BEGIN
+               TESTFIELD("Trade Item");
+             END;
+
+    CaptionML=ENU=Linked Trade Item;
+  }
+  FIELDS
+  {
+    { 10  ;   ;Vendor              ;Code15        ;TableRelation="ETIM Vendor - Central Mgt";
+                                                   CaptionML=[ENU=Vendor;
+                                                              NOR=Leverand›r;
+                                                              SVE=Leverant”r];
+                                                   NotBlank=Yes;
+                                                   Editable=No }
+    { 20  ;   ;Main Trade Item     ;Code20        ;TableRelation="Trade Item"."Item Code" WHERE (Vendor=FIELD(Vendor));
+                                                   CaptionML=ENU=Main Trade Item;
+                                                   NotBlank=Yes;
+                                                   Editable=No }
+    { 30  ;   ;Line No.            ;Integer       ;CaptionML=[ENU=Line No.;
+                                                              NOR=Linjenr.;
+                                                              SVE=Radnr];
+                                                   Editable=No }
+    { 40  ;   ;Trade Item          ;Code20        ;TableRelation="Trade Item"."Item Code" WHERE (Vendor=FIELD(Vendor));
+                                                   OnValidate=BEGIN
+                                                                IF "Trade Item" = "Main Trade Item" THEN
+                                                                  FIELDERROR("Trade Item");
+                                                                CALCFIELDS(Description, "Unit of Measure");
+                                                              END;
+
+                                                   CaptionML=[ENU=Trade Item;
+                                                              NOR=Katalogartikkel;
+                                                              SVE=Anskaffningsartikel] }
+    { 41  ;   ;Description         ;Text50        ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup("Trade Item"."Item Description" WHERE (Vendor=FIELD(Vendor),
+                                                                                                             Item Code=FIELD(Trade Item)));
+                                                   CaptionML=[ENU=Description;
+                                                              NOR=Beskrivelse;
+                                                              SVE=Beskrivning];
+                                                   Editable=No }
+    { 42  ;   ;Unit of Measure     ;Text10        ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup("Trade Item"."Application Unit" WHERE (Vendor=FIELD(Vendor),
+                                                                                                             Item Code=FIELD(Trade Item)));
+                                                   CaptionML=[ENU=Unit of Measure;
+                                                              NOR=M†leenhet;
+                                                              SVE=M†ttenhet];
+                                                   Editable=No }
+    { 50  ;   ;Quantity            ;Decimal       ;CaptionML=[ENU=Quantity;
+                                                              NOR=Antall;
+                                                              SVE=Antal];
+                                                   DecimalPlaces=0:5;
+                                                   MinValue=0;
+                                                   BlankZero=Yes }
+  }
+  KEYS
+  {
+    {    ;Vendor,Main Trade Item,Line No.         ;Clustered=Yes }
+  }
+  FIELDGROUPS
+  {
+  }
+  CODE
+  {
+    VAR
+      Text001@1100529600 : TextConst 'ENU=Add linked trade items of trade item %1?';
+
+    LOCAL PROCEDURE GetLinkedTradeItems@1100529601(VAR LinkedTradeItem@1100529602 : Record 11020466;VendorNo@1100529600 : Code[15];MainTradeItem@1100529601 : Code[20]) : Boolean;
+    BEGIN
+      LinkedTradeItem.RESET;
+      LinkedTradeItem.SETRANGE(Vendor, VendorNo);
+      LinkedTradeItem.SETRANGE("Main Trade Item", MainTradeItem);
+      EXIT(NOT LinkedTradeItem.ISEMPTY);
+    END;
+
+    PROCEDURE AddTradeItemsEstimateLine@1100529600(CurrEstimateLine@1100529600 : Record 11072072;CallFrom@1100529601 : 'Insert,Modify');
+    VAR
+      EstimateLine@1100529603 : Record 11072072;
+      LinkedTradeItem@1100529605 : Record 11020466;
+      NextLineNo@1100529604 : Integer;
+      Gap@1100529602 : Integer;
+    BEGIN
+      IF CurrEstimateLine."Trade Item" = '' THEN
+        EXIT;
+      IF CallFrom = CallFrom::Modify THEN BEGIN
+        IF NOT EstimateLine.GET(CurrEstimateLine."Estimate No.", CurrEstimateLine."Sub-Estimate No.",
+                                CurrEstimateLine."Part Group", CurrEstimateLine.Part, CurrEstimateLine."Line No.")
+        THEN
+          EXIT;
+        IF EstimateLine."Trade Item" = CurrEstimateLine."Trade Item" THEN
+          EXIT;
+      END;
+      IF NOT GetLinkedTradeItems(LinkedTradeItem, CurrEstimateLine."Vendor (Trade Item)", CurrEstimateLine."Trade Item") THEN
+        EXIT;
+      IF NOT CONFIRM(Text001, TRUE, CurrEstimateLine."Trade Item") THEN
+        EXIT;
+
+      NextLineNo := 0;
+      EstimateLine.SETRANGE("Estimate No.", CurrEstimateLine."Estimate No.");
+      EstimateLine.SETRANGE("Sub-Estimate No.", CurrEstimateLine."Sub-Estimate No.");
+      EstimateLine.SETRANGE("Part Group", CurrEstimateLine."Part Group");
+      EstimateLine.SETRANGE(Part, CurrEstimateLine.Part);
+      EstimateLine.SETFILTER("Line No.", '>%1', CurrEstimateLine."Line No.");
+
+      IF NOT EstimateLine.FINDFIRST THEN BEGIN
+        Gap := 10000;
+        NextLineNo := CurrEstimateLine."Line No." + Gap;
+      END ELSE BEGIN
+        Gap := ROUND((EstimateLine."Line No." - CurrEstimateLine."Line No.") / (LinkedTradeItem.COUNT + 1), 1, '<');
+        IF Gap > 0 THEN
+          NextLineNo := CurrEstimateLine."Line No." + Gap
+        ELSE BEGIN
+          Gap := 10000;
+          EstimateLine.SETRANGE("Line No.");
+          IF EstimateLine.FINDLAST THEN
+            NextLineNo := EstimateLine."Line No.";
+          IF NextLineNo < CurrEstimateLine."Line No." THEN
+            NextLineNo := CurrEstimateLine."Line No.";
+          NextLineNo := NextLineNo + Gap;
+        END;
+      END;
+
+      LinkedTradeItem.FINDSET;
+      REPEAT
+        InsertEstimateLine(CurrEstimateLine, NextLineNo, LinkedTradeItem."Trade Item", LinkedTradeItem.Quantity);
+        NextLineNo += Gap;
+      UNTIL LinkedTradeItem.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE InsertEstimateLine@1100525007(CurrEstimateLine@1100529600 : Record 11072072;LineNo@1100529602 : Integer;TradeItemCode@1100529604 : Code[20];TradeItemQuantity@1100529605 : Decimal);
+    VAR
+      EstimateLine@1100529601 : Record 11072072;
+    BEGIN
+      EstimateLine.INIT;
+      EstimateLine."Estimate No." := CurrEstimateLine."Estimate No.";
+      EstimateLine."Sub-Estimate No." := CurrEstimateLine."Sub-Estimate No.";
+      EstimateLine."Part Group" := CurrEstimateLine."Part Group";
+      EstimateLine.Part := CurrEstimateLine.Part;
+      EstimateLine."Line No." := LineNo;
+      EstimateLine.InitRecord;
+
+      EstimateLine."Vendor (Trade Item)" := CurrEstimateLine."Vendor (Trade Item)";
+      EstimateLine.VALIDATE("Trade Item", TradeItemCode);
+      EstimateLine.VALIDATE(Quantity, ROUND(CurrEstimateLine.Quantity * TradeItemQuantity, 0.00001));
+      EstimateLine.INSERT(TRUE);
+    END;
+
+    PROCEDURE AddTradeItemsBudgetLine@1100529603(CurrBudgetLine@1100529600 : Record 11012001;CallFrom@1100529601 : 'Insert,Modify');
+    VAR
+      BudgetLine@1100529603 : Record 11012001;
+      LinkedTradeItem@1100529605 : Record 11020466;
+      NextLineNo@1100529604 : Integer;
+      Gap@1100529602 : Integer;
+    BEGIN
+      IF CurrBudgetLine."Trade Item" = '' THEN
+        EXIT;
+      IF CallFrom = CallFrom::Modify THEN BEGIN
+        IF NOT BudgetLine.GET(CurrBudgetLine."Project No.", CurrBudgetLine.Adjustment, CurrBudgetLine."Extension Contract",
+                              CurrBudgetLine.Option, CurrBudgetLine."Line No.")
+        THEN
+          EXIT;
+        IF BudgetLine."Trade Item" = CurrBudgetLine."Trade Item" THEN
+          EXIT;
+      END;
+      IF NOT GetLinkedTradeItems(LinkedTradeItem, CurrBudgetLine."Vendor (Trade Item)", CurrBudgetLine."Trade Item") THEN
+        EXIT;
+      IF NOT CONFIRM(Text001, TRUE, CurrBudgetLine."Trade Item") THEN
+        EXIT;
+
+      NextLineNo := 0;
+      BudgetLine.SETRANGE("Project No.", CurrBudgetLine."Project No.");
+      BudgetLine.SETRANGE(Adjustment, CurrBudgetLine.Adjustment);
+      BudgetLine.SETRANGE("Extension Contract", CurrBudgetLine."Extension Contract");
+      BudgetLine.SETRANGE(Option, CurrBudgetLine.Option);
+      BudgetLine.SETFILTER("Line No.", '>%1', CurrBudgetLine."Line No.");
+
+      IF NOT BudgetLine.FINDFIRST THEN BEGIN
+        Gap := 10000;
+        NextLineNo := CurrBudgetLine."Line No." + Gap;
+      END ELSE BEGIN
+        Gap := ROUND((BudgetLine."Line No." - CurrBudgetLine."Line No.") / (LinkedTradeItem.COUNT + 1), 1, '<');
+        IF Gap > 0 THEN
+          NextLineNo := CurrBudgetLine."Line No." + Gap
+        ELSE BEGIN
+          Gap := 10000;
+          BudgetLine.SETRANGE("Line No.");
+          IF BudgetLine.FINDLAST THEN
+            NextLineNo := BudgetLine."Line No.";
+          IF NextLineNo < CurrBudgetLine."Line No." THEN
+            NextLineNo := CurrBudgetLine."Line No.";
+          NextLineNo := NextLineNo + Gap;
+        END;
+      END;
+
+      LinkedTradeItem.FINDSET;
+      REPEAT
+        InsertBudgetLine(CurrBudgetLine, NextLineNo, LinkedTradeItem."Trade Item", LinkedTradeItem.Quantity);
+        NextLineNo += Gap;
+      UNTIL LinkedTradeItem.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE InsertBudgetLine@1100529602(CurrBudgetLine@1100529600 : Record 11012001;LineNo@1100529602 : Integer;TradeItemCode@1100529604 : Code[20];TradeItemQuantity@1100529603 : Decimal);
+    VAR
+      BudgetLine@1100529601 : Record 11012001;
+    BEGIN
+      BudgetLine.INIT;
+      BudgetLine."Project No." := CurrBudgetLine."Project No.";
+      BudgetLine.Adjustment := CurrBudgetLine.Adjustment;
+      BudgetLine."Extension Contract" := CurrBudgetLine."Extension Contract";
+      BudgetLine.Option := CurrBudgetLine.Option;
+      BudgetLine."Line No." := LineNo;
+
+      BudgetLine."Cost Type" := BudgetLine."Cost Type"::Material;
+      BudgetLine."Vendor (Trade Item)" := CurrBudgetLine."Vendor (Trade Item)";
+      BudgetLine.VALIDATE("Trade Item", TradeItemCode);
+      BudgetLine.VALIDATE(Quantity, ROUND(CurrBudgetLine.Quantity * TradeItemQuantity, 0.00001));
+      BudgetLine.INSERT(TRUE);
+    END;
+
+    PROCEDURE AddTradeItemsAdviceOrderLine@1100529605(CurrAdviceOrderLine@1100529600 : Record 11012055;CallFrom@1100529601 : 'Insert,Modify');
+    VAR
+      AdviceOrderLine@1100529603 : Record 11012055;
+      LinkedTradeItem@1100529605 : Record 11020466;
+      NextLineNo@1100529604 : Integer;
+      Gap@1100529602 : Integer;
+    BEGIN
+      IF CurrAdviceOrderLine."Trade Item" = '' THEN
+        EXIT;
+      IF CallFrom = CallFrom::Modify THEN BEGIN
+        IF NOT AdviceOrderLine.GET(CurrAdviceOrderLine."Record Type", CurrAdviceOrderLine."Project No.",
+                                   CurrAdviceOrderLine."Service Order No.", CurrAdviceOrderLine."G/L Account", CurrAdviceOrderLine."Line No.")
+        THEN
+          EXIT;
+        IF AdviceOrderLine."Trade Item" = CurrAdviceOrderLine."Trade Item" THEN
+          EXIT;
+      END;
+      IF NOT GetLinkedTradeItems(LinkedTradeItem, CurrAdviceOrderLine."Vendor (Trade Item)", CurrAdviceOrderLine."Trade Item") THEN
+        EXIT;
+      IF NOT CONFIRM(Text001, TRUE, CurrAdviceOrderLine."Trade Item") THEN
+        EXIT;
+
+      NextLineNo := 0;
+      AdviceOrderLine.SETRANGE("Record Type", CurrAdviceOrderLine."Record Type");
+      AdviceOrderLine.SETRANGE("Project No.", CurrAdviceOrderLine."Project No.");
+      AdviceOrderLine.SETRANGE("Service Order No.", CurrAdviceOrderLine."Service Order No.");
+      AdviceOrderLine.SETRANGE("G/L Account", CurrAdviceOrderLine."G/L Account");
+      AdviceOrderLine.SETFILTER("Line No.", '>%1', CurrAdviceOrderLine."Line No.");
+
+      IF NOT AdviceOrderLine.FINDFIRST THEN BEGIN
+        Gap := 10000;
+        NextLineNo := CurrAdviceOrderLine."Line No." + Gap;
+      END ELSE BEGIN
+        Gap := ROUND((AdviceOrderLine."Line No." - CurrAdviceOrderLine."Line No.") / (LinkedTradeItem.COUNT + 1), 1, '<');
+        IF Gap > 0 THEN
+          NextLineNo := CurrAdviceOrderLine."Line No." + Gap
+        ELSE BEGIN
+          Gap := 10000;
+          AdviceOrderLine.SETRANGE("Line No.");
+          IF AdviceOrderLine.FINDLAST THEN
+            NextLineNo := AdviceOrderLine."Line No.";
+          IF NextLineNo < CurrAdviceOrderLine."Line No." THEN
+            NextLineNo := CurrAdviceOrderLine."Line No.";
+          NextLineNo := NextLineNo + Gap;
+        END;
+      END;
+
+      LinkedTradeItem.FINDSET;
+      REPEAT
+        InsertAdviceOrderLine(CurrAdviceOrderLine, NextLineNo, LinkedTradeItem."Trade Item", LinkedTradeItem.Quantity);
+        NextLineNo += Gap;
+      UNTIL LinkedTradeItem.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE InsertAdviceOrderLine@1100529604(CurrAdviceOrderLine@1100529600 : Record 11012055;LineNo@1100529602 : Integer;TradeItemCode@1100529604 : Code[20];TradeItemQuantity@1100529603 : Decimal);
+    VAR
+      AdviceOrderLine@1100529601 : Record 11012055;
+    BEGIN
+      AdviceOrderLine.INIT;
+      AdviceOrderLine."Record Type" := CurrAdviceOrderLine."Record Type";
+      AdviceOrderLine."Project No." := CurrAdviceOrderLine."Project No.";
+      AdviceOrderLine."Service Order No." := CurrAdviceOrderLine."Service Order No.";
+      AdviceOrderLine."G/L Account" := CurrAdviceOrderLine."G/L Account";
+      AdviceOrderLine."Line No." := LineNo;
+      AdviceOrderLine.InitRecord;
+
+      AdviceOrderLine."Vendor (Trade Item)" := CurrAdviceOrderLine."Vendor (Trade Item)";
+      AdviceOrderLine.VALIDATE("Trade Item", TradeItemCode);
+      AdviceOrderLine.VALIDATE("Quantity (Advice)", ROUND(CurrAdviceOrderLine."Quantity (Advice)" * TradeItemQuantity, 0.00001));
+      AdviceOrderLine.INSERT(TRUE);
+    END;
+
+    PROCEDURE AddTradeItemsServiceOrderBudgetLine@1100529607(CurrServiceOrderBudgetLine@1100529600 : Record 11012875;CallFrom@1100529601 : 'Insert,Modify');
+    VAR
+      ServiceOrderBudgetLine@1100529603 : Record 11012875;
+      LinkedTradeItem@1100529605 : Record 11020466;
+      NextLineNo@1100529604 : Integer;
+      Gap@1100529602 : Integer;
+    BEGIN
+      IF CurrServiceOrderBudgetLine."Trade Item" = '' THEN
+        EXIT;
+      IF CallFrom = CallFrom::Modify THEN BEGIN
+        IF NOT ServiceOrderBudgetLine.GET(CurrServiceOrderBudgetLine."Budget Type", CurrServiceOrderBudgetLine."Service Order No.",
+                                          CurrServiceOrderBudgetLine."Service Contract No.", CurrServiceOrderBudgetLine."Object No.",
+                                          CurrServiceOrderBudgetLine."Maintenance Scheme", CurrServiceOrderBudgetLine."Line No.")
+        THEN
+          EXIT;
+        IF ServiceOrderBudgetLine."Trade Item" = CurrServiceOrderBudgetLine."Trade Item" THEN
+          EXIT;
+      END;
+      IF NOT GetLinkedTradeItems(LinkedTradeItem, CurrServiceOrderBudgetLine."Vendor (Trade Item)", CurrServiceOrderBudgetLine."Trade Item") THEN
+        EXIT;
+      IF NOT CONFIRM(Text001, TRUE, CurrServiceOrderBudgetLine."Trade Item") THEN
+        EXIT;
+
+      NextLineNo := 0;
+      ServiceOrderBudgetLine.SETRANGE("Budget Type", CurrServiceOrderBudgetLine."Budget Type");
+      ServiceOrderBudgetLine.SETRANGE("Service Order No.", CurrServiceOrderBudgetLine."Service Order No.");
+      ServiceOrderBudgetLine.SETRANGE("Service Contract No.", CurrServiceOrderBudgetLine."Service Contract No.");
+      ServiceOrderBudgetLine.SETRANGE("Object No.", CurrServiceOrderBudgetLine."Object No.");
+      ServiceOrderBudgetLine.SETRANGE("Maintenance Scheme", CurrServiceOrderBudgetLine."Maintenance Scheme");
+      ServiceOrderBudgetLine.SETFILTER("Line No.", '>%1', CurrServiceOrderBudgetLine."Line No.");
+
+      IF NOT ServiceOrderBudgetLine.FINDFIRST THEN BEGIN
+        Gap := 10000;
+        NextLineNo := CurrServiceOrderBudgetLine."Line No." + Gap;
+      END ELSE BEGIN
+        Gap := ROUND((ServiceOrderBudgetLine."Line No." - CurrServiceOrderBudgetLine."Line No.") / (LinkedTradeItem.COUNT + 1), 1, '<');
+        IF Gap > 0 THEN
+          NextLineNo := CurrServiceOrderBudgetLine."Line No." + Gap
+        ELSE BEGIN
+          Gap := 10000;
+          ServiceOrderBudgetLine.SETRANGE("Line No.");
+          IF ServiceOrderBudgetLine.FINDLAST THEN
+            NextLineNo := ServiceOrderBudgetLine."Line No.";
+          IF NextLineNo < CurrServiceOrderBudgetLine."Line No." THEN
+            NextLineNo := CurrServiceOrderBudgetLine."Line No.";
+          NextLineNo := NextLineNo + Gap;
+        END;
+      END;
+
+      LinkedTradeItem.FINDSET;
+      REPEAT
+        InsertServiceOrderBudgetLine(CurrServiceOrderBudgetLine, NextLineNo, LinkedTradeItem."Trade Item", LinkedTradeItem.Quantity);
+        NextLineNo += Gap;
+      UNTIL LinkedTradeItem.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE InsertServiceOrderBudgetLine@1100529606(CurrServiceOrderBudgetLine@1100529605 : Record 11012875;LineNo@1100529602 : Integer;TradeItemCode@1100529604 : Code[20];TradeItemQuantity@1100529603 : Decimal);
+    VAR
+      ServiceOrderBudgetLine@1100529600 : Record 11012875;
+    BEGIN
+      ServiceOrderBudgetLine.INIT;
+      ServiceOrderBudgetLine."Budget Type" := CurrServiceOrderBudgetLine."Budget Type";
+      ServiceOrderBudgetLine."Service Order No." := CurrServiceOrderBudgetLine."Service Order No.";
+      ServiceOrderBudgetLine."Service Contract No." := CurrServiceOrderBudgetLine."Service Contract No.";
+      ServiceOrderBudgetLine."Object No." := CurrServiceOrderBudgetLine."Object No.";
+      ServiceOrderBudgetLine."Maintenance Scheme" := CurrServiceOrderBudgetLine."Maintenance Scheme";
+      ServiceOrderBudgetLine."Line No." := LineNo;
+
+      ServiceOrderBudgetLine."Cost Type" := ServiceOrderBudgetLine."Cost Type"::Material;
+      ServiceOrderBudgetLine."Vendor (Trade Item)" := CurrServiceOrderBudgetLine."Vendor (Trade Item)";
+      ServiceOrderBudgetLine.VALIDATE("Trade Item", TradeItemCode);
+      ServiceOrderBudgetLine.VALIDATE(Quantity, ROUND(CurrServiceOrderBudgetLine.Quantity * TradeItemQuantity, 0.00001));
+      ServiceOrderBudgetLine.INSERT(TRUE);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

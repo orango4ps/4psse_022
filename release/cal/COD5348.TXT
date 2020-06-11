@@ -1,0 +1,474 @@
+OBJECT Codeunit 5348 CRM Quote to Sales Quote
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.00;
+  }
+  PROPERTIES
+  {
+    TableNo=5351;
+    OnRun=VAR
+            SalesHeader@1000 : Record 36;
+          BEGIN
+            ProcessInNAV(Rec,SalesHeader);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      CRMSynchHelper@1000 : Codeunit 5342;
+      CannotCreateSalesQuoteInNAVTxt@1013 : TextConst 'ENU=The sales quote cannot be created.;NOR=Salgstilbudet kan ikke opprettes.';
+      CannotFindCRMAccountForQuoteErr@1012 : TextConst '@@@="%1=Dynamics CRM Sales Order Name, %2 - Microsoft Dynamics CRM";ENU=The %2 account for %2 sales quote %1 does not exist.;NOR=%2-kontoen for %2-salgstilbudet %1 finnes ikke.';
+      ItemDoesNotExistErr@1011 : TextConst '@@@="%1= the text: ""The sales order cannot be created."", %2=product name";ENU=%1 The item %2 does not exist.;NOR=%1 %2-varen finnes ikke.;SVE=%1 Artikeln %2 finns inte.';
+      NoCustomerErr@1010 : TextConst '@@@="%1= the text: ""The Dynamics CRM Sales Order cannot be created."", %2=sales order title, %3 - Microsoft Dynamics CRM";ENU=%1 There is no potential customer defined on the %3 sales quote %2.;NOR=%1 Ingen potensiell kunde er definert p† %3-salgstilbudet %2.';
+      NotCoupledCustomerErr@1009 : TextConst '@@@="%1= the text: ""The Dynamics CRM Sales Order cannot be created."", %2=account name, %3 - Microsoft Dynamics CRM";ENU=%1 There is no customer coupled to %3 account %2.;NOR=%1 Ingen kunde er koblet til %3-kontoen %2.;SVE=%1 Det finns ingen kund kopplad till %3-kontot %2.';
+      NotCoupledCRMProductErr@1008 : TextConst '@@@="%1= the text: ""The Dynamics CRM Sales Order cannot be created."", %2=product name, %3 - Microsoft Dynamics CRM";ENU=%1 The %3 product %2 is not coupled to an item.;NOR=%1 %3-produktet %2 er ikke koblet til en vare.;SVE=%1 %3-produkten %2 „r inte kopplad till n†gon artikel.';
+      NotCoupledCRMResourceErr@1007 : TextConst '@@@="%1= the text: ""The Dynamics CRM Sales Order cannot be created."", %2=resource name, %3 - Microsoft Dynamics CRM";ENU=%1 The %3 resource %2 is not coupled to a resource.;NOR=%1 %3-ressursen %2 er ikke koblet til en ressurs.;SVE=%1 %3-resursen %2 „r inte kopplad till n†gon resurs.';
+      ResourceDoesNotExistErr@1003 : TextConst '@@@="%1= the text: ""The Dynamics CRM Sales Order cannot be created."", %2=product name";ENU=%1 The resource %2 does not exist.;NOR=%1 %2-ressursen finnes ikke.;SVE=%1 Resursen %2 finns inte.';
+      UnexpectedProductTypeErr@1002 : TextConst '@@@="%1= the text: ""The Dynamics CRM Sales Order cannot be created."", %2=product name";ENU=%1 Unexpected value of product type code for product %2. The supported values are: sales inventory, services.;NOR=%1 Uventet verdi for produkttypekoden for produktet %2. De st›ttede verdiene er Salgsbeholdning og Tjenester.;SVE=%1 Ov„ntat v„rde p† produkttypkoden f”r produkten %2. F”ljande v„rden st”ds: f”rs„ljning, lager, tj„nster.';
+      CRMProductName@1014 : Codeunit 5344;
+      LastSalesLineNo@1015 : Integer;
+      MissingWriteInProductNoErr@1004 : TextConst '@@@=%1 - CRM product name,%2 - document type (order or quote), %3 - document number;ENU=%1 %2 %3 contains a write-in product. You must choose the default write-in product in Sales & Receivables Setup window.;NOR=%1 %2 %3 inneholder et produkt som ikke er i produktkatalogen. Du m† velge standard "ikke i produktkatalog" i vinduet for salgsoppsett.;SVE=%1 Produkt ej i register %2 finns inte.';
+      MisingWriteInProductTelemetryMsg@1001 : TextConst '@@@={Locked};ENU=The user is missing a default write-in product when creating a sales quote from a %1 quote.;NOR=The user is missing a default write-in product when creating a sales quote from a %1 quote.';
+      CrmTelemetryCategoryTok@1005 : TextConst '@@@={Locked};ENU=AL CRM Integration;NOR=AL CRM Integration';
+      SuccessfullyCoupledSalesQuoteTelemetryMsg@1006 : TextConst '@@@={Locked};ENU=The user successfully coupled a sales quote to a %1 quote.;NOR=The user successfully coupled a sales quote to a %1 quote.';
+
+    [External]
+    PROCEDURE ProcessInNAV@2(CRMQuote@1012 : Record 5351;VAR SalesHeader@1000 : Record 36) : Boolean;
+    BEGIN
+      IF CRMQuote.StateCode = CRMQuote.StateCode::Active THEN
+        EXIT(ProcessActiveQuote(CRMQuote,SalesHeader));
+
+      EXIT(ProcessWonQuote(CRMQuote,SalesHeader));
+    END;
+
+    LOCAL PROCEDURE ProcessActiveQuote@9(CRMQuote@1005 : Record 5351;VAR SalesHeader@1004 : Record 36) : Boolean;
+    VAR
+      CRMIntegrationRecord@1003 : Record 5331;
+      RevisionedCRMQuote@1006 : Record 5351;
+      RecordId@1002 : RecordID;
+      OpType@1000 : 'Create,Update';
+    BEGIN
+      IF CRMIntegrationRecord.FindRecordIDFromID(CRMQuote.QuoteId,DATABASE::"Sales Header",RecordId) THEN
+        EXIT(FALSE);
+
+      IF CRMQuote.RevisionNumber = 0 THEN
+        EXIT(CreateOrUpdateNAVQuote(CRMQuote,SalesHeader,OpType::Create));
+
+      RevisionedCRMQuote.RESET;
+      RevisionedCRMQuote.SETRANGE(QuoteNumber,CRMQuote.QuoteNumber);
+      RevisionedCRMQuote.SETRANGE(StateCode,RevisionedCRMQuote.StateCode::Closed);
+      RevisionedCRMQuote.SETRANGE(StatusCode,RevisionedCRMQuote.StatusCode::Revised);
+      IF RevisionedCRMQuote.FINDSET THEN
+        REPEAT
+          IF CRMIntegrationRecord.FindRecordIDFromID(RevisionedCRMQuote.QuoteId,DATABASE::"Sales Header",RecordId) THEN BEGIN
+            GetSalesHeaderByRecordId(RecordId,SalesHeader);
+            CRMIntegrationRecord.GET(RevisionedCRMQuote.QuoteId,SalesHeader.Id);
+            CRMIntegrationRecord.DELETE(TRUE);
+            EXIT(CreateOrUpdateNAVQuote(CRMQuote,SalesHeader,OpType::Update));
+          END;
+        UNTIL RevisionedCRMQuote.NEXT = 0;
+
+      EXIT(CreateOrUpdateNAVQuote(CRMQuote,SalesHeader,OpType::Create));
+    END;
+
+    LOCAL PROCEDURE ProcessWonQuote@1(CRMQuote@1005 : Record 5351;VAR SalesHeader@1004 : Record 36) : Boolean;
+    VAR
+      CRMIntegrationRecord@1003 : Record 5331;
+      BlankGuid@1001 : GUID;
+      OpType@1000 : 'Create,Update';
+    BEGIN
+      IF CRMQuote.StateCode = CRMQuote.StateCode::Won THEN BEGIN
+        CRMIntegrationRecord.RESET;
+        CRMIntegrationRecord.SETRANGE("CRM ID",CRMQuote.QuoteId);
+        IF NOT CRMIntegrationRecord.FINDFIRST THEN BEGIN
+          CreateOrUpdateNAVQuote(CRMQuote,SalesHeader,OpType::Create);
+          CRMIntegrationRecord.GET(CRMQuote.QuoteId,SalesHeader.Id)
+        END;
+        IF NOT CRMIntegrationRecord.GET(CRMQuote.QuoteId,BlankGuid) THEN BEGIN
+          SalesHeader.RESET;
+          SalesHeader.SETFILTER(Id,CRMIntegrationRecord."Integration ID");
+          IF SalesHeader.FINDFIRST THEN BEGIN
+            ManageSalesQuoteArchive(SalesHeader);
+            SalesHeader.DELETE(TRUE);
+          END;
+
+          CRMIntegrationRecord.INIT;
+          CRMIntegrationRecord.VALIDATE("CRM ID",CRMQuote.QuoteId);
+          CRMIntegrationRecord.VALIDATE("Integration ID",BlankGuid);
+          CRMIntegrationRecord.INSERT(TRUE);
+          EXIT(TRUE);
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateOrUpdateNAVQuote@15(CRMQuote@1001 : Record 5351;VAR SalesHeader@1000 : Record 36;OpType@1003 : 'Create,Update') : Boolean;
+    VAR
+      CRMIntegrationRecord@1002 : Record 5331;
+    BEGIN
+      IF ISNULLGUID(CRMQuote.QuoteId) THEN
+        EXIT;
+
+      IF OpType = OpType::Update THEN
+        ManageSalesQuoteArchive(SalesHeader);
+
+      CreateOrUpdateSalesQuoteHeader(CRMQuote,SalesHeader,OpType);
+      CreateOrUpdateSalesQuoteLines(CRMQuote,SalesHeader);
+      CreateOrUpdateSalesQuoteNotes(CRMQuote,SalesHeader);
+      CRMIntegrationRecord.CoupleRecordIdToCRMID(SalesHeader.RECORDID,CRMQuote.QuoteId);
+      IF OpType = OpType::Create THEN
+        SENDTRACETAG('0000839',CrmTelemetryCategoryTok,VERBOSITY::Normal,
+          STRSUBSTNO(SuccessfullyCoupledSalesQuoteTelemetryMsg,CRMProductName.SHORT),DATACLASSIFICATION::SystemMetadata);
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateOrUpdateSalesQuoteHeader@10(CRMQuote@1001 : Record 5351;VAR SalesHeader@1000 : Record 36;OpType@1002 : 'Create,Update');
+    VAR
+      Customer@1010 : Record 18;
+    BEGIN
+      IF OpType = OpType::Create THEN BEGIN
+        SalesHeader.INIT;
+        SalesHeader.VALIDATE("Document Type",SalesHeader."Document Type"::Quote);
+        SalesHeader.VALIDATE(Status,SalesHeader.Status::Open);
+        SalesHeader.InitInsert;
+      END ELSE
+        IF SalesHeader.Status = SalesHeader.Status::Released THEN
+          SalesHeader.VALIDATE(Status,SalesHeader.Status::Open);
+
+      GetCoupledCustomer(CRMQuote,Customer);
+      SalesHeader.VALIDATE("Sell-to Customer No.",Customer."No.");
+      SalesHeader.VALIDATE("Your Reference",COPYSTR(CRMQuote.QuoteNumber,1,MAXSTRLEN(SalesHeader."Your Reference")));
+      SalesHeader.VALIDATE("Currency Code",CRMSynchHelper.GetNavCurrencyCode(CRMQuote.TransactionCurrencyId));
+      SalesHeader.VALIDATE("Requested Delivery Date",CRMQuote.RequestDeliveryBy);
+      CopyBillToInformationIfNotEmpty(CRMQuote,SalesHeader);
+      CopyShipToInformationIfNotEmpty(CRMQuote,SalesHeader);
+      CopyCRMOptionFields(CRMQuote,SalesHeader);
+      SalesHeader.VALIDATE("Payment Discount %",CRMQuote.DiscountPercentage);
+      SalesHeader.VALIDATE("External Document No.",COPYSTR(CRMQuote.Name,1,MAXSTRLEN(SalesHeader."External Document No.")));
+      SalesHeader.VALIDATE("Quote Valid Until Date",CRMQuote.EffectiveTo);
+
+      IF OpType = OpType::Create THEN
+        SalesHeader.INSERT(TRUE)
+      ELSE
+        SalesHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateOrUpdateSalesQuoteNotes@24(CRMQuote@1001 : Record 5351;VAR SalesHeader@1000 : Record 36);
+    VAR
+      CRMAnnotation@1002 : Record 5385;
+    BEGIN
+      CRMAnnotation.SETRANGE(ObjectId,CRMQuote.QuoteId);
+      CRMAnnotation.SETRANGE(IsDocument,FALSE);
+      IF CRMAnnotation.FINDSET THEN
+        REPEAT
+          CreateNote(SalesHeader,CRMAnnotation);
+        UNTIL CRMAnnotation.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreateOrUpdateSalesQuoteLines@13(CRMQuote@1001 : Record 5351;SalesHeader@1000 : Record 36);
+    VAR
+      CRMQuotedetail@1007 : Record 5352;
+      SalesLine@1004 : Record 37;
+    BEGIN
+      // If any of the products on the lines are not found in NAV, err
+      CRMQuotedetail.SETRANGE(QuoteId,CRMQuote.QuoteId); // Get all sales quote lines
+
+      IF CRMQuotedetail.FINDSET THEN BEGIN
+        REPEAT
+          InitializeSalesQuoteLine(CRMQuotedetail,SalesHeader,SalesLine);
+          SalesLine.INSERT;
+          IF SalesLine."Qty. to Assemble to Order" <> 0 THEN
+            SalesLine.VALIDATE("Qty. to Assemble to Order");
+        UNTIL CRMQuotedetail.NEXT = 0;
+      END ELSE BEGIN
+        SalesLine.VALIDATE("Document Type",SalesHeader."Document Type");
+        SalesLine.VALIDATE("Document No.",SalesHeader."No.");
+      END;
+
+      SalesLine.InsertFreightLine(CRMQuote.FreightAmount);
+    END;
+
+    [External]
+    PROCEDURE GetCoupledCustomer@4(CRMQuote@1001 : Record 5351;VAR Customer@1000 : Record 18) : Boolean;
+    VAR
+      CRMAccount@1004 : Record 5341;
+      CRMIntegrationRecord@1002 : Record 5331;
+      NAVCustomerRecordId@1003 : RecordID;
+      CRMAccountId@1005 : GUID;
+    BEGIN
+      IF ISNULLGUID(CRMQuote.CustomerId) THEN
+        ERROR(NoCustomerErr,CannotCreateSalesQuoteInNAVTxt,CRMQuote.Description,CRMProductName.SHORT);
+
+      // Get the ID of the CRM Account associated to the sales quote. Works for both CustomerType(s): account, contact
+      IF NOT GetCRMAccountOfCRMQuote(CRMQuote,CRMAccount) THEN
+        ERROR(CannotFindCRMAccountForQuoteErr,CRMQuote.Name,CRMProductName.SHORT);
+      CRMAccountId := CRMAccount.AccountId;
+
+      IF NOT CRMIntegrationRecord.FindRecordIDFromID(CRMAccountId,DATABASE::Customer,NAVCustomerRecordId) THEN
+        ERROR(NotCoupledCustomerErr,CannotCreateSalesQuoteInNAVTxt,CRMAccount.Name,CRMProductName.SHORT);
+
+      EXIT(Customer.GET(NAVCustomerRecordId));
+    END;
+
+    [External]
+    PROCEDURE GetCRMAccountOfCRMQuote@11(CRMQuote@1002 : Record 5351;VAR CRMAccount@1000 : Record 5341) : Boolean;
+    VAR
+      CRMContact@1001 : Record 5342;
+    BEGIN
+      IF CRMQuote.CustomerIdType = CRMQuote.CustomerIdType::account THEN
+        EXIT(CRMAccount.GET(CRMQuote.CustomerId));
+
+      IF CRMQuote.CustomerIdType = CRMQuote.CustomerIdType::contact THEN
+        IF CRMContact.GET(CRMQuote.CustomerId) THEN
+          EXIT(CRMAccount.GET(CRMContact.ParentCustomerId));
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE CopyCRMOptionFields@3(CRMQuote@1001 : Record 5351;VAR SalesHeader@1000 : Record 36);
+    VAR
+      CRMAccount@1003 : Record 5341;
+      CRMOptionMapping@1002 : Record 5334;
+    BEGIN
+      IF CRMOptionMapping.FindRecordID(
+           DATABASE::"CRM Account",CRMAccount.FIELDNO(Address1_ShippingMethodCode),CRMQuote.ShippingMethodCode)
+      THEN
+        SalesHeader.VALIDATE(
+          "Shipping Agent Code",
+          COPYSTR(CRMOptionMapping.GetRecordKeyValue,1,MAXSTRLEN(SalesHeader."Shipping Agent Code")));
+
+      IF CRMOptionMapping.FindRecordID(
+           DATABASE::"CRM Account",CRMAccount.FIELDNO(PaymentTermsCode),CRMQuote.PaymentTermsCode)
+      THEN
+        SalesHeader.VALIDATE(
+          "Payment Terms Code",
+          COPYSTR(CRMOptionMapping.GetRecordKeyValue,1,MAXSTRLEN(SalesHeader."Payment Terms Code")));
+
+      IF CRMOptionMapping.FindRecordID(
+           DATABASE::"CRM Account",CRMAccount.FIELDNO(Address1_FreightTermsCode),CRMQuote.FreightTermsCode)
+      THEN
+        SalesHeader.VALIDATE(
+          "Shipment Method Code",
+          COPYSTR(CRMOptionMapping.GetRecordKeyValue,1,MAXSTRLEN(SalesHeader."Shipment Method Code")));
+    END;
+
+    LOCAL PROCEDURE CopyBillToInformationIfNotEmpty@7(CRMQuote@1001 : Record 5351;VAR SalesHeader@1000 : Record 36);
+    BEGIN
+      // If the Bill-To fields in CRM are all empty, then let NAV keep its standard behavior (takes Bill-To from the Customer information)
+      IF ((CRMQuote.BillTo_Line1 = '') AND
+          (CRMQuote.BillTo_Line2 = '') AND
+          (CRMQuote.BillTo_City = '') AND
+          (CRMQuote.BillTo_PostalCode = '') AND
+          (CRMQuote.BillTo_Country = '') AND
+          (CRMQuote.BillTo_StateOrProvince = ''))
+      THEN
+        EXIT;
+
+      SalesHeader.VALIDATE("Bill-to Address",FORMAT(CRMQuote.BillTo_Line1,MAXSTRLEN(SalesHeader."Bill-to Address")));
+      SalesHeader.VALIDATE("Bill-to Address 2",FORMAT(CRMQuote.BillTo_Line2,MAXSTRLEN(SalesHeader."Bill-to Address 2")));
+      SalesHeader.VALIDATE("Bill-to City",FORMAT(CRMQuote.BillTo_City,MAXSTRLEN(SalesHeader."Bill-to City")));
+      SalesHeader.VALIDATE("Bill-to Post Code",FORMAT(CRMQuote.BillTo_PostalCode,MAXSTRLEN(SalesHeader."Bill-to Post Code")));
+      SalesHeader.VALIDATE(
+        "Bill-to Country/Region Code",FORMAT(CRMQuote.BillTo_Country,MAXSTRLEN(SalesHeader."Bill-to Country/Region Code")));
+      SalesHeader.VALIDATE("Bill-to County",FORMAT(CRMQuote.BillTo_StateOrProvince,MAXSTRLEN(SalesHeader."Bill-to County")));
+    END;
+
+    LOCAL PROCEDURE InitNewSalesLine@32(SalesHeader@1000 : Record 36;VAR SalesLine@1001 : Record 37);
+    BEGIN
+      SalesLine.INIT;
+      SalesLine.VALIDATE("Document Type",SalesHeader."Document Type");
+      SalesLine.VALIDATE("Document No.",SalesHeader."No.");
+      LastSalesLineNo := LastSalesLineNo + 10000;
+      SalesLine.VALIDATE("Line No.",LastSalesLineNo);
+    END;
+
+    LOCAL PROCEDURE InitializeWriteInQuoteLine@12(VAR SalesLine@1001 : Record 37);
+    VAR
+      SalesSetup@1000 : Record 311;
+      SalesHeader@1002 : Record 36;
+    BEGIN
+      SalesSetup.GET;
+      IF SalesSetup."Write-in Product No." = '' THEN BEGIN
+        SalesHeader.GET(SalesLine."Document Type",SalesLine."Document No.");
+        SENDTRACETAG('000083A',CrmTelemetryCategoryTok,VERBOSITY::Normal,
+          STRSUBSTNO(MisingWriteInProductTelemetryMsg,CRMProductName.SHORT),DATACLASSIFICATION::SystemMetadata);
+        ERROR(MissingWriteInProductNoErr,CRMProductName.SHORT,SalesLine."Document Type",SalesHeader."Your Reference");
+      END;
+      SalesSetup.VALIDATE("Write-in Product No.");
+      CASE SalesSetup."Write-in Product Type" OF
+        SalesSetup."Write-in Product Type"::Item:
+          SalesLine.VALIDATE(Type,SalesLine.Type::Item);
+        SalesSetup."Write-in Product Type"::Resource:
+          SalesLine.VALIDATE(Type,SalesLine.Type::Resource);
+      END;
+      SalesLine.VALIDATE("No.",SalesSetup."Write-in Product No.");
+    END;
+
+    LOCAL PROCEDURE InitializeSalesQuoteLineFromItem@8(CRMProduct@1001 : Record 5348;VAR SalesLine@1002 : Record 37);
+    VAR
+      CRMIntegrationRecord@1003 : Record 5331;
+      Item@1005 : Record 27;
+      NAVItemRecordID@1000 : RecordID;
+    BEGIN
+      // Attempt to find the coupled item
+      IF NOT CRMIntegrationRecord.FindRecordIDFromID(CRMProduct.ProductId,DATABASE::Item,NAVItemRecordID) THEN
+        ERROR(NotCoupledCRMProductErr,CannotCreateSalesQuoteInNAVTxt,CRMProduct.Name,CRMProductName.SHORT);
+
+      IF NOT Item.GET(NAVItemRecordID) THEN
+        ERROR(ItemDoesNotExistErr,CannotCreateSalesQuoteInNAVTxt,CRMProduct.ProductNumber);
+      SalesLine.VALIDATE(Type,SalesLine.Type::Item);
+      SalesLine.VALIDATE("No.",Item."No.");
+    END;
+
+    LOCAL PROCEDURE InitializeSalesQuoteLineFromResource@6(CRMProduct@1001 : Record 5348;VAR SalesLine@1002 : Record 37);
+    VAR
+      CRMIntegrationRecord@1003 : Record 5331;
+      Resource@1005 : Record 156;
+      NAVResourceRecordID@1000 : RecordID;
+    BEGIN
+      // Attempt to find the coupled resource
+      IF NOT CRMIntegrationRecord.FindRecordIDFromID(CRMProduct.ProductId,DATABASE::Resource,NAVResourceRecordID) THEN
+        ERROR(NotCoupledCRMResourceErr,CannotCreateSalesQuoteInNAVTxt,CRMProduct.Name,CRMProductName.SHORT);
+
+      IF NOT Resource.GET(NAVResourceRecordID) THEN
+        ERROR(ResourceDoesNotExistErr,CannotCreateSalesQuoteInNAVTxt,CRMProduct.ProductNumber);
+      SalesLine.VALIDATE(Type,SalesLine.Type::Resource);
+      SalesLine.VALIDATE("No.",Resource."No.");
+    END;
+
+    LOCAL PROCEDURE InitializeSalesQuoteLine@18(CRMQuotedetail@1003 : Record 5352;SalesHeader@1000 : Record 36;VAR SalesLine@1002 : Record 37);
+    VAR
+      CRMProduct@1004 : Record 5348;
+      TypeHelper@1005 : Codeunit 10;
+      CRMQuoteDescription@1001 : Text;
+    BEGIN
+      InitNewSalesLine(SalesHeader,SalesLine);
+
+      IF ISNULLGUID(CRMQuotedetail.ProductId) THEN
+        InitializeWriteInQuoteLine(SalesLine)
+      ELSE BEGIN
+        CRMProduct.GET(CRMQuotedetail.ProductId);
+        CRMProduct.TESTFIELD(StateCode,CRMProduct.StateCode::Active);
+        CASE CRMProduct.ProductTypeCode OF
+          CRMProduct.ProductTypeCode::SalesInventory:
+            InitializeSalesQuoteLineFromItem(CRMProduct,SalesLine);
+          CRMProduct.ProductTypeCode::Services:
+            InitializeSalesQuoteLineFromResource(CRMProduct,SalesLine);
+          ELSE
+            ERROR(UnexpectedProductTypeErr,CannotCreateSalesQuoteInNAVTxt,CRMProduct.ProductNumber);
+        END;
+      END;
+
+      CRMQuoteDescription := TypeHelper.GetBlobString(CRMQuotedetail,CRMQuotedetail.FIELDNO(Description));
+      IF CRMQuoteDescription = '' THEN
+        CRMQuoteDescription := CRMQuotedetail.ProductDescription;
+      SetLineDescription(SalesHeader,SalesLine,CRMQuoteDescription);
+
+      SalesLine.VALIDATE(Quantity,CRMQuotedetail.Quantity);
+      SalesLine.VALIDATE("Unit Price",CRMQuotedetail.PricePerUnit);
+      SalesLine.VALIDATE(Amount,CRMQuotedetail.BaseAmount);
+      SalesLine.VALIDATE(
+        "Line Discount Amount",
+        CRMQuotedetail.Quantity * CRMQuotedetail.VolumeDiscountAmount +
+        CRMQuotedetail.ManualDiscountAmount);
+    END;
+
+    LOCAL PROCEDURE CopyShipToInformationIfNotEmpty@31(CRMQuote@1001 : Record 5351;VAR SalesHeader@1000 : Record 36);
+    BEGIN
+      // If the Ship-To fields in CRM are all empty, then let NAV keep its standard behavior (takes Bill-To from the Customer information)
+      IF ((CRMQuote.ShipTo_Line1 = '') AND
+          (CRMQuote.ShipTo_Line2 = '') AND
+          (CRMQuote.ShipTo_City = '') AND
+          (CRMQuote.ShipTo_PostalCode = '') AND
+          (CRMQuote.ShipTo_Country = '') AND
+          (CRMQuote.ShipTo_StateOrProvince = ''))
+      THEN
+        EXIT;
+
+      SalesHeader.VALIDATE("Ship-to Address",FORMAT(CRMQuote.ShipTo_Line1,MAXSTRLEN(SalesHeader."Ship-to Address")));
+      SalesHeader.VALIDATE("Ship-to Address 2",FORMAT(CRMQuote.ShipTo_Line2,MAXSTRLEN(SalesHeader."Ship-to Address 2")));
+      SalesHeader.VALIDATE("Ship-to City",FORMAT(CRMQuote.ShipTo_City,MAXSTRLEN(SalesHeader."Ship-to City")));
+      SalesHeader.VALIDATE("Ship-to Post Code",FORMAT(CRMQuote.ShipTo_PostalCode,MAXSTRLEN(SalesHeader."Ship-to Post Code")));
+      SalesHeader.VALIDATE(
+        "Ship-to Country/Region Code",FORMAT(CRMQuote.ShipTo_Country,MAXSTRLEN(SalesHeader."Ship-to Country/Region Code")));
+      SalesHeader.VALIDATE("Ship-to County",FORMAT(CRMQuote.ShipTo_StateOrProvince,MAXSTRLEN(SalesHeader."Ship-to County")));
+    END;
+
+    LOCAL PROCEDURE CreateNote@25(SalesHeader@1000 : Record 36;CRMAnnotation@1001 : Record 5385);
+    VAR
+      RecordLink@1003 : Record 2000000068;
+      TypeHelper@1004 : Codeunit 10;
+      RecordRef@1005 : RecordRef;
+      FieldRef@1006 : FieldRef;
+      AnnotationText@1002 : Text;
+    BEGIN
+      RecordLink."Record ID" := SalesHeader.RECORDID;
+      RecordLink.Type := RecordLink.Type::Note;
+      RecordLink.Description := CRMAnnotation.Subject;
+      CRMAnnotation.CALCFIELDS(NoteText);
+      RecordRef.GETTABLE(CRMAnnotation);
+      FieldRef := RecordRef.FIELD(CRMAnnotation.FIELDNO(NoteText));
+      AnnotationText := TypeHelper.ReadTextBlobWithTextEncoding(FieldRef,TEXTENCODING::UTF16);
+      TypeHelper.WriteRecordLinkNote(RecordLink,AnnotationText);
+      RecordLink.Created := CRMAnnotation.CreatedOn;
+      RecordLink.Company := COMPANYNAME;
+      RecordLink.INSERT(TRUE);
+    END;
+
+    LOCAL PROCEDURE SetLineDescription@27(SalesHeader@1000 : Record 36;VAR SalesLine@1001 : Record 37;LineDescription@1002 : Text);
+    BEGIN
+      IF STRLEN(LineDescription) > MAXSTRLEN(SalesLine.Description) THEN BEGIN
+        SalesLine.Description := COPYSTR(LineDescription,1,MAXSTRLEN(SalesLine.Description));
+        CreateExtendedDescriptionQuoteLines(
+          SalesHeader,
+          COPYSTR(
+            LineDescription,
+            MAXSTRLEN(SalesLine.Description) + 1));
+      END;
+    END;
+
+    [External]
+    PROCEDURE CreateExtendedDescriptionQuoteLines@5(SalesHeader@1000 : Record 36;FullDescription@1001 : Text);
+    VAR
+      SalesLine@1002 : Record 37;
+    BEGIN
+      WHILE STRLEN(FullDescription) > 0 DO BEGIN
+        InitNewSalesLine(SalesHeader,SalesLine);
+
+        SalesLine.VALIDATE(Description,COPYSTR(FullDescription,1,MAXSTRLEN(SalesLine.Description)));
+        SalesLine.INSERT;
+        FullDescription := COPYSTR(FullDescription,MAXSTRLEN(SalesLine.Description) + 1);
+      END;
+    END;
+
+    LOCAL PROCEDURE ManageSalesQuoteArchive@28(VAR SalesHeader@1005 : Record 36);
+    VAR
+      SalesLine@1001 : Record 37;
+      RecordLink@1003 : Record 2000000068;
+      ArchiveManagement@1006 : Codeunit 5063;
+    BEGIN
+      ArchiveManagement.ArchSalesDocumentNoConfirm(SalesHeader);
+      SalesLine.SETRANGE("Document Type",SalesLine."Document Type"::Quote);
+      SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+      SalesLine.DELETEALL;
+      RecordLink.SETRANGE("Record ID",SalesHeader.RECORDID);
+      RecordLink.SETRANGE(Type,RecordLink.Type::Note);
+      RecordLink.DELETEALL;
+    END;
+
+    LOCAL PROCEDURE GetSalesHeaderByRecordId@40(RecordID@1000 : RecordID;VAR SalesHeader@1001 : Record 36);
+    VAR
+      RecRef@1002 : RecordRef;
+    BEGIN
+      RecRef := RecordID.GETRECORD;
+      RecRef.SETTABLE(SalesHeader);
+      SalesHeader.FIND;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

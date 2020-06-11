@@ -1,0 +1,445 @@
+OBJECT XMLport 81670 Import Sym.PurchOrder
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=;
+  }
+  PROPERTIES
+  {
+    DefaultFieldsValidation=No;
+    TextEncoding=UTF-8;
+    OnInitXMLport=BEGIN
+                    XMLNo := 81670;
+                    MainTableID := 38;
+                    TableID2 := 39;
+
+                    GenSetupRec.GET();
+                  END;
+
+    OnPreXMLport=BEGIN
+                   IF NOT currXMLport.IMPORTFILE THEN BEGIN
+                     AddConversionFileFormatLine;
+                     FillConversionXMLPortFields;
+                     COMMIT;
+                     ERROR('');
+                   END;
+
+                   ContactSetupRec.GET();
+
+                   ConvMgt.DeleteConComment(XMLNo);
+                   ConvMgt.CreateConComment(XMLNo,'Start');
+                 END;
+
+    OnPostXMLport=BEGIN
+                    IF NOT RunIsImportRunBln THEN
+                      currXMLport.BREAK;
+
+                    ConvMgt.CreateConComment(XMLNo,'Stop');
+                    ConvMgt.CreateConComment(XMLNo,ConvMgt.CreateNoOfLinesCommentTxt(MainTableID,ImpLineCounter));
+                  END;
+
+    Format=Variable Text;
+    FieldSeparator=[;];
+  }
+  ELEMENTS
+  {
+    { [{755F5B7F-F062-4834-8364-DC4CD51C5A62}];  ;Root                ;Element ;Text     }
+
+    { [{A7DBD164-8D3E-4F8D-B3A0-89F91BC12205}];1 ;PH                  ;Element ;Table   ;
+                                                  SourceTable=Table38;
+                                                  SourceTableView=SORTING(Field1,Field3);
+                                                  Import::OnAfterInitRecord=BEGIN
+                                                                              ClearFields;
+                                                                            END;
+
+                                                  Import::OnBeforeInsertRecord=VAR
+                                                                                 ContactPerson@1100409000 : Record 5050;
+                                                                                 ETIMVendorLocalMgt@1100285500 : Record 11012313;
+                                                                                 TradeItem@1100285502 : Record 11012317;
+                                                                                 ItemRelation@1100285501 : Record 11012319;
+                                                                                 lvTradeItem@1100285503 : Record 11012317;
+                                                                               BEGIN
+
+                                                                                 StripData;
+                                                                                 ImpLineCounter := ImpLineCounter + 1;
+                                                                                 CLEAR(PurchaseLine);
+                                                                                 CLEAR("Purchase Header");
+
+                                                                                 IF "Purchase Header".GET("Purchase Header"."Document Type"::Order,A) THEN BEGIN
+                                                                                   IF (D <> '') AND (D <> '0')  THEN BEGIN
+                                                                                     EVALUATE(DInt,D);
+
+                                                                                     //WHILE (Count < DInt) DO BEGIN
+                                                                                     PurchaseLine.INIT;
+                                                                                     PurchaseLine.VALIDATE("Document Type","Purchase Header"."Document Type");
+                                                                                     PurchaseLine.VALIDATE("Document No.","Purchase Header"."No.");
+                                                                                     PurchaseLine.VALIDATE("Line No.", DInt * 10000);
+
+                                                                                     PurchaseLine.INSERT(TRUE);
+                                                                                     PurchaseLine.VALIDATE("Job No.", "Purchase Header"."Job No.");
+
+
+
+                                                                                     ETIMVendorLocalMgt.SETRANGE("Vendor (Purchase)","Purchase Header"."Buy-from Vendor No.");
+                                                                                     IF ETIMVendorLocalMgt.FINDFIRST THEN BEGIN
+                                                                                       TradeItem.SETRANGE(Vendor, ETIMVendorLocalMgt.Code);
+                                                                                       TradeItem.SETRANGE("Item Code",E);
+                                                                                       IF TradeItem.FINDFIRST THEN BEGIN
+                                                                                         PurchaseLine.VALIDATE("Vendor (Trade Item)", ETIMVendorLocalMgt.Code);
+                                                                                         PurchaseLine.VALIDATE(Description, TradeItem."Item Description");
+                                                                                         //>>140317 SYM015
+                                                                                         PurchaseLine.VALIDATE("Description 2", TradeItem."Item Description 2");
+                                                                                         //<<140317 SYM015
+                                                                                         PurchaseLine.VALIDATE("Trade Item",E);
+                                                                                       END
+                                                                                       //
+                                                                                       //>>140901 ITERO.GH IME188
+                                                                                       ELSE BEGIN
+                                                                                         CLEAR(lvTradeItem);
+                                                                                         lvTradeItem.SETRANGE("Item Code" ,E);
+                                                                                         IF lvTradeItem.FINDFIRST THEN BEGIN
+                                                                                           CLEAR(ItemRelation);
+                                                                                           ItemRelation.SETCURRENTKEY(Vendor,"Trade Item");
+                                                                                           ItemRelation.SETRANGE ("Source Type"   , ItemRelation."Source Type" :: "Trade Item");
+                                                                                           ItemRelation.SETRANGE("GTIN Code"      , lvTradeItem."GTIN Code (Item)");
+                                                                                           ItemRelation.SETFILTER("Navision Item" , '<>%1','');
+                                                                                           IF ItemRelation.FINDFIRST THEN BEGIN
+                                                                                              PurchaseLine.VALIDATE("Vendor (Trade Item)", ETIMVendorLocalMgt.Code);
+                                                                                              PurchaseLine.VALIDATE(Description  , ItemRelation."Description Navision-item");
+                                                                                              PurchaseLine.VALIDATE("Trade Item" , ItemRelation."Trade Item");
+                                                                                           END;
+                                                                                         END;
+                                                                                       END;
+                                                                                     //<<140901 ITERO.GH IME188
+
+                                                                                       //
+                                                                                     END;
+
+                                                                                     IF (STRLEN(C) = 14) THEN BEGIN
+                                                                                       ContractCode := COPYSTR(C,11);
+                                                                                       LenghtContractCode := STRLEN(ContractCode);
+                                                                                       StartPos := 1;
+                                                                                       ContractCodeFound := FALSE;
+
+                                                                                       IF ContractCode <> '' THEN BEGIN
+                                                                                         // Loop, cut/trim and check if ContractCode exists
+                                                                                       REPEAT
+                                                                                         ContractCode := COPYSTR(ContractCode, StartPos, LenghtContractCode-StartPos+1);
+                                                                                         StartPos := StartPos + 1;
+                                                                                         IF ExtensionContract.GET(COPYSTR(C,1,10),ContractCode) THEN
+                                                                                           ContractCodeFound := TRUE;
+                                                                                       UNTIL ((ContractCodeFound) OR (StartPos > LenghtContractCode));
+
+                                                                                       IF ContractCodeFound THEN
+                                                                                         PurchaseLine.VALIDATE("Extension Contract",ContractCode)
+                                                                                       ELSE
+                                                                                         ERROR('Ogiltlig ŽTA %1',ContractCode);
+                                                                                       END ELSE BEGIN
+                                                                                         // If blank then just validate
+                                                                                         PurchaseLine.VALIDATE("Extension Contract",'');
+                                                                                       END;
+                                                                                     END;
+
+                                                                                     IF PurchaseLine."Shortcut Dimension 2 Code" = '' THEN
+                                                                                       PurchaseLine.VALIDATE("Shortcut Dimension 2 Code",'9495');
+
+                                                                                     EVALUATE(FDec,F);
+                                                                                     EVALUATE(GDec,G);
+
+                                                                                     IF (FDec > 0) AND (GDec < 0) THEN BEGIN
+                                                                                       FDec:=FDec*-1;
+                                                                                       GDec:=GDec*-1;
+                                                                                     END;
+                                                                                     PurchaseLine.VALIDATE(Quantity,FDec);
+                                                                                     //IF FDec>-1 THEN
+                                                                                     PurchaseLine.VALIDATE("Direct Unit Cost",GDec);
+                                                                                     //ELSE
+                                                                                     //  PurchaseLine.VALIDATE("Direct Unit Cost",GDec*-1);
+
+                                                                                     {
+                                                                                     //PurchaseLine.VALIDATE(Description, 'Converted line');
+                                                                                     EVALUATE(FDec,F);
+                                                                                     PurchaseLine.VALIDATE(Quantity,FDec);
+                                                                                     EVALUATE(GDec,G);
+                                                                                     PurchaseLine.VALIDATE("Direct Unit Cost",GDec);
+                                                                                     }
+                                                                                     PurchaseLine.MODIFY(TRUE);
+
+                                                                                     //Count:=Count+1;
+                                                                                     //END;
+
+                                                                                   END;
+
+                                                                                 END ELSE BEGIN
+
+                                                                                   "Purchase Header"."Document Type" := "Purchase Header"."Document Type"::Order;
+                                                                                   "Purchase Header".VALIDATE("No.",A);
+                                                                                   "Purchase Header".INSERT(TRUE);
+
+                                                                                   "Purchase Header".VALIDATE("Buy-from Vendor No.",B);
+                                                                                   IF STRLEN(C) = 10 THEN
+                                                                                     "Purchase Header".VALIDATE("Job No.",C)
+                                                                                   ELSE IF (STRLEN(C) = 14) THEN BEGIN
+                                                                                     "Purchase Header".VALIDATE("Job No.",COPYSTR(C,1,10));
+                                                                                   END;
+
+
+                                                                                   "Purchase Header".MODIFY(TRUE);
+                                                                                   IF (D <> '') AND (D <> '0')  THEN BEGIN
+                                                                                     EVALUATE(DInt,D);
+
+                                                                                     //WHILE (Count < DInt) DO BEGIN
+                                                                                     PurchaseLine.INIT;
+                                                                                     PurchaseLine.VALIDATE("Document Type","Purchase Header"."Document Type");
+                                                                                     PurchaseLine.VALIDATE("Document No.","Purchase Header"."No.");
+                                                                                     PurchaseLine.VALIDATE("Line No.", DInt * 10000);
+
+                                                                                     PurchaseLine.INSERT(TRUE);
+                                                                                     PurchaseLine.VALIDATE("Job No.", "Purchase Header"."Job No.");
+
+
+
+                                                                                     ETIMVendorLocalMgt.SETRANGE("Vendor (Purchase)","Purchase Header"."Buy-from Vendor No.");
+                                                                                     IF ETIMVendorLocalMgt.FINDFIRST THEN BEGIN
+                                                                                       TradeItem.SETRANGE(Vendor, ETIMVendorLocalMgt.Code);
+                                                                                       TradeItem.SETRANGE("Item Code",E);
+                                                                                       IF TradeItem.FINDFIRST THEN BEGIN
+                                                                                         PurchaseLine.VALIDATE("Vendor (Trade Item)", ETIMVendorLocalMgt.Code);
+                                                                                         PurchaseLine.VALIDATE(Description, TradeItem."Item Description");
+                                                                                         //>>140317 SYM015
+                                                                                         PurchaseLine.VALIDATE("Description 2", TradeItem."Item Description 2");
+                                                                                         //<<140317 SYM015
+                                                                                         PurchaseLine.VALIDATE("Trade Item",E);
+                                                                                       END
+                                                                                       //
+                                                                                       //>>140901 ITERO.GH IME188
+                                                                                       ELSE BEGIN
+                                                                                         CLEAR(lvTradeItem);
+                                                                                         lvTradeItem.SETRANGE("Item Code" ,E);
+                                                                                         IF lvTradeItem.FINDFIRST THEN BEGIN
+                                                                                           CLEAR(ItemRelation);
+                                                                                           ItemRelation.SETCURRENTKEY(Vendor,"Trade Item");
+                                                                                           ItemRelation.SETRANGE ("Source Type"   , ItemRelation."Source Type" :: "Trade Item");
+                                                                                           ItemRelation.SETRANGE("GTIN Code"      , lvTradeItem."GTIN Code (Item)");
+                                                                                           ItemRelation.SETFILTER("Navision Item" , '<>%1','');
+                                                                                           IF ItemRelation.FINDFIRST THEN BEGIN
+                                                                                              PurchaseLine.VALIDATE("Vendor (Trade Item)", ETIMVendorLocalMgt.Code);
+                                                                                              PurchaseLine.VALIDATE(Description  , ItemRelation."Description Navision-item");
+                                                                                              PurchaseLine.VALIDATE("Trade Item" , ItemRelation."Trade Item");
+                                                                                           END;
+                                                                                         END;
+                                                                                       END;
+                                                                                     //<<140901 ITERO.GH IME188
+
+                                                                                       //
+                                                                                     END;
+
+                                                                                     IF (STRLEN(C) = 14) THEN BEGIN
+                                                                                       ContractCode := COPYSTR(C,11);
+                                                                                       LenghtContractCode := STRLEN(ContractCode);
+                                                                                       StartPos := 1;
+                                                                                       ContractCodeFound := FALSE;
+
+                                                                                       IF ContractCode <> '' THEN BEGIN
+                                                                                         // Loop, cut/trim and check if ContractCode exists
+                                                                                       REPEAT
+                                                                                         ContractCode := COPYSTR(ContractCode, StartPos, LenghtContractCode-StartPos+1);
+                                                                                         StartPos := StartPos + 1;
+                                                                                         IF ExtensionContract.GET(COPYSTR(C,1,10),ContractCode) THEN
+                                                                                           ContractCodeFound := TRUE;
+                                                                                       UNTIL ((ContractCodeFound) OR (StartPos > LenghtContractCode));
+
+                                                                                       IF ContractCodeFound THEN
+                                                                                         PurchaseLine.VALIDATE("Extension Contract",ContractCode)
+                                                                                       ELSE
+                                                                                         ERROR('Ogiltlig ŽTA %1',ContractCode);
+                                                                                       END ELSE BEGIN
+                                                                                         // If blank then just validate
+                                                                                         PurchaseLine.VALIDATE("Extension Contract",'');
+                                                                                       END;
+                                                                                     END;
+
+                                                                                     IF PurchaseLine."Shortcut Dimension 2 Code" = '' THEN
+                                                                                       PurchaseLine.VALIDATE("Shortcut Dimension 2 Code",'9495');
+                                                                                     //PurchaseLine.VALIDATE(Description, 'Converted line');
+
+                                                                                     EVALUATE(FDec,F);
+                                                                                     EVALUATE(GDec,G);
+
+                                                                                     IF (FDec > 0) AND (GDec < 0) THEN BEGIN
+                                                                                       FDec:=FDec*-1;
+                                                                                       GDec:=GDec*-1;
+                                                                                     END;
+                                                                                     PurchaseLine.VALIDATE(Quantity,FDec);
+                                                                                     //IF FDec>-1 THEN
+                                                                                     PurchaseLine.VALIDATE("Direct Unit Cost",GDec);
+                                                                                     //ELSE
+                                                                                     //  PurchaseLine.VALIDATE("Direct Unit Cost",GDec*-1);
+
+                                                                                     PurchaseLine.MODIFY(TRUE);
+
+                                                                                     //Count:=Count+1;
+                                                                                     //END;
+
+                                                                                   END;
+
+                                                                                 END;
+                                                                                 ClearFields;
+                                                                                 currXMLport.SKIP;
+                                                                               END;
+                                                                                }
+
+    { [{5C900A9C-2240-4551-8D3B-A67A2D629F53}];2 ;A                   ;Element ;Text     }
+
+    { [{5E5EE9AF-296C-4B48-B3A4-71FD1D3BDBB8}];2 ;B                   ;Element ;Text    ;
+                                                  Import::OnAfterAssignVariable=BEGIN
+                                                                                  //IF B <> '' THEN
+                                                                                    //EVALUATE(BDate,B);
+                                                                                END;
+                                                                                 }
+
+    { [{25AC6843-1C35-47B7-A0CF-D50BA5395DE9}];2 ;C                   ;Element ;Text     }
+
+    { [{FFE50D66-1E11-4F0D-9437-7AA03F71A83B}];2 ;D                   ;Element ;Text     }
+
+    { [{7CD91AD1-AA3C-4DA9-ABF4-538F22177483}];2 ;E                   ;Element ;Text     }
+
+    { [{2B95F67C-2294-4640-8A2B-0F55F168B991}];2 ;F                   ;Element ;Text     }
+
+    { [{C076FC5A-3C1D-4EFE-9B04-0555FB03D527}];2 ;G                   ;Element ;Text     }
+
+  }
+  EVENTS
+  {
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      CaptionML=[ENU=Lookup Main Project No. based on old Main Project No.;
+                 SVE=Val av huvudprojekt baserat p† gammalt huvudprojektnr];
+      OnOpenPage=BEGIN
+                   RunIsImportRunBln := TRUE;
+                 END;
+
+    }
+    CONTROLS
+    {
+    }
+  }
+  CODE
+  {
+    VAR
+      "// GENERAL"@1100525045 : Integer;
+      CommentRec@1100525044 : Record 97;
+      ConvMgt@1100525043 : Codeunit 11020212;
+      NoSerieMgt@1100525042 : Codeunit 396;
+      XMLNo@1100525040 : Integer;
+      MainTableID@1100525039 : Integer;
+      CreateNewNosBln@1100525038 : Boolean;
+      ImpLineCounter@1100525037 : Integer;
+      CommentCde@1100525036 : Code[10];
+      UserSetup@1100285000 : Record 91;
+      ContactSetupRec@1100525035 : Record 5079;
+      ConversionFileFormat@1100525033 : Record 11020691;
+      RunIsImportRunBln@1100525032 : Boolean;
+      xRec@1100525031 : Record 11012312;
+      GenSetupRec@1100525030 : Record 98;
+      CDate@1100525014 : Date;
+      EDec@1100525012 : Decimal;
+      Text001@1100525016 : TextConst 'ENU=Third Dimension must be filled;SVE=Tredje dimensionen m†ste fyllas i';
+      Text002@1100525015 : TextConst 'ENU=Fourth Dimension must be filled;SVE=Fj„rde dimensionen m†ste fyllas i';
+      Text003@1100525010 : TextConst 'ENU="<empty>=Male, [1]=Female";SVE="<tom>=Man, [1]=Kvinna"';
+      Text004@1100525009 : TextConst 'ENU=Third Dimension;SVE=Tredje dimensionen';
+      Text005@1100525008 : TextConst 'ENU=Fourth Dimension;SVE=Fj„rde dimensionen';
+      DDate@1100285500 : Date;
+      ExceptionalSalesPriceDate@1100285501 : Record 11020389;
+      TableID2@1100285502 : Integer;
+      ProjCommentCde@1100285505 : Code[20];
+      UseOldProjNoBln@1100285503 : Boolean;
+      PurchaseLine@1100285514 : Record 39;
+      Count@1100285504 : Integer;
+      DInt@1100285506 : Integer;
+      ContractCode@1100285004 : Code[10];
+      LenghtContractCode@1100285003 : Integer;
+      StartPos@1100285002 : Integer;
+      ContractCodeFound@1100285001 : Boolean;
+      ExtensionContract@1100285005 : Record 11012004;
+      GDec@1100285507 : Decimal;
+      FDec@1100285508 : Decimal;
+
+    PROCEDURE StripData@1100485001();
+    BEGIN
+      A := DELCHR(A,'<>',' ');
+      B := DELCHR(B,'<>',' ');
+    END;
+
+    PROCEDURE AddConversionFileFormatLine@1100529901();
+    VAR
+      DefaultDimension@1100529900 : Record 352;
+    BEGIN
+      // This function stores the file format into table [Conversion File Format].
+      // There is no other standard documentation; so please maintain this function in case of customization.
+      //
+      // Parameters: 1: [Dataport No.],
+      //             2: [csv-Column],
+      //             3: [NAV Table ID],
+      //             4: [NAV Field Name],
+      //             5: [Data Type of dataport field],
+      //             6: [extra Comment].
+      //
+
+      WITH ConversionFileFormat DO BEGIN
+        ConversionFileFormat.DeleteColumnLines(XMLNo);
+        InsertColumnLine(XMLNo,'A',MainTableID,"Purchase Header".FIELDNAME("No."),'Code20','');
+        InsertColumnLine(XMLNo,'B',MainTableID,"Purchase Header".FIELDNAME("Buy-from Vendor No."),'Code20','');
+        InsertColumnLine(XMLNo,'C',MainTableID,"Purchase Header".FIELDNAME("Job No."),'Code20','');
+        InsertColumnLine(XMLNo,'D',TableID2,PurchaseLine.FIELDNAME("Line No."),'Integer','OrderLinePos (LineNo=Pos*10000)');
+        InsertColumnLine(XMLNo,'E',TableID2,PurchaseLine.FIELDNAME("Item No."),'Code20','');
+        InsertColumnLine(XMLNo,'F',TableID2,PurchaseLine.FIELDNAME(Quantity),'Decimal','');
+        InsertColumnLine(XMLNo,'G',TableID2,PurchaseLine.FIELDNAME(Amount),'Decimal','');
+
+
+
+      END;
+    END;
+
+    PROCEDURE ClearFields@1100529903();
+    BEGIN
+      CLEAR("Purchase Header");
+      CLEAR(PurchaseLine);
+      CLEAR(ExtensionContract);
+      A := '';
+      B := '';
+      C := '';
+      D := '';
+      E := '';
+      F := '';
+      G := '';
+      GDec:=0;
+      FDec:=0;
+
+      Count:=0;
+      ContractCode:='';
+      LenghtContractCode:=0;
+      StartPos:=0;
+      ContractCodeFound:=FALSE;
+    END;
+
+    PROCEDURE FillConversionXMLPortFields@1100409004();
+    VAR
+      ConversionXMLPort@1100409000 : Record 11020640;
+    BEGIN
+      ConversionXMLPort.GET(XMLNo);
+      ConversionXMLPort."Main Table ID" := MainTableID;
+      //ConversionXMLPort."Page ID" := //11128030;
+      ConversionXMLPort.MODIFY;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

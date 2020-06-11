@@ -1,0 +1,480 @@
+OBJECT Report 7051 Suggest Item Price on Wksh.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.00,4PS14.00;
+  }
+  PROPERTIES
+  {
+    CaptionML=[DEU=Artikelpreis vorschlagen;
+               ENU=Suggest Item Price on Wksh.;
+               NLD=Artikelprijsvoorstellen maken;
+               NOR=ForeslÜ varepris i forslag];
+    ProcessingOnly=Yes;
+    OnPreReport=BEGIN
+                  RoundingMethod.SETRANGE(Code,RoundingMethod.Code);
+                  IF ToCurrency.Code = '' THEN BEGIN
+                    ToCurrency.InitRoundingPrecision;
+                  END ELSE BEGIN
+                    ToCurrency.FIND;
+                    ToCurrency.TESTFIELD("Unit-Amount Rounding Precision");
+                  END;
+
+                  IF (ToSalesCode = '') AND (ToSalesType <> ToSalesType::"All Customers") THEN
+                    ERROR(Text002,SalesPrice.FIELDCAPTION("Sales Code"));
+
+                  IF ToUnitofMeasure.Code <> '' THEN
+                    ToUnitofMeasure.FIND;
+                  WITH SalesPriceWksh DO BEGIN
+                    VALIDATE("Sales Type",ToSalesType);
+                    VALIDATE("Sales Code",ToSalesCode);
+                    VALIDATE("Currency Code",ToCurrency.Code);
+                    VALIDATE("Starting Date",ToStartDate);
+                    VALIDATE("Ending Date",ToEndDate);
+                    "Unit of Measure Code" := ToUnitofMeasure.Code;
+
+                    CASE ToSalesType OF
+                      ToSalesType::Customer:
+                        BEGIN
+                          ToCust."No." := ToSalesCode;
+                          ToCust.FIND;
+                          "Price Includes VAT" := ToCust."Prices Including VAT";
+                          "Allow Line Disc." := ToCust."Allow Line Disc.";
+                        END;
+                      ToSalesType::"Customer Price Group":
+                        BEGIN
+                          ToCustPriceGr.Code := ToSalesCode;
+                          ToCustPriceGr.FIND;
+                          "Price Includes VAT" := ToCustPriceGr."Price Includes VAT";
+                          "Allow Line Disc." := ToCustPriceGr."Allow Line Disc.";
+                          "Allow Invoice Disc." := ToCustPriceGr."Allow Invoice Disc.";
+                        END;
+                    END;
+                  END;
+                END;
+
+  }
+  DATASET
+  {
+    { 8129;    ;DataItem;                    ;
+               DataItemTable=Table27;
+               DataItemTableView=SORTING(No.);
+               OnPreDataItem=BEGIN
+                               Window.OPEN(Text000);
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  CurrentUnitPrice@1000 : Decimal;
+                                BEGIN
+                                  Window.UPDATE(1,"No.");
+                                  WITH SalesPriceWksh DO BEGIN
+                                    INIT;
+                                    VALIDATE("Item No.",Item."No.");
+
+                                    IF NOT ("Unit of Measure Code" IN [Item."Base Unit of Measure",'']) THEN
+                                      IF NOT ItemUnitOfMeasure.GET("Item No.","Unit of Measure Code") THEN
+                                        CurrReport.SKIP;
+
+                                    VALIDATE("Unit of Measure Code",ToUnitofMeasure.Code);
+
+                                    //**4PS.sn
+                                    CASE PriceMethod OF
+                                      PriceMethod::SalesPrice: BasicPrice := Item."Unit Price";
+                                      PriceMethod::CostPrice: BasicPrice := Item."Unit Cost";
+                                      PriceMethod::DirectCost: BasicPrice := Item."Last Direct Cost";
+                                    END;
+                                    //**4PS.en
+
+                                    CurrentUnitPrice :=
+                                      ROUND(
+                                        CurrExchRate.ExchangeAmtLCYToFCY(
+                                          0, '', //**4PS.n
+                                          WORKDATE,ToCurrency.Code,
+                                          //Item."Unit Price", //**4PS.o
+                                          BasicPrice, //**4PS.n
+                                          CurrExchRate.ExchangeRate(
+                                          //WORKDATE,ToCurrency.Code)) * //**4PS.o
+                                            0, '', WORKDATE,ToCurrency.Code,TRUE),TRUE) * //**4PS.n
+                                        UOMMgt.GetQtyPerUnitOfMeasure(Item,"Unit of Measure Code"),
+                                        ToCurrency."Unit-Amount Rounding Precision");
+
+                                    IF CurrentUnitPrice > PriceLowerLimit THEN
+                                      "New Unit Price" := CurrentUnitPrice * UnitPriceFactor;
+
+                                    OnBeforeRoundMethod(SalesPriceWksh,Item,ToCurrency,UnitPriceFactor,PriceLowerLimit,CurrentUnitPrice);
+
+                                    IF RoundingMethod.Code <> '' THEN BEGIN
+                                      RoundingMethod."Minimum Amount" := "New Unit Price";
+                                      IF RoundingMethod.FIND('=<') THEN BEGIN
+                                        "New Unit Price" := "New Unit Price" + RoundingMethod."Amount Added Before";
+                                        IF RoundingMethod.Precision > 0 THEN
+                                          "New Unit Price" :=
+                                            ROUND(
+                                              "New Unit Price",
+                                              RoundingMethod.Precision,COPYSTR('=><',RoundingMethod.Type + 1,1));
+                                        "New Unit Price" := "New Unit Price" + RoundingMethod."Amount Added After";
+                                      END;
+                                    END;
+
+                                    CalcCurrentPrice(PriceAlreadyExists);
+
+                                    IF NOT PriceAlreadyExists THEN BEGIN
+                                      "Current Unit Price" := CurrentUnitPrice;
+                                      "VAT Bus. Posting Gr. (Price)" := Item."VAT Bus. Posting Gr. (Price)";
+                                    END;
+
+                                    OnBeforeModifyOrInsertSalesPriceWksh(SalesPriceWksh);
+
+                                    IF PriceAlreadyExists OR CreateNewPrices THEN BEGIN
+                                      SalesPriceWksh2 := SalesPriceWksh;
+                                      IF SalesPriceWksh2.FIND('=') THEN
+                                        MODIFY
+                                      ELSE
+                                        INSERT;
+                                    END;
+                                  END;
+                                END;
+
+               ReqFilterFields=No.,Vendor No.,Inventory Posting Group }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      SaveValues=Yes;
+      OnInit=BEGIN
+               ToEndDateCtrlEnable := TRUE;
+               ToStartDateCtrlEnable := TRUE;
+               SalesCodeCtrlEnable := TRUE;
+             END;
+
+      OnOpenPage=BEGIN
+                   IF UnitPriceFactor = 0 THEN
+                     UnitPriceFactor := 1;
+
+                   SalesCodeCtrlEnable := TRUE;
+                   IF ToSalesType = ToSalesType::"All Customers" THEN
+                     SalesCodeCtrlEnable := FALSE;
+
+                   SalesCodeCtrlEnable := ToSalesType <> ToSalesType::"All Customers";
+                   ToStartDateCtrlEnable := ToSalesType <> ToSalesType::Campaign;
+                   ToEndDateCtrlEnable := ToSalesType <> ToSalesType::Campaign;
+                 END;
+
+    }
+    CONTROLS
+    {
+      { 1900000001;0;Container;
+                  ContainerType=ContentArea }
+
+      { 1900000002;1;Group  ;
+                  CaptionML=[DEU=Optionen;
+                             ENU=Options;
+                             NLD=Opties;
+                             NOR=Alternativer;
+                             SVE=Alternativ] }
+
+      { 21  ;2   ;Group     ;
+                  CaptionML=[DEU=In VK-Preisvorschlag kopieren...;
+                             ENU=Copy to Sales Price Worksheet...;
+                             NLD=Kopiâren naar verkoopprijsvoorstel...;
+                             NOR=Kopier til salgsprisforslag...] }
+
+      { 8   ;3   ;Field     ;
+                  CaptionML=[DEU=Verkaufsart;
+                             ENU=Sales Type;
+                             NLD=Verkoopsoort;
+                             NOR=Salgstype;
+                             SVE=Fîrs.typ];
+                  ToolTipML=[DEU=Gibt die Verkaufsart fÅr die Verkaufspreisvereinbarung an. Klicken Sie auf das Feld, um die vorhandenen Verkaufsarten anzuzeigen.;
+                             ENU=Specifies the sales type for the sales price agreement. To see the existing sales types, click the field.;
+                             NLD=Hiermee wordt het verkoopsoort opgegeven voor de verkoopprijsovereenkomst. Klik op het veld om de bestaande verkoopsoorten te bekijken.;
+                             NOR=Angir salgstypen for salgsprisavtalen. Hvis du vil se de eksisterende salgstypene, klikker du i feltet.];
+                  OptionCaptionML=[DEU=Debitor,Debitorenpreisgruppe,Alle Debitoren,Kampagne;
+                                   ENU=Customer,Customer Price Group,All Customers,Campaign;
+                                   NLD=Klant,Klantenprijsgroep,Alle klanten,Campagne;
+                                   NOR=Kunde,Kundeprisgruppe,Alle kunder,Kampanje;
+                                   SVE=Kund,Kundprisgrupp,Alla kunder,Kampanj];
+                  ApplicationArea=#Basic,#Suite;
+                  SourceExpr=ToSalesType;
+                  OnValidate=BEGIN
+                               SalesCodeCtrlEnable := ToSalesType <> ToSalesType::"All Customers";
+                               ToStartDateCtrlEnable := ToSalesType <> ToSalesType::Campaign;
+                               ToEndDateCtrlEnable := ToSalesType <> ToSalesType::Campaign;
+
+                               ToSalesCode := '';
+                               ToStartDate := 0D;
+                               ToEndDate := 0D;
+                             END;
+                              }
+
+      { 1   ;3   ;Field     ;
+                  Name=SalesCodeCtrl;
+                  CaptionML=[DEU=Verkaufscode;
+                             ENU=Sales Code;
+                             NLD=Verkoopcode;
+                             NOR=Salgskode;
+                             SVE=Fîrs.kod];
+                  ToolTipML=[DEU=Gibt den Code fÅr die Verkaufsart an, der durch die Verkaufspreisvereinbarung aktualisiert wird. Klicken Sie auf das Feld, um die vorhandenen Verkaufscodes anzuzeigen.;
+                             ENU=Specifies the code for the sales type that the sales price agreement will update. To see the existing sales codes, click the field.;
+                             NLD=Hiermee wordt de code voor het verkoopsoort opgegeven dat door de verkoopprijsovereenkomst wordt bijgewerkt. Klik op het veld om de bestaande verkoopcodes te bekijken.;
+                             NOR=Angir koden for salgstypen som salgsprisavtalen skal oppdatere. Hvis du vil se de eksisterende salgskodene, klikker du i feltet.];
+                  ApplicationArea=#Basic,#Suite;
+                  SourceExpr=ToSalesCode;
+                  Enabled=SalesCodeCtrlEnable;
+                  OnValidate=BEGIN
+                               ToSalesCodeOnAfterValidate;
+                             END;
+
+                  OnLookup=VAR
+                             CustList@1004 : Page 22;
+                             CustPriceGrList@1003 : Page 7;
+                             CampaignList@1002 : Page 11072059;
+                           BEGIN
+                             CASE ToSalesType OF
+                               ToSalesType::Customer:
+                                 BEGIN
+                                   CustList.LOOKUPMODE := TRUE;
+                                   CustList.SETRECORD(ToCust);
+                                   IF CustList.RUNMODAL = ACTION::LookupOK THEN BEGIN
+                                     CustList.GETRECORD(ToCust);
+                                     ToSalesCode := ToCust."No.";
+                                   END;
+                                 END;
+                               ToSalesType::"Customer Price Group":
+                                 BEGIN
+                                   CustPriceGrList.LOOKUPMODE := TRUE;
+                                   CustPriceGrList.SETRECORD(ToCustPriceGr);
+                                   IF CustPriceGrList.RUNMODAL = ACTION::LookupOK THEN BEGIN
+                                     CustPriceGrList.GETRECORD(ToCustPriceGr);
+                                     ToSalesCode := ToCustPriceGr.Code;
+                                   END;
+                                 END;
+                               ToSalesType::Campaign:
+                                 BEGIN
+                                   CampaignList.LOOKUPMODE := TRUE;
+                                   CampaignList.SETRECORD(ToCampaign);
+                                   IF CampaignList.RUNMODAL = ACTION::LookupOK THEN BEGIN
+                                     CampaignList.GETRECORD(ToCampaign);
+                                     ToSalesCode := ToCampaign."No.";
+                                     ToStartDate := ToCampaign."Starting Date";
+                                     ToEndDate := ToCampaign."Ending Date";
+                                   END;
+                                 END;
+                             END;
+                           END;
+                            }
+
+      { 9   ;3   ;Field     ;
+                  CaptionML=[DEU=Einheitencode;
+                             ENU=Unit of Measure Code;
+                             NLD=Eenheidscode;
+                             NOR=Enhetskode;
+                             SVE=Enhetskod];
+                  ToolTipML=[DEU=Gibt die Ma·einheit an, in der der Artikel angezeigt wird.;
+                             ENU=Specifies the unit of measure that the item is shown in.;
+                             NLD=Hiermee wordt de eenheid opgegeven waarin het artikel worden uitgedrukt.;
+                             NOR=Angir mÜleenheten som varen vises i.;
+                             SVE=Anger enheten som artikeln visas med.];
+                  ApplicationArea=#Basic,#Suite;
+                  SourceExpr=ToUnitofMeasure.Code;
+                  TableRelation="Unit of Measure" }
+
+      { 2   ;3   ;Field     ;
+                  CaptionML=[DEU=WÑhrungscode;
+                             ENU=Currency Code;
+                             NLD=Valutacode;
+                             NOR=Valutakode;
+                             SVE=Valutakod];
+                  ToolTipML=[DEU=Gibt den Code fÅr die WÑhrung an, in der die BetrÑge angezeigt werden.;
+                             ENU=Specifies the code for the currency that amounts are shown in.;
+                             NLD=Hiermee wordt de valutacode opgegeven waarin bedragen worden weergegeven.;
+                             NOR=Angir koden for valutaen som belõpene vises i.;
+                             SVE=Anger i vilken valuta beloppen visas.];
+                  ApplicationArea=#Basic,#Suite;
+                  SourceExpr=ToCurrency.Code;
+                  TableRelation=Currency }
+
+      { 3   ;3   ;Field     ;
+                  Name=ToStartDateCtrl;
+                  CaptionML=[DEU=Startdatum;
+                             ENU=Starting Date;
+                             NLD=Begindatum;
+                             NOR=Startdato;
+                             SVE=Startdatum];
+                  ToolTipML=[DEU=Gibt das Datum an, ab dem die PreisÑnderungen in Kraft treten werden.;
+                             ENU=Specifies the date when the price changes will take effect.;
+                             NLD=Hiermee wordt de datum opgegeven waarop de prijswijzigingen van kracht worden.;
+                             NOR=Angir datoen da prisendringene skal tre i kraft.];
+                  ApplicationArea=#Basic,#Suite;
+                  SourceExpr=ToStartDate;
+                  Enabled=ToStartDateCtrlEnable }
+
+      { 12  ;3   ;Field     ;
+                  Name=ToEndDateCtrl;
+                  CaptionML=[DEU=Enddatum;
+                             ENU=Ending Date;
+                             NLD=Einddatum;
+                             NOR=Sluttdato;
+                             SVE=Till Datum];
+                  ToolTipML=[DEU=Gibt das Datum an, bis zu dem die PreisÑnderungen gelten.;
+                             ENU=Specifies the date to which the price changes are valid.;
+                             NLD=Hiermee wordt de datum opgegeven tot wanneer prijswijzigingen geldig zijn.;
+                             NOR=Angir datoen som prisendringene er gyldig til.];
+                  ApplicationArea=#Basic,#Suite;
+                  SourceExpr=ToEndDate;
+                  Enabled=ToEndDateCtrlEnable }
+
+      { 4   ;2   ;Field     ;
+                  CaptionML=[DEU=Nur BetrÑge Åber;
+                             ENU=Only Amounts Above;
+                             NLD=Minimumbedrag;
+                             NOR=Bare belõp over];
+                  ToolTipML=[DEU=Gibt den niedrigsten VK-Preis an, der geÑndert wird. Nur Preise, die hîher als dieser Preis sind, werden geÑndert.;
+                             ENU=Specifies the lowest unit price that will be changed. Only prices that are higher than this price will be changed.;
+                             NLD=Hiermee wordt de laagste eenheidsprijs opgegeven die wordt gewijzigd. Alleen prijzen die hoger zijn dan deze prijs worden gewijzigd.;
+                             NOR=Angir den laveste salgsprisen som blir endret. Bare priser som er hõyere enn denne prisen, blir endret.];
+                  ApplicationArea=#Basic,#Suite;
+                  DecimalPlaces=2:5;
+                  SourceExpr=PriceLowerLimit }
+
+      { 5   ;2   ;Field     ;
+                  CaptionML=[DEU=Korrekturfaktor;
+                             ENU=Adjustment Factor;
+                             NLD=Herwaarderingsfactor;
+                             NOR=Justeringsfaktor];
+                  ToolTipML=[DEU=Gibt einen Korrekturfaktor an, mit dem der Artikelpreis, den Sie vorschlagen mîchten, multipliziert wird. Durch die Eingabe eines Korrekturfaktors kînnen Sie die BetrÑge erhîhen oder verringern, die vorgeschlagen werden.;
+                             ENU=Specifies an adjustment factor to multiply the item price that you want suggested. By entering an adjustment factor, you can increase or decrease the amounts that are suggested.;
+                             NLD=Hiermee wordt een herwaarderingsfactor opgegeven om de artikelprijs mee te vermenigvuldigen die u wilt voorstellen. Door een herwaarderingsfactor in te voeren kunt u de bedragen die worden voorgesteld, verhogen of verlagen.;
+                             NOR=Angir en justeringsfaktor for Ü multiplisere vareprisen du vil foreslÜ. Ved Ü angi en justeringsfaktor, kan du õke eller minske belõpene som foreslÜs.];
+                  ApplicationArea=#Basic,#Suite;
+                  DecimalPlaces=0:5;
+                  SourceExpr=UnitPriceFactor;
+                  MinValue=0 }
+
+      { 6   ;2   ;Field     ;
+                  CaptionML=[DEU=Rundungsmethode;
+                             ENU=Rounding Method;
+                             NLD=Afrondingsmethode;
+                             NOR=Avrundingsmetode;
+                             SVE=Avrundningsmetod];
+                  ToolTipML=[DEU=Gibt einen Code fÅr die Rundungsmethode an, die auf Preise angewendet werden soll.;
+                             ENU=Specifies a code for the rounding method that you want applied to prices.;
+                             NLD=Hiermee wordt een code opgegeven voor de afrondingsmethode die op prijzen moet worden toegepast.;
+                             NOR=Angir en kode for avrundingsmetoden du vil skal gjelde for priser.];
+                  ApplicationArea=#Basic,#Suite;
+                  SourceExpr=RoundingMethod.Code;
+                  TableRelation="Rounding Method" }
+
+      { 7   ;2   ;Field     ;
+                  CaptionML=[DEU=Neue Preise generieren;
+                             ENU=Create New Prices;
+                             NLD=Nieuwe prijzen maken;
+                             NOR=Opprett nye priser];
+                  ToolTipML=[DEU=Gibt an, ob die Stapelverarbeitung neue PreisvorschlÑge generieren soll (z. B. eine neue Kombination aus WÑhrung, Verkaufscode und Zeit). Setzen Sie kein HÑkchen, wenn Sie nur bestehende Preise verÑndern mîchten.;
+                             ENU=Specifies if you want the batch job to create new price suggestions (for example, a new combination of currency, sales code and time). Don't insert a check mark if you only want to adjust existing sales prices.;
+                             NLD=Hiermee wordt opgegeven of u wilt dat de batchverwerking nieuwe prijsvoorstellen maakt (bijvoorbeeld een nieuwe combinatie van valuta, verkoopcode en tijd). Schakel het selectievakje uit als u alleen de bestaande verkoopprijzen wilt aanpassen.;
+                             NOR=Angir om du vil at kjõrselen skal opprette nye prisforslag (for eksempel en ny kombinasjon av valuta, salgskode og tidspunkt). Sett ikke en hake i dette feltet hvis du bare skal justere eksisterende salgspriser.];
+                  ApplicationArea=#Basic,#Suite;
+                  SourceExpr=CreateNewPrices }
+
+      { 1100525001;2;Field  ;
+                  CaptionML=[DEU=Preis basiert auf;
+                             ENU=Price based on;
+                             NLD=Prijs gebaseerd op];
+                  OptionCaptionML=[DEU=VK-Preis,Einstandspreis,Letzter Einkaufspreis;
+                                   ENU=SalesPrice,CostPrice,DirectUnitCost;
+                                   NLD=Verkoopprijs,Kostprijs,Laatste inkoopprijs];
+                  SourceExpr=PriceMethod }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'DEU=Artikel werden durchgelesen #1##########;ENU=Processing items  #1##########;NLD=Verwerken art.    #1##########;NOR=Behandler varer   #1##########';
+      RoundingMethod@1002 : Record 42;
+      SalesPrice@1003 : Record 7002;
+      SalesPriceWksh2@1004 : Record 7023;
+      SalesPriceWksh@1005 : Record 7023;
+      ToCust@1024 : Record 18;
+      ToCustPriceGr@1006 : Record 6;
+      ToCampaign@1022 : Record 11072034;
+      ToCurrency@1007 : Record 4;
+      CurrExchRate@1008 : Record 330;
+      ToUnitofMeasure@1009 : Record 204;
+      ItemUnitOfMeasure@1010 : Record 5404;
+      UOMMgt@1012 : Codeunit 5402;
+      Window@1013 : Dialog;
+      PriceAlreadyExists@1014 : Boolean;
+      CreateNewPrices@1015 : Boolean;
+      UnitPriceFactor@1016 : Decimal;
+      PriceLowerLimit@1017 : Decimal;
+      ToSalesType@1019 : 'Customer,Customer Price Group,All Customers,Campaign';
+      ToSalesCode@1020 : Code[20];
+      ToStartDate@1018 : Date;
+      ToEndDate@1011 : Date;
+      Text002@1021 : TextConst 'DEU=%1 muss angegeben werden.;ENU=%1 must be specified.;NLD=%1 moet opgegeven worden.;NOR=%1 mÜ angis.;SVE=%1 mÜste specificeras.';
+      SalesCodeCtrlEnable@19004995 : Boolean INDATASET;
+      ToStartDateCtrlEnable@19060085 : Boolean INDATASET;
+      ToEndDateCtrlEnable@19023823 : Boolean INDATASET;
+      PriceMethod@1100525001 : 'SalesPrice,CostPrice,DirectCost';
+      BasicPrice@1100525000 : Decimal;
+
+    [External]
+    PROCEDURE InitializeRequest@3(NewToSalesType@1005 : Option;NewToSalesCode@1004 : Code[20];NewToStartDateText@1002 : Date;NewToEndDateText@1000 : Date;NewToCurrCode@1001 : Code[10];NewToUOMCode@1003 : Code[10]);
+    BEGIN
+      ToSalesType := NewToSalesType;
+      ToSalesCode := NewToSalesCode;
+      ToStartDate := NewToStartDateText;
+      ToEndDate := NewToEndDateText;
+      ToCurrency.Code := NewToCurrCode;
+      ToUnitofMeasure.Code := NewToUOMCode;
+    END;
+
+    LOCAL PROCEDURE ToSalesCodeOnAfterValidate@19025830();
+    BEGIN
+      IF ToSalesType = ToSalesType::Campaign THEN
+        IF ToCampaign.GET(ToSalesCode) THEN BEGIN
+          ToStartDate := ToCampaign."Starting Date";
+          ToEndDate := ToCampaign."Ending Date";
+        END ELSE BEGIN
+          ToStartDate := 0D;
+          ToEndDate := 0D;
+        END;
+    END;
+
+    [External]
+    PROCEDURE InitializeRequest2@1(NewToSalesType@1005 : Option;NewToSalesCode@1004 : Code[20];NewToStartDateText@1002 : Date;NewToEndDateText@1000 : Date;NewToCurrCode@1001 : Code[10];NewToUOMCode@1003 : Code[10];NewPriceLowerLimit@1006 : Decimal;NewUnitPriceFactor@1007 : Decimal;NewRoundingMethodCode@1008 : Code[10];NewCreateNewPrices@1009 : Boolean);
+    BEGIN
+      InitializeRequest(NewToSalesType,NewToSalesCode,NewToStartDateText,NewToEndDateText,NewToCurrCode,NewToUOMCode);
+      PriceLowerLimit := NewPriceLowerLimit;
+      UnitPriceFactor := NewUnitPriceFactor;
+      RoundingMethod.Code := NewRoundingMethodCode;
+      CreateNewPrices := NewCreateNewPrices;
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeRoundMethod@2(VAR SalesPriceWorksheet@1000 : Record 7023;Item@1001 : Record 27;ToCurrency@1002 : Record 4;UnitPriceFactor@1003 : Decimal;PriceLowerLimit@1004 : Decimal;VAR CurrentUnitPrice@1005 : Decimal);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeModifyOrInsertSalesPriceWksh@4(VAR SalesPriceWorksheet@1000 : Record 7023);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

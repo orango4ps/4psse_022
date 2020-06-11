@@ -1,0 +1,183 @@
+OBJECT Codeunit 5352 CRM Order Status Update Job
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.00;
+  }
+  PROPERTIES
+  {
+    TableNo=472;
+    OnRun=BEGIN
+            UpdateOrders(GetLastLogEntryNo);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ConnectionNotEnabledErr@1002 : TextConst '@@@="%1 = CRM product name";ENU=The %1 connection is not enabled.;NOR=%1-tilkoblingen er ikke aktivert.;SVE=%1-anslutningen har inte aktiverats.';
+      CRMProductName@1004 : Codeunit 5344;
+      OrderStatusUpdatedMsg@1008 : TextConst 'ENU=Sent messages about status change of sales orders.;NOR=Sendte meldinger om endring av ordrestatusen.';
+      OrderStatusReleasedTxt@1007 : TextConst 'ENU=The order status has changed to Released.;NOR=Ordrestatusen er endret til Frigitt.';
+      OrderShipmentCreatedTxt@1006 : TextConst 'ENU=A shipment has been created for the order.;NOR=En levering er opprettet for ordren.';
+      OrderInvoiceCreatedTxt@1005 : TextConst 'ENU=An invoice has been created for the order.;NOR=En faktura er opprettet for ordren.';
+
+    LOCAL PROCEDURE UpdateOrders@1(JobLogEntryNo@1011 : Integer);
+    VAR
+      CRMConnectionSetup@1004 : Record 5330;
+      ConnectionName@1006 : Text;
+    BEGIN
+      CRMConnectionSetup.GET;
+      IF NOT CRMConnectionSetup."Is Enabled" THEN
+        ERROR(ConnectionNotEnabledErr,CRMProductName.FULL);
+
+      ConnectionName := FORMAT(CREATEGUID);
+      CRMConnectionSetup.RegisterConnectionWithName(ConnectionName);
+      SETDEFAULTTABLECONNECTION(
+        TABLECONNECTIONTYPE::CRM,CRMConnectionSetup.GetDefaultCRMConnection(ConnectionName));
+
+      UpdateSalesOrders(JobLogEntryNo);
+
+      CRMConnectionSetup.UnregisterConnectionWithName(ConnectionName);
+    END;
+
+    LOCAL PROCEDURE UpdateSalesOrders@12(JobLogEntryNo@1000 : Integer);
+    VAR
+      IntegrationTableSynch@1002 : Codeunit 5335;
+      SynchActionType@1001 : 'None,Insert,Modify,ForceModify,IgnoreUnchanged,Fail,Skip,Delete';
+      Counter@1003 : Integer;
+    BEGIN
+      IntegrationTableSynch.BeginIntegrationSynchJobLoging(
+        TABLECONNECTIONTYPE::CRM,CODEUNIT::"CRM Order Status Update Job",JobLogEntryNo,DATABASE::"Sales Header");
+
+      Counter := CreateStatusPostOnModifiedOrders;
+      IntegrationTableSynch.UpdateSynchJobCounters(SynchActionType::Modify,Counter);
+
+      IntegrationTableSynch.EndIntegrationSynchJobWithMsg(GetOrderStatusUpdateFinalMessage);
+    END;
+
+    [External]
+    PROCEDURE GetOrderStatusUpdateFinalMessage@23() : Text;
+    BEGIN
+      EXIT(OrderStatusUpdatedMsg);
+    END;
+
+    [EventSubscriber(Table,472,OnFindingIfJobNeedsToBeRun)]
+    LOCAL PROCEDURE OnFindingIfJobNeedsToBeRun@65(VAR Sender@1000 : Record 472;VAR Result@1001 : Boolean);
+    VAR
+      CRMConnectionSetup@1002 : Record 5330;
+      CRMPostBuffer@1003 : Record 5387;
+    BEGIN
+      IF Sender."Object Type to Run" <> Sender."Object Type to Run"::Codeunit THEN
+        EXIT;
+
+      IF Sender."Object ID to Run" <> CODEUNIT::"CRM Order Status Update Job" THEN
+        EXIT;
+
+      IF NOT CRMConnectionSetup.GET THEN
+        EXIT;
+
+      IF NOT CRMConnectionSetup."Is Enabled" THEN
+        EXIT;
+
+      CRMPostBuffer.SETRANGE("Table ID",DATABASE::"Sales Header");
+      Result := NOT CRMPostBuffer.ISEMPTY;
+    END;
+
+    LOCAL PROCEDURE CreatePost@29(CRMSalesorder@1000 : Record 5353;Message@1002 : Text);
+    VAR
+      CRMPost@1003 : Record 5344;
+    BEGIN
+      CRMPost.PostId := CREATEGUID;
+      CRMPost.RegardingObjectId := CRMSalesorder.SalesOrderId;
+      CRMPost.RegardingObjectTypeCode := CRMPost.RegardingObjectTypeCode::salesorder;
+      CRMPost.Text := COPYSTR(Message,1,MAXSTRLEN(CRMPost.Text));
+      CRMPost.INSERT;
+    END;
+
+    LOCAL PROCEDURE FindCoupledCRMSalesOrder@33(VAR CRMSalesorder@1000 : Record 5353;SalesHeader@1001 : Record 36) : Boolean;
+    VAR
+      CRMIntegrationRecord@1003 : Record 5331;
+      CRMIntegrationManagement@1002 : Codeunit 5330;
+    BEGIN
+      IF NOT CRMIntegrationManagement.IsCRMIntegrationEnabled THEN
+        EXIT(FALSE);
+
+      IF NOT CRMIntegrationRecord.FindIDFromRecordID(SalesHeader.RECORDID,CRMSalesorder.SalesOrderId) THEN
+        EXIT(FALSE);
+
+      IF NOT CRMSalesorder.FIND THEN
+        EXIT(FALSE);
+
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE CreateStatusPostOnModifiedOrders@15() CreatedPosts : Integer;
+    VAR
+      CRMPostBuffer@1000 : Record 5387;
+      TempCRMPostBuffer@1001 : TEMPORARY Record 5387;
+    BEGIN
+      CRMPostBuffer.SETRANGE("Table ID",DATABASE::"Sales Header");
+      IF NOT CRMPostBuffer.FINDSET THEN
+        EXIT;
+
+      REPEAT
+        TempCRMPostBuffer.TRANSFERFIELDS(CRMPostBuffer);
+        TempCRMPostBuffer.INSERT;
+      UNTIL CRMPostBuffer.NEXT = 0;
+
+      IF TempCRMPostBuffer.FINDSET THEN
+        REPEAT
+          CreatedPosts += ProcessCRMPostBufferEntry(TempCRMPostBuffer);
+        UNTIL TempCRMPostBuffer.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ProcessCRMPostBufferEntry@17(VAR TempCRMPostBuffer@1000 : TEMPORARY Record 5387) : Integer;
+    VAR
+      CRMSalesorder@1001 : Record 5353;
+      SalesHeader@1002 : Record 36;
+    BEGIN
+      IF TempCRMPostBuffer."Table ID" <> DATABASE::"Sales Header" THEN
+        EXIT(0);
+
+      IF NOT SalesHeader.GET(TempCRMPostBuffer.RecId) THEN BEGIN
+        DeleteCRMPostBufferEntry(TempCRMPostBuffer);
+        EXIT(0);
+      END;
+
+      IF SalesHeader."Document Type" <> SalesHeader."Document Type"::Order THEN
+        EXIT(0);
+
+      IF NOT FindCoupledCRMSalesOrder(CRMSalesorder,SalesHeader) THEN BEGIN
+        DeleteCRMPostBufferEntry(TempCRMPostBuffer);
+        EXIT(0);
+      END;
+
+      CASE TempCRMPostBuffer.ChangeType OF
+        TempCRMPostBuffer.ChangeType::SalesDocReleased:
+          CreatePost(CRMSalesorder,OrderStatusReleasedTxt);
+        TempCRMPostBuffer.ChangeType::SalesShptHeaderCreated:
+          CreatePost(CRMSalesorder,OrderShipmentCreatedTxt);
+        TempCRMPostBuffer.ChangeType::SalesInvHeaderCreated:
+          CreatePost(CRMSalesorder,OrderInvoiceCreatedTxt);
+      END;
+
+      DeleteCRMPostBufferEntry(TempCRMPostBuffer);
+      EXIT(1);
+    END;
+
+    LOCAL PROCEDURE DeleteCRMPostBufferEntry@18(VAR TempCRMPostBuffer@1000 : TEMPORARY Record 5387);
+    VAR
+      CRMPostBuffer@1001 : Record 5387;
+    BEGIN
+      IF CRMPostBuffer.GET(TempCRMPostBuffer.ID) THEN
+        CRMPostBuffer.DELETE;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -1,0 +1,224 @@
+OBJECT Codeunit 11229296 Common Purch. Inv. Functions
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+
+    PROCEDURE DetermineOnHoldCodeBasedOnOrdersRelatedToInvoice@1100528414(InvoiceVariant@1100528402 : Variant;ConsiderCurrentOnHoldCode@1100528403 : Boolean;VAR RelatedPurchOrderNoCausingOnHold@1100528404 : Code[20]) : Code[3];
+    VAR
+      TempRelatedPurchaseOrder@1100528400 : TEMPORARY Record 38;
+      CurrentOnHoldCode@1100528401 : Code[3];
+    BEGIN
+      IF ConsiderCurrentOnHoldCode THEN BEGIN
+        CurrentOnHoldCode := GetCurrentOnHoldCode(InvoiceVariant);
+        IF CurrentOnHoldCodeMustBeKept(CurrentOnHoldCode) THEN
+          EXIT(CurrentOnHoldCode);
+      END ELSE
+        CurrentOnHoldCode := '';
+
+      IF NOT ContractOrLetterOfCreditCanBeApplicable THEN
+        EXIT(CurrentOnHoldCode);
+
+      GetOrdersRelatedToInvoice(TempRelatedPurchaseOrder, InvoiceVariant);
+      EXIT(DetermineOnHoldCodeBasedOnRelatedOrders(
+        TempRelatedPurchaseOrder, CurrentOnHoldCode, RelatedPurchOrderNoCausingOnHold));
+    END;
+
+    PROCEDURE DetermineOnHoldCodeOfInvoiceRelatedToCurrentOrder@1100528400(InvoiceVariant@1100528402 : Variant;CurrentPurchaseOrder@1100528401 : Record 38) : Code[3];
+    VAR
+      TempRelatedPurchaseOrder@1100528400 : TEMPORARY Record 38;
+      RelatedPurchOrderNoCausingOnHold@1100528403 : Code[20];
+    BEGIN
+      IF NOT ContractOrLetterOfCreditCanBeApplicable THEN
+        EXIT('');
+
+      GetOrdersRelatedToInvoice(TempRelatedPurchaseOrder, InvoiceVariant);
+      // Current purchase order should not be read from the database because
+      // "Return Date Signed Contract" or "Return Date Letter of Credit" may not be modified
+      // yet in the database.
+      IF TempRelatedPurchaseOrder.GET(
+        TempRelatedPurchaseOrder."Document Type"::Order, CurrentPurchaseOrder."No.")
+      THEN BEGIN
+        TempRelatedPurchaseOrder.COPY(CurrentPurchaseOrder);
+        TempRelatedPurchaseOrder.MODIFY;
+      END;
+      EXIT(DetermineOnHoldCodeBasedOnRelatedOrders(
+        TempRelatedPurchaseOrder, '', RelatedPurchOrderNoCausingOnHold));
+    END;
+
+    LOCAL PROCEDURE GetOrdersRelatedToInvoice@1100528422(VAR TempRelatedPurchaseOrder@1100528400 : TEMPORARY Record 38;InvoiceVariant@1100528404 : Variant);
+    VAR
+      PurchInvLine@1100528401 : Record 123;
+      PurchaseLine@1100528407 : Record 39;
+      PurchRcptLine@1100528402 : Record 121;
+      RelatedToHeaderPurchOrderNo@1100528403 : Code[20];
+      PostedPurchInvoiceNo@1100528405 : Code[20];
+      PurchInvoiceNo@1100528406 : Code[20];
+    BEGIN
+      RelatedToHeaderPurchOrderNo := GetRelatedToHeaderPurchOrderNo(InvoiceVariant);
+      PostedPurchInvoiceNo := GetPostedPurchInvoiceNo(InvoiceVariant);
+      PurchInvoiceNo := GetPurchInvoiceNo(InvoiceVariant);
+      IF RelatedToHeaderPurchOrderNo <> '' THEN
+        AddOrderToTempRelatedOrders(TempRelatedPurchaseOrder, RelatedToHeaderPurchOrderNo);
+      IF PostedPurchInvoiceNo <> '' THEN BEGIN
+        PurchInvLine.SETRANGE("Document No.", PostedPurchInvoiceNo);
+        IF PurchInvLine.FINDSET THEN
+          REPEAT
+            IF PurchRcptLine.GET(PurchInvLine."Receipt No.", PurchInvLine."Receipt Line No.") THEN
+              AddOrderToTempRelatedOrders(TempRelatedPurchaseOrder, PurchRcptLine."Order No.");
+          UNTIL PurchInvLine.NEXT = 0;
+      END;
+      IF PurchInvoiceNo <> '' THEN BEGIN
+        PurchaseLine.SETRANGE("Document Type", PurchaseLine."Document Type"::Invoice);
+        PurchaseLine.SETRANGE("Document No.", PurchInvoiceNo);
+        IF PurchaseLine.FINDSET THEN
+          REPEAT
+            IF PurchRcptLine.GET(PurchaseLine."Receipt No.", PurchaseLine."Receipt Line No.") THEN
+              AddOrderToTempRelatedOrders(TempRelatedPurchaseOrder, PurchRcptLine."Order No.");
+          UNTIL PurchaseLine.NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE DetermineOnHoldCodeBasedOnRelatedOrders@1100528433(VAR TempRelatedPurchaseOrder@1100528400 : TEMPORARY Record 38;CurrentOnHoldCode@1100528404 : Code[3];VAR RelatedPurchOrderNoCausingOnHold@1100528401 : Code[20]) : Code[3];
+    VAR
+      NewOnHoldCode@1100528405 : Code[3];
+    BEGIN
+      IF TempRelatedPurchaseOrder.FINDSET THEN
+        REPEAT
+          NewOnHoldCode := TempRelatedPurchaseOrder.DetermineOnHoldCodeForInvoice(CurrentOnHoldCode);
+          IF NewOnHoldCode <> '' THEN
+            RelatedPurchOrderNoCausingOnHold := TempRelatedPurchaseOrder."No.";
+        UNTIL (TempRelatedPurchaseOrder.NEXT = 0) OR (NewOnHoldCode <> '');
+
+      IF NewOnHoldCode <> '' THEN
+        EXIT(NewOnHoldCode);
+
+      EXIT(CurrentOnHoldCode);
+    END;
+
+    LOCAL PROCEDURE AddOrderToTempRelatedOrders@1100528443(VAR TempRelatedPurchaseOrder@1100528400 : TEMPORARY Record 38;PurchaseOrderNo@1100528401 : Code[20]);
+    VAR
+      PurchaseHeader@1100528402 : Record 38;
+    BEGIN
+      IF PurchaseHeader.GET(PurchaseHeader."Document Type"::Order, PurchaseOrderNo) THEN BEGIN
+        TempRelatedPurchaseOrder.COPY(PurchaseHeader);
+        IF TempRelatedPurchaseOrder.INSERT THEN;
+      END;
+    END;
+
+    PROCEDURE CurrentOnHoldCodeMustBeKept@1100528432(CurrentOnHoldCode@1100528400 : Code[3]) : Boolean;
+    VAR
+      PurchasesPayablesSetup@1100528401 : Record 312;
+    BEGIN
+      IF CurrentOnHoldCode <> '' THEN BEGIN
+        PurchasesPayablesSetup.GET;
+        IF (CurrentOnHoldCode <> PurchasesPayablesSetup."On Hold Code No Contract") AND
+           (CurrentOnHoldCode <> PurchasesPayablesSetup."On Hold Code No Letter of Cr.")
+        THEN
+          EXIT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE ContractOrLetterOfCreditCanBeApplicable@1100528421() : Boolean;
+    VAR
+      PurchasesPayablesSetup@1100528400 : Record 312;
+    BEGIN
+      PurchasesPayablesSetup.GET;
+      IF PurchasesPayablesSetup."On Hold No Contract" THEN
+        EXIT(TRUE);
+
+      IF PurchasesPayablesSetup."On Hold No Letter of Credit" AND
+         (PurchasesPayablesSetup."Min. Amt. Letter of Credit" > 0)
+      THEN
+        EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE GetCurrentOnHoldCode@1100528401(InvoiceVariant@1100528400 : Variant) : Code[3];
+    VAR
+      PurchaseHeader@1100528401 : Record 38;
+      FieldValueCode@1100528402 : Code[20];
+      IsPostedInvoice@1100528403 : Boolean;
+    BEGIN
+      GetPurchInvFieldValue(
+        InvoiceVariant, PurchaseHeader.FIELDNO("On Hold"), FieldValueCode, IsPostedInvoice);
+      EXIT(COPYSTR(FieldValueCode, 1, MAXSTRLEN(PurchaseHeader."On Hold")));
+    END;
+
+    LOCAL PROCEDURE GetRelatedToHeaderPurchOrderNo@1100528403(InvoiceVariant@1100528400 : Variant) : Code[20];
+    VAR
+      PurchaseHeader@1100528403 : Record 38;
+      FieldValueCode@1100528402 : Code[20];
+      IsPostedInvoice@1100528401 : Boolean;
+    BEGIN
+      GetPurchInvFieldValue(
+        InvoiceVariant, PurchaseHeader.FIELDNO("Related Purch. Order No."), FieldValueCode, IsPostedInvoice);
+      EXIT(FieldValueCode);
+    END;
+
+    LOCAL PROCEDURE GetPostedPurchInvoiceNo@1100528412(InvoiceVariant@1100528400 : Variant) : Code[20];
+    VAR
+      PurchaseHeader@1100528403 : Record 38;
+      FieldValueCode@1100528402 : Code[20];
+      IsPostedInvoice@1100528401 : Boolean;
+    BEGIN
+      GetPurchInvFieldValue(
+        InvoiceVariant, PurchaseHeader.FIELDNO("No."), FieldValueCode, IsPostedInvoice);
+      IF IsPostedInvoice THEN
+        EXIT(FieldValueCode);
+    END;
+
+    LOCAL PROCEDURE GetPurchInvoiceNo@1100528413(InvoiceVariant@1100528400 : Variant) : Code[20];
+    VAR
+      PurchaseHeader@1100528403 : Record 38;
+      FieldValueCode@1100528402 : Code[20];
+      IsPostedInvoice@1100528401 : Boolean;
+    BEGIN
+      GetPurchInvFieldValue(
+        InvoiceVariant, PurchaseHeader.FIELDNO("No."), FieldValueCode, IsPostedInvoice);
+      IF NOT IsPostedInvoice THEN
+        EXIT(FieldValueCode);
+    END;
+
+    LOCAL PROCEDURE GetPurchInvFieldValue@1100528417(InvoiceVariant@1100528400 : Variant;FieldNumber@1100528401 : Integer;VAR FieldValueCode@1100528402 : Code[20];VAR IsPostedInvoice@1100528403 : Boolean);
+    VAR
+      RecRef@1100528404 : RecordRef;
+      FieldRef@1100528405 : FieldRef;
+    BEGIN
+      CLEAR(FieldValueCode);
+      CLEAR(IsPostedInvoice);
+      IF NOT InvoiceVariant.ISRECORD THEN
+        EXIT;
+
+      RecRef.GETTABLE(InvoiceVariant);
+      CASE RecRef.NUMBER OF
+        DATABASE::"Purchase Header":
+          FieldRef := RecRef.FIELD(FieldNumber);
+        DATABASE::"Purch. Inv. Header":
+          BEGIN
+            FieldRef := RecRef.FIELD(FieldNumber);
+            IsPostedInvoice := TRUE;
+          END;
+        ELSE
+          EXIT;
+      END;
+
+      IF (UPPERCASE(FORMAT(FieldRef.TYPE)) = 'CODE') THEN
+        FieldValueCode := FieldRef.VALUE;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

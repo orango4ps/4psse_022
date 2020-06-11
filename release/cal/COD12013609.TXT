@@ -1,0 +1,1862 @@
+OBJECT Codeunit 12013609 Update Purchase Line
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=EXF513000,4PS;
+  }
+  PROPERTIES
+  {
+    TableNo=12013608;
+    OnRun=VAR
+            PurchHeader@1100285003 : Record 38;
+            PurchLine@1100285002 : Record 39;
+            DocLine@1100285001 : Record 12013609;
+            ChangeJournalLine@1100285004 : Record 12013618;
+            ExFlowSetup@1100285006 : Record 12013601;
+            NewLineNo@1100285000 : Integer;
+            DeleteLine@1100285005 : Boolean;
+          BEGIN
+            ExFlowSetup.GET;
+
+            ChangeJournalLine.RESET;
+            ChangeJournalLine.SETCURRENTKEY("Document No.","Accept Warning");
+            ChangeJournalLine.SETRANGE("Document Type","Document Type");
+            ChangeJournalLine.SETRANGE("Document No.","Document No.");
+            ChangeJournalLine.SETFILTER("Warning Message", '<>%1', '');
+            ChangeJournalLine.SETRANGE("Accept Warning", FALSE);
+            IF ChangeJournalLine.FINDFIRST THEN
+              ERROR(STRSUBSTNO(EXF08,ChangeJournalLine.FIELDCAPTION("Accept Warning"),ChangeJournalLine."Line No."));
+
+            ChangeJournalLine.RESET;
+            ChangeJournalLine.SETCURRENTKEY("Document No.");
+            ChangeJournalLine.SETRANGE("Document Type","Document Type");
+            ChangeJournalLine.SETRANGE("Document No.","Document No.");
+            IF ChangeJournalLine.FINDSET(TRUE) THEN BEGIN
+              REPEAT
+                PurchHeader.GET(ChangeJournalLine."Document Type",ChangeJournalLine."Document No.");
+                PurchHeader."New Line" := TRUE;
+                PurchHeader.MODIFY(FALSE);
+                DeleteLine := FALSE;
+
+                IF ChangeJournalLine."Document Type" = ChangeJournalLine."Document Type"::Order THEN BEGIN
+                  PurchHeader.GET(ChangeJournalLine."Document Type",ChangeJournalLine."Document No.");
+                  ReleasePurchDoc.PerformManualReopen(PurchHeader);
+                END;
+
+                NewLineNo := UpdateDocLine(ChangeJournalLine,DeleteLine,ExFlowSetup);
+                UpdateDocLineDimensions(ChangeJournalLine,NewLineNo,PurchHeader,ExFlowSetup);
+
+                IF ExFlowSetup."Delete Zero Lines" AND DeleteLine THEN
+                  IF PurchLine.GET(ChangeJournalLine."Document Type", ChangeJournalLine."Document No.", ChangeJournalLine."Line No.") THEN BEGIN
+                    IF DocLine.RetrieveRecord(DocLine,ChangeJournalLine."Document Type", ChangeJournalLine."Document No.", ChangeJournalLine."Line No.") THEN BEGIN
+                      DocLine.Flowstatus := DocLine.Flowstatus::Active;
+                      DocLine.MODIFY(FALSE);
+                    END;
+
+                    PurchLine.DELETE(TRUE);
+                  END;
+
+                PurchHeader."New Line" := FALSE;
+                PurchHeader.MODIFY(FALSE);
+              UNTIL ChangeJournalLine.NEXT = 0;
+
+              ChangeJournalLine.DELETEALL;
+            END;
+
+            IF Status = Status::Approved THEN
+              IF "Document Type" IN ["Document Type"::Invoice,"Document Type"::"Credit Memo"] THEN
+                SetStatusReadyForPosting(Rec,FALSE,ExFlowSetup);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ExFlow@1100285002 : Codeunit 12013601;
+      ReleasePurchDoc@1100285004 : Codeunit 415;
+      EXF05@1100285013 : TextConst 'ENU=Type %1 and No %2 is on hold!;SVE=Radtyp %1 och Nr %2 „r sp„rrat!';
+      EXF06@1100285012 : TextConst 'ENU=G/L Account %1 does not exist for document %2!;SVE=Redov. Konto %1 finns ej f”r dokument %2!';
+      EXF07@1100285011 : TextConst 'ENU=%1 must not be blank when %2 is set to Yes!;SVE=%1 f†r inte vara blankt f”r rad %2 n„r %3 „r satt till Ja!';
+      EXF08@1100285010 : TextConst 'ENU=%1 must be set to Yes for line %2;SVE=%1 m†ste vara Ja f”r rad %2';
+      ExDimMgt@1100285014 : Codeunit 12013605;
+      EXF09@1100285015 : TextConst 'ENU=Value %1 does not exist in table %2. Document %3 %4.;SVE=V„rde %1 finns ej i tabell %2! Dokument %3 %4.';
+      EXF10@1100285006 : TextConst 'ENU=Line is not connected to a receipt!;SVE=Rad „r inte kopplad mot inleverans!';
+      EXF11@1100285003 : TextConst 'ENU=Cannot find description.;SVE=Kan inte hitta beskrivning.';
+      EXF12@1100285001 : TextConst 'ENU=Processing documents @1@@@@@@@@@@@@@@@\;SVE=Processar dokument @1@@@@@@@@@@@@@@@\';
+      EXF13@1100285005 : TextConst 'ENU=Processing Lines     @2@@@@@@@@@@@@@@@;SVE=Processar rader    @2@@@@@@@@@@@@@@@';
+      EXF14@1100285000 : TextConst 'ENU=Job task %1 does not exist for job %2!;SVE=Projektaktivitet %1 finns ej f”r projekt %2!';
+      "***4PS***"@1101285000 : Integer;
+      cuExFlow4PS@1101285001 : Codeunit 12057160;
+
+    PROCEDURE UpdateDocLine@1100285010(ChangeJournalLine@1100285000 : Record 12013618;VAR DeleteLine@1100285011 : Boolean;ExFlowSetup@1100285013 : Record 12013601) NewLineNo : Integer;
+    VAR
+      PurchLine@1100285001 : Record 39;
+      PurchLineCopy@1100285002 : Record 39;
+      PurchLine2@1100285004 : Record 39;
+      PurchHeader@1100285003 : Record 38;
+      DocLine@1100285006 : Record 12013609;
+      DocLineDim@1100285007 : Record 12013611;
+      VATPostingSetup@1100285008 : Record 325;
+      ExWorkFlowMgt@1100285005 : Codeunit 12013593;
+      TempStrLen@1100285009 : Integer;
+      ExFlowSEMgt@1100285012 : Codeunit 12013598;
+      ExPeriodicMgt@1100285010 : Codeunit 12013599;
+    BEGIN
+      PurchHeader.GET(ChangeJournalLine."Document Type",ChangeJournalLine."Document No.");
+
+      VATPostingSetup.GET(PurchHeader."VAT Bus. Posting Group",ChangeJournalLine."VAT Prod. Posting Group");
+
+      NewLineNo := ChangeJournalLine."Line No.";
+
+      CASE ChangeJournalLine."Line Status" OF
+        ChangeJournalLine."Line Status":: "New Line" :
+          BEGIN
+            PurchLine2.RESET;
+            PurchLine2.SETCURRENTKEY("Document Type","Document No.","Line No.");
+            PurchLine2.SETRANGE("Document Type", ChangeJournalLine."Document Type");
+            PurchLine2.SETRANGE("Document No.", ChangeJournalLine."Document No.");
+            IF PurchLine2.FINDLAST THEN
+              NewLineNo := PurchLine2."Line No." + 10000
+            ELSE
+              NewLineNo := 10000;
+
+            PurchLine.INIT;
+            PurchLine."Document Type" := ChangeJournalLine."Document Type";
+            PurchLine."Document No." := ChangeJournalLine."Document No.";
+            PurchLine."Line No." := NewLineNo;
+            PurchLine."Buy-from Vendor No." := PurchHeader."Buy-from Vendor No.";
+
+            PurchLine.VALIDATE(Type,ChangeJournalLine."New Type");
+
+            //4PS
+            IF NOT cuExFlow4PS.ValidateChangeJnlNewLine(ChangeJournalLine,PurchLine) THEN BEGIN
+            //4PS
+              PurchLine.VALIDATE("No.",ChangeJournalLine."New No.");
+
+            PurchLine.VALIDATE("Gen. Prod. Posting Group", ChangeJournalLine."Gen. Prod. Posting Group");
+            PurchLine.VALIDATE("VAT Prod. Posting Group", ChangeJournalLine."VAT Prod. Posting Group");
+
+            IF ChangeJournalLine."New Description" <> '' THEN BEGIN
+              TempStrLen := MAXSTRLEN(PurchLine.Description);
+
+              IF STRLEN(ChangeJournalLine."New Description") > TempStrLen THEN BEGIN
+                IF FORMAT(ChangeJournalLine."New Description"[TempStrLen]) <> ' ' THEN
+                  REPEAT
+                    TempStrLen := TempStrLen - 1;
+                  UNTIL (FORMAT(ChangeJournalLine."New Description"[TempStrLen]) = ' ') OR (TempStrLen = 1);
+
+                IF TempStrLen = 1 THEN
+                  TempStrLen := MAXSTRLEN(PurchLine.Description);
+
+                PurchLine.Description := COPYSTR(ChangeJournalLine."New Description", 1, TempStrLen);
+                PurchLine."Description 2" := COPYSTR(ChangeJournalLine."New Description",TempStrLen + 1,
+                                                     MAXSTRLEN(PurchLine.Description));
+              END ELSE
+                PurchLine.Description := ChangeJournalLine."New Description";
+            END;
+
+            PurchLine.VALIDATE(Quantity,ChangeJournalLine."New Quantity");
+
+              PurchLine.VALIDATE("Job No.", ChangeJournalLine."New Job No.");
+              DocLine."Job No." := ChangeJournalLine."New Job No.";
+            //4PS
+            END;
+            //IF (DocLine."Job No." <> '') AND (ChangeJournalLine."New Job Task No." <> '') THEN BEGIN
+            //  IF JobTask.GET(DocLine."Job No.",ChangeJournalLine."New Job Task No.") THEN
+            //    PurchLine.VALIDATE("Job Task No.", ChangeJournalLine."New Job Task No.")
+            //  ELSE
+            //    ERROR(STRSUBSTNO(EXF14,ChangeJournalLine."New Job Task No.",DocLine."Job No."));
+            //END
+            //ELSE
+            //  PurchLine.VALIDATE("Job Task No.", ChangeJournalLine."New Job Task No.");
+            //4PS
+
+            PurchLine.VALIDATE("Direct Unit Cost",ChangeJournalLine."New Direct Unit Cost");
+            PurchLine.VALIDATE("Unit Cost",ChangeJournalLine."New Direct Unit Cost");
+            PurchLine.VALIDATE("Line Discount %",ChangeJournalLine."New Line Discount %");
+            DocLine.RetrieveRecord(DocLine,PurchLine."Document Type",PurchLine."Document No.",ChangeJournalLine."Line No.");
+
+            DocLine."New Line" := FALSE;
+
+            PurchLine.VALIDATE("Invoice to Customer", ChangeJournalLine."New Invoice to Customer");
+            PurchLine.VALIDATE("Invoicing Amount", ChangeJournalLine."New Invoicing Amount");
+            IF ChangeJournalLine."New Start Date for Invoicing" <> 0D THEN
+              PurchLine.VALIDATE("Start Date for Invoicing", ChangeJournalLine."New Start Date for Invoicing")
+            ELSE
+              PurchLine."Start Date for Invoicing" := 0D;
+
+            IF ChangeJournalLine."New Invoicing Code" <> '' THEN
+              PurchLine.VALIDATE("Invoicing Code", ChangeJournalLine."New Invoicing Code")
+            ELSE
+              PurchLine."Invoicing Code" := '';
+
+            DocLine.MODIFY(FALSE);
+
+            PurchLine.Difference := PurchLine.Difference::Netto;
+
+            PurchLine.Approve := FALSE;
+            PurchLine.INSERT(TRUE);
+            //Force update of deferals
+            ExPeriodicMgt.UpdatePurchLineCodeunit_UpdatePerPurch(ChangeJournalLine,PurchLine,DocLine);
+            PurchLine.Approve := PurchHeader.Approve;
+            PurchLine.MODIFY;
+
+            IF NewLineNo <> ChangeJournalLine."Line No." THEN BEGIN
+              IF DocLine.RetrieveRecord(DocLine,ChangeJournalLine."Document Type", ChangeJournalLine."Document No.",ChangeJournalLine."Line No.") THEN
+                RenumberDocLine(DocLine,NewLineNo);
+            END;
+          END;
+
+        ChangeJournalLine."Line Status":: "Changed Line" :
+          BEGIN
+            PurchLine.GET(ChangeJournalLine."Document Type",ChangeJournalLine."Document No.",ChangeJournalLine."Line No.");
+            PurchLineCopy := PurchLine;
+            DocLine.RetrieveRecord(DocLine, PurchLine."Document Type", PurchLine."Document No.", PurchLine."Line No.");
+
+            IF ChangeJournalLine."New Type" = 0 THEN
+              ChangeJournalLine."New Type" := ChangeJournalLine.Type;
+
+            IF ChangeJournalLine."New Type" <> PurchLine.Type THEN BEGIN
+              PurchLine.VALIDATE(Type,ChangeJournalLine."New Type");
+              DocLine."Line Type" := ChangeJournalLine."New Type";
+            END;
+
+            //4PS
+            cuExFlow4PS.ValidateChangeJnlModifedLine(ChangeJournalLine,PurchLine,PurchLineCopy,DocLine);
+            //4PS
+            IF ChangeJournalLine."New No." <> PurchLineCopy."No." THEN BEGIN
+              PurchLine.VALIDATE("No.",ChangeJournalLine."New No.");
+              DocLine."No." := ChangeJournalLine."New No.";
+
+              ExFlowSEMgt.UpdateAccGroup(PurchLine,PurchLineCopy);
+            END;
+
+            SynchNoColumnFromChangedLine(PurchLine,DocLine);
+
+            IF ChangeJournalLine."Gen. Prod. Posting Group" <> PurchLineCopy."Gen. Prod. Posting Group" THEN
+              PurchLine.VALIDATE("Gen. Prod. Posting Group",ChangeJournalLine."Gen. Prod. Posting Group")
+            ELSE
+              PurchLine.VALIDATE("Gen. Prod. Posting Group",PurchLineCopy."Gen. Prod. Posting Group");
+
+            //4PSSE.so #24679
+            //  IF ChangeJournalLine."New VAT Prod. Posting Group" <> PurchLineCopy."VAT Prod. Posting Group" THEN
+            //  PurchLine.VALIDATE("VAT Prod. Posting Group",ChangeJournalLine."New VAT Prod. Posting Group")
+            //ELSE
+            //  PurchLine.VALIDATE("VAT Prod. Posting Group",PurchLineCopy."VAT Prod. Posting Group");
+            //4PSSE.eo
+
+            IF (((ChangeJournalLine."New Description" <> (PurchLineCopy.Description + PurchLineCopy."Description 2")) OR
+               (DocLine.Description <> ChangeJournalLine."New Description"))) THEN BEGIN
+                TempStrLen := MAXSTRLEN(PurchLine.Description);
+
+                IF STRLEN(ChangeJournalLine."New Description") > TempStrLen THEN BEGIN
+                  IF FORMAT(ChangeJournalLine."New Description"[TempStrLen]) <> ' ' THEN
+                    REPEAT
+                      TempStrLen := TempStrLen - 1;
+                    UNTIL (FORMAT(ChangeJournalLine."New Description"[TempStrLen]) = ' ') OR (TempStrLen = 1);
+
+                  IF TempStrLen = 1 THEN
+                    TempStrLen := MAXSTRLEN(PurchLine.Description);
+
+                  PurchLine.Description := COPYSTR(ChangeJournalLine."New Description", 1, TempStrLen);
+                  PurchLine."Description 2" := COPYSTR(ChangeJournalLine."New Description",TempStrLen + 1,
+                                                       MAXSTRLEN(PurchLine.Description));
+                END ELSE
+                  PurchLine.Description := ChangeJournalLine."New Description";
+
+                //4PS20200221
+                //IF NOT ((DocLine.Description = '') AND (ChangeJournalLine."New Description" = GetDescription(ChangeJournalLine))) THEN
+                IF ChangeJournalLine."New Description" <> DocLine.GetName THEN
+                  DocLine.Description := ChangeJournalLine."New Description";
+                //4PS20200221
+              END
+            ELSE
+              PurchLine.VALIDATE(Description,PurchLineCopy.Description);
+
+            IF (ChangeJournalLine."New Quantity" <> PurchLineCopy.Quantity) OR (DocLine.Quantity <> ChangeJournalLine."New Quantity") THEN BEGIN
+              PurchLine.VALIDATE(Quantity,ChangeJournalLine."New Quantity");
+              DocLine.Quantity := ChangeJournalLine."New Quantity";
+            END ELSE
+              PurchLine.VALIDATE(Quantity,PurchLineCopy.Quantity);
+
+            IF (ChangeJournalLine."New Job No." <> PurchLine."Job No.") OR (ChangeJournalLine."New Job No." <> DocLine."Job No.") THEN BEGIN
+              PurchLine.VALIDATE("Job No.", ChangeJournalLine."New Job No.");
+              DocLine."Job No." := ChangeJournalLine."New Job No.";
+              IF DocLineDim.RetrieveRecord(DocLineDim, PurchLine."Document Type", PurchLine."Document No.", PurchLine."Line No.",'JOB') THEN BEGIN
+                IF ChangeJournalLine."New Job No." = '' THEN
+                  DocLineDim.DELETE
+                ELSE BEGIN
+                  DocLineDim."Dimension Value" := ChangeJournalLine."New Job No.";
+                  DocLineDim.MODIFY;
+                END;
+              END;
+            END;
+
+            //4PS
+            //IF ChangeJournalLine."New Job Task No." <> PurchLine."Job Task No." THEN
+            //  BEGIN
+            //    IF (DocLine."Job No." <> '') AND (ChangeJournalLine."New Job Task No." <> '') THEN
+            //      IF NOT JobTask.GET(DocLine."Job No.",ChangeJournalLine."New Job Task No.") THEN
+            //        ERROR(STRSUBSTNO(EXF14,ChangeJournalLine."New Job Task No.",DocLine."Job No."));
+
+            //    PurchLine.VALIDATE("Job Task No.", ChangeJournalLine."New Job Task No.");
+            //    DocLine."Job Task No." := ChangeJournalLine."New Job Task No.";
+            //    IF DocLineDim.RetrieveRecord(DocLineDim, PurchLine."Document Type", PurchLine."Document No.",
+            //                      PurchLine."Line No.",'JOBTASK') THEN
+            //      BEGIN
+            //        IF ChangeJournalLine."New Job Task No." = '' THEN
+            //          DocLineDim.DELETE
+            //       ELSE
+            //          BEGIN
+            //            DocLineDim."Dimension Value" := ChangeJournalLine."New Job Task No.";
+            //            DocLineDim.MODIFY;
+            //          END;
+            //      END;
+            //  END;
+            //4PS
+
+            IF (ChangeJournalLine."New Direct Unit Cost" <> PurchLineCopy."Direct Unit Cost") OR (DocLine."Line Discount %" <> ChangeJournalLine."New Line Discount %") THEN BEGIN
+              PurchLine.VALIDATE("Direct Unit Cost",ChangeJournalLine."New Direct Unit Cost");
+              DocLine."Direct Unit Cost" := ChangeJournalLine."New Direct Unit Cost";
+            END ELSE
+              PurchLine.VALIDATE("Direct Unit Cost",PurchLineCopy."Direct Unit Cost");
+
+            IF ChangeJournalLine."New Line Discount %" <> PurchLineCopy."Line Discount %" THEN BEGIN
+              PurchLine.VALIDATE("Line Discount %",ChangeJournalLine."New Line Discount %");
+              DocLine."Line Discount %" := ChangeJournalLine."New Line Discount %";
+            END ELSE
+              PurchLine.VALIDATE("Line Discount %",PurchLineCopy."Line Discount %");
+
+            IF (ChangeJournalLine."New Invoice to Customer" <> PurchLine."Invoice to Customer") OR (DocLine."Invoice to Customer" <> ChangeJournalLine."New Invoice to Customer")THEN BEGIN
+              PurchLine.VALIDATE("Invoice to Customer", ChangeJournalLine."New Invoice to Customer");
+              DocLine."Invoice to Customer" := ChangeJournalLine."New Invoice to Customer";
+              IF DocLineDim.RetrieveRecord(DocLineDim, PurchLine."Document Type", PurchLine."Document No.", PurchLine."Line No.",'CUSTOMERINV') THEN BEGIN
+                IF ChangeJournalLine."New Invoice to Customer" = FALSE THEN
+                  DocLineDim.DELETE
+                ELSE BEGIN
+                  DocLineDim."Dimension Value" := FORMAT(ChangeJournalLine."New Invoice to Customer",0,'<Number>');
+                  DocLineDim.MODIFY;
+                END;
+              END;
+            END;
+
+            IF (ChangeJournalLine."New Invoicing Amount" <> PurchLine."Invoicing Amount") OR (DocLine."Invoicing Amount" <> ChangeJournalLine."New Invoicing Amount") THEN BEGIN
+              PurchLine.VALIDATE("Invoicing Amount", ChangeJournalLine."New Invoicing Amount");
+              DocLine."Invoicing Amount" := ChangeJournalLine."New Invoicing Amount";
+              IF DocLineDim.RetrieveRecord(DocLineDim, PurchLine."Document Type", PurchLine."Document No.", PurchLine."Line No.",'AMOUNTINV') THEN BEGIN
+                IF ChangeJournalLine."New Invoicing Amount" = 0 THEN
+                  DocLineDim.DELETE
+                ELSE BEGIN
+                  DocLineDim."Dimension Value" := FORMAT(ChangeJournalLine."New Invoicing Amount");
+                  DocLineDim.MODIFY;
+                END;
+              END;
+            END;
+
+            IF (ChangeJournalLine."New Start Date for Invoicing" <> PurchLine."Start Date for Invoicing") OR (DocLine."Start Date for Invoicing" <> ChangeJournalLine."New Start Date for Invoicing") THEN BEGIN
+              PurchLine.VALIDATE("Start Date for Invoicing", ChangeJournalLine."New Start Date for Invoicing");
+              DocLine."Start Date for Invoicing" := ChangeJournalLine."New Start Date for Invoicing";
+              IF DocLineDim.RetrieveRecord(DocLineDim, PurchLine."Document Type", PurchLine."Document No.", PurchLine."Line No.",'INVDATE') THEN BEGIN
+                IF ChangeJournalLine."New Start Date for Invoicing" = 0D THEN
+                  DocLineDim.DELETE
+                ELSE BEGIN
+                  DocLineDim."Dimension Value" := ExWorkFlowMgt.TransformDateToText(ChangeJournalLine."New Start Date for Invoicing");
+                  DocLineDim.MODIFY;
+                END;
+              END;
+            END;
+
+            IF (ChangeJournalLine."New Invoicing Code" <> PurchLine."Invoicing Code") OR (DocLine."Invoicing Code" <> ChangeJournalLine."New Invoicing Code") THEN BEGIN
+              IF ChangeJournalLine."New Invoicing Code" <> '' THEN BEGIN
+                PurchLine.VALIDATE("Invoicing Code", ChangeJournalLine."New Invoicing Code");
+                DocLine."Invoicing Code" := ChangeJournalLine."New Invoicing Code";
+              END ELSE BEGIN
+                PurchLine."Invoicing Code" := '';
+                DocLine."Invoicing Code" := '';
+              END;
+
+              IF DocLineDim.RetrieveRecord(DocLineDim, PurchLine."Document Type", PurchLine."Document No.", PurchLine."Line No.",'INV_CODE') THEN BEGIN
+                IF ChangeJournalLine."New Invoicing Code" = '' THEN
+                  DocLineDim.DELETE
+                ELSE BEGIN
+                  DocLineDim."Dimension Value" := ChangeJournalLine."New Invoicing Code";
+                  DocLineDim.MODIFY;
+                END;
+              END;
+            END;
+
+            IF (ChangeJournalLine."New VAT Prod. Posting Group" <> PurchLine."VAT Prod. Posting Group") OR (DocLine."VAT Prod. Posting Group" <> ChangeJournalLine."New VAT Prod. Posting Group") THEN BEGIN
+              PurchLine.VALIDATE("VAT Prod. Posting Group", ChangeJournalLine."New VAT Prod. Posting Group");
+              DocLine."VAT Prod. Posting Group" := ChangeJournalLine."New VAT Prod. Posting Group";
+              IF DocLineDim.RetrieveRecord(DocLineDim, PurchLine."Document Type", PurchLine."Document No.", PurchLine."Line No.",'VATPRODPOSTGRP') THEN BEGIN
+                IF ChangeJournalLine."New VAT Prod. Posting Group" = '' THEN
+                  DocLineDim.DELETE
+                ELSE BEGIN
+                  DocLineDim."Dimension Value" := ChangeJournalLine."New VAT Prod. Posting Group";
+                  DocLineDim.MODIFY;
+                END;
+              END;
+            END;
+
+            ExPeriodicMgt.UpdatePurchLineCodeunit_UpdatePerPurchFromDoc(ChangeJournalLine,PurchLine,DocLine);
+
+            DocLine.MODIFY(FALSE);
+
+            IF ExFlowSetup."Delete Zero Lines" THEN
+              IF PurchLine."Line Amount" = 0 THEN
+                DeleteLine := TRUE;
+          END;
+
+        ChangeJournalLine."Line Status":: "Receipt Line" :
+          BEGIN
+          END;
+
+        ChangeJournalLine."Line Status":: "Order Line" :
+          BEGIN
+          END;
+        END;
+
+      IF ExFlowSetup."Propose New Approvers Web" THEN
+        IF DocLine."Applied Template Rule" <> PurchLine."Applied Template Rule" THEN
+          PurchLine."Applied Template Rule" := DocLine."Applied Template Rule";
+
+      PurchLine.MODIFY(FALSE);
+    END;
+
+    PROCEDURE RenumberDocLine@1100285000(VAR DocLine@1100285000 : Record 12013609;NewLineNo@1100285001 : Integer);
+    VAR
+      DocLineDim@1100285005 : Record 12013611;
+      DocLineApp@1100285003 : Record 12013610;
+    BEGIN
+      DocLine."Line No." := NewLineNo;
+      DocLine.MODIFY;
+
+      // Change LineNo Document Line Dimension
+      DocLineDim.RESET;
+      DocLineDim.SETCURRENTKEY("Document Line ID");
+      DocLineDim.SETRANGE("Document Line ID", DocLine.ID);
+      IF DocLineDim.FINDSET(TRUE) THEN
+        REPEAT
+          DocLineDim."Document Type" := DocLine."Document Type";
+          DocLineDim."Document No." := DocLine."Document No.";
+          DocLineDim."Line No." := DocLine."Line No.";
+          DocLineDim.MODIFY;
+        UNTIL DocLineDim.NEXT = 0;
+
+      // Change LineNo Document Line Approvers
+      DocLineApp.RESET;
+      DocLineApp.SETCURRENTKEY("Document Line ID");
+      DocLineApp.SETRANGE("Document Line ID", DocLine.ID);
+      IF DocLineApp.FINDSET(TRUE) THEN
+        REPEAT
+          DocLineApp."Document Type" := DocLine."Document Type";
+          DocLineApp."Document No." := DocLine."Document No.";
+          DocLineApp."Line No." := DocLine."Line No.";
+          DocLineApp.MODIFY;
+        UNTIL DocLineApp.NEXT = 0;
+    END;
+
+    PROCEDURE ShowDocLineDim@1100285002(DocType@1100285005 : 'Quote,Order,Invoice,Credit Memo,Blanket Order,Return Order,Posted Invoice,Posted Credit Memo,Requisition';DocNo@1100285006 : Code[20];LineNo@1100285007 : Integer;DimSetID@1100285000 : Integer);
+    BEGIN
+      ExDimMgt.ShowDocLineDim(DocType,DocNo,LineNo,DimSetID);
+    END;
+
+    PROCEDURE CreateJournalLine@1100285006(ForcedBySync@1100285012 : Boolean;ExDocIn@1100285013 : Record 12013608);
+    VAR
+      DocHead2@1100285000 : Record 12013608;
+      ChangeJournalLine@1100285002 : Record 12013618;
+      GLAccount@1100285016 : Record 15;
+      LineAdvOpt@1100285007 : Record 12013596;
+      ExFlowSetup@1100285011 : Record 12013601;
+      DocHead@1100285005 : Record 12013608;
+      DocLine@1100285003 : Record 12013609;
+      Window@1100285004 : Dialog;
+      CounterTotal@1100285006 : Integer;
+      Counter@1100285008 : Integer;
+      LineCounterTotal@1100285010 : Integer;
+      LineCounter@1100285009 : Integer;
+    BEGIN
+      ExFlowSetup.GET;
+
+      ChangeJournalLine.RESET;
+      ChangeJournalLine.LOCKTABLE;
+      ChangeJournalLine.DELETEALL;
+
+      IF NOT ForcedBySync THEN BEGIN
+        DocHead.SETCURRENTKEY(Status);
+        DocHead.SETRANGE(Status,DocHead.Status::Approved);
+        DocHead.SETFILTER("Document Type",'%1|%2',DocHead."Document Type"::Invoice,DocHead."Document Type"::"Credit Memo");
+      END ELSE BEGIN
+        DocHead.RESET;
+        DocHead.SETRANGE(ID,ExDocIn.ID);
+      END;
+
+
+      IF GUIALLOWED THEN BEGIN
+        CounterTotal := DocHead.COUNT;
+        Counter := 1;
+
+        Window.OPEN(EXF12+EXF13);
+      END;
+
+      IF DocHead.FINDSET(TRUE,TRUE) THEN
+        REPEAT
+          DocHead2 := DocHead;
+
+          IF GUIALLOWED THEN BEGIN
+            Window.UPDATE(1,ROUND(Counter / CounterTotal * 10000,1));
+            Counter := Counter + 1;
+          END;
+
+          DocLine.RESET;
+          DocLine.SETCURRENTKEY("Document ID");
+          DocLine.SETRANGE("Document ID", DocHead.ID);
+
+          IF GUIALLOWED THEN BEGIN
+            LineCounterTotal := DocLine.COUNT;
+            LineCounter := 1;
+          END;
+
+          IF DocLine.FINDSET THEN
+            REPEAT
+              IF GUIALLOWED THEN BEGIN
+                Window.UPDATE(2,ROUND(LineCounter / LineCounterTotal * 10000,1));
+                LineCounter := LineCounter + 1;
+              END;
+
+              IF DocLine."Line Type" = DocLine."Line Type"::"G/L Account" THEN BEGIN
+                CLEAR(GLAccount);
+                IF (DocLine."No." <> '') AND NOT GLAccount.GET(DocLine."No.") THEN
+                  ERROR(STRSUBSTNO(EXF06,DocLine."No.",DocLine."Document No."));
+              END;
+
+              CLEAR(LineAdvOpt);
+              LineAdvOpt.RESET;
+              LineAdvOpt.SETRANGE(Type, DocLine."Line Type");
+              LineAdvOpt.SETFILTER("No.", '%1|%2', '', DocLine."No.");
+              LineAdvOpt.SETFILTER("Minimum Amount", '%1|<=%2', 0, DocLine.Amount);
+              IF LineAdvOpt.FINDLAST THEN;
+
+              CreateLine(DocLine,LineAdvOpt,FALSE,ExFlowSetup);
+            UNTIL DocLine.NEXT = 0;
+
+          IF DocHead.Status = DocHead.Status::Approved THEN BEGIN
+            ChangeJournalLine.RESET;
+            ChangeJournalLine.SETCURRENTKEY("Document No.");
+            ChangeJournalLine.SETRANGE("Document Type",DocHead."Document Type");
+            ChangeJournalLine.SETRANGE("Document No.",DocHead."Document No.");
+            IF NOT ChangeJournalLine.FINDFIRST THEN
+              SetStatusReadyForPosting(DocHead2,TRUE,ExFlowSetup);
+            END;
+        UNTIL DocHead.NEXT = 0;
+
+      IF GUIALLOWED THEN
+        Window.CLOSE;
+    END;
+
+    PROCEDURE CreateLine@1100285005(VAR DocLine@1100285003 : Record 12013609;LineAdvOpt@1100285013 : Record 12013596;NotConnectedToReceipt@1100285014 : Boolean;ExFlowSetup@1100285016 : Record 12013601);
+    VAR
+      Changed@1100285002 : Boolean;
+      PurchLine@1100285001 : Record 39;
+      PurchLineOriginal@1100285018 : Record 39;
+      DocLineOriginal@1100285019 : Record 12013609;
+      GLAcc@1100285011 : Record 15;
+      VATPostingSetup@1100285012 : Record 325;
+      ChangeJournalLine2@1100285005 : Record 12013618;
+      PurchHeader@1100285009 : Record 38;
+      CreateQuoteFromReq@1100285015 : Codeunit 12013614;
+      NewNum@1100285007 : Code[20];
+      NewType@1100285008 : Integer;
+      New@1100285004 : Boolean;
+      OriginalLineFound@1100285020 : Boolean;
+      ExPeriodicMgt@1100285000 : Codeunit 12013599;
+      "***4PS***"@1101285003 : Integer;
+      DimCode4PSserviceOrder@1101285000 : Code[20];
+      DimCode4PSCostObject@1101285001 : Code[20];
+      CostDim4PSExists@1101285002 : Boolean;
+      ServiceOrder4PSExist@1101285004 : Boolean;
+    BEGIN
+      Changed := FALSE;
+      New := FALSE;
+
+      ChangeJournalLine2.INIT;
+      ChangeJournalLine2."Document Type" := DocLine."Document Type";
+      ChangeJournalLine2."Document No." := DocLine."Document No.";
+      ChangeJournalLine2."Line No." := DocLine."Line No.";
+      ChangeJournalLine2."New Line No." := DocLine."Line No.";
+      ChangeJournalLine2.INSERT;
+
+      ChangeJournalLine2."New Type" := DocLine."Line Type";
+      ChangeJournalLine2."New No." := DocLine."No.";
+
+      IF DocLine."Line Type" <> 0 THEN BEGIN
+        GetNoFromDocLineDim(DocLine,NewType,NewNum,COMPANYNAME);
+        IF NewType <> 0 THEN
+          ChangeJournalLine2."New Type" := NewType;
+        IF NewNum <> '' THEN
+          ChangeJournalLine2."New No." := NewNum;
+      END;
+
+      ChangeJournalLine2."New Quantity" := DocLine.Quantity;
+      ChangeJournalLine2."New Direct Unit Cost" := DocLine."Direct Unit Cost";
+      ChangeJournalLine2."New Line Discount %" := DocLine."Line Discount %";
+
+      IF NOT DocLine."New Line" THEN BEGIN
+        PurchLine.GET(DocLine."Document Type",DocLine."Document No.",DocLine."Line No.");
+
+        ChangeJournalLine2."New Job No." := PurchLine."Job No.";
+        ChangeJournalLine2."New Job Task No." := PurchLine."Job Task No.";
+        ChangeJournalLine2."New Invoicing Code" := PurchLine."Invoicing Code";
+        ChangeJournalLine2."New Invoice to Customer" := PurchLine."Invoice to Customer";
+        ChangeJournalLine2."New Invoicing Amount" := PurchLine."Invoicing Amount";
+        ChangeJournalLine2."New Start Date for Invoicing" := PurchLine."Start Date for Invoicing";
+        ExPeriodicMgt.UpdatePurchLineCodeunit_UpdateNewPerChangeJnl(ChangeJournalLine2,PurchLine);
+      END;
+
+      IF ExFlow.GetColumnID('JOB') <> 0 THEN
+        ChangeJournalLine2."New Job No." := GetAddFromDocLineDim(DocLine, 'JOB', COMPANYNAME);
+      IF ExFlow.GetColumnID('JOBTASK') <> 0 THEN
+        ChangeJournalLine2."New Job Task No." := GetAddFromDocLineDim(DocLine, 'JOBTASK', COMPANYNAME);
+      IF ExFlow.GetColumnID('INV_CODE') <> 0 THEN
+        ChangeJournalLine2."New Invoicing Code" := GetAddFromDocLineDim(DocLine, 'INV_CODE', COMPANYNAME);
+      IF ExFlow.GetColumnID('CUSTOMERINV') <> 0 THEN
+        ChangeJournalLine2."New Invoice to Customer" := GetAddBooleanFromDocLineDim(DocLine, 'CUSTOMERINV', COMPANYNAME);
+      IF ExFlow.GetColumnID('AMOUNTINV') <> 0 THEN
+        ChangeJournalLine2."New Invoicing Amount" := GetAddDecimalFromDocLineDim(DocLine, 'AMOUNTINV', COMPANYNAME);
+      IF ExFlow.GetColumnID('INVDATE') <> 0 THEN
+        ChangeJournalLine2."New Start Date for Invoicing" := GetAddDateFromDocLineDim(DocLine, 'INVDATE', COMPANYNAME);
+      IF ExFlow.GetColumnID('DESCRIPTION') <> 0 THEN
+        ChangeJournalLine2."New Description" := GetAddTextFromDocLineDim(DocLine, 'DESCRIPTION', COMPANYNAME);
+      IF ExFlow.GetColumnID('PERCODE') <> 0 THEN
+        ChangeJournalLine2."New Periodic Template Code" := GetAddFromDocLineDim(DocLine, 'PERCODE', COMPANYNAME);
+      IF ExFlow.GetColumnID('PERDATE') <> 0 THEN
+        ChangeJournalLine2."New Periodic Starting Date" := GetAddDateFromDocLineDim(DocLine, 'PERDATE', COMPANYNAME);
+      IF ExFlow.GetColumnID('VATPRODPOSTGRP') <> 0 THEN
+        ChangeJournalLine2."New VAT Prod. Posting Group" := GetAddFromDocLineDim(DocLine, 'VATPRODPOSTGRP', COMPANYNAME);
+      //4PS
+      ServiceOrder4PSExist := cuExFlow4PS.GetServiceOrderNoCode(DimCode4PSserviceOrder);
+      IF ServiceOrder4PSExist THEN
+        ChangeJournalLine2."New Service Order No." := GetAddFromDocLineDim(DocLine, DimCode4PSserviceOrder, COMPANYNAME);
+
+      CostDim4PSExists := cuExFlow4PS.GetCostObjDimCode(DimCode4PSCostObject);
+      IF CostDim4PSExists THEN
+        ChangeJournalLine2."New Cost Object" := GetAddFromDocLineDim(DocLine, DimCode4PSCostObject, COMPANYNAME);
+      //4PS
+      IF DocLine."New Line" THEN BEGIN
+        CLEAR(PurchLine);
+        New := TRUE;
+        ChangeJournalLine2."Line Status" := ChangeJournalLine2."Line Status"::"New Line";
+          //4PS
+          IF DocLine.Description = '' THEN
+            //ChangeJournalLine2."New Description" := GetDescription(ChangeJournalLine2);
+            ChangeJournalLine2."New Description" := DocLine.GetName;
+          //4PS
+
+        IF DocLineOriginal.GET(DocLine."Split from Parent ID") THEN
+          OriginalLineFound := PurchLineOriginal.GET(DocLineOriginal."Document Type",DocLineOriginal."Document No.",DocLineOriginal."Line No.");
+
+        IF OriginalLineFound AND NOT ExFlowSetup."Update Chng. Jrnl. Post. Grps." THEN BEGIN
+          ChangeJournalLine2."Gen. Prod. Posting Group" := PurchLineOriginal."Gen. Prod. Posting Group";
+          ChangeJournalLine2."VAT Prod. Posting Group" := PurchLineOriginal."VAT Prod. Posting Group";
+        END ELSE BEGIN
+          GetProdPostingGroups(ChangeJournalLine2,ChangeJournalLine2."Gen. Prod. Posting Group",
+                                ChangeJournalLine2."VAT Prod. Posting Group");
+
+          PurchHeader.GET(DocLine."Document Type",DocLine."Document No.");
+          IF PurchHeader."Propose VAT Line" THEN
+            ChangeJournalLine2."VAT Prod. Posting Group" := ExFlowSetup."VAT Prod. Posting Group 0%";
+        END;
+
+        IF DocLine."Line Type" = DocLine."Line Type"::"G/L Account" THEN BEGIN
+          IF GLAcc.GET(DocLine."No.") THEN BEGIN
+            VATPostingSetup.RESET;
+            VATPostingSetup.SETRANGE("VAT Prod. Posting Group", GLAcc."VAT Prod. Posting Group");
+            VATPostingSetup.SETRANGE("VAT Calculation Type", VATPostingSetup."VAT Calculation Type"::"Full VAT");
+            IF VATPostingSetup.FINDFIRST THEN
+              ChangeJournalLine2."VAT Prod. Posting Group" := GLAcc."VAT Prod. Posting Group";
+          END;
+        END;
+
+        IF ChangeJournalLine2."New No." = '' THEN BEGIN
+          PurchLine."Line No." := DocLine."Line No.";
+          ChangeJournalLine2."New No." := CreateQuoteFromReq.FindNoMapping(DocLine,PurchHeader."Buy-from Vendor No.");
+
+          IF ChangeJournalLine2."New No." <> '' THEN BEGIN
+            IF DocLine.Description = '' THEN
+              ChangeJournalLine2."New Description" := GetDescription(ChangeJournalLine2);
+
+            GetProdPostingGroups(ChangeJournalLine2,ChangeJournalLine2."Gen. Prod. Posting Group",
+                                  ChangeJournalLine2."VAT Prod. Posting Group");
+
+            PurchHeader.GET(DocLine."Document Type",DocLine."Document No.");
+            IF PurchHeader."Propose VAT Line" THEN
+              ChangeJournalLine2."VAT Prod. Posting Group" := ExFlowSetup."VAT Prod. Posting Group 0%";
+            Changed := TRUE;
+          END;
+        END;
+      END ELSE BEGIN
+        // Existing line
+        PurchLine.GET(DocLine."Document Type",DocLine."Document No.",DocLine."Line No.");
+
+        ChangeJournalLine2.Type := PurchLine.Type;
+        ChangeJournalLine2."No." := PurchLine."No.";
+        ChangeJournalLine2.Description := PurchLine.Description + PurchLine."Description 2";
+          //4PS
+          IF DocLine.Description = '' THEN
+            //ChangeJournalLine2."New Description" := PurchLine.Description + PurchLine."Description 2";
+            ChangeJournalLine2."New Description" := DocLine.GetName;
+          //4PS
+        ChangeJournalLine2.Quantity := PurchLine.Quantity;
+        ChangeJournalLine2."Direct Unit Cost" := PurchLine."Direct Unit Cost";
+        ChangeJournalLine2."Line Discount %" := PurchLine."Line Discount %";
+        ChangeJournalLine2."Job No." := PurchLine."Job No.";
+        ChangeJournalLine2."Job Task No." := PurchLine."Job Task No.";
+        ExPeriodicMgt.UpdatePurchLineCodeunit_UpdatePerChangeJnl(ChangeJournalLine2,PurchLine);
+
+        ChangeJournalLine2."Job No." := PurchLine."Job No.";
+        ChangeJournalLine2."Job Task No." := PurchLine."Job Task No.";
+        ChangeJournalLine2."Invoicing Code" := PurchLine."Invoicing Code";
+        ChangeJournalLine2."Invoice to Customer" := PurchLine."Invoice to Customer";
+        ChangeJournalLine2."Invoicing Amount" := PurchLine."Invoicing Amount";
+        ChangeJournalLine2."Start Date for Invoicing" := PurchLine."Start Date for Invoicing";
+          //4PS
+          IF ServiceOrder4PSExist THEN BEGIN
+            ChangeJournalLine2."Service Order No." := PurchLine."Service Order No.";
+            IF ChangeJournalLine2."Service Order No." <> ChangeJournalLine2."New Service Order No." THEN
+              Changed := TRUE;
+          END;
+
+          //Not required as it will be identify in dim, but easier for checks ahead and for user interaction
+          IF CostDim4PSExists THEN BEGIN
+            ChangeJournalLine2."Cost Object" := PurchLine."Shortcut Dimension 2 Code";
+            IF ChangeJournalLine2."Cost Object" <> ChangeJournalLine2."New Cost Object" THEN
+              Changed := TRUE;
+          END;
+          //4PS
+
+        IF ExFlowSetup."Update Chng. Jrnl. Post. Grps." THEN BEGIN
+          GetProdPostingGroups(ChangeJournalLine2,ChangeJournalLine2."Gen. Prod. Posting Group",
+                                ChangeJournalLine2."VAT Prod. Posting Group");
+        END ELSE BEGIN
+          ChangeJournalLine2."Gen. Prod. Posting Group" := PurchLine."Gen. Prod. Posting Group";
+          ChangeJournalLine2."VAT Prod. Posting Group" := PurchLine."VAT Prod. Posting Group";
+        END;
+
+        ChangeJournalLine2.MODIFY;
+
+        IF ChangeJournalLine2.Type <> ChangeJournalLine2."New Type" THEN BEGIN
+          Changed := TRUE;
+          GetProdPostingGroups(ChangeJournalLine2,ChangeJournalLine2."Gen. Prod. Posting Group",
+                                ChangeJournalLine2."VAT Prod. Posting Group");
+        END;
+
+        IF ChangeJournalLine2."New No." = '' THEN BEGIN
+          ChangeJournalLine2."New No." := CreateQuoteFromReq.FindNoMapping(DocLine,PurchLine."Buy-from Vendor No.");
+
+          IF ChangeJournalLine2."New No." <> '' THEN BEGIN
+            Changed := TRUE;
+            GetProdPostingGroups(ChangeJournalLine2,ChangeJournalLine2."Gen. Prod. Posting Group",
+                                  ChangeJournalLine2."VAT Prod. Posting Group");
+          END;
+        END;
+
+        IF ChangeJournalLine2."No." <> ChangeJournalLine2."New No." THEN BEGIN
+          Changed := TRUE;
+          IF DocLine.Description = '' THEN
+            ChangeJournalLine2."New Description" := GetDescription(ChangeJournalLine2);
+          PurchHeader.GET(DocLine."Document Type",DocLine."Document No.");
+          IF PurchHeader."Propose VAT Line" THEN
+            ChangeJournalLine2."VAT Prod. Posting Group" := ExFlowSetup."VAT Prod. Posting Group 0%";
+        END;
+
+        IF DocLine.Description = '' THEN
+          ChangeJournalLine2."New Description" := GetDescription(ChangeJournalLine2)
+        ELSE
+          ChangeJournalLine2."New Description" := DocLine.Description;
+
+        IF ExFlow.GetColumnID('DESCRIPTION') <> 0 THEN
+          IF ChangeJournalLine2.Description <> ChangeJournalLine2."New Description" THEN
+            Changed := TRUE;
+
+        IF ChangeJournalLine2.Quantity <> ChangeJournalLine2."New Quantity" THEN
+          Changed := TRUE;
+
+        IF ChangeJournalLine2."Direct Unit Cost" <> ChangeJournalLine2."New Direct Unit Cost" THEN
+          Changed := TRUE;
+
+        IF ChangeJournalLine2."Line Discount %" <> ChangeJournalLine2."New Line Discount %" THEN
+          Changed := TRUE;
+
+        IF ExFlow.GetColumnID('JOB') <> 0 THEN
+          IF ChangeJournalLine2."Job No." <> ChangeJournalLine2."New Job No." THEN
+            Changed := TRUE;
+        IF ExFlow.GetColumnID('JOBTASK') <> 0 THEN
+          IF ChangeJournalLine2."Job Task No." <> ChangeJournalLine2."New Job Task No." THEN
+            Changed := TRUE;
+
+        IF ExFlow.GetColumnID('PERCODE') <> 0 THEN BEGIN
+          IF ChangeJournalLine2."Periodic Template Code" <> ChangeJournalLine2."New Periodic Template Code" THEN
+            Changed := TRUE;
+
+          IF ChangeJournalLine2."Periodic Starting Date" <> ChangeJournalLine2."New Periodic Starting Date" THEN
+            Changed := TRUE;
+        END;
+
+        IF ExFlow.GetColumnID('INV_CODE') <> 0 THEN
+          IF ChangeJournalLine2."New Invoicing Code" <> ChangeJournalLine2."New Invoicing Code" THEN
+            Changed := TRUE;
+        IF ExFlow.GetColumnID('CUSTOMERINV') <> 0 THEN
+          IF ChangeJournalLine2."New Invoice to Customer" <> ChangeJournalLine2."Invoice to Customer" THEN
+            Changed := TRUE;
+        IF ExFlow.GetColumnID('AMOUNTINV') <> 0 THEN
+          IF ChangeJournalLine2."New Invoicing Amount" <> ChangeJournalLine2."Invoicing Amount" THEN
+            Changed := TRUE;
+        IF ExFlow.GetColumnID('INVDATE') <> 0 THEN
+          IF ChangeJournalLine2."New Start Date for Invoicing" <> ChangeJournalLine2."Start Date for Invoicing" THEN
+            Changed := TRUE;
+        IF ExFlow.GetColumnID('VATPRODPOSTGRP') <> 0 THEN
+          IF ChangeJournalLine2."New VAT Prod. Posting Group" <> ChangeJournalLine2."VAT Prod. Posting Group" THEN
+            Changed := TRUE;
+
+        IF DimensionChanged(PurchLine) THEN BEGIN
+          Changed := TRUE;
+          ChangeJournalLine2."Dimension Status" := TRUE;
+        END;
+
+        IF LineAdvOpt."Set ExFlow Invoice On Hold" THEN
+          Changed := TRUE;
+
+        IF LineAdvOpt."Mandatory Invoice to Customer" THEN
+          IF NOT GetAddBooleanFromDocLineDim(DocLine, 'CUSTOMERINV', COMPANYNAME) THEN
+            Changed := TRUE;
+
+        IF LineAdvOpt."Mandatory Periodic code" THEN
+          IF (ChangeJournalLine2."New Periodic Template Code" = '') AND (ChangeJournalLine2."Periodic Template Code" = '') THEN
+            Changed := TRUE;
+
+        IF NOT NotConnectedToReceipt AND (Changed = FALSE) THEN BEGIN
+          ChangeJournalLine2.DELETE(FALSE);
+          EXIT;
+        END;
+      END;
+
+      IF LineAdvOpt."Set ExFlow Invoice On Hold" THEN
+        ChangeJournalLine2."Warning Message" := COPYSTR(STRSUBSTNO(EXF05,LineAdvOpt.Type,LineAdvOpt."No."),1,
+                                                        MAXSTRLEN(ChangeJournalLine2."Warning Message"));
+
+      IF LineAdvOpt."Mandatory Invoice to Customer" THEN
+        IF NOT GetAddBooleanFromDocLineDim(DocLine, 'CUSTOMERINV', COMPANYNAME) THEN
+          ChangeJournalLine2."Warning Message" := COPYSTR(STRSUBSTNO(EXF07,ChangeJournalLine2.FIELDCAPTION("Invoice to Customer"),
+                                                          LineAdvOpt.FIELDCAPTION("Mandatory Invoice to Customer")),1,
+                                                          MAXSTRLEN(ChangeJournalLine2."Warning Message"));
+      IF LineAdvOpt."Mandatory Periodic code" THEN
+        IF (ChangeJournalLine2."New Periodic Template Code" = '') AND (ChangeJournalLine2."Periodic Template Code" = '') THEN
+          ChangeJournalLine2."Warning Message" := COPYSTR(STRSUBSTNO(EXF07,ChangeJournalLine2.FIELDCAPTION("Periodic Template Code"),
+                                                          LineAdvOpt.FIELDCAPTION("Mandatory Periodic code")),1,
+                                                          MAXSTRLEN(ChangeJournalLine2."Warning Message"));
+
+      IF NotConnectedToReceipt THEN
+        ChangeJournalLine2."Warning Message" := COPYSTR(EXF10,1,MAXSTRLEN(ChangeJournalLine2."Warning Message"));
+
+      ChangeJournalLine2.MODIFY;
+    END;
+
+    PROCEDURE DimensionChanged@1100285013(PurchLine@1100285000 : Record 39) : Boolean;
+    BEGIN
+      EXIT(ExDimMgt.DimensionChanged(PurchLine));
+    END;
+
+    PROCEDURE GetDescription@1100285004(ChangedLine@1100285000 : Record 12013618) : Text[50];
+    VAR
+      Account@1100285004 : Record 15;
+      Item@1100285003 : Record 27;
+      Fixed@1100285002 : Record 5600;
+      Charge@1100285001 : Record 5800;
+    BEGIN
+      CASE ChangedLine."New Type" OF
+        1 : IF Account.GET(ChangedLine."New No.") THEN
+              EXIT(Account.Name);
+
+        2 : IF Item.GET(ChangedLine."New No.") THEN
+              EXIT(Item.Description);
+
+        4 : IF Fixed.GET(ChangedLine."New No.") THEN
+              EXIT(Fixed.Description);
+
+        5 : IF Charge.GET(ChangedLine."New No.") THEN
+              EXIT(Charge.Description);
+        ELSE
+          EXIT(EXF11);
+      END;
+    END;
+
+    PROCEDURE GetProdPostingGroups@1100285008(ChangedLine@1100285000 : Record 12013618;VAR GenProdPostinGroup@1100285005 : Code[10];VAR VATProdPostingGroup@1100285006 : Code[10]);
+    VAR
+      Account@1100285004 : Record 15;
+      Item@1100285003 : Record 27;
+      Fixed@1100285002 : Record 5600;
+      Charge@1100285001 : Record 5800;
+      ExFlowSetup@1100285007 : Record 12013601;
+    BEGIN
+      CASE ChangedLine."New Type" OF
+        1 :
+          IF Account.GET(ChangedLine."New No.") THEN BEGIN
+            GenProdPostinGroup := Account."Gen. Prod. Posting Group";
+            VATProdPostingGroup := Account."VAT Prod. Posting Group";
+          END;
+
+        2 :
+          IF Item.GET(ChangedLine."New No.") THEN BEGIN
+            GenProdPostinGroup := Item."Gen. Prod. Posting Group";
+            VATProdPostingGroup := Item."VAT Prod. Posting Group";
+          END;
+
+        4 :
+          IF Fixed.GET(ChangedLine."New No.") THEN BEGIN
+            GetFAPostingGroup(Fixed,GenProdPostinGroup,VATProdPostingGroup);
+          END;
+
+        5 :
+          IF Charge.GET(ChangedLine."New No.") THEN BEGIN
+            GenProdPostinGroup := Charge."Gen. Prod. Posting Group";
+            VATProdPostingGroup := Charge."VAT Prod. Posting Group";
+          END;
+      END;
+
+      ExFlowSetup.GET;
+      IF GenProdPostinGroup = '' THEN
+        GenProdPostinGroup := ExFlowSetup."Std. Prod. Posting Group";
+
+      IF VATProdPostingGroup = '' THEN
+        VATProdPostingGroup := ExFlowSetup."Std. VAT Prod. Posting Group";
+    END;
+
+    LOCAL PROCEDURE GetFAPostingGroup@10(Fixed@1100285002 : Record 5600;VAR GenProdPostinGroup@1100285001 : Code[10];VAR VATProdPostingGroup@1100285000 : Code[10]);
+    VAR
+      LocalGLAcc@1000 : Record 15;
+      FAPostingGr@1001 : Record 5606;
+      FADeprBook@1100285005 : Record 5612;
+      FASetup@1100285004 : Record 5603;
+      DepBookCode@1100285003 : Code[10];
+    BEGIN
+      IF (Fixed."No." = '') THEN
+        EXIT;
+      IF DepBookCode = '' THEN BEGIN
+        FASetup.GET;
+        DepBookCode := FASetup."Default Depr. Book";
+        IF NOT FADeprBook.GET(Fixed."No.",DepBookCode) THEN
+          DepBookCode := '';
+        IF DepBookCode = '' THEN
+          EXIT;
+      END;
+
+      FADeprBook.GET(Fixed."No.",DepBookCode);
+      FADeprBook.TESTFIELD("FA Posting Group");
+      FAPostingGr.GET(FADeprBook."FA Posting Group");
+      FAPostingGr.TESTFIELD("Acquisition Cost Account");
+      LocalGLAcc.GET(FAPostingGr."Acquisition Cost Account");
+      LocalGLAcc.CheckGLAcc;
+      LocalGLAcc.TESTFIELD("Gen. Prod. Posting Group");
+      GenProdPostinGroup := LocalGLAcc."Gen. Prod. Posting Group";
+      VATProdPostingGroup := LocalGLAcc."VAT Prod. Posting Group";
+    END;
+
+    PROCEDURE GetNoFromDocLineDim@1100285009(VAR DocLine@1100285000 : Record 12013609;VAR NewType@1100285002 : Integer;VAR NewNum@1100285003 : Code[20];CompName@1100285004 : Text[50]);
+    VAR
+      DocLineDim@1100285001 : Record 12013611;
+    BEGIN
+      // Get hidden Account No from DocLineApp
+      DocLineDim.RESET;
+      DocLineDim.CHANGECOMPANY(CompName);
+      DocLineDim.SETCURRENTKEY("Document Line ID");
+      DocLineDim.SETRANGE("Document Line ID", DocLine.ID);
+      DocLineDim.SETFILTER("Dimension Code", '%1|%2|%3|%4','G_LACCOUNT','ITEM','CHARGE','FIXEDASSET');
+
+      IF DocLineDim.FINDFIRST THEN BEGIN
+        CASE DocLineDim."Dimension Code" OF
+        'G_LACCOUNT' : NewType := 1;
+        'ITEM'       : NewType := 2;
+        'FIXEDASSET' : NewType := 4;
+        'CHARGE'     : NewType := 5
+        ELSE
+          NewType := 0;
+        END;
+
+        NewNum := DocLineDim."Dimension Value";
+      END ELSE BEGIN
+        NewType := 0;
+        NewNum := '';
+      END;
+    END;
+
+    PROCEDURE GetAddFromDocLineDim@1100285007(VAR DocLine@1100285000 : Record 12013609;FindCode@1100285002 : Code[50];CompName@1100285003 : Text[50]) : Code[20];
+    VAR
+      DocLineDim@1100285001 : Record 12013611;
+    BEGIN
+      // Get hidden Account No from DocLineApp
+
+      DocLineDim.RESET;
+      DocLineDim.CHANGECOMPANY(CompName);
+      DocLineDim.SETCURRENTKEY("Document Line ID");
+      DocLineDim.SETRANGE("Document Line ID", DocLine.ID);
+      DocLineDim.SETFILTER("Dimension Code", FindCode);
+
+      IF DocLineDim.FINDFIRST THEN BEGIN
+        EXIT(DocLineDim."Dimension Value");
+      END ELSE
+        EXIT('');
+    END;
+
+    PROCEDURE GetAddDateFromDocLineDim@1100285015(VAR DocLine@1100285000 : Record 12013609;FindCode@1100285002 : Code[50];CompName@1100285004 : Text[50]) : Date;
+    VAR
+      DocLineDim@1100285001 : Record 12013611;
+      ExReqToQuote@1100285003 : Codeunit 12013614;
+    BEGIN
+      // Get hidden Date No from DocLineApp
+
+      DocLineDim.RESET;
+      DocLineDim.CHANGECOMPANY(CompName);
+      DocLineDim.SETCURRENTKEY("Document Line ID");
+      DocLineDim.SETRANGE("Document Line ID", DocLine.ID);
+      DocLineDim.SETFILTER("Dimension Code", FindCode);
+
+      IF DocLineDim.FINDFIRST THEN BEGIN
+        EXIT(ExReqToQuote.DateField(DocLineDim."Dimension Value"));
+      END ELSE
+        EXIT(0D);
+    END;
+
+    PROCEDURE GetAddDecimalFromDocLineDim@1100285014(VAR DocLine@1100285000 : Record 12013609;FindCode@1100285002 : Code[50];CompName@1100285003 : Text[50]) : Decimal;
+    VAR
+      DocLineDim@1100285001 : Record 12013611;
+      TempValue@1100285004 : Decimal;
+    BEGIN
+      // Get decimal No from DocLineApp
+
+      DocLineDim.RESET;
+      DocLineDim.CHANGECOMPANY(CompName);
+      DocLineDim.SETCURRENTKEY("Document Line ID");
+      DocLineDim.SETRANGE("Document Line ID", DocLine.ID);
+      DocLineDim.SETFILTER("Dimension Code", FindCode);
+
+      IF DocLineDim.FINDFIRST THEN BEGIN
+        EVALUATE(TempValue, DocLineDim."Dimension Value");
+        EXIT(TempValue);
+      END ELSE
+        EXIT(0);
+    END;
+
+    PROCEDURE GetAddBooleanFromDocLineDim@1100285016(VAR DocLine@1100285000 : Record 12013609;FindCode@1100285002 : Code[50];CompName@1100285003 : Text[50]) : Boolean;
+    VAR
+      DocLineDim@1100285001 : Record 12013611;
+      TempValue@1100285004 : Boolean;
+    BEGIN
+      // Get Boolean No from DocLineApp
+
+      DocLineDim.RESET;
+      DocLineDim.CHANGECOMPANY(CompName);
+      DocLineDim.SETCURRENTKEY("Document Line ID");
+      DocLineDim.SETRANGE("Document Line ID", DocLine.ID);
+      DocLineDim.SETFILTER("Dimension Code", FindCode);
+
+      IF DocLineDim.FINDFIRST THEN BEGIN
+      CASE DocLineDim."Dimension Value" OF
+        'YES', 'JA', '1': TempValue := TRUE
+        ELSE
+          TempValue := FALSE;
+      END;
+
+        EXIT(TempValue);
+      END ELSE
+        EXIT(FALSE);
+    END;
+
+    PROCEDURE UpdateDocLineDimensions@1100285012(ChangeJournalLine@1100285003 : Record 12013618;NewLineNo@1100285007 : Integer;VAR PurchHeader@1100285008 : Record 38;ExFlowSetup@1100285000 : Record 12013601);
+    BEGIN
+      ExDimMgt.UpdateDocLineDimensions(ChangeJournalLine,NewLineNo,PurchHeader,ExFlowSetup);
+    END;
+
+    PROCEDURE CheckBlockedAccount@1100285003(ExDocHead@1100285004 : Record 12013608);
+    VAR
+      DocLine@1100285003 : Record 12013609;
+      ChangeJournalLine@1100285002 : Record 12013618;
+      GLAccount@1100285001 : Record 15;
+      LineAdvOpt@1100285005 : Record 12013596;
+      BlockedAccountUsed@1100285000 : Boolean;
+    BEGIN
+      WITH ExDocHead DO BEGIN
+        BlockedAccountUsed := FALSE;
+
+        ChangeJournalLine.RESET;
+        ChangeJournalLine.SETCURRENTKEY("Document No.");
+        ChangeJournalLine.SETRANGE("Document Type", "Document Type");
+        ChangeJournalLine.SETRANGE("Document No.", "Document No.");
+        IF ChangeJournalLine.FINDSET THEN BEGIN
+          REPEAT
+            IF ChangeJournalLine."New Type" = ChangeJournalLine."New Type"::"G/L Account" THEN BEGIN
+              IF ChangeJournalLine."New No." <> '' THEN
+                GLAccount.GET(ChangeJournalLine."New No.")
+              ELSE
+                GLAccount.GET(ChangeJournalLine."No.");
+            END;
+
+            LineAdvOpt.RESET;
+            LineAdvOpt.SETRANGE(Type, ChangeJournalLine."New Type");
+            LineAdvOpt.SETFILTER("No.", '%1|%2', '', ChangeJournalLine."New No.");
+            LineAdvOpt.SETFILTER("Minimum Amount", '%1|<=%2', 0,
+                 ChangeJournalLine."New Quantity" * ChangeJournalLine."New Direct Unit Cost" *
+                    (1 - ChangeJournalLine."New Line Discount %" / 100));
+            LineAdvOpt.SETRANGE("Set ExFlow Invoice On Hold", TRUE);
+            IF LineAdvOpt.FINDLAST THEN
+              BlockedAccountUsed := TRUE;
+          UNTIL (ChangeJournalLine.NEXT = 0) OR BlockedAccountUsed;
+        END ELSE BEGIN
+          DocLine.RESET;
+          DocLine.SETCURRENTKEY("Document ID");
+          DocLine.SETRANGE("Document ID", ID);
+          IF DocLine.FINDSET THEN
+            REPEAT
+              IF DocLine."Line Type" = DocLine."Line Type"::"G/L Account" THEN
+                GLAccount.GET(DocLine."No.");
+
+              LineAdvOpt.RESET;
+              LineAdvOpt.SETRANGE(Type, DocLine."Line Type");
+              LineAdvOpt.SETFILTER("No.", '%1|%2', '', DocLine."No.");
+              LineAdvOpt.SETFILTER("Minimum Amount", '%1|<=%2', 0, DocLine.Amount);
+              LineAdvOpt.SETRANGE("Set ExFlow Invoice On Hold", TRUE);
+              IF LineAdvOpt.FINDLAST THEN
+                BlockedAccountUsed := TRUE;
+            UNTIL (DocLine.NEXT = 0) OR BlockedAccountUsed;
+        END;
+      END;
+
+      IF BlockedAccountUsed THEN
+        ERROR(STRSUBSTNO(EXF05, GLAccount."No."));
+    END;
+
+    PROCEDURE AutoAssignItemCharge@1100285001(VAR DocHead@1100285000 : Record 12013608);
+    VAR
+      PurchLine@1100285010 : Record 39;
+      PurchLine2@1100285009 : Record 39;
+      ItemChargeAssgntPurch@1100285008 : Record 5805;
+      ItemChargeAssgntPurch2@1100285007 : Record 5805;
+      PurchHeader@1100285006 : Record 38;
+      Currency@1100285005 : Record 4;
+      ExFlowSetup@1100285018 : Record 12013601;
+      ItemChargeAssPurch@1100285004 : Codeunit 5805;
+      AssignableQty@1100285003 : Decimal;
+      AssgntAmount@1100285002 : Decimal;
+      NextLineNo@1100285001 : Integer;
+      ItemChargeAssgntLineAmt@1100285011 : Decimal;
+    BEGIN
+      ExFlowSetup.GET;
+      IF ExFlowSetup."Automatic Item Charge Assignt." = ExFlowSetup."Automatic Item Charge Assignt."::None THEN
+        EXIT;
+
+      PurchLine.RESET;
+      PurchLine.SETRANGE("Document Type", DocHead."Document Type");
+      PurchLine.SETRANGE("Document No.", DocHead."Document No.");
+      PurchLine.SETRANGE(Type, PurchLine.Type::"Charge (Item)");
+      IF NOT PurchLine.FINDSET THEN
+        EXIT;
+
+      PurchLine2.RESET;
+      PurchLine2.SETRANGE("Document Type", DocHead."Document Type");
+      PurchLine2.SETRANGE("Document No.", DocHead."Document No.");
+      PurchLine2.SETRANGE(Type, PurchLine.Type::Item);
+      IF NOT PurchLine2.FINDFIRST THEN
+        EXIT;
+
+      WITH PurchLine DO BEGIN
+        REPEAT
+          ItemChargeAssgntPurch.RESET;
+          ItemChargeAssgntPurch.SETRANGE("Document Type", PurchLine."Document Type");
+          ItemChargeAssgntPurch.SETRANGE("Document No.", PurchLine."Document No.");
+          ItemChargeAssgntPurch.SETRANGE("Document Line No.", PurchLine."Line No.");
+          ItemChargeAssgntPurch.DELETEALL;
+
+          PurchHeader.GET(PurchLine."Document Type",PurchLine."Document No.");
+          IF PurchHeader."Currency Code" = '' THEN
+            Currency.InitRoundingPrecision
+          ELSE
+            Currency.GET(PurchHeader."Currency Code");
+          IF ("Inv. Discount Amount" = 0) AND
+            ("Line Discount Amount" = 0) AND
+            (NOT PurchHeader."Prices Including VAT")
+          THEN
+            ItemChargeAssgntLineAmt := "Line Amount"
+          ELSE IF PurchHeader."Prices Including VAT" THEN
+            ItemChargeAssgntLineAmt := ROUND(("Line Amount" - "Inv. Discount Amount") / (1 + "VAT %" / 100), Currency."Amount Rounding Precision")
+          ELSE
+            ItemChargeAssgntLineAmt := "Line Amount" - "Inv. Discount Amount";
+
+          ItemChargeAssgntPurch."Document Type" := "Document Type";
+          ItemChargeAssgntPurch."Document No." := "Document No.";
+          ItemChargeAssgntPurch."Document Line No." := "Line No.";
+          ItemChargeAssgntPurch."Item Charge No." := "No.";
+          ItemChargeAssgntPurch."Unit Cost" := ROUND(ItemChargeAssgntLineAmt / Quantity, Currency."Unit-Amount Rounding Precision");
+
+          ItemChargeAssgntLineAmt := ROUND(ItemChargeAssgntLineAmt * ("Qty. to Invoice" / Quantity), Currency."Amount Rounding Precision");
+
+          IF "Document Type" IN ["Document Type"::"Return Order","Document Type"::"Credit Memo"] THEN
+            ItemChargeAssPurch.CreateDocChargeAssgnt(ItemChargeAssgntPurch,"Return Shipment No.")
+          ELSE
+            ItemChargeAssPurch.CreateDocChargeAssgnt(ItemChargeAssgntPurch,"Receipt No.");
+          CLEAR(ItemChargeAssPurch);
+
+          ItemChargeAssPurch.SuggestAssgnt2(PurchLine,"Qty. to Invoice",ItemChargeAssgntLineAmt,ExFlowSetup."Automatic Item Charge Assignt.");
+        UNTIL PurchLine.NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE UpdatePurchHeader@1100285011(_DocHead@1100285006 : Record 12013608);
+    VAR
+      ExDocPurchMapping@1100285005 : Record 12013617;
+      Field@1100285004 : Record 2000000041;
+      _PurchHeader@1100285003 : Record 38;
+      MapToFldRef@1100285001 : FieldRef;
+      MapToRecRef@1100285000 : RecordRef;
+      RecRef@1100285002 : RecordRef;
+      FldRef@1100285007 : FieldRef;
+      RecRefRel@1100285008 : RecordRef;
+      FldRefRel@1100285009 : FieldRef;
+      UpdateDone@1100285010 : Boolean;
+    BEGIN
+      ExDocPurchMapping.RESET;
+      IF ExDocPurchMapping.FINDSET THEN BEGIN
+        _PurchHeader.GET(_DocHead."Document Type",_DocHead."Document No.");
+        RecRef.GETTABLE(_DocHead);
+        MapToRecRef.GETTABLE(_PurchHeader);
+        UpdateDone := FALSE;
+        REPEAT
+          FldRef := RecRef.FIELD(ExDocPurchMapping."Field No.");
+          IF FORMAT(FldRef.VALUE) <> '' THEN BEGIN
+            MapToFldRef := MapToRecRef.FIELD(ExDocPurchMapping."Map to Field No.");
+
+            Field.SETRANGE(TableNo, DATABASE::"Purchase Header");
+            Field.SETRANGE("No.",ExDocPurchMapping."Map to Field No.");
+            Field.FINDFIRST;
+
+            IF Field.RelationTableNo <> 0 THEN BEGIN
+              RecRefRel.OPEN(Field.RelationTableNo);
+
+              IF Field.RelationFieldNo <> 0 THEN
+                FldRefRel := RecRefRel.FIELD(Field.RelationFieldNo)
+              ELSE
+                FldRefRel := RecRefRel.FIELD(1);
+
+              FldRefRel.SETRANGE(COPYSTR(FORMAT(FldRef.VALUE),1,Field.Len));
+              IF NOT RecRefRel.FINDFIRST THEN
+                ERROR(STRSUBSTNO(EXF09,COPYSTR(FORMAT(FldRef.VALUE),1,Field.Len),RecRefRel.CAPTION,_DocHead."Document Type", _DocHead."Document No."));
+
+              RecRefRel.CLOSE;
+            END;
+            MapToFldRef.VALUE := COPYSTR(FORMAT(FldRef.VALUE),1,Field.Len);
+            UpdateDone := TRUE;
+          END;
+        UNTIL ExDocPurchMapping.NEXT = 0;
+        IF UpdateDone THEN
+          MapToRecRef.MODIFY;
+      END;
+    END;
+
+    PROCEDURE ConnectToReceipt@1100285017(VAR DocHead@1100285000 : Record 12013608;CallPostReceipt@1100285005 : Boolean) : Boolean;
+    VAR
+      PurchLine@1100285001 : Record 39;
+      PurchOrderLine@1100285004 : Record 39;
+      TempPurchOrderHeader@1100285002 : TEMPORARY Record 38;
+      TempPurchLine@1100285003 : TEMPORARY Record 39;
+      ExFlowSetup@1100285006 : Record 12013601;
+    BEGIN
+      ExFlowSetup.GET;
+      IF ExFlowSetup."Order Applies-to" <> ExFlowSetup."Order Applies-to"::"First Order then Receipt" THEN
+        EXIT(TRUE);
+
+      IF NOT (DocHead."Document Type" IN [DocHead."Document Type"::Invoice,DocHead."Document Type"::"Credit Memo"]) THEN
+        EXIT(TRUE);
+
+      TempPurchLine.RESET;
+      TempPurchLine.DELETEALL;
+      TempPurchOrderHeader.RESET;
+      TempPurchOrderHeader.DELETEALL;
+
+      PurchLine.RESET;
+      PurchLine.SETRANGE("Document Type", DocHead."Document Type");
+      PurchLine.SETRANGE("Document No.", DocHead."Document No.");
+      PurchLine.SETFILTER(Quantity, '>%1', 0);
+      IF PurchLine.FINDSET(TRUE) THEN
+        REPEAT
+          ConnectToReceiptLine(PurchLine);
+
+          IF ExFlowSetup."Automatic Receipt Order" IN [ExFlowSetup."Automatic Receipt Order"::"All documents",
+                                                    ExFlowSetup."Automatic Receipt Order"::"Matched Orders from invoice only"] THEN
+
+            IF (PurchLine."ExFlow Order No." <> '') AND (PurchLine."Receipt No." = '') AND (PurchLine."Return Shipment No." = '') THEN BEGIN
+              CASE PurchLine."Document Type" OF
+                PurchLine."Document Type"::Invoice:
+                  BEGIN
+                    PurchOrderLine.GET(PurchLine."Document Type"::Order,PurchLine."ExFlow Order No.",PurchLine."ExFlow Order Line No.");
+                    IF (PurchOrderLine."Quantity Received" <> 0) AND ((PurchLine."No." <> PurchOrderLine."No.") OR
+                        (PurchLine.Type <> PurchOrderLine.Type)) THEN
+                      CreateNewPOLine(PurchOrderLine,PurchLine);
+
+                    TempPurchLine.INIT;
+                    TempPurchLine.TRANSFERFIELDS(PurchLine);
+                    TempPurchLine.INSERT;
+
+                    TempPurchOrderHeader.RESET;
+                    TempPurchOrderHeader.SETRANGE("Document Type", TempPurchOrderHeader."Document Type"::Order);
+                    TempPurchOrderHeader.SETRANGE("No.", PurchLine."ExFlow Order No.");
+                    IF NOT TempPurchOrderHeader.FINDFIRST THEN BEGIN
+                      TempPurchOrderHeader."Document Type" := TempPurchOrderHeader."Document Type"::Order;
+                      TempPurchOrderHeader."No." := PurchLine."ExFlow Order No.";
+                      TempPurchOrderHeader.INSERT;
+                    END;
+                  END;
+                PurchLine."Document Type"::"Credit Memo":
+                  BEGIN
+                    PurchOrderLine.GET(PurchLine."Document Type"::"Return Order",PurchLine."ExFlow Order No.",
+                                       PurchLine."ExFlow Order Line No.");
+
+                    IF (PurchOrderLine."Return Qty. Shipped" <> 0) AND (PurchLine."No." <> PurchOrderLine."No.") THEN
+                      CreateNewPOLine(PurchOrderLine,PurchLine);
+
+                    TempPurchLine.INIT;
+                    TempPurchLine.TRANSFERFIELDS(PurchLine);
+                    TempPurchLine.INSERT;
+
+                    TempPurchOrderHeader.RESET;
+                    TempPurchOrderHeader.SETRANGE("Document Type", TempPurchOrderHeader."Document Type"::"Return Order");
+                    TempPurchOrderHeader.SETRANGE("No.", PurchLine."ExFlow Order No.");
+                    IF NOT TempPurchOrderHeader.FINDFIRST THEN BEGIN
+                      TempPurchOrderHeader."Document Type" := TempPurchOrderHeader."Document Type"::"Return Order";
+                      TempPurchOrderHeader."No." := PurchLine."ExFlow Order No.";
+                      TempPurchOrderHeader.INSERT;
+                    END;
+                  END;
+              END;
+            END;
+        UNTIL PurchLine.NEXT = 0;
+
+      IF CallPostReceipt THEN BEGIN
+        TempPurchOrderHeader.RESET;
+        IF TempPurchOrderHeader.FIND('-') THEN
+          REPEAT
+            IF NOT PostReceipt(TempPurchOrderHeader,TempPurchLine,ExFlowSetup) THEN
+              EXIT(FALSE);
+          UNTIL TempPurchOrderHeader.NEXT = 0;
+
+        PurchLine.RESET;
+        PurchLine.SETRANGE("Document Type", DocHead."Document Type");
+        PurchLine.SETRANGE("Document No.", DocHead."Document No.");
+        IF PurchLine.FINDSET(TRUE) THEN
+          REPEAT
+            IF NOT ConnectToReceiptLine(PurchLine) THEN
+              EXIT(FALSE);
+          UNTIL PurchLine.NEXT = 0;
+      END;
+
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE ConnectToReceiptLine@1100285021(VAR PurchLine@1100285004 : Record 39) : Boolean;
+    VAR
+      PurchOrderLine@1100285003 : Record 39;
+      ReceiptLine@1100285002 : Record 121;
+      ReturnShipLine@1100285001 : Record 6651;
+      PurchLine2@1100285008 : Record 39;
+      GetPurchaseLine@1100285006 : Codeunit 12013630;
+      ProcessRec@1100285000 : Boolean;
+      ReceiptFound@1100285007 : Boolean;
+      InvQty@1100285005 : Decimal;
+      DocLine@1100285009 : Record 12013609;
+    BEGIN
+      PurchLine2 := PurchLine;
+
+      LineShouldBeConnectedToReceipt(PurchLine,ProcessRec);
+
+      IF ProcessRec THEN BEGIN
+        CASE PurchLine."Document Type" OF
+          PurchLine."Document Type"::Invoice:
+            BEGIN
+              PurchOrderLine.GET(PurchLine."Document Type"::Order,PurchLine."ExFlow Order No.",PurchLine."ExFlow Order Line No.");
+
+              ReceiptLine.RESET;
+              ReceiptLine.SETCURRENTKEY("Order No.");
+              ReceiptLine.SETRANGE("Order No.", PurchOrderLine."Document No.");
+              ReceiptLine.SETRANGE("Order Line No.", PurchOrderLine."Line No.");
+              ReceiptLine.SETRANGE("Qty. Rcd. Not Invoiced", PurchLine.Quantity);
+              ReceiptFound := FALSE;
+              InvQty := PurchLine.Quantity;
+              IF ReceiptLine.FINDSET THEN
+                REPEAT
+                  IF NOT GetPurchaseLine.LineMatched(ReceiptLine."Document No.",ReceiptLine."Line No.",PurchLine) THEN BEGIN
+                    ReceiptFound := TRUE;
+
+                    InvQty := PurchLine.Quantity;
+                    InvQty := InvQty - ReceiptLine."Qty. Rcd. Not Invoiced";
+                    IF InvQty > 0 THEN BEGIN
+                      PurchLine.VALIDATE(Quantity, ReceiptLine."Qty. Rcd. Not Invoiced");
+                      PurchLine.VALIDATE("Direct Unit Cost", PurchLine2."Direct Unit Cost");
+                      PurchLine.VALIDATE("Line Discount %", PurchLine2."Line Discount %");
+                      IF DocLine.RetrieveRecord(DocLine,PurchLine."Document Type",PurchLine."Document No.",PurchLine."Line No.") THEN
+                        IF DocLine.Quantity <> PurchLine.Quantity THEN BEGIN
+                          DocLine.Quantity := PurchLine.Quantity;
+                          DocLine.Amount := PurchLine."Line Amount";
+                          DocLine.MODIFY;
+                        END;
+                    END;
+
+                    PurchLine."Receipt No." := ReceiptLine."Document No.";
+                    PurchLine."Receipt Line No." := ReceiptLine."Line No.";
+                    PurchLine.MODIFY(TRUE);
+
+                    IF InvQty > 0 THEN BEGIN // invoiced quantity remains to be connected
+                      CreateNewInvLine(PurchLine);
+
+                      PurchLine."Receipt No." := '';
+                      PurchLine."Receipt Line No." := 0;
+                      PurchLine.VALIDATE(Quantity, InvQty);
+                      PurchLine.VALIDATE("Direct Unit Cost", PurchLine2."Direct Unit Cost");
+                      PurchLine.VALIDATE("Line Discount %", PurchLine2."Line Discount %");
+                      PurchLine.MODIFY(TRUE);
+                      IF DocLine.RetrieveRecord(DocLine,PurchLine."Document Type",PurchLine."Document No.",PurchLine."Line No.") THEN
+                        IF DocLine.Quantity <> PurchLine.Quantity THEN BEGIN
+                          DocLine.Quantity := PurchLine.Quantity;
+                          DocLine.Amount := PurchLine."Line Amount";
+                          DocLine.MODIFY;
+                        END;
+
+                      IF NOT ConnectToReceiptLine(PurchLine) THEN
+                        EXIT(FALSE);
+                    END;
+                  END;
+                UNTIL (ReceiptLine.NEXT = 0) OR ReceiptFound;
+
+              IF InvQty > 0 THEN BEGIN
+                ReceiptLine.SETFILTER("Qty. Rcd. Not Invoiced", '<>%1', 0);
+                IF ReceiptLine.FINDSET THEN
+                  REPEAT
+                    IF NOT GetPurchaseLine.LineMatched(ReceiptLine."Document No.",ReceiptLine."Line No.",PurchLine) THEN BEGIN
+                      ReceiptFound := TRUE;
+
+                      InvQty := PurchLine.Quantity;
+                      InvQty := InvQty - ReceiptLine."Qty. Rcd. Not Invoiced";
+                      IF InvQty > 0 THEN BEGIN
+                        PurchLine.VALIDATE(Quantity, ReceiptLine."Qty. Rcd. Not Invoiced");
+                        PurchLine.VALIDATE("Direct Unit Cost", PurchLine2."Direct Unit Cost");
+                        PurchLine.VALIDATE("Line Discount %", PurchLine2."Line Discount %");
+                        IF DocLine.RetrieveRecord(DocLine,PurchLine."Document Type",PurchLine."Document No.",PurchLine."Line No.") THEN
+                          IF DocLine.Quantity <> PurchLine.Quantity THEN BEGIN
+                            DocLine.Quantity := PurchLine.Quantity;
+                            DocLine.Amount := PurchLine."Line Amount";
+                            DocLine.MODIFY;
+                          END;
+                      END;
+
+                      PurchLine."Receipt No." := ReceiptLine."Document No.";
+                      PurchLine."Receipt Line No." := ReceiptLine."Line No.";
+                      PurchLine.MODIFY(TRUE);
+
+                      IF InvQty > 0 THEN BEGIN // invoiced quantity remains to be connected
+                        CreateNewInvLine(PurchLine);
+
+                        PurchLine."Receipt No." := '';
+                        PurchLine."Receipt Line No." := 0;
+                        PurchLine.VALIDATE(Quantity, InvQty);
+                        PurchLine.VALIDATE("Direct Unit Cost", PurchLine2."Direct Unit Cost");
+                        PurchLine.VALIDATE("Line Discount %", PurchLine2."Line Discount %");
+                        PurchLine.MODIFY(TRUE);
+                        IF DocLine.RetrieveRecord(DocLine,PurchLine."Document Type",PurchLine."Document No.",PurchLine."Line No.") THEN
+                          IF DocLine.Quantity <> PurchLine.Quantity THEN BEGIN
+                            DocLine.Quantity := PurchLine.Quantity;
+                            DocLine.Amount := PurchLine."Line Amount";
+                            DocLine.MODIFY;
+                          END;
+
+                        IF NOT ConnectToReceiptLine(PurchLine) THEN
+                          EXIT(FALSE);
+                      END;
+                    END;
+                  UNTIL (ReceiptLine.NEXT = 0) OR ReceiptFound;
+              END;
+            END;
+          PurchLine."Document Type"::"Credit Memo":
+            BEGIN
+              PurchOrderLine.GET(PurchLine."Document Type"::"Return Order",PurchLine."ExFlow Order No.",
+                                 PurchLine."ExFlow Order Line No.");
+
+              ReturnShipLine.RESET;
+              ReturnShipLine.SETCURRENTKEY("Return Order No.");
+              ReturnShipLine.SETRANGE("Return Order No.", PurchOrderLine."Document No.");
+              ReturnShipLine.SETRANGE("Return Order Line No.", PurchOrderLine."Line No.");
+              ReturnShipLine.SETFILTER("Return Qty. Shipped Not Invd.", '<>%1', 0);
+              ReceiptFound := FALSE;
+              IF ReturnShipLine.FINDSET THEN
+                REPEAT
+                  IF NOT GetPurchaseLine.LineMatched(ReturnShipLine."Document No.",ReturnShipLine."Line No.",PurchLine) THEN BEGIN
+                    ReceiptFound := TRUE;
+
+                    InvQty := PurchLine.Quantity;
+                    InvQty := InvQty - ReturnShipLine."Return Qty. Shipped Not Invd.";
+                    IF InvQty > 0 THEN BEGIN
+                      PurchLine.VALIDATE(Quantity, ReturnShipLine."Return Qty. Shipped Not Invd.");
+                      PurchLine.VALIDATE("Direct Unit Cost", PurchLine2."Direct Unit Cost");
+                      PurchLine.VALIDATE("Line Discount %", PurchLine2."Line Discount %");
+                      IF DocLine.RetrieveRecord(DocLine,PurchLine."Document Type",PurchLine."Document No.",PurchLine."Line No.") THEN
+                        IF DocLine.Quantity <> PurchLine.Quantity THEN BEGIN
+                          DocLine.Quantity := PurchLine.Quantity;
+                          DocLine.Amount := PurchLine."Line Amount";
+                          DocLine.MODIFY;
+                        END;
+                    END;
+
+                    PurchLine."Return Shipment No." := ReturnShipLine."Document No.";
+                    PurchLine."Return Shipment Line No." := ReturnShipLine."Line No.";
+                    PurchLine.MODIFY(TRUE);
+
+                    IF InvQty > 0 THEN BEGIN // invoiced quantity remains to be connected
+                      CreateNewInvLine(PurchLine);
+
+                      PurchLine."Return Shipment No." := '';
+                      PurchLine."Return Shipment Line No." := 0;
+                      PurchLine.VALIDATE(Quantity, InvQty);
+                      PurchLine.VALIDATE("Direct Unit Cost", PurchLine2."Direct Unit Cost");
+                      PurchLine.VALIDATE("Line Discount %", PurchLine2."Line Discount %");
+                      PurchLine.MODIFY(TRUE);
+                      IF DocLine.RetrieveRecord(DocLine,PurchLine."Document Type",PurchLine."Document No.",PurchLine."Line No.") THEN
+                        IF DocLine.Quantity <> PurchLine.Quantity THEN BEGIN
+                          DocLine.Quantity := PurchLine.Quantity;
+                          DocLine.Amount := PurchLine."Line Amount";
+                          DocLine.MODIFY;
+                        END;
+
+                      IF NOT ConnectToReceiptLine(PurchLine) THEN
+                        EXIT(FALSE);
+                    END;
+                  END;
+                UNTIL (ReturnShipLine.NEXT = 0) OR ReceiptFound;
+            END;
+        END;
+      END;
+
+      IF NOT ProcessRec THEN
+        EXIT(TRUE)
+      ELSE IF (PurchLine."Return Shipment No." <> '') OR (PurchLine."Receipt No." <> '') THEN
+        EXIT(TRUE)
+      ELSE
+        EXIT(FALSE);
+    END;
+
+    PROCEDURE LineShouldBeConnectedToReceipt@1100285024(VAR PurchLine@1100285000 : Record 39;VAR ProcessRec@1100285001 : Boolean);
+    VAR
+      PurchReceiptLine@1100285002 : Record 121;
+      ReturnShipLine@1100285003 : Record 6661;
+    BEGIN
+      ProcessRec := PurchLine."ExFlow Order No." <> '';
+
+      IF ProcessRec THEN
+        IF PurchLine."Document Type" = PurchLine."Document Type"::Invoice THEN BEGIN
+          ProcessRec := PurchLine."Receipt No." = '';
+
+          IF NOT ProcessRec THEN BEGIN
+            IF NOT PurchReceiptLine.GET(PurchLine."Receipt No.",PurchLine."Receipt Line No.") THEN
+              ProcessRec := TRUE
+            ELSE IF PurchLine.Quantity > PurchReceiptLine."Qty. Rcd. Not Invoiced" THEN
+              ProcessRec := TRUE
+          END;
+        END ELSE BEGIN
+          ProcessRec := PurchLine."Return Shipment No." = '';
+
+          IF NOT ProcessRec THEN BEGIN
+            IF NOT ReturnShipLine.GET(PurchLine."Return Shipment No.",PurchLine."Return Shipment Line No.") THEN
+              ProcessRec := TRUE
+            ELSE IF PurchLine.Quantity > ReturnShipLine."Return Qty. Rcd. Not Invd." THEN
+              ProcessRec := TRUE
+          END;
+        END;
+    END;
+
+    PROCEDURE PostReceipt@1100285019(PurchOrderHeader@1100285004 : Record 38;VAR TempPurchLine@1100285005 : TEMPORARY Record 39;ExFlowSetup@1100285007 : Record 12013601) : Boolean;
+    VAR
+      PurchOrderLine@1100285000 : Record 39;
+      PurchPost@1100285003 : Codeunit 90;
+      PostingLinesFound@1100285006 : Boolean;
+      DoNotPostLine@1100285002 : Boolean;
+    BEGIN
+      PurchOrderHeader.GET(PurchOrderHeader."Document Type",PurchOrderHeader."No.");
+
+      PostingLinesFound := FALSE;
+
+      // Update Qty. to Receive
+      PurchOrderLine.RESET;
+      PurchOrderLine.SETRANGE("Document Type", PurchOrderHeader."Document Type");
+      PurchOrderLine.SETRANGE("Document No.", PurchOrderHeader."No.");
+      PurchOrderLine.SETFILTER(Quantity, '>%1', 0);
+      IF PurchOrderLine.FINDSET THEN BEGIN
+        REPEAT
+          TempPurchLine.RESET;
+          IF TempPurchLine.SETCURRENTKEY("ExFlow Order No.") THEN;
+          TempPurchLine.SETRANGE("ExFlow Order No.", PurchOrderLine."Document No.");
+          TempPurchLine.SETRANGE("ExFlow Order Line No.",PurchOrderLine."Line No.");
+          IF TempPurchLine.FIND('-') THEN
+            PostingLinesFound := TRUE;
+        UNTIL (PurchOrderLine.NEXT = 0) OR PostingLinesFound;
+
+        IF PostingLinesFound THEN BEGIN
+          PurchOrderLine.FINDSET(TRUE);
+          REPEAT
+            DoNotPostLine := FALSE;
+            PurchOrderLine.SuspendStatusCheck := TRUE;
+
+            TempPurchLine.RESET;
+            IF TempPurchLine.SETCURRENTKEY("ExFlow Order No.") THEN;
+            TempPurchLine.SETRANGE("ExFlow Order No.", PurchOrderLine."Document No.");
+            TempPurchLine.SETRANGE("ExFlow Order Line No.",PurchOrderLine."Line No.");
+            IF (NOT TempPurchLine.FIND('-')) OR DoNotPostLine THEN
+              PurchOrderLine.VALIDATE("Qty. to Receive", 0)
+            ELSE BEGIN
+              IF (PurchOrderLine.Quantity - PurchOrderLine."Quantity Received") < TempPurchLine.Quantity THEN
+                PurchOrderLine.VALIDATE(Quantity, TempPurchLine.Quantity + PurchOrderLine."Quantity Received");
+
+              PurchOrderLine.VALIDATE("Qty. to Receive", TempPurchLine.Quantity);
+            END;
+
+            PurchOrderLine.MODIFY(FALSE);
+          UNTIL PurchOrderLine.NEXT = 0;
+        END;
+
+        // Receipt
+        IF PostingLinesFound THEN BEGIN
+          PurchOrderHeader.SetHideValidationDialog(TRUE);
+          PurchOrderHeader.Receive := TRUE;
+          PurchOrderHeader.Invoice := FALSE;
+          IF ExFlowSetup."Set Posting Date to (Web Rec.)" = ExFlowSetup."Set Posting Date to (Web Rec.)"::"Today's date" THEN
+            PurchOrderHeader.VALIDATE("Posting Date", TODAY);
+          PurchOrderHeader.MODIFY(FALSE);
+
+          PurchOrderLine.RESET;
+          PurchOrderLine.SETRANGE("Document Type", PurchOrderHeader."Document Type");
+          PurchOrderLine.SETRANGE("Document No.", PurchOrderHeader."No.");
+          PurchOrderLine.SETFILTER("Qty. to Receive", '>%1', 0);
+          IF PurchOrderLine.FINDFIRST THEN BEGIN
+            COMMIT;
+            CLEAR(PurchPost);
+            EXIT(PurchPost.RUN(PurchOrderHeader));
+          END;
+        END;
+      END;
+    END;
+
+    PROCEDURE CreateNewPOLine@1100285020(VAR PurchOrderLine@1100285004 : Record 39;VAR PurchLine@1100285000 : Record 39);
+    VAR
+      PurchOrderLine2@1100285002 : Record 39;
+      TempLineNo@1100285003 : Integer;
+      ExFlowCustomReceipt@1100285001 : Codeunit 12013628;
+    BEGIN
+      PurchOrderLine2.RESET;
+      PurchOrderLine2.LOCKTABLE;
+      PurchOrderLine2.SETRANGE("Document Type", PurchOrderLine."Document Type");
+      PurchOrderLine2.SETRANGE("Document No.", PurchOrderLine."Document No.");
+      PurchOrderLine2.FINDLAST;
+      TempLineNo := PurchOrderLine2."Line No." + 10000;
+
+      CLEAR(ExDimMgt);
+      ExDimMgt.CopyPurchLineDimToTemp(PurchLine);
+
+      PurchOrderLine2.INIT;
+      PurchOrderLine2.TRANSFERFIELDS(PurchOrderLine);
+      ExFlowCustomReceipt.ClearLine(PurchOrderLine2);
+      PurchOrderLine2."Line No." := TempLineNo;
+      PurchOrderLine2.VALIDATE("No.", PurchLine."No.");
+      PurchOrderLine2.VALIDATE(Quantity, PurchLine.Quantity);
+      PurchOrderLine2.INSERT;
+
+      ExDimMgt.CopyTempDimToPurchLine(PurchOrderLine2,TRUE);
+
+      PurchOrderLine := PurchOrderLine2;
+      PurchLine."ExFlow Order Line No." := PurchOrderLine2."Line No.";
+      PurchLine.MODIFY;
+    END;
+
+    PROCEDURE CreateNewInvLine@1100285018(VAR PurchLine@1100285000 : Record 39);
+    VAR
+      PurchLine2@1100285001 : Record 39;
+      TempLineNo@1100285003 : Integer;
+    BEGIN
+      PurchLine2.RESET;
+      PurchLine2.LOCKTABLE;
+      PurchLine2.SETRANGE("Document Type", PurchLine."Document Type");
+      PurchLine2.SETRANGE("Document No.", PurchLine."Document No.");
+      PurchLine2.FINDLAST;
+      TempLineNo := PurchLine2."Line No." + 10000;
+
+      CLEAR(ExDimMgt);
+      ExDimMgt.CopyPurchLineDimToTemp(PurchLine);
+
+      PurchLine2.INIT;
+      PurchLine2.TRANSFERFIELDS(PurchLine);
+      PurchLine2."Line No." := TempLineNo;
+      PurchLine2.INSERT;
+
+      CopyApproverInfo(PurchLine,PurchLine2);
+
+      ExDimMgt.CopyTempDimToPurchLine(PurchLine2, TRUE);
+
+      PurchLine := PurchLine2;
+    END;
+
+    PROCEDURE CopyApproverInfo@1100285023(FromPurchLine@1100285000 : Record 39;ToPurchLine@1100285007 : Record 39);
+    VAR
+      ExDocLine@1100285006 : Record 12013609;
+      NewExDocLine@1100285005 : Record 12013609;
+      ExDocLineApp@1100285004 : Record 12013610;
+      NewExDocLineApp@1100285003 : Record 12013610;
+      ExDocLineDim@1100285002 : Record 12013611;
+      NewExDocLineDim@1100285001 : Record 12013611;
+    BEGIN
+      ExDocLine.RESET;
+      ExDocLine.SETCURRENTKEY("Document No.");
+      ExDocLine.SETRANGE("Document Type", FromPurchLine."Document Type");
+      ExDocLine.SETRANGE("Document No.", FromPurchLine."Document No.");
+      ExDocLine.SETRANGE("Line No.", FromPurchLine."Line No.");
+      IF ExDocLine.FINDFIRST THEN BEGIN
+        NewExDocLine.INIT;
+        NewExDocLine.TRANSFERFIELDS(ExDocLine);
+        NewExDocLine.ID := 0;
+        NewExDocLine."Document Type" := ToPurchLine."Document Type";
+        NewExDocLine."Document No." := ToPurchLine."Document No.";
+        NewExDocLine."Line No." := ToPurchLine."Line No.";
+        NewExDocLine.INSERT;
+
+        ExDocLineApp.RESET;
+        ExDocLineApp.SETCURRENTKEY("Document Line ID");
+        ExDocLineApp.SETRANGE("Document Line ID",ExDocLine.ID);
+        IF ExDocLineApp.FINDSET THEN
+          REPEAT
+            NewExDocLineApp.INIT;
+            NewExDocLineApp.TRANSFERFIELDS(ExDocLineApp);
+            NewExDocLineApp.ID := 0;
+            NewExDocLineApp."Document Type" := NewExDocLine."Document Type";
+            NewExDocLineApp."Document No." := NewExDocLine."Document No.";
+            NewExDocLineApp."Line No." := NewExDocLine."Line No.";
+            NewExDocLineApp."Document Line ID" := NewExDocLine.ID;
+            NewExDocLineApp."Document ID" := NewExDocLine."Document ID";
+            NewExDocLineApp.INSERT;
+          UNTIL ExDocLineApp.NEXT = 0;
+
+        ExDocLineDim.RESET;
+        ExDocLineDim.SETCURRENTKEY("Document Line ID");
+        ExDocLineDim.SETRANGE("Document Line ID",ExDocLine.ID);
+        IF ExDocLineDim.FINDSET THEN
+          REPEAT
+            NewExDocLineDim.INIT;
+            NewExDocLineDim.TRANSFERFIELDS(ExDocLineDim);
+            NewExDocLineDim.ID := 0;
+            NewExDocLineDim."Document Type" := NewExDocLine."Document Type";
+            NewExDocLineDim."Document No." := NewExDocLine."Document No.";
+            NewExDocLineDim."Line No." := NewExDocLine."Line No.";
+            NewExDocLineDim."Document Line ID" := NewExDocLine.ID;
+            NewExDocLineDim."Document ID" := NewExDocLine."Document ID";
+            NewExDocLineDim.INSERT;
+          UNTIL ExDocLineDim.NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE SetStatusReadyForPosting@1100285022(VAR DocHead@1100285000 : Record 12013608;CreateChangeJnlLine@1100285002 : Boolean;ExFlowSetup@1100285001 : Record 12013601);
+    VAR
+      DocLine@1100285003 : Record 12013609;
+      LineAdvOpt@1100285004 : Record 12013596;
+      PurchLine@1100285006 : Record 39;
+      NotConnectedToReceipt@1100285005 : Boolean;
+    BEGIN
+      CLEARLASTERROR;
+      DocHead.GET(DocHead.ID);
+      IF NOT ConnectToReceipt(DocHead,TRUE) THEN BEGIN
+        DocHead."Error Message" := COPYSTR(GETLASTERRORTEXT,1,MAXSTRLEN(DocHead."Error Message"));
+        DocHead.MODIFY;
+        IF CreateChangeJnlLine THEN BEGIN
+          CLEAR(LineAdvOpt);
+
+          DocLine.RESET;
+          DocLine.SETCURRENTKEY("Document ID");
+          DocLine.SETRANGE("Document ID", DocHead.ID);
+          IF DocLine.FINDSET THEN
+            REPEAT
+              NotConnectedToReceipt := FALSE;
+              IF NOT DocLine."New Line" THEN
+                IF PurchLine.GET(DocLine."Document Type",DocLine."Document No.",DocLine."Line No.") THEN
+                  LineShouldBeConnectedToReceipt(PurchLine,NotConnectedToReceipt);
+
+              CreateLine(DocLine,LineAdvOpt,NotConnectedToReceipt,ExFlowSetup);
+            UNTIL DocLine.NEXT = 0;
+        END;
+      END ELSE BEGIN
+        DocHead.GET(DocHead.ID);
+        DocHead."Error Message" := '';
+
+        IF DocHead."Document Type" <> DocHead."Document Type"::Order THEN
+          DocHead.Status := DocHead.Status::"Ready for posting";
+
+        DocHead.MODIFY(TRUE);
+
+        AutoAssignItemCharge(DocHead);
+        UpdatePurchHeader(DocHead);
+      END;
+    END;
+
+    PROCEDURE GetAddTextFromDocLineDim@1100285027(VAR DocLine@1100285000 : Record 12013609;FindCode@1100285001 : Code[50];CompName@1100285002 : Text[50]) : Text;
+    VAR
+      DocLineDim@1100285003 : Record 12013611;
+    BEGIN
+      // Get Text No from DocLineApp
+      DocLineDim.RESET;
+      DocLineDim.CHANGECOMPANY(CompName);
+      DocLineDim.SETCURRENTKEY("Document Line ID");
+      DocLineDim.SETRANGE("Document Line ID",DocLine.ID);
+      DocLineDim.SETFILTER("Dimension Code",FindCode);
+
+      IF DocLineDim.FINDFIRST THEN
+        EXIT(DocLineDim."Dimension Desc.")
+      ELSE
+        EXIT('');
+    END;
+
+    LOCAL PROCEDURE SynchNoColumnFromChangedLine@1100285025(PurchLine@1100285000 : Record 39;VAR DocLine@1100285001 : Record 12013609);
+    VAR
+      DocLineDim@1100285003 : Record 12013611;
+      LineType@1100285004 : Code[20];
+    BEGIN
+      CASE PurchLine.Type OF
+        PurchLine.Type::"G/L Account" :
+          LineType := 'G_LACCOUNT';
+        PurchLine.Type::Item :
+          LineType := 'ITEM';
+        PurchLine.Type::"Fixed Asset" :
+          LineType := 'FIXEDASSET';
+        PurchLine.Type::"Charge (Item)" :
+          LineType := 'CHARGE';
+      END;
+
+      DocLine."No." := PurchLine."No.";
+
+      IF DocLineDim.RetrieveRecord(DocLineDim, PurchLine."Document Type", PurchLine."Document No.", PurchLine."Line No.", LineType) THEN
+        IF PurchLine."No." = '' THEN
+          DocLineDim.DELETE
+        ELSE IF PurchLine."No." <> DocLineDim."Dimension Value" THEN BEGIN
+          DocLineDim."Dimension Value" := PurchLine."No.";
+          DocLineDim.MODIFY;
+        END;
+    END;
+
+    BEGIN
+    {
+      190612 ORANGO.WG #24679 Change from SignUp
+      4PS20200221 Only update docline desc if not Account or 4PS Dim name
+    }
+    END.
+  }
+}
+

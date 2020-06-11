@@ -1,0 +1,175 @@
+OBJECT Codeunit 81613 Handyman File Import
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PSSE.HM;
+  }
+  PROPERTIES
+  {
+    OnRun=VAR
+            HandymanSetupTEMP@1100285500 : TEMPORARY Record 81609;
+          BEGIN
+            LOCKTIMEOUT(GUIALLOWED); // ITERO.MH 151102
+
+            IF NOT GetHandymanSetupThis THEN
+              EXIT;
+            IF NOT HandymanSetupThisComp."Leading Company" THEN
+              EXIT;
+
+            GetListOfCompaniesAndClientsForHandyman(HandymanSetupTEMP);
+
+            IF HandymanSetupTEMP.FINDSET THEN
+            REPEAT
+              LookForFiles(HandymanSetupTEMP);
+            UNTIL HandymanSetupTEMP.NEXT = 0;
+
+            ImportFiles;
+
+            RelaseImportLock(HandymanSetupTEMP);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      HandymanSetupThisComp@1100285100 : Record 81609;
+      HandymanSetupOtherComp@1100285101 : Record 81609;
+
+    LOCAL PROCEDURE GetListOfCompaniesAndClientsForHandyman@1100285502(VAR HandymanSetupTEMP@1100285502 : Record 81609);
+    VAR
+      Company@1100285501 : Record 2000000006;
+      PrimaryKeyInt@1100285503 : Integer;
+    BEGIN
+      PrimaryKeyInt := 1;
+      Company.SETFILTER(Name, '<>%1', COMPANYNAME);
+
+      // Lists through all Handyman Setup in all companies and create them as Temporary records
+      IF Company.FINDSET(FALSE) THEN REPEAT
+      //  HandymanSetupOtherComp.CHANGECOMPANY(Company.Name);
+        IF GetHandymanSetupOther(Company.Name) THEN
+          IF HandymanSetupOtherComp."Leading Company" AND (NOT HandymanSetupOtherComp."Job Active") THEN BEGIN
+            HandymanSetupOtherComp.LOCKTABLE;
+            IF GetHandymanSetupOther(Company.Name) THEN BEGIN
+              IF NOT HandymanSetupOtherComp."Job Active" THEN BEGIN
+                HandymanSetupOtherComp."Import Active" := TRUE; // Trigger Import
+                HandymanSetupOtherComp.MODIFY;
+                COMMIT;
+              END;
+              HandymanSetupTEMP.INIT;
+              HandymanSetupTEMP.COPY(HandymanSetupOtherComp);
+              HandymanSetupTEMP."Primary Key" := FORMAT(PrimaryKeyInt);
+              HandymanSetupTEMP."Company Name" := Company.Name;
+              HandymanSetupTEMP.INSERT;
+              PrimaryKeyInt += 1;
+            END;
+          END;
+      UNTIL Company.NEXT = 0;
+      COMMIT;   // 160107 ITERO.AC Added in order to avoid locks in other companies running Handyman Mgmt
+    END;
+
+    LOCAL PROCEDURE ImportFiles@1100285500();
+    VAR
+      HandymanImportBuffer@1100285500 : Record 81624;
+      cuHandymanWS@1100285501 : Codeunit 81612;
+    BEGIN
+      IF NOT GetHandymanSetupThis THEN
+        EXIT;
+
+      HandymanImportBuffer.SETRANGE(Type, HandymanImportBuffer.Type::File);
+      HandymanImportBuffer.SETRANGE(Status, HandymanImportBuffer.Status::"In Buffer");
+
+      IF HandymanImportBuffer.FINDSET(TRUE) THEN REPEAT
+        COMMIT;
+        IF CODEUNIT.RUN(CODEUNIT::"Handyman WS", HandymanImportBuffer) THEN BEGIN
+          HandymanImportBuffer.Status := HandymanImportBuffer.Status::Imported;
+          IF FILE.EXISTS(HandymanImportBuffer.Description) THEN
+            FILE.RENAME(HandymanImportBuffer.Description, HandymanSetupThisComp."Archive Path Handyman" + '\ok'+ DELCHR(FORMAT(TODAY, 0, 9), '=', '-') + '-' + DELCHR(FORMAT(TIME), '=', ':') + HandymanImportBuffer.Filename);
+          HandymanImportBuffer."Error Message" := '';
+          HandymanImportBuffer.MODIFY(TRUE);
+        END ELSE BEGIN
+          HandymanImportBuffer.Status := HandymanImportBuffer.Status::Error;
+          HandymanImportBuffer."Error Message" := COPYSTR(GETLASTERRORTEXT, 1, MAXSTRLEN(HandymanImportBuffer."Error Message"));
+          IF FILE.EXISTS(HandymanImportBuffer.Description) THEN
+            FILE.RENAME(HandymanImportBuffer.Description, HandymanSetupThisComp."Error Path Handyman" + '\er' + DELCHR(FORMAT(TODAY, 0, 9), '=', '-') + '-' + DELCHR(FORMAT(TIME), '=', ':') + HandymanImportBuffer.Filename);
+          HandymanImportBuffer.MODIFY(TRUE);
+        END;
+      UNTIL HandymanImportBuffer.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE LookForFiles@1100285506(VAR localHandymanSetup@1100285500 : Record 81609);
+    VAR
+      FilePath@1100285501 : Record 2000000022;
+      HandymanImportBuffer@1100285502 : Record 81624;
+      PrimaryKeyInt@1100285503 : Integer;
+    BEGIN
+      // *** NAS ***
+      IF HandymanImportBuffer.FINDLAST THEN
+        PrimaryKeyInt := HandymanImportBuffer."Line Key" + 1
+      ELSE
+        PrimaryKeyInt := 1;
+      CLEAR(FilePath);
+      FilePath.SETFILTER(Name, '%1', '*.' + localHandymanSetup."Client Number Handyman");
+      FilePath.SETRANGE("Is a file", TRUE);
+      FilePath.SETRANGE(Path, localHandymanSetup."Export Path Handyman");
+      IF FilePath.FIND('-') THEN;
+      FilePath.SETRANGE(Path, localHandymanSetup."Import Path Handyman");
+
+      IF FilePath.FINDSET THEN
+      REPEAT
+        HandymanImportBuffer.INIT;
+        HandymanImportBuffer."Line Key" := PrimaryKeyInt;
+        PrimaryKeyInt += 1;
+        HandymanImportBuffer."Imported Date & Time" := CURRENTDATETIME;
+        HandymanImportBuffer.Type := HandymanImportBuffer.Type::File;
+        HandymanImportBuffer."HM Client ID" := localHandymanSetup."Client Number Handyman";
+        HandymanImportBuffer.Description := FilePath.Path + '\' + FilePath.Name;
+        HandymanImportBuffer.Filename := FilePath.Name;
+        HandymanImportBuffer."Company Name" := localHandymanSetup."Company Name";
+        HandymanImportBuffer.INSERT;
+      UNTIL FilePath.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE RelaseImportLock@1100285501(VAR HandymanSetup@1100285500 : Record 81609);
+    VAR
+      HandymanSetupFROM@1100285501 : Record 81609;
+    BEGIN
+      IF HandymanSetup.FINDSET(FALSE) THEN
+      REPEAT
+      //   HandymanSetupFROM.CHANGECOMPANY(HandymanSetup."Company Name");
+      //   HandymanSetupFROM.GET();
+        GetHandymanSetupOther(HandymanSetup."Company Name");
+        IF HandymanSetupOtherComp."Import Active" THEN BEGIN
+          HandymanSetupOtherComp."Import Active" := FALSE;
+          HandymanSetupOtherComp.MODIFY;
+        END;
+      UNTIL HandymanSetup.NEXT = 0;
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE GetHandymanSetupThis@1100285100();
+    BEGIN
+      HandymanSetupThisComp.GET;
+    END;
+
+    [TryFunction]
+    LOCAL PROCEDURE GetHandymanSetupOther@1100285104(CompanyName@1100285100 : Text[30]);
+    BEGIN
+      HandymanSetupOtherComp.CHANGECOMPANY(CompanyName);
+      HandymanSetupOtherComp.GET;
+    END;
+
+    BEGIN
+    {
+      150611 ITERO.MH Added trigger import when setup-table is created.
+      150929 ITERO.MH RFC0015 Added locktable
+      151102 ITERO.MH Added LockTimeout to prevent LOCKING-timeouterrors
+      160107 ITERO.AC Some changes in GetListOfCompaniesAndClientsForHandyman in order to avoid record locks
+      170424 ITERO.DL IME513
+      171026 ITERO.DL implement try
+    }
+    END.
+  }
+}
+

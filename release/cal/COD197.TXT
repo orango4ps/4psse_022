@@ -1,0 +1,238 @@
+OBJECT Codeunit 197 Update Acc. Sched. KPI Data
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.03;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData 135=rim,
+                TableData 197=rimd;
+    OnRun=BEGIN
+            InitSetupData;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      AccSchedKPIWebSrvSetup@1014 : Record 135;
+      AccSchedKPIBuffer@1003 : Record 197;
+      TempAccScheduleLine@1013 : TEMPORARY Record 85;
+      TempColumnLayout@1012 : TEMPORARY Record 334;
+      AccSchedManagement@1011 : Codeunit 8;
+      NoOfActiveAccSchedLines@1010 : Integer;
+      NoOfLines@1009 : Integer;
+      LastLineNo@1004 : Integer;
+      StartDate@1008 : Date;
+      EndDate@1007 : Date;
+      LastClosedDate@1006 : Date;
+      UpdateFromDate@1016 : Date;
+      Date@1001 : Date;
+      UpdatingMsg@1000 : TextConst '@@@=@1 is a number;ENU=Updating buffer table @1@@@@@@@@@@@@@@@@@@@;NOR=Oppdaterer buffertabellen @1@@@@@@@@@@@@@@@@@@@';
+
+    LOCAL PROCEDURE InitSetupData@1();
+    VAR
+      AccSchedKPIWebSrvLine@1004 : Record 136;
+      AccScheduleLine@1000 : Record 85;
+      ColumnLayout@1001 : Record 334;
+      GLEntry@1007 : Record 17;
+      LogInManagement@1002 : Codeunit 40;
+      Window@1003 : Dialog;
+      i@1006 : Integer;
+    BEGIN
+      AccSchedKPIWebSrvSetup.LOCKTABLE;
+      IF NOT AccSchedKPIWebSrvSetup.GET THEN BEGIN
+        AccSchedKPIWebSrvSetup.INIT;
+        AccSchedKPIWebSrvSetup.INSERT;
+      END;
+      IF AccSchedKPIWebSrvSetup."Data Time To Live (hours)" < 1 THEN
+        AccSchedKPIWebSrvSetup."Data Time To Live (hours)" := 24;
+      IF NOT AccSchedKPIBuffer.ISEMPTY THEN
+        IF AccSchedKPIWebSrvSetup."Data Last Updated" >
+           CURRENTDATETIME - AccSchedKPIWebSrvSetup."Data Time To Live (hours)" * 3600000
+        THEN
+          EXIT;
+
+      IF AccSchedKPIWebSrvSetup."Last G/L Entry Included" > 0 THEN BEGIN
+        GLEntry.SETFILTER("Entry No.",'>%1',AccSchedKPIWebSrvSetup."Last G/L Entry Included");
+        GLEntry.SETCURRENTKEY("Posting Date");
+      END;
+      IF NOT GLEntry.FINDFIRST THEN
+        EXIT; // nothing to update
+
+      Window.OPEN(UpdatingMsg);
+      IF NOT GUIALLOWED THEN
+        WORKDATE := LogInManagement.GetDefaultWorkDate;
+
+      IF AccSchedKPIWebSrvSetup."Last G/L Entry Included" = 0 THEN BEGIN
+        AccSchedKPIBuffer.DELETEALL;
+        UpdateFromDate := 0D;
+      END ELSE BEGIN
+        UpdateFromDate := GLEntry."Posting Date";
+        AccSchedKPIBuffer.SETFILTER(Date,'>=%1',UpdateFromDate);
+        AccSchedKPIBuffer.DELETEALL;
+        AccSchedKPIBuffer.RESET;
+        IF AccSchedKPIBuffer.FINDLAST THEN
+          LastLineNo := AccSchedKPIBuffer."No.";
+      END;
+
+      IF NOT AccSchedKPIWebSrvLine.FINDSET THEN
+        EXIT;
+      AccScheduleLine.SETRANGE(Show,AccScheduleLine.Show::Yes);
+      AccScheduleLine.SETFILTER(Totaling,'<>%1','');
+      REPEAT
+        AccScheduleLine.SETRANGE("Schedule Name",AccSchedKPIWebSrvLine."Acc. Schedule Name");
+        IF AccScheduleLine.FINDSET THEN
+          REPEAT
+            NoOfActiveAccSchedLines += 1;
+            TempAccScheduleLine := AccScheduleLine;
+            TempAccScheduleLine."Line No." := NoOfActiveAccSchedLines;
+            TempAccScheduleLine.INSERT;
+          UNTIL AccScheduleLine.NEXT = 0;
+      UNTIL AccSchedKPIWebSrvLine.NEXT = 0;
+
+      OnInitSetupDataAnAfterTempAccScheduleLineInsert(TempAccScheduleLine,NoOfActiveAccSchedLines);
+
+      WITH ColumnLayout DO BEGIN
+        // Net Change Actual
+        InsertTempColumn("Column Type"::"Net Change","Ledger Entry Type"::Entries,FALSE);
+        // Balance at Date Actual
+        InsertTempColumn("Column Type"::"Balance at Date","Ledger Entry Type"::Entries,FALSE);
+        // Net Change Budget
+        InsertTempColumn("Column Type"::"Net Change","Ledger Entry Type"::"Budget Entries",FALSE);
+        // Balance at Date Budget
+        InsertTempColumn("Column Type"::"Balance at Date","Ledger Entry Type"::"Budget Entries",FALSE);
+        // Net Change Actual Last Year
+        InsertTempColumn("Column Type"::"Net Change","Ledger Entry Type"::Entries,TRUE);
+        // Balance at Date Actual Last Year
+        InsertTempColumn("Column Type"::"Balance at Date","Ledger Entry Type"::Entries,TRUE);
+        // Net Change Budget Last Year
+        InsertTempColumn("Column Type"::"Net Change","Ledger Entry Type"::"Budget Entries",TRUE);
+        // Balance at Date Budget Last Year
+        InsertTempColumn("Column Type"::"Balance at Date","Ledger Entry Type"::"Budget Entries",TRUE);
+      END;
+
+      AccSchedKPIWebSrvSetup.GetPeriodLength(NoOfLines,StartDate,EndDate);
+      NoOfLines *= NoOfActiveAccSchedLines;
+      LastClosedDate := AccSchedKPIWebSrvSetup.GetLastClosedAccDate;
+
+      GLEntry.RESET;
+      GLEntry.FINDLAST;
+
+      FOR i := 0 TO NoOfLines - 1 DO BEGIN
+        IF i MOD 10 = 0 THEN
+          Window.UPDATE(1,10000 * i DIV NoOfLines);
+        CalcValues(i);
+      END;
+
+      AccSchedKPIWebSrvSetup."Data Last Updated" := CURRENTDATETIME;
+      AccSchedKPIWebSrvSetup."Last G/L Entry Included" := GLEntry."Entry No.";
+      AccSchedKPIWebSrvSetup.MODIFY;
+      COMMIT;
+      Window.CLOSE;
+    END;
+
+    LOCAL PROCEDURE InsertTempColumn@9(ColumnType@1000 : Option;EntryType@1001 : Option;LastYear@1002 : Boolean);
+    BEGIN
+      WITH TempColumnLayout DO BEGIN
+        IF FINDLAST THEN;
+        INIT;
+        "Line No." += 10000;
+        "Column Type" := ColumnType;
+        "Ledger Entry Type" := EntryType;
+        IF LastYear THEN
+          EVALUATE("Comparison Date Formula",'<-1Y>');
+        INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE CalcValues@2(Number@1002 : Integer);
+    VAR
+      ToDate@1000 : Date;
+      ColNo@1001 : Integer;
+      CalculatedValue@1003 : Decimal;
+    BEGIN
+      Date := AccSchedKPIWebSrvSetup.CalcNextStartDate(StartDate,Number DIV NoOfActiveAccSchedLines);
+      IF Date < UpdateFromDate THEN
+        EXIT;
+
+      ToDate := AccSchedKPIWebSrvSetup.CalcNextStartDate(Date,1) - 1;
+      TempAccScheduleLine.FINDSET;
+      IF Number MOD NoOfActiveAccSchedLines > 0 THEN
+        TempAccScheduleLine.NEXT(Number MOD NoOfActiveAccSchedLines);
+      TempAccScheduleLine.SETRANGE("Date Filter",Date,ToDate);
+      TempAccScheduleLine.SETRANGE("G/L Budget Filter",AccSchedKPIWebSrvSetup."G/L Budget Name");
+
+      LastLineNo += 1;
+      AccSchedKPIBuffer.INIT;
+      AccSchedKPIBuffer."No." := LastLineNo;
+      AccSchedKPIBuffer.Date := Date;
+      AccSchedKPIBuffer."Closed Period" := Date <= LastClosedDate;
+      AccSchedKPIBuffer."Account Schedule Name" := TempAccScheduleLine."Schedule Name";
+      AccSchedKPIBuffer."KPI Code" := COPYSTR(TempAccScheduleLine."Row No.",1,MAXSTRLEN(AccSchedKPIBuffer."KPI Code"));
+      AccSchedKPIBuffer."KPI Name" := COPYSTR(TempAccScheduleLine.Description,1,MAXSTRLEN(AccSchedKPIBuffer."KPI Name"));
+
+      ColNo := 0;
+      TempColumnLayout.FINDSET;
+      REPEAT
+        CalculatedValue := AccSchedManagement.CalcCell(TempAccScheduleLine,TempColumnLayout,FALSE);
+        OnCalcValuesOnAfterCalculateValue(TempAccScheduleLine,TempColumnLayout,CalculatedValue);
+
+        ColNo += 1;
+        CASE ColNo OF
+          1:
+            AccSchedKPIBuffer."Net Change Actual" := CalculatedValue;
+          2:
+            AccSchedKPIBuffer."Balance at Date Actual" := CalculatedValue;
+          3:
+            AccSchedKPIBuffer."Net Change Budget" := CalculatedValue;
+          4:
+            AccSchedKPIBuffer."Balance at Date Budget" := CalculatedValue;
+          5:
+            AccSchedKPIBuffer."Net Change Actual Last Year" := CalculatedValue;
+          6:
+            AccSchedKPIBuffer."Balance at Date Act. Last Year" := CalculatedValue;
+          7:
+            AccSchedKPIBuffer."Net Change Budget Last Year" := CalculatedValue;
+          8:
+            AccSchedKPIBuffer."Balance at Date Bud. Last Year" := CalculatedValue;
+          9:
+            AccSchedKPIBuffer."Net Change Forecast" := CalculatedValue;
+          10:
+            AccSchedKPIBuffer."Balance at Date Forecast" := CalculatedValue;
+        END;
+      UNTIL TempColumnLayout.NEXT = 0;
+
+      // Forecasted values
+      WITH AccSchedKPIWebSrvSetup DO
+        IF (("Forecasted Values Start" = "Forecasted Values Start"::"After Latest Closed Period") AND
+            NOT AccSchedKPIBuffer."Closed Period") OR
+           (("Forecasted Values Start" = "Forecasted Values Start"::"After Current Date") AND (Date > WORKDATE))
+        THEN BEGIN
+          AccSchedKPIBuffer."Net Change Forecast" := AccSchedKPIBuffer."Net Change Budget"; // Net Change Budget
+          AccSchedKPIBuffer."Balance at Date Forecast" := AccSchedKPIBuffer."Balance at Date Budget"; // Balance at Date Budget
+        END ELSE BEGIN
+          AccSchedKPIBuffer."Net Change Forecast" := AccSchedKPIBuffer."Net Change Actual"; // Net Change Actual
+          AccSchedKPIBuffer."Balance at Date Forecast" := AccSchedKPIBuffer."Balance at Date Actual"; // Balance at Date Actual
+        END;
+      AccSchedKPIBuffer.INSERT;
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnCalcValuesOnAfterCalculateValue@3(VAR TempAccScheduleLine@1000 : TEMPORARY Record 85;VAR TempColumnLayout@1001 : TEMPORARY Record 334;VAR CalculatedValue@1002 : Decimal);
+    BEGIN
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnInitSetupDataAnAfterTempAccScheduleLineInsert@4(VAR TempAccScheduleLine@1000 : TEMPORARY Record 85;VAR NoOfLines@1001 : Integer);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

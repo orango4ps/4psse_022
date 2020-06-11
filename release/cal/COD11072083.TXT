@@ -1,0 +1,140 @@
+OBJECT Codeunit 11072083 INSBOU Process Despatch Advice
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    TableNo=11012341;
+    OnRun=BEGIN
+            ProcessINSBOUDespatchAdvices(Rec);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1100528400 : TextConst 'DEU=Es gibt mehr als 1 %1 fr %2 %3 in%4 %5.;ENU=There is more than 1 %1 for %2 %3 in%4 %5.;NLD=Er is meer dan 1 %1 voor %2 %3 in %4 %5.';
+      Text001@1100528401 : TextConst 'DEU=Einkaufsbestellung;ENU=Purchase Order;NLD=Inkooporder;NOR=Bestilling;SVE=Ink”psorder';
+      Text002@1100528402 : TextConst 'DEU=%1 oder %2 von %3 %4, %5, %6 sollten ausgefllt sein.;ENU=%1 or %2 of %3 %4, %5, %6 should be filled.;NLD=%1 of %2 van %3 %4, %5, %6 moet gevuld zijn.';
+
+    LOCAL PROCEDURE ProcessINSBOUDespatchAdvices@1100528300(VAR INSBOUDespatchAdvice@1100528300 : Record 11012341);
+    BEGIN
+      IF INSBOUDespatchAdvice.FINDSET(TRUE) THEN
+        REPEAT
+          ProcessINSBOUDespatchAdvice(INSBOUDespatchAdvice);
+        UNTIL INSBOUDespatchAdvice.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ProcessINSBOUDespatchAdvice@1100525001(INSBOUDespatchAdvice@1100528300 : Record 11012341);
+    VAR
+      PurchaseHeader@1100525000 : Record 38;
+      RelatedPurchaseOrderNo@1100525002 : Code[20];
+    BEGIN
+      IF (INSBOUDespatchAdvice."Process Status" > INSBOUDespatchAdvice."Process Status"::Processing) THEN
+        INSBOUDespatchAdvice.FIELDERROR("Process Status");
+
+      INSBOUDespatchAdvice."Process Status" := INSBOUDespatchAdvice."Process Status"::Processing;
+      INSBOUDespatchAdvice."Error Message" := '';
+      INSBOUDespatchAdvice.MODIFY;
+      COMMIT;
+
+      RelatedPurchaseOrderNo := GetRelatedPurchaseOrderNo(INSBOUDespatchAdvice);
+      PurchaseHeader.GET(PurchaseHeader."Document Type"::Order, RelatedPurchaseOrderNo);
+      ProcessDespatchAdviceItems(INSBOUDespatchAdvice, RelatedPurchaseOrderNo);
+
+      INSBOUDespatchAdvice."Process Status" := INSBOUDespatchAdvice."Process Status"::Processed;
+      INSBOUDespatchAdvice.MODIFY;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE GetRelatedPurchaseOrderNo@1100525002(INSBOUDespatchAdvice@1100528300 : Record 11012341) PurchaseOrderNo : Code[20];
+    VAR
+      INSBOUPurchaseOrderResponse@1100525000 : Record 11072658;
+      PurchaseHeader@1100528400 : Record 38;
+    BEGIN
+      IF INSBOUDespatchAdvice.BuyersOrderNumber <> '' THEN
+        IF PurchaseHeader.GET(PurchaseHeader."Document Type"::Order, INSBOUDespatchAdvice.BuyersOrderNumber) THEN
+          PurchaseOrderNo := INSBOUDespatchAdvice.BuyersOrderNumber;
+
+      IF PurchaseOrderNo = '' THEN
+        IF INSBOUDespatchAdvice.OrderResponseNumber <> '' THEN
+          IF INSBOUPurchaseOrderResponse.GET(
+            INSBOUDespatchAdvice."Vendor No.", INSBOUDespatchAdvice.OrderResponseNumber)
+          THEN
+            PurchaseOrderNo := INSBOUPurchaseOrderResponse.BuyersOrderNumber;
+    END;
+
+    LOCAL PROCEDURE ProcessDespatchAdviceItems@1100528406(INSBOUDespatchAdvice@1100525000 : Record 11012341;RelatedPurchaseOrderNo@1100525001 : Code[20]);
+    VAR
+      INSBOUDespatchAdviceItem@1100528400 : Record 11012343;
+    BEGIN
+      INSBOUDespatchAdviceItem.SETRANGE("Vendor No.", INSBOUDespatchAdvice."Vendor No.");
+      INSBOUDespatchAdviceItem.SETRANGE(MessageNumber, INSBOUDespatchAdvice.MessageNumber);
+      INSBOUDespatchAdviceItem.FINDSET; //Check if INSBOUDespatchAdviceItem has lines.
+      INSBOUDespatchAdviceItem.SETFILTER("Process Status", '<%1', INSBOUDespatchAdviceItem."Process Status"::Processed);
+      IF INSBOUDespatchAdviceItem.FINDSET(TRUE) THEN
+        REPEAT
+          ProcessDespatchAdviceItem(INSBOUDespatchAdviceItem, RelatedPurchaseOrderNo);
+        UNTIL INSBOUDespatchAdviceItem.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ProcessDespatchAdviceItem@1100525014(INSBOUDespatchAdviceItem@1100525000 : Record 11012343;RelatedPurchaseOrderNo@1100525001 : Code[20]);
+    VAR
+      PurchaseLine@1100525002 : Record 39;
+      TradeItemNo@1100525004 : Code[20];
+    BEGIN
+      INSBOUDespatchAdviceItem."Process Status" := INSBOUDespatchAdviceItem."Process Status"::Processing;
+      INSBOUDespatchAdviceItem.MODIFY;
+      COMMIT;
+      PurchaseLine.SETRANGE("Document Type", PurchaseLine."Document Type"::Order);
+      PurchaseLine.SETRANGE("Document No.", RelatedPurchaseOrderNo);
+      IF INSBOUDespatchAdviceItem.OrderLineIdentification > 0 THEN
+        PurchaseLine.SETRANGE("Line No.", INSBOUDespatchAdviceItem.OrderLineIdentification)
+      ELSE
+        IF INSBOUDespatchAdviceItem.SupplierTradeItemIdentificat <> '' THEN BEGIN
+          TradeItemNo := COPYSTR(
+            INSBOUDespatchAdviceItem.SupplierTradeItemIdentificat, 1, MAXSTRLEN(PurchaseLine."Trade Item"));
+          CheckIfOnly1DespatchAdviceItemForTradeItem(INSBOUDespatchAdviceItem, TradeItemNo);
+          PurchaseLine.SETRANGE("Trade Item", TradeItemNo);
+          IF PurchaseLine.COUNT > 1 THEN
+            ERROR(
+              Text000, PurchaseLine.TABLECAPTION, PurchaseLine.FIELDCAPTION("Trade Item"),
+              INSBOUDespatchAdviceItem.SupplierTradeItemIdentificat, Text001, RelatedPurchaseOrderNo);
+        END ELSE
+          ERROR(
+            Text002, INSBOUDespatchAdviceItem.FIELDCAPTION(OrderLineIdentification),
+            INSBOUDespatchAdviceItem.FIELDCAPTION(SupplierTradeItemIdentificat),
+            INSBOUDespatchAdviceItem.TABLECAPTION, INSBOUDespatchAdviceItem."Vendor No.",
+            INSBOUDespatchAdviceItem.MessageNumber, INSBOUDespatchAdviceItem.LineNumber);
+      PurchaseLine.FINDFIRST;
+      PurchaseLine.TESTFIELD("Trade Item", INSBOUDespatchAdviceItem.SupplierTradeItemIdentificat);
+      PurchaseLine.VALIDATE("Qty. to Receive", INSBOUDespatchAdviceItem.DeliveredQuantity);
+      PurchaseLine.MODIFY;
+      INSBOUDespatchAdviceItem."Process Status" := INSBOUDespatchAdviceItem."Process Status"::Processed;
+      INSBOUDespatchAdviceItem.MODIFY;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CheckIfOnly1DespatchAdviceItemForTradeItem@1100525010(INSBOUDespatchAdviceItem2@1100525000 : Record 11012343;TradeItemNo@1100525001 : Code[20]);
+    VAR
+      INSBOUDespatchAdviceItem@1100525002 : Record 11012343;
+    BEGIN
+      INSBOUDespatchAdviceItem.SETRANGE("Vendor No.", INSBOUDespatchAdviceItem2."Vendor No.");
+      INSBOUDespatchAdviceItem.SETRANGE(MessageNumber, INSBOUDespatchAdviceItem2.MessageNumber);
+      INSBOUDespatchAdviceItem.SETRANGE(SupplierTradeItemIdentificat, INSBOUDespatchAdviceItem2.SupplierTradeItemIdentificat);
+      IF INSBOUDespatchAdviceItem.COUNT > 1 THEN
+        ERROR(
+          Text000, INSBOUDespatchAdviceItem.TABLECAPTION, INSBOUDespatchAdviceItem.FIELDCAPTION(SupplierTradeItemIdentificat),
+          INSBOUDespatchAdviceItem2.SupplierTradeItemIdentificat, INSBOUDespatchAdviceItem.FIELDCAPTION(MessageNumber),
+          INSBOUDespatchAdviceItem2.MessageNumber);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

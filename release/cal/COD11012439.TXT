@@ -1,0 +1,469 @@
+OBJECT Codeunit 11012439 SD Worx Cobra Get Leave
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=VAR
+            AccessToken@1100528500 : Text;
+            Attempts@1100527600 : Integer;
+          BEGIN
+            Attempts := 0;
+            AccessToken := SDWorxCobraConnectionMgt.GetAccessToken;
+
+            CalculatedDate := CALCDATE('<-1M>', TODAY);
+            CalculatedYearTxt := FORMAT(DATE2DMY(CalculatedDate, 3));
+            CalculatedMonthTxt := FORMAT(DATE2DMY(CalculatedDate, 2));
+            CalculatedDayTxt := FORMAT(DATE2DMY(CalculatedDate, 1));
+
+            IF STRLEN(CalculatedMonthTxt) < 2 THEN
+              CalculatedMonthTxt := '0' + CalculatedMonthTxt;
+
+            IF STRLEN(CalculatedDayTxt) < 2 THEN
+              CalculatedDayTxt := '0' + CalculatedDayTxt;
+
+            IF AccessToken <> '' THEN BEGIN
+              IF GetPersonLeave(AccessToken) THEN
+                IF GetPersonLeaveHour(AccessToken) THEN
+                  IF GetPersonLeaveEntitlement(AccessToken) THEN
+                    IF GetLeaveEntitlement(AccessToken) THEN BEGIN
+                      REPEAT
+                        Attempts := Attempts + 1;
+                        CountNewAbsenceRecords := 0;
+                        CountRemovedAbsenceRecords := 0;
+                        DeleteRemovedAbsence;
+                        WritePersonLeaveHour;
+                        WritePersonLeave;
+                        IF GUIALLOWED THEN
+                          MESSAGE(Text002, CountNewAbsenceRecords, CountRemovedAbsenceRecords);
+                      UNTIL (CountNewAbsenceRecords = 0) AND (CountRemovedAbsenceRecords = 0) OR (Attempts = 5);
+                      IF GUIALLOWED THEN
+                        MESSAGE(Text003);
+                    END;
+            END ELSE
+              ERROR('Couldnt retrieve access token');
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      SDWorxCobraConnectionMgt@1100528500 : Codeunit 11012437;
+      TempGenericPersonLeave@1100528507 : TEMPORARY Record 11020579;
+      TempGenericPersonLeaveHour@1100527600 : TEMPORARY Record 11020579;
+      TempGenericPersonLeaveEntitlement@1100528501 : TEMPORARY Record 11020579;
+      TempGenericLeaveEntitlement@1100528502 : TEMPORARY Record 11020579;
+      Text001@1100528503 : TextConst 'DEU=Grund der Abwesenheit: %1 von: %2 besteht nicht im 4PS-Konstrukt.;ENU=Cause of absence: %1 from: %2 doesn''t exist in 4PS Construct.;NLD=Reden van absentie: %1 van: %2 bestaat niet in 4PS Construct.';
+      CalculatedDate@1100527604 : Date;
+      CalculatedYearTxt@1100527601 : Text;
+      CalculatedMonthTxt@1100527602 : Text;
+      CalculatedDayTxt@1100527603 : Text;
+      Text002@1100527607 : TextConst 'DEU=Neue Registrierungen: %1, Gel”schte Registrierungen: %2.;ENU=New registrations: %1, Removed registrations: %2.;NLD=Nieuwe registraties: %1, Verwijderde registraties: %2.';
+      Text003@1100527608 : TextConst 'DEU=Fertig mit dem Importieren. Keine neuen Erfassungen gefunden.;ENU=Finished importing, no more new registrations found.;NLD=Klaar met importeren. Geen nieuwe registraties meer gevonden.';
+      CountNewAbsenceRecords@1100527606 : Integer;
+      CountRemovedAbsenceRecords@1100527605 : Integer;
+
+    LOCAL PROCEDURE GetPersonLeave@1100528503(AccessToken@1100528500 : Text) : Boolean;
+    VAR
+      XMLText@1100528501 : Text;
+      FullUrl@1100525001 : Text;
+    BEGIN
+      FullUrl := STRSUBSTNO('PersonLeave?$filter=From gt datetimeoffset''%1-%2-%3T00:00:00Z''', CalculatedYearTxt, CalculatedMonthTxt, CalculatedDayTxt);
+      IF NOT SDWorxCobraConnectionMgt.GetCobraData(AccessToken, SDWorxCobraConnectionMgt.GetFullURL(FullUrl), 'PersonLeave', XMLText) THEN
+        EXIT(FALSE);
+      ReadPersonLeaveApi(XMLText);
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE GetPersonLeaveHour@1100527601(AccessToken@1100528500 : Text) : Boolean;
+    VAR
+      XMLText@1100528501 : Text;
+      FullUrl@1100525001 : Text;
+    BEGIN
+      FullUrl := STRSUBSTNO('PersonLeaveHour?$filter=Date gt datetime''%1-%2-%3T00:00:00Z''', CalculatedYearTxt, CalculatedMonthTxt, CalculatedDayTxt);
+      IF NOT SDWorxCobraConnectionMgt.GetCobraData(AccessToken, SDWorxCobraConnectionMgt.GetFullURL(FullUrl), 'PersonLeaveHour', XMLText) THEN
+        EXIT(FALSE);
+      ReadPersonLeaveHourApi(XMLText);
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE GetPersonLeaveEntitlement@1100528506(AccessToken@1100528500 : Text) : Boolean;
+    VAR
+      XMLText@1100528501 : Text;
+    BEGIN
+      IF NOT SDWorxCobraConnectionMgt.GetCobraData(AccessToken, SDWorxCobraConnectionMgt.GetFullURL('PersonLeaveEntitlement'), 'PersonLeaveEntitlement', XMLText) THEN
+        EXIT(FALSE);
+      ReadPersonLeaveEntitlementApi(XMLText);
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE GetLeaveEntitlement@1100528507(AccessToken@1100528500 : Text) : Boolean;
+    VAR
+      XMLText@1100528501 : Text;
+    BEGIN
+      IF NOT SDWorxCobraConnectionMgt.GetCobraData(AccessToken, SDWorxCobraConnectionMgt.GetFullURL('LeaveEntitlement'), 'LeaveEntitlement', XMLText) THEN
+        EXIT(FALSE);
+      ReadLeaveEntitlementApi(XMLText);
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE ReadPersonLeaveApi@1100528501(XMLText@1100528500 : Text);
+    VAR
+      XMLNamespaceManager@1100528505 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNamespaceManager";
+      XMLDocument@1100528504 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      XMLDOMMgt@1100528503 : Codeunit 6224;
+      NoOfLines@1100528502 : Integer;
+      LineNo@1100528501 : Integer;
+      DateUnformatted@1100528506 : Text;
+    BEGIN
+      SDWorxCobraConnectionMgt.SetNameSpaceManager(XMLNamespaceManager);
+      XMLDocument := XMLDocument.XmlDocument;
+      XMLDocument.LoadXml(XMLText);
+
+      NoOfLines := XMLDOMMgt.FindNodeCountNs(XMLDocument, '//empty:entry', XMLNamespaceManager);
+      IF NoOfLines = 0 THEN
+        EXIT;
+      WITH TempGenericPersonLeave DO
+        FOR LineNo := 1 TO NoOfLines DO BEGIN
+          INIT;
+          "Key Code1" := COPYSTR(XMLDOMMgt.FindNodeTextNs(XMLDocument, '//empty:entry[' + FORMAT(LineNo) + ']/empty:content/m:properties/d:ID', XMLNamespaceManager), 1, MAXSTRLEN("Key Code1"));
+          Code1 := COPYSTR(XMLDOMMgt.FindNodeTextNs(XMLDocument, '//empty:entry[' + FORMAT(LineNo) + ']/empty:content/m:properties/d:PersonLeaveEntitlementId', XMLNamespaceManager), 1, MAXSTRLEN(Code1));
+          Code2 := COPYSTR(XMLDOMMgt.FindNodeTextNs(XMLDocument, '//empty:entry[' + FORMAT(LineNo) + ']/empty:content/m:properties/d:PersonId', XMLNamespaceManager), 1, MAXSTRLEN(Code2));
+
+          DateUnformatted := COPYSTR(XMLDOMMgt.FindNodeTextNs(XMLDocument, '//empty:entry[' + FORMAT(LineNo) + ']/empty:content/m:properties/d:From', XMLNamespaceManager), 1, 10);
+          Date1 := DMY2DATE(TextToInteger(COPYSTR(DateUnformatted, 9, 2)), TextToInteger(COPYSTR(DateUnformatted, 6, 2)), TextToInteger(COPYSTR(DateUnformatted, 1, 4)));
+          DateUnformatted := XMLDOMMgt.FindNodeTextNs(XMLDocument, '//empty:entry[' + FORMAT(LineNo) + ']/empty:content/m:properties/d:To', XMLNamespaceManager);
+          Date2 := DMY2DATE(TextToInteger(COPYSTR(DateUnformatted, 9, 2)), TextToInteger(COPYSTR(DateUnformatted, 6, 2)), TextToInteger(COPYSTR(DateUnformatted, 1, 4)));
+
+          IF NOT EVALUATE(Dec1, XMLDOMMgt.FindNodeTextNs(XMLDocument, '//empty:entry[' + FORMAT(LineNo) + ']/empty:content/m:properties/d:Use', XMLNamespaceManager), 9) THEN
+            Dec1 := 0;
+          LimitAndInsertText(Text3, XMLDOMMgt.FindNodeTextNs(XMLDocument, '//empty:entry[' + FORMAT(LineNo) + ']/empty:content/m:properties/d:Reason', XMLNamespaceManager));
+          LimitAndInsertText(Text4, XMLDOMMgt.FindNodeTextNs(XMLDocument, '//empty:entry[' + FORMAT(LineNo) + ']/empty:content/m:properties/d:Description', XMLNamespaceManager));
+          LimitAndInsertText(Text5, XMLDOMMgt.FindNodeTextNs(XMLDocument, '//empty:entry[' + FORMAT(LineNo) + ']/empty:content/m:properties/d:Correction', XMLNamespaceManager));
+          INSERT;
+        END;
+    END;
+
+    LOCAL PROCEDURE ReadPersonLeaveHourApi@1100527602(XMLText@1100528500 : Text);
+    VAR
+      XMLNamespaceManager@1100528505 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNamespaceManager";
+      XMLDocument@1100528504 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      XMLDOMMgt@1100528503 : Codeunit 6224;
+      NoOfLines@1100528502 : Integer;
+      LineNo@1100528501 : Integer;
+      DateUnformatted@1100528506 : Text;
+    BEGIN
+      SDWorxCobraConnectionMgt.SetNameSpaceManager(XMLNamespaceManager);
+      XMLDocument := XMLDocument.XmlDocument;
+      XMLDocument.LoadXml(XMLText);
+
+      NoOfLines := XMLDOMMgt.FindNodeCountNs(XMLDocument, '//empty:entry', XMLNamespaceManager);
+      IF NoOfLines = 0 THEN
+        EXIT;
+      WITH TempGenericPersonLeaveHour DO
+        FOR LineNo := 1 TO NoOfLines DO BEGIN
+          INIT;
+          "Key Code1" := COPYSTR(XMLDOMMgt.FindNodeTextNs(XMLDocument, '//empty:entry[' + FORMAT(LineNo) + ']/empty:content/m:properties/d:ID', XMLNamespaceManager), 1, MAXSTRLEN("Key Code1"));
+          Code1 := COPYSTR(XMLDOMMgt.FindNodeTextNs(XMLDocument, '//empty:entry[' + FORMAT(LineNo) + ']/empty:content/m:properties/d:PersonLeaveId', XMLNamespaceManager), 1, MAXSTRLEN(Code1));
+          Code2 := COPYSTR(XMLDOMMgt.FindNodeTextNs(XMLDocument, '//empty:entry[' + FORMAT(LineNo) + ']/empty:content/m:properties/d:PersonId', XMLNamespaceManager), 1, MAXSTRLEN(Code2));
+          Code3 := COPYSTR(XMLDOMMgt.FindNodeTextNs(XMLDocument, '//empty:entry[' + FORMAT(LineNo) + ']/empty:content/m:properties/d:PersonLeaveEntitlementId', XMLNamespaceManager), 1, MAXSTRLEN(Code3));
+          DateUnformatted := COPYSTR(XMLDOMMgt.FindNodeTextNs(XMLDocument, '//empty:entry[' + FORMAT(LineNo) + ']/empty:content/m:properties/d:Date', XMLNamespaceManager), 1, 10);
+          Date1 := DMY2DATE(TextToInteger(COPYSTR(DateUnformatted, 9, 2)), TextToInteger(COPYSTR(DateUnformatted, 6, 2)), TextToInteger(COPYSTR(DateUnformatted, 1, 4)));
+          IF NOT EVALUATE(Dec1, XMLDOMMgt.FindNodeTextNs(XMLDocument, '//empty:entry[' + FORMAT(LineNo) + ']/empty:content/m:properties/d:Use', XMLNamespaceManager), 9) THEN
+            Dec1 := 0;
+          Time1 := ParseTimeFromText(XMLDOMMgt.FindNodeTextNs(XMLDocument, '//empty:entry[' + FORMAT(LineNo) + ']/empty:content/m:properties/d:StartTime', XMLNamespaceManager));
+          Time2 := ParseTimeFromText(XMLDOMMgt.FindNodeTextNs(XMLDocument, '//empty:entry[' + FORMAT(LineNo) + ']/empty:content/m:properties/d:EndTime', XMLNamespaceManager));
+          INSERT;
+        END;
+    END;
+
+    LOCAL PROCEDURE ReadPersonLeaveEntitlementApi@1100528508(XMLText@1100528500 : Text);
+    VAR
+      XMLNamespaceManager@1100528505 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNamespaceManager";
+      XMLDocument@1100528504 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      XMLDOMMgt@1100528503 : Codeunit 6224;
+      NoOfLines@1100528502 : Integer;
+      LineNo@1100528501 : Integer;
+    BEGIN
+      SDWorxCobraConnectionMgt.SetNameSpaceManager(XMLNamespaceManager);
+      XMLDocument := XMLDocument.XmlDocument;
+      XMLDocument.LoadXml(XMLText);
+
+      NoOfLines := XMLDOMMgt.FindNodeCountNs(XMLDocument, '//empty:entry', XMLNamespaceManager);
+      IF NoOfLines = 0 THEN
+        EXIT;
+      WITH TempGenericPersonLeaveEntitlement DO
+        FOR LineNo := 1 TO NoOfLines DO BEGIN
+          INIT;
+          "Key Code1" := COPYSTR(XMLDOMMgt.FindNodeTextNs(XMLDocument, '//empty:entry[' + FORMAT(LineNo) + ']/empty:content/m:properties/d:ID', XMLNamespaceManager), 1, MAXSTRLEN("Key Code1"));
+          Code1 := COPYSTR(XMLDOMMgt.FindNodeTextNs(XMLDocument, '//empty:entry[' + FORMAT(LineNo) + ']/empty:content/m:properties/d:LeaveEntitlementId', XMLNamespaceManager), 1, MAXSTRLEN(Code1));
+          INSERT;
+        END;
+    END;
+
+    LOCAL PROCEDURE ReadLeaveEntitlementApi@1100528509(XMLText@1100528500 : Text);
+    VAR
+      XMLNamespaceManager@1100528505 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNamespaceManager";
+      XMLDocument@1100528504 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      XMLDOMMgt@1100528503 : Codeunit 6224;
+      NoOfLines@1100528502 : Integer;
+      LineNo@1100528501 : Integer;
+    BEGIN
+      SDWorxCobraConnectionMgt.SetNameSpaceManager(XMLNamespaceManager);
+      XMLDocument := XMLDocument.XmlDocument;
+      XMLDocument.LoadXml(XMLText);
+
+      NoOfLines := XMLDOMMgt.FindNodeCountNs(XMLDocument, '//empty:entry', XMLNamespaceManager);
+      IF NoOfLines = 0 THEN
+        EXIT;
+      WITH TempGenericLeaveEntitlement DO
+        FOR LineNo := 1 TO NoOfLines DO BEGIN
+          INIT;
+          "Key Code1" := COPYSTR(XMLDOMMgt.FindNodeTextNs(XMLDocument, '//empty:entry[' + FORMAT(LineNo) + ']/empty:content/m:properties/d:ID', XMLNamespaceManager), 1, MAXSTRLEN("Key Code1"));
+          Code1 := COPYSTR(XMLDOMMgt.FindNodeTextNs(XMLDocument, '//empty:entry[' + FORMAT(LineNo) + ']/empty:content/m:properties/d:LeaveCode', XMLNamespaceManager), 1, MAXSTRLEN(Code1));
+          LimitAndInsertText(Text1, XMLDOMMgt.FindNodeTextNs(XMLDocument, '//empty:entry[' + FORMAT(LineNo) + ']/empty:content/m:properties/d:DescriptionCode', XMLNamespaceManager));
+          INSERT;
+        END;
+    END;
+
+    LOCAL PROCEDURE WritePersonLeaveHour@1100527623();
+    VAR
+      Employee@1100528501 : Record 5200;
+      SDWorxCobraIDAssociation@1100528502 : Record 11012389;
+      EmployeeAbsence@1100528500 : Record 5207;
+      CauseofAbsence@1100528504 : Record 5206;
+      CauseOfAbsenceLimited@1100528503 : Code[10];
+    BEGIN
+      TempGenericPersonLeaveHour.RESET;
+      IF TempGenericPersonLeaveHour.FINDFIRST THEN
+        REPEAT
+          IF NOT SDWorxCobraIDAssociation.GET(TempGenericPersonLeaveHour.Code1) THEN
+            IF SDWorxCobraIDAssociation.GET(TempGenericPersonLeaveHour.Code2) THEN
+              IF Employee.GET(SDWorxCobraIDAssociation."NAV No.") THEN
+                IF SDWorxCobraIDAssociation.GET(TempGenericPersonLeaveHour."Key Code1") AND EmployeeAbsence.GET(SDWorxCobraIDAssociation."NAV No.") THEN BEGIN // DOES EXIST, UPDATE THE ENTRY
+                  EmployeeAbsence.GET(SDWorxCobraIDAssociation."NAV No.");
+                  EmployeeAbsence."From Date" := TempGenericPersonLeaveHour.Date1;
+                  EmployeeAbsence."To Date" := TempGenericPersonLeaveHour.Date1;
+                  EmployeeAbsence.Quantity := TempGenericPersonLeaveHour.Dec1;
+                  EmployeeAbsence."Unit of Measure Code" := GetUnitOfMeasureHour;
+                  FillEmployeeAbsenceValues(EmployeeAbsence, TempGenericPersonLeave.Code3);
+                  EmployeeAbsence.MODIFY(TRUE);
+                END ELSE BEGIN // DOESNT EXIST YET, INSERT INSTEAD OF UPDATE
+                  // Clear sdworxcobraidassociation if still exists
+                  IF SDWorxCobraIDAssociation.GET(TempGenericPersonLeaveHour."Key Code1") THEN
+                    SDWorxCobraIDAssociation.DELETE;
+
+                  EmployeeAbsence.INIT;
+                  EmployeeAbsence.VALIDATE("Employee No.", Employee."No.");
+                  EmployeeAbsence."From Date" := TempGenericPersonLeaveHour.Date1;
+                  EmployeeAbsence."To Date" := TempGenericPersonLeaveHour.Date1;
+                  EmployeeAbsence."From Time" := TempGenericPersonLeaveHour.Time1;
+                  EmployeeAbsence."Until Time" := TempGenericPersonLeaveHour.Time2;
+                  EmployeeAbsence.Quantity := TempGenericPersonLeaveHour.Dec1;
+                  EmployeeAbsence."Unit of Measure Code" := GetUnitOfMeasureHour;
+
+                  TempGenericPersonLeave.RESET;
+                  TempGenericPersonLeave.SETRANGE("Key Code1", TempGenericPersonLeaveHour.Code1);
+                  IF TempGenericPersonLeave.FINDFIRST THEN BEGIN
+                    FillEmployeeAbsenceValues(EmployeeAbsence, TempGenericPersonLeaveHour.Code3);
+                    EmployeeAbsence.INSERT(TRUE);
+                    EmployeeAbsence.FINDLAST;
+
+                    CreateAbsenceComment(EmployeeAbsence."Entry No.", TempGenericPersonLeave.Text3);
+                    CreateAbsenceComment(EmployeeAbsence."Entry No.", TempGenericPersonLeave.Text4);
+                  END;
+
+                  SDWorxCobraIDAssociation.INIT;
+                  SDWorxCobraIDAssociation."Cobra ID" := TempGenericPersonLeaveHour."Key Code1";
+                  SDWorxCobraIDAssociation.Type := SDWorxCobraIDAssociation.Type::PersonLeaveHour;
+                  SDWorxCobraIDAssociation."NAV No." := FORMAT(EmployeeAbsence."Entry No.");
+                  SDWorxCobraIDAssociation.INSERT;
+                  CountNewAbsenceRecords := CountNewAbsenceRecords + 1;
+                END;
+        UNTIL TempGenericPersonLeaveHour.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE WritePersonLeave@1100528510();
+    VAR
+      Employee@1100528501 : Record 5200;
+      SDWorxCobraIDAssociation@1100528502 : Record 11012389;
+      EmployeeAbsence@1100528500 : Record 5207;
+    BEGIN
+      TempGenericPersonLeave.RESET;
+      IF TempGenericPersonLeave.FINDFIRST THEN
+        REPEAT
+          TempGenericPersonLeaveHour.RESET;
+          TempGenericPersonLeaveHour.SETRANGE(Code1, TempGenericPersonLeave."Key Code1");
+          IF NOT TempGenericPersonLeaveHour.FINDFIRST THEN
+            IF SDWorxCobraIDAssociation.GET(TempGenericPersonLeave.Code2) THEN
+              IF Employee.GET(SDWorxCobraIDAssociation."NAV No.") THEN
+                IF SDWorxCobraIDAssociation.GET(TempGenericPersonLeave."Key Code1") AND EmployeeAbsence.GET(SDWorxCobraIDAssociation."NAV No.") THEN BEGIN // DOES EXIST, UPDATE THE ENTRY
+                  EmployeeAbsence.GET(SDWorxCobraIDAssociation."NAV No.");
+                  EmployeeAbsence."From Date" := TempGenericPersonLeave.Date1;
+                  EmployeeAbsence."To Date" := TempGenericPersonLeave.Date2;
+                  EmployeeAbsence.Quantity := TempGenericPersonLeave.Dec1;
+                  EmployeeAbsence."Unit of Measure Code" := GetUnitOfMeasureHour;
+                  FillEmployeeAbsenceValues(EmployeeAbsence, TempGenericPersonLeave.Code1);
+                  EmployeeAbsence.MODIFY(TRUE);
+                END ELSE BEGIN // DOESNT EXIST YET, INSERT INSTEAD OF UPDATE
+                  // Clear sdworxcobraidassociation if still exists
+                  IF SDWorxCobraIDAssociation.GET(TempGenericPersonLeave."Key Code1") THEN
+                    SDWorxCobraIDAssociation.DELETE;
+
+                  EmployeeAbsence.INIT;
+                  EmployeeAbsence.VALIDATE("Employee No.", Employee."No.");
+                  EmployeeAbsence."From Date" := TempGenericPersonLeave.Date1;
+                  EmployeeAbsence."To Date" := TempGenericPersonLeave.Date2;
+                  EmployeeAbsence.Quantity := TempGenericPersonLeave.Dec1;
+                  EmployeeAbsence."Unit of Measure Code" := GetUnitOfMeasureHour;
+
+                  FillEmployeeAbsenceValues(EmployeeAbsence, TempGenericPersonLeaveEntitlement.Code1);
+                  EmployeeAbsence.INSERT(TRUE);
+                  EmployeeAbsence.FINDLAST;
+
+                  CreateAbsenceComment(EmployeeAbsence."Entry No.", TempGenericPersonLeave.Text3);
+                  CreateAbsenceComment(EmployeeAbsence."Entry No.", TempGenericPersonLeave.Text4);
+
+                  SDWorxCobraIDAssociation.INIT;
+                  SDWorxCobraIDAssociation."Cobra ID" := TempGenericPersonLeave."Key Code1";
+                  SDWorxCobraIDAssociation.Type := SDWorxCobraIDAssociation.Type::PersonLeave;
+                  SDWorxCobraIDAssociation."NAV No." := FORMAT(EmployeeAbsence."Entry No.");
+                  SDWorxCobraIDAssociation.INSERT;
+                  CountNewAbsenceRecords := CountNewAbsenceRecords + 1;
+                END;
+        UNTIL TempGenericPersonLeave.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE FillEmployeeAbsenceValues@1100527606(VAR EmployeeAbsence@1100527600 : Record 5207;LeaveEntitlementCode@1100527601 : Code[100]);
+    VAR
+      CauseOfAbsenceLimited@1100527602 : Code[10];
+      CauseofAbsence@1100527603 : Record 5206;
+    BEGIN
+      IF TempGenericPersonLeaveEntitlement.GET(TempGenericPersonLeave.Code1) THEN
+        IF TempGenericLeaveEntitlement.GET(LeaveEntitlementCode) THEN BEGIN
+          CauseOfAbsenceLimited := COPYSTR(TempGenericLeaveEntitlement.Code1, 1, MAXSTRLEN(CauseOfAbsenceLimited));
+          IF CauseofAbsence.GET(CauseOfAbsenceLimited) THEN BEGIN
+            EmployeeAbsence.VALIDATE("Cause of Absence Code" , CauseofAbsence.Code);
+            EmployeeAbsence.Description := COPYSTR(CauseofAbsence.Description, 1, MAXSTRLEN(EmployeeAbsence.Description));
+          END ELSE
+            EmployeeAbsence.Description := COPYSTR(TempGenericLeaveEntitlement.Text1, 1, MAXSTRLEN(EmployeeAbsence.Description));
+        END;
+    END;
+
+    LOCAL PROCEDURE DeleteRemovedAbsence@1100527607();
+    VAR
+      SDWorxCobraIDAssociation@1100527600 : Record 11012389;
+      EmployeeAbsence@1100527601 : Record 5207;
+    BEGIN
+      SDWorxCobraIDAssociation.SETRANGE(Type, SDWorxCobraIDAssociation.Type::PersonLeave, SDWorxCobraIDAssociation.Type::PersonLeaveHour);
+      IF SDWorxCobraIDAssociation.FINDSET THEN
+        REPEAT
+          IF EmployeeAbsence.GET(SDWorxCobraIDAssociation."NAV No.") THEN
+            IF EmployeeAbsence."From Date" > CalculatedDate THEN BEGIN
+              IF SDWorxCobraIDAssociation.Type = SDWorxCobraIDAssociation.Type::PersonLeave THEN
+                IF NOT TempGenericPersonLeave.GET(SDWorxCobraIDAssociation."Cobra ID") THEN BEGIN
+                  EmployeeAbsence.DELETE;
+                  SDWorxCobraIDAssociation.DELETE;
+                  CountRemovedAbsenceRecords := CountRemovedAbsenceRecords + 1;
+                END;
+              IF SDWorxCobraIDAssociation.Type = SDWorxCobraIDAssociation.Type::PersonLeaveHour THEN
+                IF NOT TempGenericPersonLeaveHour.GET(SDWorxCobraIDAssociation."Cobra ID") THEN BEGIN
+                  EmployeeAbsence.DELETE;
+                  SDWorxCobraIDAssociation.DELETE;
+                  CountRemovedAbsenceRecords := CountRemovedAbsenceRecords + 1;
+                END;
+           END;
+        UNTIL SDWorxCobraIDAssociation.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreateAbsenceComment@1100528500("EntryNo."@1100528502 : Integer;Comment@1100528501 : Text);
+    VAR
+      HumanResourceCommentLine@1100528503 : Record 5208;
+      HumanResourceCommentLine2@1100528500 : Record 5208;
+    BEGIN
+      IF ("EntryNo." <> 1) AND (Comment <> '') THEN BEGIN
+        HumanResourceCommentLine.INIT;
+        HumanResourceCommentLine."Table Name" := HumanResourceCommentLine2."Table Name"::"Employee Absence";
+        HumanResourceCommentLine."Table Line No." := "EntryNo.";
+        HumanResourceCommentLine.Comment := COPYSTR(Comment, 1, MAXSTRLEN(HumanResourceCommentLine.Comment));
+        HumanResourceCommentLine2.SETRANGE("Table Name", HumanResourceCommentLine."Table Name"::"Employee Absence");
+        HumanResourceCommentLine2.SETRANGE("Table Line No.", "EntryNo.");
+        IF HumanResourceCommentLine2.FINDLAST THEN
+          HumanResourceCommentLine."Line No." := HumanResourceCommentLine2."Line No." + 10000;
+
+        HumanResourceCommentLine.INSERT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE GetUnitOfMeasureHour@1100528522() : Code[20];
+    VAR
+      HumanResourceUnitofMeasure@1100528500 : Record 5220;
+    BEGIN
+      HumanResourceUnitofMeasure.SETRANGE("Qty. per Unit of Measure", 0.125);
+        IF HumanResourceUnitofMeasure.FINDFIRST THEN
+          EXIT(HumanResourceUnitofMeasure.Code);
+    END;
+
+    LOCAL PROCEDURE TextToInteger@1100528502(TextToConvert@1100528500 : Text) returnValue : Integer;
+    BEGIN
+      EVALUATE(returnValue, TextToConvert);
+    END;
+
+    LOCAL PROCEDURE LimitAndInsertText@1100527600(VAR Destination@1100527600 : Text;TextToInsert@1100527601 : Text);
+    BEGIN
+      Destination := COPYSTR(TextToInsert, 1, MAXSTRLEN(Destination));
+    END;
+
+    LOCAL PROCEDURE ParseTimeFromText@1100527608(TimeFromSDWorx@1100527600 : Text) returnTime : Time;
+    VAR
+      HourText@1100527601 : Text;
+      MinuteText@1100527602 : Text;
+      SecondText@1100527603 : Text;
+      parseHourIntToTime@1100527608 : Text;
+      parseMinuteIntToTime@1100527609 : Text;
+      parseSecondIntToTime@1100527610 : Text;
+    BEGIN
+      HourText := RegExFind(TimeFromSDWorx, '[0-9]*H');
+      MinuteText := RegExFind(TimeFromSDWorx, '[0-9]*M');
+      SecondText := RegExFind(TimeFromSDWorx, '[0-9]*S');
+
+      IF HourText <> '' THEN
+        HourText := COPYSTR(HourText, 1, STRLEN(HourText) - 1);
+
+      IF MinuteText <> '' THEN
+        MinuteText := COPYSTR(MinuteText, 1, STRLEN(MinuteText) - 1);
+
+      IF SecondText <> '' THEN
+        SecondText := COPYSTR(SecondText, 1, STRLEN(SecondText) - 1);
+
+      IF STRLEN(HourText) < 2 THEN
+        parseHourIntToTime := STRSUBSTNO('0%1', HourText);
+      IF STRLEN(MinuteText) < 2 THEN
+        parseMinuteIntToTime := STRSUBSTNO('0%1', MinuteText);
+      IF STRLEN(SecondText) < 2 THEN
+        parseSecondIntToTime := STRSUBSTNO('0%1', SecondText);
+
+      IF EVALUATE(returnTime, parseHourIntToTime + parseMinuteIntToTime + parseSecondIntToTime) THEN
+        EXIT(returnTime);
+    END;
+
+    LOCAL PROCEDURE RegExFind@1100527605(SearchString@1100527600 : Text;RegEx@1100527601 : Text) : Text;
+    VAR
+      dnRegEx@1100527603 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.RegularExpressions.Regex";
+      dnMatch@1100527602 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.RegularExpressions.Match";
+    BEGIN
+      dnMatch := dnRegEx.Match(SearchString, RegEx);
+
+      IF dnMatch.Success THEN
+        EXIT(dnMatch.Value);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

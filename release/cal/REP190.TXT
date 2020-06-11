@@ -1,0 +1,259 @@
+OBJECT Report 190 Issue Reminders
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.00,4PS14.00,4PSSE,NAVDK.NO;
+  }
+  PROPERTIES
+  {
+    CaptionML=[ENU=Issue Reminders;
+               NOR=Utsted purringer;
+               SVE=Utskick betalningsp†minnelser];
+    ProcessingOnly=Yes;
+    OnInitReport=VAR
+                   OfficeMgt@1000 : Codeunit 1630;
+                 BEGIN
+                   IsOfficeAddin := OfficeMgt.IsAvailable;
+                   IF IsOfficeAddin THEN
+                     PrintDoc := 2;
+                   GLSetup.GET  //NAVDK
+                 END;
+
+  }
+  DATASET
+  {
+    { 4775;    ;DataItem;Check Reminder Header;
+               DataItemTable=Table295;
+               DataItemTableView=SORTING(No.);
+               ReqFilterHeadingML=[ENU=Reminder;
+                                   NOR=Purring;
+                                   SVE=Betalningsp†minnelse];
+               OnAfterGetRecord=BEGIN
+                                  IF GLSetup."Norwegian Localization Active" THEN
+                                    IF "E-Invoice" THEN
+                                      CODEUNIT.RUN(CODEUNIT::"E-Invoice Check Reminder","Check Reminder Header");
+                                END;
+
+               ReqFilterFields=No. }
+
+    { 1080000; ;DataItem;                    ;
+               DataItemTable=Table295;
+               DataItemTableView=SORTING(No.);
+               OnPreDataItem=BEGIN
+                               SETVIEW("Check Reminder Header".GETVIEW);
+                               COPYFILTERS("Check Reminder Header");
+                               IF ReplacePostingDate AND (PostingDateReq = 0D) THEN
+                                 ERROR(Text000);
+                               DPA_SetFilters(CurrReport.OBJECTID(FALSE)); //**4PS.n C001277
+                               NoOfRecords := COUNT;
+                               IF NoOfRecords = 1 THEN
+                                 Window.OPEN(Text001)
+                               ELSE BEGIN
+                                 Window.OPEN(Text002);
+                                 OldDateTime := CURRENTDATETIME;
+                               END;
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  RecordNo := RecordNo + 1;
+                                  CLEAR(ReminderIssue);
+                                  ReminderIssue.Set("Reminder Header",ReplacePostingDate,PostingDateReq);
+                                  IF NoOfRecords = 1 THEN BEGIN
+                                    IF GLSetup."Danish Localization Active" THEN  //NAVDK
+                                      OIOXMLCheckReminder.RUN("Reminder Header");  //NAVDK
+                                    ReminderIssue.RUN;
+                                    MARK := FALSE;
+                                  END ELSE BEGIN
+                                    NewDateTime := CURRENTDATETIME;
+                                    IF (NewDateTime - OldDateTime > 100) OR (NewDateTime < OldDateTime) THEN BEGIN
+                                      NewProgress := ROUND(RecordNo / NoOfRecords * 100,1);
+                                      IF NewProgress <> OldProgress THEN BEGIN
+                                        Window.UPDATE(1,NewProgress * 100);
+                                        OldProgress := NewProgress;
+                                      END;
+                                      OldDateTime := CURRENTDATETIME;
+                                    END;
+                                    COMMIT;
+                                    MARK := NOT ReminderIssue.RUN;
+                                  END;
+
+                                  IF NOT "Reminder Header".MARK THEN //**4PS.n
+                                    //IF PrintDoc <> PrintDoc::" " THEN BEGIN //**4PS.o
+                                    //IF PrintEMailDoc THEN BEGIN //**4PS.n
+                                    IF PrintEMailDoc OR SentElectronically THEN BEGIN //**4PSSE
+                                      ReminderIssue.GetIssuedReminder(IssuedReminderHeader);
+                                      TempIssuedReminderHeader := IssuedReminderHeader;
+                                      TempIssuedReminderHeader.INSERT;
+                                    END;
+                                END;
+
+               OnPostDataItem=VAR
+                                IssuedReminderHeaderPrint@1000 : Record 297;
+                                ConfirmManagement@1001 : Codeunit 27;
+                                IsHandled@1002 : Boolean;
+                              BEGIN
+                                Window.CLOSE;
+                                COMMIT;
+                                //**4PS.so
+                                //IF PrintDoc <> PrintDoc::" " THEN
+                                //**4PS.eo
+
+                                //**4PS.sn
+                                IF PrintEMailDoc THEN BEGIN
+                                  TempIssuedReminderHeader.SETRANGE("Reminder per E-Mail", FALSE);
+                                  IF TempIssuedReminderHeader.FINDSET THEN BEGIN
+                                    REPEAT
+                                      TempIssuedReminderHeader.MARK(TRUE);
+                                    UNTIL TempIssuedReminderHeader.NEXT = 0;
+                                    TempIssuedReminderHeader.MARKEDONLY(TRUE);
+                                    TempIssuedReminderHeader.PrintRecordsWithRequestPage; //M20052
+                                    TempIssuedReminderHeader.CLEARMARKS;
+                                    TempIssuedReminderHeader.MARKEDONLY(FALSE);
+                                  END;
+                                  TempIssuedReminderHeader.SETRANGE("Reminder per E-Mail", TRUE);
+                                //**4PS.en
+                                  IF TempIssuedReminderHeader.FINDSET THEN
+                                    REPEAT
+                                      IssuedReminderHeaderPrint := TempIssuedReminderHeader;
+                                      IsHandled := FALSE;
+                                      OnBeforePrintIssuedReminderHeader(IssuedReminderHeaderPrint,IsHandled);
+                                      IF NOT IsHandled THEN BEGIN
+                                        IssuedReminderHeaderPrint.SETRECFILTER;
+                                        IssuedReminderHeaderPrint.PrintRecords(FALSE,TRUE,HideDialog);
+                                      END;
+                                    UNTIL TempIssuedReminderHeader.NEXT = 0
+                                END; //**4PS.n
+                                //*ENH050 141105 ITERO.MH <<
+                                IF SentElectronically THEN BEGIN
+                                  TempIssuedReminderHeader.SETRANGE("Reminder per E-Mail");
+                                  TempIssuedReminderHeader.SendReminderElectronic(FALSE,TRUE);
+                                END;
+                                //*ENH050 141105 ITERO.MH >>
+                                MARKEDONLY := TRUE;
+                                IF FINDFIRST THEN
+                                  IF ConfirmManagement.ConfirmProcessUI(Text003,TRUE) THEN
+                                    PAGE.RUNMODAL(0,"Reminder Header");
+                              END;
+
+               ReqFilterFields=No. }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      SaveValues=Yes;
+      OnOpenPage=BEGIN
+                   PostingDateReq := 0D; //**4PS.n
+                 END;
+
+    }
+    CONTROLS
+    {
+      { 1900000001;0;Container;
+                  ContainerType=ContentArea }
+
+      { 1900000002;1;Group  ;
+                  CaptionML=[ENU=Options;
+                             NOR=Alternativer;
+                             SVE=Alternativ] }
+
+      { 3   ;2   ;Field     ;
+                  Name=PrintDoc;
+                  CaptionML=[ENU=Print/E-Mail;
+                             NOR=Skriv ut;
+                             SVE=Skriv ut];
+                  ToolTipML=[ENU=Specifies it you want to print or email the reminders when they are issued.;
+                             NOR=Angir om du vil skrive ut eller sende purringer via e-post n†r de er utstedt.;
+                             SVE=Anger om du vill skriva ut p†minnelserna som utf„rdas eller skicka dem via e-post.];
+                  ApplicationArea=#Suite;
+                  SourceExpr=PrintEMailDoc }
+
+      { 2   ;2   ;Field     ;
+                  CaptionML=[ENU=Replace Posting Date;
+                             NOR=Erstatt bokf›ringsdato;
+                             SVE=Ers„tt bokf”ringsdatum];
+                  ToolTipML=[ENU=Specifies if you want to replace the reminders' posting date with the date entered in the field below.;
+                             NOR=Angir om du vil erstatte purringens bokf›ringsdato med datoen du angir i feltet nedenfor.;
+                             SVE=Anger om du vill ers„tta betalningsp†minnelsernas bokf”ringsdatum med det bokf”ringsdatum som anges i f„ltet nedan.];
+                  ApplicationArea=#Suite;
+                  SourceExpr=ReplacePostingDate }
+
+      { 1   ;2   ;Field     ;
+                  CaptionML=[ENU=Posting Date;
+                             NOR=Bokf›ringsdato;
+                             SVE=Bokf”ringsdatum];
+                  ToolTipML=[ENU=Specifies the posting date. If you place a check mark in the check box above, the program will use this date on all reminders when you post.;
+                             NOR=Angir bokf›ringsdatoen. Hvis du setter en hake i avmerkingsboksen ovenfor, brukes denne datoen p† alle purringene n†r du bokf›rer.;
+                             SVE=Anger bokf”ringsdatumet. Om du markerar kryssrutan ovan, anv„nds detta datum f”r alla betalningsp†minnelser n„r du bokf”r.];
+                  ApplicationArea=#Suite;
+                  SourceExpr=PostingDateReq }
+
+      { 4   ;2   ;Field     ;
+                  Name=HideEmailDialog;
+                  CaptionML=[ENU=Hide Email Dialog;
+                             NOR=Skjul dialogboksen E-post;
+                             SVE=D”lj e-postdialog];
+                  ToolTipML=[ENU=Specifies if you want to hide email dialog.;
+                             NOR=Angir om du vil skjule dialogboksen E-post.;
+                             SVE=Anger om du vill d”lja dialogrutan f”r e-post.];
+                  ApplicationArea=#Suite;
+                  SourceExpr=HideDialog }
+
+      { 1100285500;2;Field  ;
+                  CaptionML=[ENU=Send Electronically;
+                             NOR=Send elektronisk;
+                             SVE=Skicka elektroniskt];
+                  SourceExpr=SentElectronically }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'ENU=Enter the posting date.;NOR=Angi bokf›ringsdatoen.;SVE=Ange bokf”ringsdatum.';
+      Text001@1001 : TextConst 'ENU=Issuing reminder...;NOR=Utsteder purring...;SVE=Utskick betalningsp†minnelse...';
+      Text002@1002 : TextConst 'ENU=Issuing reminders @1@@@@@@@@@@@@@;NOR=Utsteder purringer@1@@@@@@@@@@@@@;SVE=Utskick betalp†m. @1@@@@@@@@@@@@@';
+      Text003@1003 : TextConst 'ENU=It was not possible to issue some of the selected reminders.\Do you want to see these reminders?;NOR=Det var ikke mulig † utstede en del av de valgte purringene.\Vil du vise disse purringene?;SVE=Det gick inte att skapa skicka ut de valda betalningsp†minnelserna.\Vill du visa dem?';
+      IssuedReminderHeader@1005 : Record 297;
+      TempIssuedReminderHeader@1017 : TEMPORARY Record 297;
+      ReminderIssue@1006 : Codeunit 393;
+      OIOXMLCheckReminder@1101100000 : Codeunit 11128574;
+      Window@1007 : Dialog;
+      NoOfRecords@1008 : Integer;
+      RecordNo@1009 : Integer;
+      NewProgress@1010 : Integer;
+      OldProgress@1011 : Integer;
+      NewDateTime@1012 : DateTime;
+      OldDateTime@1013 : DateTime;
+      PostingDateReq@1014 : Date;
+      ReplacePostingDate@1015 : Boolean;
+      PrintDoc@1016 : ' ,Print,Email';
+      GLSetup@111285700 : Record 98;
+      EInvoiceCheckReminder@1080000 : Codeunit 11128505;
+      SentElectronically@1100285500 : Boolean;
+      HideDialog@1004 : Boolean;
+      IsOfficeAddin@1018 : Boolean INDATASET;
+      PrintEMailDoc@1100528400 : Boolean;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforePrintIssuedReminderHeader@1(VAR IssuedReminderHeader@1000 : Record 297;VAR IsHandled@1001 : Boolean);
+    BEGIN
+    END;
+
+    BEGIN
+    {
+      141105 ITERO.MH ENH050 Added possiblity to choose Electronic Invoice Creation from reminder issue.
+    }
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

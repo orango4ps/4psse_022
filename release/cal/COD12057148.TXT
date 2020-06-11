@@ -1,0 +1,715 @@
+OBJECT Codeunit 12057148 Search ExFlow Documents
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=EXF512000;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      DecFormat@1100285003 : TextConst 'ENU=<Sign><Integer><Decimals><Comma,.>';
+      Error001@1100285002 : TextConst 'ENU=Company name cannot be blank!;SVE=F”retagsnamn kan inte vara tomt!';
+      Error002@1100285001 : TextConst 'ENU=Column %1 is not setup!;SVE=Kolumn %1 finns ej uppsatt!';
+      Error003@1100285000 : TextConst 'ENU=Atleast one search critera must be selected.;SVE=Minst ett s”kkriterie m†ste v„ljas.';
+
+    PROCEDURE GetUserGroupFilter@1100285000(CompName@1100285003 : Text[30];InUserID@1100285000 : Code[50]) : Text[1024];
+    VAR
+      _exUserGroup@1100285001 : Record 12013606;
+      _exUserGroupLine@1100285002 : Record 12013607;
+      _retString@1100285004 : Text[250];
+    BEGIN
+      _exUserGroupLine.RESET;
+      _exUserGroupLine.CHANGECOMPANY(CompName);
+
+      _exUserGroupLine.SETCURRENTKEY("User ID",Code);
+      _exUserGroupLine.SETRANGE("User ID",InUserID);
+      _exUserGroupLine.SETFILTER("Starting Date",'..%1',WORKDATE);
+      _exUserGroupLine.SETFILTER("Ending Date",'''''|%1..',WORKDATE);
+      IF _exUserGroupLine.FINDSET THEN BEGIN
+        _retString := _exUserGroupLine.Code;
+        IF _exUserGroupLine.NEXT = 1 THEN
+          REPEAT
+            _retString := _retString +'|' +_exUserGroupLine.Code;
+          UNTIL _exUserGroupLine.NEXT = 0;
+      END;
+
+      EXIT(_retString);
+    END;
+
+    PROCEDURE WebSearchPage@1100285003(VAR TempEXDoc@1100285000 : TEMPORARY Record 12013608;TempSearchRec@1100285001 : TEMPORARY Record 12057116;arrDimWebColumnID@1100285003 : ARRAY [10] OF Code[20];arrDimValue@1100285002 : ARRAY [10] OF Code[1024];MultiCompSearch@1100285008 : Boolean);
+    VAR
+      "***FilterRecs***"@1100285005 : Integer;
+      ExDoc@1100285026 : Record 12013608;
+      ExDocLineApp@1100285021 : Record 12013610;
+      ExDocLineApprovedBy@1100285011 : Record 12013610;
+      PostedExDoc@1100285020 : Record 12013626;
+      PostedExDocLineApp@1100285018 : Record 12013628;
+      PostedExDocLineAppovedBy@1100285023 : Record 12013628;
+      ExflowPurchDocumentHeader@1100285013 : Record 12013587;
+      "***Other***"@1100285010 : Integer;
+      CreateQuotefromReq@1100285006 : Codeunit 12013614;
+      TempUserFilter@1100285030 : Text;
+      RefNoSearch@1100285029 : Boolean;
+      SearchByCreatedDate@1100285012 : Boolean;
+      SearchByPostingDate@1100285053 : Boolean;
+      DimFilterCount@1100285054 : Integer;
+      FiltersApplied@1100285004 : Boolean;
+      ApproverFilterExists@1100285007 : Boolean;
+      arrLocalColumnID@1100285009 : ARRAY [10] OF BigInteger;
+    BEGIN
+      //Change company on all search recs, pass them to appropritate sub funcs
+      //Dim recs are taken care of in internal funcations as no other filters will be applied until that stage
+      WITH TempSearchRec DO BEGIN
+        TESTFIELD(CompName);
+        ExDoc.CHANGECOMPANY(CompName);
+        ExDocLineApp.CHANGECOMPANY(CompName);
+        ExDocLineApprovedBy.CHANGECOMPANY(CompName);
+        PostedExDoc.CHANGECOMPANY(CompName);
+        PostedExDocLineApp.CHANGECOMPANY(CompName);
+        PostedExDocLineAppovedBy.CHANGECOMPANY(CompName);
+        ExflowPurchDocumentHeader.CHANGECOMPANY(CompName); //1367
+
+        CASE docStatus OF
+          '0','Inactive':
+            BEGIN
+              ExDoc.SETRANGE(Status,ExDoc.Status::Inactive);
+              PostedExDoc.SETRANGE(Status,-1);
+              ExflowPurchDocumentHeader.SETRANGE(Reserve,-1); //1367 dummy filter
+            END;
+          '1','Active':
+            BEGIN
+              ExDoc.SETRANGE(Status,ExDoc.Status::Active);
+              PostedExDoc.SETRANGE(Status,-1);
+              ExflowPurchDocumentHeader.SETRANGE(Reserve,-1); //1367 dummy filter
+            END;
+          '2','Approved':
+            BEGIN
+              ExDoc.SETFILTER(Status,'%1|%2|%3',ExDoc.Status::"Ready for posting",ExDoc.Status::Approved,ExDoc.Status::Invoiced);
+              ExflowPurchDocumentHeader.SETRANGE(Reserve,-1); //1367 dummy filter
+            END;
+        END;
+
+        CASE docType OF
+          '0','Requisition':
+            BEGIN
+              ExDoc.SETFILTER("Document Type",'%1|%2',ExDoc."Document Type"::Quote,ExDoc."Document Type"::Order);
+              PostedExDoc.SETRANGE("Document Type",-1);
+              ExflowPurchDocumentHeader.SETRANGE("Document Type",-1);  //1367
+            END;
+
+          '1','Order':
+            BEGIN
+              ExDoc.SETRANGE("Document Type",ExDoc."Document Type"::Order);
+              PostedExDoc.SETRANGE("Document Type",-1);
+              ExflowPurchDocumentHeader.SETRANGE("Document Type", -1); //1367
+            END;
+
+          '2','Invoice':
+            BEGIN
+              ExDoc.SETRANGE("Document Type",ExDoc."Document Type"::Invoice);
+              PostedExDoc.SETRANGE("Document Type",PostedExDoc."Document Type"::"Posted Invoice");
+              ExflowPurchDocumentHeader.SETRANGE("Document Type",ExflowPurchDocumentHeader."Document Type"::Invoice);  //1367
+            END;
+
+          '3','Credit':
+            BEGIN
+              ExDoc.SETRANGE("Document Type",ExDoc."Document Type"::"Credit Memo");
+              PostedExDoc.SETRANGE("Document Type", PostedExDoc."Document Type"::"Posted Credit Memo");
+              ExflowPurchDocumentHeader.SETRANGE("Document Type",ExflowPurchDocumentHeader."Document Type"::"Credit Memo");  //1367
+            END;
+        END;
+
+        //Set filters
+        IF vendorNo <> '' THEN BEGIN
+          ExDoc.SETFILTER("Vendor No.",vendorNo);
+          PostedExDoc.SETFILTER("Vendor No.",vendorNo);
+          ExflowPurchDocumentHeader.SETFILTER("Buy-from Vendor No.",vendorNo);    //1367
+        END ELSE IF vendorName <> '' THEN BEGIN
+          vendorNo := CheckVendorNameFilter(vendorName,MultiCompSearch, TempSearchRec.CompName);
+          IF vendorNo = '' THEN BEGIN
+            ExDoc.SETFILTER("Vendor Name",'%1',vendorName);
+            PostedExDoc.SETFILTER("Vendor Name",'%1',vendorName);
+            ExflowPurchDocumentHeader.SETFILTER("Buy-from Vendor Name" , vendorName);  //1367
+          END ELSE BEGIN
+            ExDoc.SETFILTER("Vendor No.",vendorNo);
+            PostedExDoc.SETFILTER("Vendor No.",vendorNo);
+            ExflowPurchDocumentHeader.SETFILTER("Buy-from Vendor No.",vendorNo);   // 1367
+          END;
+        END;
+
+        // Initiator Created by is populated on create
+        IF initiator <> '' THEN BEGIN
+          TempUserFilter := GetUserGroupFilter(CompName,initiator);
+          IF TempUserFilter = '' THEN
+            EXIT;
+
+          ExDoc.SETRANGE("Created By", TempUserFilter);
+          PostedExDoc.SETRANGE("Created By", TempUserFilter);
+          ExflowPurchDocumentHeader.SETRANGE("Invoice Discount Calculation",-1);  //1367 dummy filter
+        END;
+
+        IF  minAmount + maxAmount <> '' THEN BEGIN
+          ExDoc.SETFILTER("Gross Amount",minAmount +'..' +maxAmount);
+          PostedExDoc.SETFILTER("Gross Amount",minAmount + '..' + maxAmount);
+          ExflowPurchDocumentHeader.SETFILTER("Amount Including VAT", minAmount +'..' +maxAmount);  //1367
+        END;
+
+        IF (duedate_from + duedate_to) <> '' THEN BEGIN
+          duedate_from := FORMAT(CreateQuotefromReq.DateField(duedate_from));
+          duedate_to := FORMAT(CreateQuotefromReq.DateField(duedate_to));
+          ExDoc.SETFILTER("Due Date", duedate_from + '..' + duedate_to);
+          PostedExDoc.SETFILTER("Due Date", duedate_from + '..' + duedate_to);
+          ExflowPurchDocumentHeader.SETFILTER("Due Date",duedate_from + '..' + duedate_to);  //1367
+        END;
+
+        IF (postingdate_from + postingdate_to) <> '' THEN BEGIN
+          postingdate_from := FORMAT(CreateQuotefromReq.DateField(postingdate_from));
+          postingdate_to := FORMAT(CreateQuotefromReq.DateField(postingdate_to));
+          IF SearchByCreatedDate THEN BEGIN
+            ExDoc.SETFILTER("Create Date", postingdate_from + '..' + postingdate_to);
+            PostedExDoc.SETFILTER("Create Date", postingdate_from + '..' + postingdate_to);
+            ExflowPurchDocumentHeader.SETFILTER("Date Created" ,postingdate_from + '..' + postingdate_to);  //1367
+          END ELSE IF SearchByPostingDate THEN BEGIN
+            ExDoc.SETFILTER("Posting Date", postingdate_from + '..' + postingdate_to);
+            PostedExDoc.SETFILTER("Posting Date", postingdate_from + '..' + postingdate_to);
+            ExflowPurchDocumentHeader.SETFILTER("Posting Date",postingdate_from + '..' + postingdate_to);  //1367
+          END ELSE BEGIN
+            ExDoc.SETFILTER("Document Date", postingdate_from + '..' + postingdate_to);
+            PostedExDoc.SETFILTER("Document Date", postingdate_from + '..' + postingdate_to);
+            ExflowPurchDocumentHeader.SETFILTER("Document Date",postingdate_from + '..' + postingdate_to)  //1367
+          END;
+        END;
+
+        IF RefNoSearch THEN BEGIN
+          ExDoc.SETRANGE("Text Field 1",docNo);
+          PostedExDoc.SETRANGE("Text Field 1",docNo);
+          ExflowPurchDocumentHeader.SETRANGE("Document Type",-1) //1367 dummy filter
+        END ELSE IF docNo <> '' THEN BEGIN
+          ExDoc.SETRANGE("Document No.",docNo);
+          PostedExDoc.SETRANGE("Document No.",docNo);
+          ExflowPurchDocumentHeader.SETRANGE("Document Type", -1 ) //1367 dummy filter
+        END;
+
+        IF vendorDocNo <> '' THEN BEGIN
+          ExDoc.SETFILTER("Vendor Document No.",'%1',vendorDocNo);
+          PostedExDoc.SETFILTER("Vendor Document No.",'%1',vendorDocNo);
+          ExflowPurchDocumentHeader.SETFILTER("Vendor Document No.", '%1' ,vendorDocNo);  //1367
+        END;
+
+        IF docAdminComment <> '' THEN BEGIN
+          ExDoc.SETFILTER("Admin Comment",docAdminComment);
+          PostedExDoc.SETFILTER("Admin Comment",docAdminComment);
+          ExflowPurchDocumentHeader.SETRANGE("Job Queue Status",-1);   //1367 dummy filter
+        END;
+
+        //If initiator is specified approvers are ignored
+        IF initiator = '' THEN
+          IF (approver <> '') THEN BEGIN
+            ExDocLineApp.SETRANGE(Approver,approver);
+            PostedExDocLineApp.SETRANGE(Approver,approver);
+            //Only need to search approvedby where approver is diffrent user than approver
+            ExDocLineApprovedBy.SETRANGE("Approved By",approver);
+            ExDocLineApprovedBy.SETFILTER(Approver,'<>%1',approver);
+            PostedExDocLineAppovedBy.SETRANGE("Approved By",approver);
+            PostedExDocLineAppovedBy.SETFILTER(Approver,'<>%1',approver);
+            //ExflowPurchDocumentHeader.SETRANGE("VAT calculated from",-1);   //1367 dummy filter
+            ApproverFilterExists := TRUE;
+          END;
+
+        //add wildcard search
+        IF approverComment <> '' THEN BEGIN
+          ExDocLineApp.SETFILTER(Comment,approverComment);
+          PostedExDocLineApp.SETFILTER(Comment,approverComment);
+          //ExflowPurchDocumentHeader.SETRANGE("ExFlow Entry Type",-1); //1367 dummy filter
+        END;
+
+        CASE approverstatus OF
+          '0','Not Processed':
+            BEGIN
+              ExDocLineApp.SETRANGE(Flowstatus,ExDocLineApp.Flowstatus::"Not processed");
+              ExDocLineApprovedBy.SETRANGE(Flowstatus,ExDocLineApp.Flowstatus::"Not processed"); //shouldnt occur but will ensure no hit
+              PostedExDocLineApp.SETRANGE(Flowstatus,-1);
+              PostedExDocLineAppovedBy.SETRANGE(Flowstatus,-1);
+              //ExflowPurchDocumentHeader.SETRANGE("Block Document",-1);  //1367 dummy filter
+            END;
+          '1','Current':
+            BEGIN
+              ExDocLineApp.SETRANGE(Flowstatus,ExDocLineApp.Flowstatus::Current);
+              ExDocLineApprovedBy.SETRANGE(Flowstatus,ExDocLineApp.Flowstatus::Current); //shouldnt occur but will ensure no hit
+              PostedExDocLineApp.SETRANGE(Flowstatus,-1);
+              PostedExDocLineAppovedBy.SETRANGE(Flowstatus,-1);
+              //ExflowPurchDocumentHeader.SETRANGE("Block Document",-1);  //1367 dummy filter
+            END;
+          '2','Approved':
+            BEGIN
+              ExDocLineApp.SETRANGE(Flowstatus,ExDocLineApp.Flowstatus::Approved);
+              ExDocLineApprovedBy.SETRANGE(Flowstatus,ExDocLineApp.Flowstatus::Approved);
+              PostedExDocLineApp.SETRANGE(Flowstatus,ExDocLineApp.Flowstatus::Approved);
+              PostedExDocLineAppovedBy.SETRANGE(Flowstatus,ExDocLineApp.Flowstatus::Approved);
+              //ExflowPurchDocumentHeader.SETRANGE("Block Document",-1);  //1367 dummy filter
+            END;
+          '3','Rejected':
+            BEGIN
+              ExDocLineApp.SETRANGE(Flowstatus,ExDocLineApp.Flowstatus::Rejected);
+              ExDocLineApprovedBy.SETRANGE(Flowstatus,ExDocLineApp.Flowstatus::Rejected);
+              PostedExDocLineApp.SETRANGE(Flowstatus,-1);
+              PostedExDocLineAppovedBy.SETRANGE(Flowstatus,-1);
+              //ExflowPurchDocumentHeader.SETRANGE("Block Document",-1);  //1367 dummy filter
+            END;
+          '4','On Hold':
+            BEGIN
+              ExDocLineApp.SETRANGE(Flowstatus,ExDocLineApp.Flowstatus::"On hold");
+              ExDocLineApprovedBy.SETRANGE(Flowstatus,ExDocLineApp.Flowstatus::"On hold");
+              PostedExDocLineApp.SETRANGE(Flowstatus,-1);
+              PostedExDocLineAppovedBy.SETRANGE(Flowstatus,-1);
+              //ExflowPurchDocumentHeader.SETRANGE("Block Document",-1);  //1367 dummy filter
+            END;
+        END;
+      END;
+
+      //Check that filters are applied and convert dim array to local comp id
+      CheckFilters(ExDoc,ExDocLineApp,arrLocalColumnID,arrDimWebColumnID,arrDimValue,TempSearchRec.CompName,DimFilterCount);
+
+      //Search docs, headers first, consecutive searches will be based on filterd temp list or source table.
+      FiltersApplied := SearchByHeaders(TempEXDoc,ExDoc,PostedExDoc,ExflowPurchDocumentHeader,TempSearchRec.CompName);  //1367 ExflowPurchDocumentHeader added parameter
+
+      IF FiltersApplied THEN
+        SearchByFilteredDocLineApp(TempEXDoc,ExDocLineApp,ExDocLineApprovedBy,PostedExDocLineApp,PostedExDocLineAppovedBy,TempSearchRec.CompName)
+      ELSE
+        FiltersApplied := SearchByDocLineApp(TempEXDoc,ExDocLineApp,ExDocLineApprovedBy,PostedExDocLineApp,PostedExDocLineAppovedBy,
+                                             ExDoc,PostedExDoc,ApproverFilterExists,TempSearchRec.CompName);
+      CASE DimFilterCount OF
+        0 : EXIT;
+        1 :
+          BEGIN
+            IF FiltersApplied THEN
+              SearchByFilteredDim(TempEXDoc,arrLocalColumnID,arrDimValue,TempSearchRec.CompName)
+            ELSE
+              SearchByOneDim(TempEXDoc,arrLocalColumnID,arrDimValue,ExDoc,PostedExDoc,TempSearchRec.CompName);
+          END;
+        ELSE
+          BEGIN
+            IF FiltersApplied THEN
+              SearchByFilteredDim(TempEXDoc,arrLocalColumnID,arrDimValue,TempSearchRec.CompName)
+            ELSE
+              SearchByMultiDim(TempEXDoc,arrLocalColumnID,arrDimValue,ExDoc,PostedExDoc,TempSearchRec.CompName);
+          END;
+      END;
+    END;
+
+    LOCAL PROCEDURE SearchByHeaders@1100285006(VAR TempEXDoc@1100285000 : TEMPORARY Record 12013608;VAR ExDoc@1100285001 : Record 12013608;VAR PostedExDoc@1100285002 : Record 12013626;VAR ExflowPurchDocumentHeader@1100285003 : Record 12013587;CompName@1100285004 : Text[100]) FilteExist : Boolean;
+    BEGIN
+      //1367 added parameter ExflowPurchDocumentHeader
+
+      IF ExDoc.GETFILTERS = '' THEN
+        EXIT(FALSE);
+
+      IF ExDoc.FINDSET THEN
+        REPEAT
+          InsertTempExDoc(TempEXDoc,ExDoc,CompName);
+        UNTIL ExDoc.NEXT = 0;
+
+      IF PostedExDoc.FINDSET THEN
+        REPEAT
+          InsertTempPostedExDoc(TempEXDoc,PostedExDoc,CompName);
+        UNTIL PostedExDoc.NEXT = 0;
+
+      //>>1367
+      IF  ExflowPurchDocumentHeader.FINDSET THEN
+        REPEAT
+          InsertTempExFlowPurchDocumentHeader(TempEXDoc,ExflowPurchDocumentHeader,CompName);
+        UNTIL ExflowPurchDocumentHeader.NEXT=0;
+      //<<1367
+
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE SearchByDocLineApp@1100285008(VAR TempEXDoc@1100285004 : TEMPORARY Record 12013608;VAR ExDocLineApp@1100285003 : Record 12013610;VAR ExDocLineApprovedBy@1100285002 : Record 12013610;VAR PostedExDocLineApp@1100285001 : Record 12013628;VAR PostedExDocLineApprovedBy@1100285000 : Record 12013628;VAR ExDoc@1100285006 : Record 12013608;VAR PostedExDoc@1100285005 : Record 12013626;ApproverFilterExist@1100285007 : Boolean;CompName@1100285008 : Text[100]) FiltersApplied : Boolean;
+    BEGIN
+      //Same filters are applied to all recs
+      IF ExDocLineApp.GETFILTERS = '' THEN
+        EXIT(FALSE);
+
+      IF ExDocLineApp.FINDSET THEN
+        REPEAT
+          ExDoc.GET(ExDocLineApp."Document ID");
+          InsertTempExDoc(TempEXDoc,ExDoc,CompName);
+        UNTIL ExDocLineApp.NEXT = 0;
+
+      IF PostedExDocLineApp.FINDSET THEN
+        REPEAT
+          PostedExDoc.GET(PostedExDocLineApp."Document ID");
+          InsertTempPostedExDoc(TempEXDoc,PostedExDoc,CompName);
+        UNTIL PostedExDocLineApp.NEXT = 0;
+
+      //No need to search Approved By recs if no apporver filter is applied
+      IF ApproverFilterExist THEN BEGIN
+        IF ExDocLineApprovedBy.FINDSET THEN
+          REPEAT
+            ExDoc.GET(ExDocLineApprovedBy."Document ID");
+            InsertTempExDoc(TempEXDoc,ExDoc,CompName);
+          UNTIL ExDocLineApprovedBy.NEXT = 0;
+
+      IF PostedExDocLineApprovedBy.FINDSET THEN
+        REPEAT
+          PostedExDoc.GET(PostedExDocLineApprovedBy."Document ID");
+          InsertTempPostedExDoc(TempEXDoc,PostedExDoc,CompName);
+        UNTIL PostedExDocLineApp.NEXT = 0;
+      END;
+
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE SearchByFilteredDocLineApp@1100285009(VAR TempEXDoc@1100285004 : TEMPORARY Record 12013608;VAR ExDocLineApp@1100285003 : Record 12013610;VAR ExDocLineApprovedBy@1100285002 : Record 12013610;VAR PostedExDocLineApp@1100285001 : Record 12013628;VAR PostedExDocLineApprovedBy@1100285000 : Record 12013628;CompName@1100285005 : Text[100]);
+    BEGIN
+      IF ExDocLineApp.GETFILTERS = '' THEN
+        EXIT;
+
+      //Search temp table and remove records without approver match
+      TempEXDoc.RESET;
+      TempEXDoc.SETRANGE("Temp Company Name",CompName);
+      IF TempEXDoc.FINDSET THEN
+        REPEAT
+          CASE TempEXDoc."Temp Source Table" OF
+            DATABASE::"EX Document" :
+              BEGIN
+                ExDocLineApp.SETRANGE("Document ID",TempEXDoc."Temp ID");
+                ExDocLineApprovedBy.SETRANGE("Document ID",TempEXDoc."Temp ID");
+                IF ExDocLineApp.ISEMPTY AND ExDocLineApprovedBy.ISEMPTY THEN
+                  TempEXDoc.DELETE;
+              END;
+             DATABASE::"EX Posted Document" :
+              BEGIN
+                PostedExDocLineApp.SETRANGE("Document ID",TempEXDoc."Temp ID");
+                PostedExDocLineApprovedBy.SETRANGE("Document ID",TempEXDoc."Temp ID");
+                IF PostedExDocLineApp.ISEMPTY AND PostedExDocLineApprovedBy.ISEMPTY THEN
+                  TempEXDoc.DELETE;
+              END;
+            END;
+        UNTIL TempEXDoc.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE SearchByOneDim@1100285011(VAR TempEXDoc@1100285002 : TEMPORARY Record 12013608;arrLocalColumnID@1100285001 : ARRAY [10] OF BigInteger;arrDimValue@1100285000 : ARRAY [10] OF Code[1024];VAR ExDoc@1100285006 : Record 12013608;VAR PostedExDoc@1100285005 : Record 12013626;CompName@1100285007 : Text[50]);
+    VAR
+      ExDocLineDim@1100285004 : Record 12013611;
+      PostedExDocLineDim@1100285003 : Record 12013629;
+      i@1100285008 : Integer;
+    BEGIN
+      //Change comp on locals
+      ExDocLineDim.CHANGECOMPANY(CompName);
+      PostedExDocLineDim.CHANGECOMPANY(CompName);
+
+      FOR i := 1 TO ARRAYLEN(arrLocalColumnID) DO
+        IF arrLocalColumnID[i] <> 0 THEN BEGIN
+          ExDocLineDim.RESET;
+          ExDocLineDim.SETRANGE("Column ID",arrLocalColumnID[i]);
+          ExDocLineDim.SETFILTER("Dimension Value",arrDimValue[i]);
+          IF ExDocLineDim.FINDSET THEN
+            REPEAT
+              ExDoc.GET(ExDocLineDim."Document ID");
+              InsertTempExDoc(TempEXDoc,ExDoc,CompName);
+            UNTIL ExDocLineDim.NEXT = 0;
+
+          //Find posted docs
+          PostedExDocLineDim.RESET;
+          PostedExDocLineDim.SETRANGE("Column ID",arrLocalColumnID[i]);
+          PostedExDocLineDim.SETFILTER("Dimension Value",arrDimValue[i]);
+          IF PostedExDocLineDim.FINDSET THEN
+            REPEAT
+              PostedExDoc.GET(PostedExDocLineDim."Document ID");
+              InsertTempPostedExDoc(TempEXDoc,PostedExDoc,CompName);
+            UNTIL PostedExDocLineDim.NEXT  = 0;
+        END;
+    END;
+
+    LOCAL PROCEDURE SearchByFilteredDim@1100285007(VAR TempEXDoc@1100285006 : TEMPORARY Record 12013608;arrLocalColumnID@1100285005 : ARRAY [10] OF BigInteger;arrDimValue@1100285004 : ARRAY [10] OF Code[50];CompName@1100285003 : Text[100]);
+    VAR
+      ExDocLineDim@1100285001 : Record 12013611;
+      PostedExDocLineDim@1100285000 : Record 12013629;
+      i@1100285002 : Integer;
+      DimMiss@1100285007 : Boolean;
+    BEGIN
+      ExDocLineDim.CHANGECOMPANY(CompName);
+      PostedExDocLineDim.CHANGECOMPANY(CompName);
+
+      //Delete temp results based on dim misses
+      TempEXDoc.RESET;
+      TempEXDoc.SETRANGE("Temp Company Name",CompName);
+      IF TempEXDoc.FINDSET THEN
+        REPEAT
+          FOR i := 1 TO ARRAYLEN(arrLocalColumnID) DO BEGIN
+            IF arrLocalColumnID[i] <> 0 THEN
+              CASE TempEXDoc."Temp Source Table" OF
+                DATABASE::"EX Document" :
+                  BEGIN
+                    ExDocLineDim.RESET;
+                    ExDocLineDim.SETRANGE("Document ID",TempEXDoc."Temp ID");
+                    ExDocLineDim.SETRANGE("Column ID",arrLocalColumnID[i]);
+                    ExDocLineDim.SETFILTER("Dimension Value",arrDimValue[i]);
+                    IF ExDocLineDim.ISEMPTY THEN BEGIN
+                      //Delete and exit for-loop
+                      TempEXDoc.DELETE;
+                      i := ARRAYLEN(arrLocalColumnID);
+                    END;
+                  END;
+                DATABASE::"EX Posted Document" :
+                  BEGIN
+                    PostedExDocLineDim.RESET;
+                    PostedExDocLineDim.SETRANGE("Document ID",TempEXDoc."Temp ID");
+                    PostedExDocLineDim.SETRANGE("Column ID",arrLocalColumnID[i]);
+                    PostedExDocLineDim.SETFILTER("Dimension Value",arrDimValue[i]);
+                    IF PostedExDocLineDim.ISEMPTY THEN BEGIN
+                      //Delete and exit for-loop
+                      TempEXDoc.DELETE;
+                      i := ARRAYLEN(arrLocalColumnID);
+                    END;
+                  END;
+               //>>1367
+                 DATABASE::"Exflow Purch. Document Header":
+                   BEGIN
+                     IF TempEXDoc.DELETE THEN;
+                   END;
+               //<<1367
+                END;
+          END;
+        UNTIL TempEXDoc.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE SearchByMultiDim@1100285013(VAR TempEXDoc@1100285006 : TEMPORARY Record 12013608;arrLocalColumnID@1100285005 : ARRAY [10] OF BigInteger;arrDimValue@1100285015 : ARRAY [10] OF Code[1024];VAR ExDoc@1100285003 : Record 12013608;VAR PostedExDoc@1100285002 : Record 12013626;CompName@1100285004 : Text[100]);
+    VAR
+      ExDocLineDim@1100285011 : Record 12013611;
+      PostedExDocLineDim@1100285010 : Record 12013629;
+      TempExDocLineDim@1100285008 : TEMPORARY Record 12013611;
+      TempPostedExDocLineDim@1100285007 : TEMPORARY Record 12013629;
+      i@1100285012 : Integer;
+      FirstHitPos@1100285013 : Integer;
+      TmpFilter@1100285000 : Text;
+    BEGIN
+      ExDocLineDim.CHANGECOMPANY(CompName);
+      PostedExDocLineDim.CHANGECOMPANY(CompName);
+
+      FOR i := 1 TO ARRAYLEN(arrLocalColumnID) DO
+        IF arrLocalColumnID[i] <> 0 THEN BEGIN
+          ExDocLineDim.RESET;
+          ExDocLineDim.SETRANGE("Column ID",arrLocalColumnID[i]);
+          ExDocLineDim.SETFILTER("Dimension Value",arrDimValue[i]);
+          //save position and exit outuer loop
+          FirstHitPos := i;
+          i := ARRAYLEN(arrLocalColumnID);
+          IF ExDocLineDim.FINDSET THEN
+            REPEAT
+              //Store temp recs
+              InsertTempExDocLineDim(TempExDocLineDim,ExDocLineDim);
+            UNTIL ExDocLineDim.NEXT = 0;
+        END;
+
+      //loop though first dim set and delete if miss dim filter N
+      TempExDocLineDim.RESET;
+      IF TempExDocLineDim.FINDSET THEN
+        REPEAT
+          FOR i := FirstHitPos + 1 TO ARRAYLEN(arrLocalColumnID) DO
+            IF arrLocalColumnID[i] <> 0 THEN BEGIN
+              ExDocLineDim.RESET;
+              ExDocLineDim.SETRANGE("Document ID",TempExDocLineDim."Document ID");
+              ExDocLineDim.SETRANGE("Column ID",arrLocalColumnID[i]);
+              ExDocLineDim.SETFILTER("Dimension Value",arrDimValue[i]);
+              TmpFilter := arrDimValue[i];
+              IF ExDocLineDim.ISEMPTY THEN BEGIN
+                TempExDocLineDim.DELETE;
+                i := ARRAYLEN(arrLocalColumnID);
+              END;
+            END;
+        UNTIL TempExDocLineDim.NEXT = 0;
+
+      FOR i := 1 TO ARRAYLEN(arrLocalColumnID) DO
+        IF arrLocalColumnID[i] <> 0 THEN BEGIN
+          PostedExDocLineDim.RESET;
+          PostedExDocLineDim.SETRANGE("Column ID",arrLocalColumnID[i]);
+          PostedExDocLineDim.SETFILTER("Dimension Value",arrDimValue[i]);
+          //save position and exit outuer loop
+          FirstHitPos := i;
+          i := ARRAYLEN(arrLocalColumnID);
+          IF PostedExDocLineDim.FINDSET THEN
+            REPEAT
+              //Store temp recs
+              InsertTempPostedExDocLineDim(TempPostedExDocLineDim,PostedExDocLineDim);
+            UNTIL PostedExDocLineDim.NEXT = 0;
+        END;
+
+      //loop though first dim set and delete if miss dim filter N
+      TempPostedExDocLineDim.RESET;
+      IF TempPostedExDocLineDim.FINDSET THEN
+        REPEAT
+          FOR i := FirstHitPos + 1 TO ARRAYLEN(arrLocalColumnID) DO
+            IF arrLocalColumnID[i] <> 0 THEN BEGIN
+              PostedExDocLineDim.RESET;
+              PostedExDocLineDim.SETRANGE("Document ID",TempPostedExDocLineDim."Document ID");
+              PostedExDocLineDim.SETRANGE("Column ID",arrLocalColumnID[i]);
+              PostedExDocLineDim.SETFILTER("Dimension Value",arrDimValue[i]);
+              IF PostedExDocLineDim.ISEMPTY THEN BEGIN
+                TempPostedExDocLineDim.DELETE;
+                i := ARRAYLEN(arrLocalColumnID);
+              END;
+            END;
+        UNTIL TempPostedExDocLineDim.NEXT = 0;
+
+      //Insert search result based on found TempExDocLin recs
+      TempExDocLineDim.RESET;
+      IF TempExDocLineDim.FINDSET THEN
+        REPEAT
+          ExDoc.GET(TempExDocLineDim."Document ID");
+          InsertTempExDoc(TempEXDoc,ExDoc,CompName);
+        UNTIL TempExDocLineDim.NEXT = 0;
+
+      TempPostedExDocLineDim.RESET;
+      IF TempPostedExDocLineDim.FINDSET THEN
+        REPEAT
+          PostedExDoc.GET(TempPostedExDocLineDim."Document ID");
+          InsertTempPostedExDoc(TempEXDoc,PostedExDoc,CompName);
+        UNTIL TempPostedExDocLineDim.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CheckFilters@1100285014(VAR ExDoc@1100285006 : Record 12013608;VAR ExDocLineApp@1100285005 : Record 12013610;VAR arrLocalColumnID@1100285004 : ARRAY [10] OF BigInteger;arrDimWebColumnID@1100285003 : ARRAY [10] OF Code[20];arrDimValue@1100285002 : ARRAY [10] OF Code[50];CompName@1100285001 : Text[100];VAR DimFilterCount@1100285000 : Integer);
+    BEGIN
+      GetDimFilterCount(arrLocalColumnID,arrDimWebColumnID,arrDimValue,CompName,DimFilterCount);
+      IF DimFilterCount = 0 THEN
+        IF ExDoc.GETFILTERS = '' THEN
+          IF ExDocLineApp.GETFILTERS = '' THEN
+            ERROR(Error003);
+    END;
+
+    LOCAL PROCEDURE GetDimFilterCount@1100285010(VAR arrLocalColumnID@1100285006 : ARRAY [10] OF BigInteger;arrDimWebColumnID@1100285002 : ARRAY [10] OF Code[20];arrDimValue@1100285001 : ARRAY [10] OF Code[50];CompName@1100285005 : Text[100];VAR DimFilterCount@1100285008 : Integer);
+    VAR
+      i@1100285000 : Integer;
+      ExColumn@1100285003 : Record 12013661;
+      WebCompID@1100285004 : Record 12013630;
+      WebColumnID@1100285007 : BigInteger;
+    BEGIN
+      IF NOT WebCompID.GET(CompName) THEN
+        EXIT;
+
+      IF NOT WebCompID."Web enabled" THEN
+        EXIT;
+
+      //Find local comp Column ID
+      ExColumn.CHANGECOMPANY(CompName);
+      FOR i := 1 TO ARRAYLEN(arrDimValue) DO
+        IF arrDimValue[i] <> '' THEN
+          IF EVALUATE(WebColumnID,arrDimWebColumnID[i]) THEN
+            IF ExColumn.GET(WebColumnID-WebCompID."Web Company ID") THEN BEGIN
+              DimFilterCount := DimFilterCount + 1;
+              arrLocalColumnID[i] := ExColumn.ID;
+            END;
+    END;
+
+    LOCAL PROCEDURE InsertTempExDoc@1100285005(VAR TempEXDoc@1100285001 : TEMPORARY Record 12013608;ExDoc@1100285000 : Record 12013608;CompName@1100285002 : Text[100]);
+    BEGIN
+      IF NOT TempEXDoc.GET(ExDoc."Web ID") THEN BEGIN
+        TempEXDoc.INIT;
+        TempEXDoc.TRANSFERFIELDS(ExDoc);
+        TempEXDoc."Temp ID" := TempEXDoc.ID;
+        TempEXDoc."Temp Company Name" := CompName;
+        TempEXDoc."Temp Source Table" := DATABASE::"EX Document";
+        TempEXDoc.ID := ExDoc."Web ID";
+        TempEXDoc.INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE InsertTempPostedExDoc@1100285016(VAR TempEXDoc@1100285001 : TEMPORARY Record 12013608;PostedExDoc@1100285000 : Record 12013626;CompName@1100285003 : Text[100]);
+    BEGIN
+      IF NOT TempEXDoc.GET(PostedExDoc."Web ID") THEN BEGIN
+        TempEXDoc.INIT;
+        TempEXDoc.TRANSFERFIELDS(PostedExDoc);
+        TempEXDoc."Temp ID" := TempEXDoc.ID;
+        TempEXDoc.ID := PostedExDoc."Web ID";
+        TempEXDoc."Temp Source Table" := DATABASE::"EX Posted Document";
+        TempEXDoc."Temp Company Name" := CompName;
+        TempEXDoc.INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE InsertTempExFlowPurchDocumentHeader@1100285027(VAR TempExDoc@1100285000 : Record 12013608;ExflowPurchDocumentHeader@1100285001 : Record 12013587;CompName@1100285002 : Text[100]);
+    BEGIN
+      //>>1367
+      TempExDoc.INIT;
+      TempExDoc."Document Type":=ExflowPurchDocumentHeader."Document Type";
+      TempExDoc."Document No.":='Imp.Jour. ' + ExflowPurchDocumentHeader."Journal Batch Name" ;
+      TempExDoc."Requisition No. Series" := ExflowPurchDocumentHeader."Journal Batch Name" ;
+      TempExDoc."Vendor No.":=ExflowPurchDocumentHeader."Buy-from Vendor No.";
+      TempExDoc."Vendor Name":=ExflowPurchDocumentHeader."Buy-from Vendor Name";
+      TempExDoc."Document Date":=ExflowPurchDocumentHeader."Document Date"; // posting date????
+      TempExDoc."Due Date":=ExflowPurchDocumentHeader."Due Date";
+      TempExDoc."Posting Date":=ExflowPurchDocumentHeader."Posting Date"; //chech this with document date
+      TempExDoc."Gross Amount":=ExflowPurchDocumentHeader."Document Amount Including VAT";
+      TempExDoc."VAT Amount":=ExflowPurchDocumentHeader."Document Amount VAT";
+      TempExDoc."Net Amount":=ExflowPurchDocumentHeader."Document Amount";
+      TempExDoc."Vendor Document No.":=ExflowPurchDocumentHeader."Vendor Document No.";
+      TempExDoc.ID:= ExflowPurchDocumentHeader."Inbound Document No.";
+      TempExDoc."Temp ID":=TempExDoc.ID;
+      TempExDoc."Temp Source Table":=DATABASE::"Exflow Purch. Document Header";
+      TempExDoc."Temp Company Name":=CompName;
+      TempExDoc.INSERT;
+      //<<1367
+    END;
+
+    LOCAL PROCEDURE CheckVendorNameFilter@1100285017(VendorName@1100285000 : Text;MultiCompSearch@1100285004 : Boolean;CompName@1100285005 : Text[100]) VendorNo : Code[20];
+    VAR
+      WebUsedVendors@1100285001 : Record 12013631;
+      MissMatch@1100285002 : Boolean;
+      FirstVendNo@1100285003 : Code[20];
+    BEGIN
+      //For multi comp, use vendorname - If Only 1 vendorno matches search, return vendorno filter
+      IF MultiCompSearch THEN
+        EXIT('');
+
+      WebUsedVendors.SETFILTER("Vendor Name",'%1',VendorName);
+      WebUsedVendors.SETRANGE("Company Name",CompName);
+      IF WebUsedVendors.FINDSET THEN BEGIN
+        FirstVendNo := WebUsedVendors."Vendor No.";
+        REPEAT
+          IF FirstVendNo <> WebUsedVendors."Vendor No." THEN
+            MissMatch := TRUE;
+        UNTIL (WebUsedVendors.NEXT = 0) OR MissMatch;
+      END;
+
+      IF NOT MissMatch THEN
+        EXIT(FirstVendNo)
+      ELSE
+        EXIT('');
+    END;
+
+    LOCAL PROCEDURE InsertTempExDocLineDim@1100285023(VAR TempEXDocLineDim@1100285001 : TEMPORARY Record 12013611;ExDocLineDim@1100285000 : Record 12013611);
+    BEGIN
+      TempEXDocLineDim.RESET;
+      TempEXDocLineDim.SETRANGE("Document ID",ExDocLineDim."Document ID");
+      IF TempEXDocLineDim.ISEMPTY THEN BEGIN
+        TempEXDocLineDim.INIT;
+        TempEXDocLineDim.TRANSFERFIELDS(ExDocLineDim);
+        TempEXDocLineDim.INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE InsertTempPostedExDocLineDim@1100285019(VAR TempPostedExDocLineDim@1100285001 : TEMPORARY Record 12013629;PostedExDocLineDim@1100285000 : Record 12013629);
+    BEGIN
+      TempPostedExDocLineDim.RESET;
+      TempPostedExDocLineDim.SETRANGE("Document ID",PostedExDocLineDim."Document ID");
+      IF TempPostedExDocLineDim.ISEMPTY THEN BEGIN
+        TempPostedExDocLineDim.INIT;
+        TempPostedExDocLineDim.TRANSFERFIELDS(PostedExDocLineDim);
+        TempPostedExDocLineDim.INSERT;
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

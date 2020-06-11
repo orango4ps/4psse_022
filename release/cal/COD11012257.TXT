@@ -1,0 +1,240 @@
+OBJECT Codeunit 11012257 Batch Release Retention
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    TableNo=11020636;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      BatchRetReleaseBuffer@1000000007 : TEMPORARY Record 11020638;
+      Text001@1100528501 : TextConst 'DEU=Rechnungen buchen  #1########## @2@@@@@@@@@@@@@;ENU=Posting invoices   #1########## @2@@@@@@@@@@@@@;NLD=Facturen boeken   #1########## @2@@@@@@@@@@@@@;NOR=Bokf›rer fakturaer #1########## @2@@@@@@@@@@@@@;SVE=Bokf”r fakturor    #1########## @2@@@@@@@@@@@@@';
+      Text002@1100528500 : TextConst 'DEU=%1 Rechnungen von insgesamt %2 wurden gebucht.;ENU=%1 invoices out of a total of %2 have now been posted.;NLD=%1 van de totaal %2 facturen zijn geboekt.;NOR=%1 fakturaer av til sammen %2 er n† bokf›rt.;SVE=%1 fakturor av totalt %2 har nu bokf”rts.';
+      Text003@10009000 : TextConst 'DEU=Keine Zeilen ausgew„hlt;ENU=No lines selected;NLD=Geen regels geselecteerd;SVE=Inga rader valda';
+      Text004@10009001 : TextConst 'DEU=%1 Belege wurden erstellt;ENU=%1 documents has been created;NLD=%1 documenten aangemaakt;SVE=%1 dokument har skapats';
+
+    PROCEDURE BatchCreate@10009000(VAR RetLedgerEntryTemp@10009000 : TEMPORARY Record 11020636);
+    VAR
+      RetLedgerEntry@10009003 : Record 11020636;
+      RetLedgerEntryTemp2@10009004 : TEMPORARY Record 11020636;
+      ReleaseRetentionLines@10009002 : Codeunit 11012258;
+      ErrTxt@10009001 : Text[250];
+      CounterOK@10009005 : Integer;
+    BEGIN
+      IF NOT RetLedgerEntryTemp.FINDSET THEN BEGIN
+        MESSAGE(Text003);
+        EXIT;
+      END;
+
+      REPEAT
+        RetLedgerEntry.GET(RetLedgerEntryTemp."Entry No.");
+        IF (RetLedgerEntry."Applied Document No." = '') AND (RetLedgerEntry."On Hold" = '' ) THEN BEGIN
+          RetLedgerEntry.CALCFIELDS("Remaining Amount");
+          BatchRetReleaseBuffer."Subcontract Type" := RetLedgerEntry."Subcontract Type";
+          BatchRetReleaseBuffer."Sell-to/Buy-from No." := RetLedgerEntry."Sell-to/Buy-from No.";
+          BatchRetReleaseBuffer."Related No." := RetLedgerEntry."Related No.";
+          BatchRetReleaseBuffer."Job No." := RetLedgerEntry."Job No.";
+          BatchRetReleaseBuffer."Subcontract No." := RetLedgerEntry."Subcontract No.";
+          BatchRetReleaseBuffer."Currency Code" := RetLedgerEntry."Currency Code";
+          IF BatchRetReleaseBuffer.FIND THEN BEGIN
+            BatchRetReleaseBuffer."Retention Amt" += RetLedgerEntry."Remaining Amount";
+            BatchRetReleaseBuffer.MODIFY;
+          END ELSE BEGIN
+            BatchRetReleaseBuffer."Retention Amt" := RetLedgerEntry."Remaining Amount";
+            BatchRetReleaseBuffer.INSERT;
+          END;
+
+          RetLedgerEntryTemp2 := RetLedgerEntry;
+          RetLedgerEntryTemp2.INSERT;
+        END;
+      UNTIL RetLedgerEntryTemp.NEXT = 0;
+
+      RetLedgerEntryTemp2.SETCURRENTKEY("Related No.");
+      IF BatchRetReleaseBuffer.FINDSET THEN
+        REPEAT
+          RetLedgerEntryTemp2.SETRANGE("Subcontract Type",BatchRetReleaseBuffer."Subcontract Type");
+          RetLedgerEntryTemp2.SETRANGE("Sell-to/Buy-from No.",BatchRetReleaseBuffer."Sell-to/Buy-from No.");
+          RetLedgerEntryTemp2.SETRANGE("Related No.",BatchRetReleaseBuffer."Related No.");
+          RetLedgerEntryTemp2.SETRANGE("Job No.",BatchRetReleaseBuffer."Job No.");
+          RetLedgerEntryTemp2.SETRANGE("Subcontract No.",BatchRetReleaseBuffer."Subcontract No.");
+          RetLedgerEntryTemp2.SETRANGE("Currency Code",BatchRetReleaseBuffer."Currency Code");
+          IF RetLedgerEntryTemp2.FINDSET THEN
+            ReleaseRetentionLines.SetBatchRetReleaseBuffer(BatchRetReleaseBuffer);
+            IF NOT ReleaseRetentionLines.RUN(RetLedgerEntryTemp2) THEN BEGIN
+              ErrTxt := GETLASTERRORTEXT;
+              CLEARLASTERROR;
+              REPEAT
+                RetLedgerEntry.GET(RetLedgerEntryTemp2."Entry No.");
+                RetLedgerEntry.Comment := COPYSTR(ErrTxt,1,MAXSTRLEN(RetLedgerEntry.Comment));
+                RetLedgerEntry.MODIFY;
+              UNTIL RetLedgerEntryTemp2.NEXT = 0;
+            END ELSE
+              CounterOK += 1;
+            COMMIT;
+        UNTIL BatchRetReleaseBuffer.NEXT = 0;
+
+      IF GUIALLOWED AND (CounterOK > 0) THEN
+        MESSAGE(Text004,CounterOK);
+    END;
+
+    PROCEDURE BatchPost@1000000007(VAR RetLedgerEntryTemp@1000000013 : TEMPORARY Record 11020636);
+    VAR
+      SalesHeader@1000000011 : Record 36;
+      SalesHeaderTemp@1000000010 : TEMPORARY Record 36;
+      PurchaseHeader@1000000006 : Record 38;
+      PurchHeaderTemp@1000000000 : TEMPORARY Record 38;
+      RetLedgerEntry@1000000015 : Record 11020636;
+      RetLedgerEntryTemp2@1000000008 : TEMPORARY Record 11020636;
+      SalesPost@1000000012 : Codeunit 80;
+      PurchPost@1000000005 : Codeunit 90;
+      BatchProcessingMgt@1100525001 : Codeunit 1380;
+      BatchPostParameterTypes@1100525002 : Codeunit 1370;
+      Window@1000000003 : Dialog;
+      CounterOK@1000000007 : Integer;
+      Counter@1000000004 : Integer;
+      CounterTotal@1000000002 : Integer;
+      ErrTxt@1000000009 : Text[1024];
+    BEGIN
+      IF NOT RetLedgerEntryTemp.FINDSET THEN
+        EXIT;
+      REPEAT
+        RetLedgerEntry.GET(RetLedgerEntryTemp."Entry No.");
+
+        IF RetLedgerEntry."Subcontract Type" = RetLedgerEntry."Subcontract Type"::Vendor THEN BEGIN
+          IF RetLedgerEntry."Applied Document No." <> '' THEN BEGIN
+            IF RetLedgerEntry."Applied Document Type" = RetLedgerEntry."Applied Document Type"::"Credit Memo" THEN
+              PurchHeaderTemp."Document Type" := PurchHeaderTemp."Document Type"::"Credit Memo"
+            ELSE
+              PurchHeaderTemp."Document Type" := PurchHeaderTemp."Document Type"::Invoice;
+            PurchHeaderTemp."No." := RetLedgerEntry."Applied Document No.";
+            IF PurchHeaderTemp.INSERT THEN;
+          END;
+        END ELSE BEGIN
+          IF RetLedgerEntry."Applied Document No." <> '' THEN BEGIN
+            IF RetLedgerEntry."Applied Document Type" = RetLedgerEntry."Applied Document Type"::"Credit Memo" THEN
+              SalesHeaderTemp."Document Type" := SalesHeaderTemp."Document Type"::"Credit Memo"
+            ELSE
+              SalesHeaderTemp."Document Type" := SalesHeaderTemp."Document Type"::Invoice;
+            SalesHeaderTemp."No." := RetLedgerEntry."Applied Document No.";
+            IF SalesHeaderTemp.INSERT THEN;
+          END;
+        END;
+
+      UNTIL RetLedgerEntryTemp.NEXT = 0;
+
+      CounterTotal := PurchHeaderTemp.COUNT + SalesHeaderTemp.COUNT;
+
+      IF CounterTotal = 0 THEN
+        EXIT;
+
+      IF GUIALLOWED THEN
+        Window.OPEN(Text001);
+
+      WITH PurchHeaderTemp DO BEGIN
+        IF FINDSET THEN
+          REPEAT
+            Counter := Counter + 1;
+            IF GUIALLOWED THEN BEGIN
+              Window.UPDATE(1,PurchHeaderTemp."No.");
+              Window.UPDATE(2,ROUND(Counter / CounterTotal * 10000,1));
+            END;
+            CLEAR(PurchPost);
+            IF PurchaseHeader.GET(PurchHeaderTemp."Document Type",PurchHeaderTemp."No.") THEN BEGIN
+              PurchaseHeader.CALCFIELDS(Amount,PurchaseHeader."Amount Including VAT");
+
+              IF PurchaseHeader."Manually VAT Posting" THEN BEGIN
+                IF (PurchaseHeader."Amount excl. VAT" = 0) AND (PurchaseHeader."VAT Amount" = 0) THEN
+                  PurchaseHeader."Amount excl. VAT" := PurchaseHeader.Amount;
+                  PurchaseHeader."VAT Amount" := PurchaseHeader."Amount Including VAT" - PurchaseHeader.Amount;
+              END ELSE BEGIN
+                IF PurchaseHeader."Amount incl. VAT" = 0 THEN
+                  PurchaseHeader."Amount incl. VAT" := PurchaseHeader."Amount Including VAT";
+              END;
+
+              BatchProcessingMgt.AddParameter(BatchPostParameterTypes.PostingDate,PurchaseHeader."Posting Date");
+              BatchProcessingMgt.AddParameter(BatchPostParameterTypes.ReplacePostingDate,TRUE);
+              BatchProcessingMgt.AddParameter(BatchPostParameterTypes.ReplaceDocumentDate,TRUE);
+              COMMIT;
+              IF PurchPost.RUN(PurchaseHeader) THEN BEGIN
+                CounterOK := CounterOK + 1;
+                IF MARKEDONLY THEN
+                  MARK(FALSE);
+              END ELSE BEGIN
+                ErrTxt := GETLASTERRORTEXT;
+                CLEARLASTERROR;
+
+                RetLedgerEntryTemp2.COPY(RetLedgerEntryTemp,TRUE);
+                IF RetLedgerEntryTemp."Applied Document Type" = RetLedgerEntryTemp."Applied Document Type"::"Credit Memo" THEN
+                  RetLedgerEntryTemp2.SETRANGE("Applied Document Type",RetLedgerEntryTemp2."Applied Document Type"::"Credit Memo")
+                ELSE
+                  RetLedgerEntryTemp2.SETRANGE("Applied Document Type",RetLedgerEntryTemp2."Applied Document Type"::Invoice);
+                RetLedgerEntryTemp2.SETRANGE("Applied Document No.",PurchHeaderTemp."No.");
+                IF RetLedgerEntryTemp2.FINDSET THEN
+                  REPEAT
+                     RetLedgerEntry.GET(RetLedgerEntryTemp2."Entry No.");
+                     RetLedgerEntry.Comment := COPYSTR(ErrTxt,1,MAXSTRLEN(RetLedgerEntryTemp2.Comment));
+                     RetLedgerEntry.MODIFY;
+                  UNTIL RetLedgerEntryTemp2.NEXT = 0;
+              END;
+              BatchProcessingMgt.ResetBatchID;
+            END;
+          UNTIL PurchHeaderTemp.NEXT = 0;
+      END;
+
+      WITH SalesHeaderTemp DO BEGIN
+        IF FINDSET THEN
+          REPEAT
+            Counter := Counter + 1;
+            IF GUIALLOWED THEN BEGIN
+              Window.UPDATE(1,SalesHeaderTemp."No.");
+              Window.UPDATE(2,ROUND(Counter / CounterTotal * 10000,1));
+            END;
+            CLEAR(SalesPost);
+            IF SalesHeader.GET(SalesHeaderTemp."Document Type",SalesHeaderTemp."No.") THEN BEGIN
+              IF SalesPost.RUN(SalesHeader) THEN BEGIN
+                CounterOK := CounterOK + 1;
+                IF MARKEDONLY THEN
+                  MARK(FALSE);
+              END ELSE BEGIN
+                ErrTxt := GETLASTERRORTEXT;
+                CLEARLASTERROR;
+
+                RetLedgerEntryTemp2.COPY(RetLedgerEntryTemp,TRUE);
+                IF RetLedgerEntryTemp."Applied Document Type" = RetLedgerEntryTemp."Applied Document Type"::"Credit Memo" THEN
+                  RetLedgerEntryTemp2.SETRANGE("Applied Document Type",RetLedgerEntryTemp2."Applied Document Type"::"Credit Memo")
+                ELSE
+                  RetLedgerEntryTemp2.SETRANGE("Applied Document Type",RetLedgerEntryTemp2."Applied Document Type"::Invoice);
+                RetLedgerEntryTemp2.SETRANGE("Applied Document No.",SalesHeaderTemp."No.");
+                IF RetLedgerEntryTemp2.FINDSET THEN BEGIN
+                  REPEAT
+                    RetLedgerEntry.GET(RetLedgerEntryTemp2."Entry No.");
+                    RetLedgerEntry.Comment := COPYSTR(ErrTxt,1,MAXSTRLEN(RetLedgerEntryTemp2.Comment));
+                    RetLedgerEntry.MODIFY;
+                  UNTIL RetLedgerEntryTemp2.NEXT = 0;
+                  COMMIT;
+                END;
+              END;
+            END;
+          UNTIL SalesHeaderTemp.NEXT = 0;
+      END;
+
+      IF GUIALLOWED THEN BEGIN
+        Window.CLOSE;
+        MESSAGE(Text002,CounterOK,CounterTotal);
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

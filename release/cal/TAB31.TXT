@@ -1,0 +1,211 @@
+OBJECT Table 31 Item Picture Buffer
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.00;
+  }
+  PROPERTIES
+  {
+    ReplicateData=No;
+    CaptionML=[ENU=Item Picture Buffer;
+               NOR=Varebildebuffer];
+  }
+  FIELDS
+  {
+    { 1   ;   ;File Name           ;Text260       ;CaptionML=[ENU=File Name;
+                                                              NOR=Filnavn;
+                                                              SVE=Filnamn] }
+    { 2   ;   ;Picture             ;Media         ;CaptionML=[ENU=Picture;
+                                                              NOR=Bilde;
+                                                              SVE=Bild] }
+    { 3   ;   ;Item No.            ;Code20        ;TableRelation=Item;
+                                                   CaptionML=[ENU=Item No.;
+                                                              NOR=Varenr.;
+                                                              SVE=Artikelnr] }
+    { 4   ;   ;Item Description    ;Text100       ;FieldClass=FlowField;
+                                                   CalcFormula=Lookup(Item.Description WHERE (No.=FIELD(Item No.)));
+                                                   CaptionML=[ENU=Item Description;
+                                                              NOR=Varebeskrivelse;
+                                                              SVE=Artikelbeskrivning] }
+    { 5   ;   ;Import Status       ;Option        ;CaptionML=[ENU=Import Status;
+                                                              NOR=Importstatus];
+                                                   OptionCaptionML=[ENU=Skip,Pending,Completed;
+                                                                    NOR=Hopp over,Venter,Fullf›rt];
+                                                   OptionString=Skip,Pending,Completed;
+                                                   Editable=No }
+    { 6   ;   ;Picture Already Exists;Boolean     ;CaptionML=[ENU=Picture Already Exists;
+                                                              NOR=Bildet finnes allerede] }
+    { 7   ;   ;File Size (KB)      ;BigInteger    ;CaptionML=[ENU=File Size (KB);
+                                                              NOR=Filst›rrelse (kB)] }
+    { 8   ;   ;File Extension      ;Text30        ;CaptionML=[ENU=File Extension;
+                                                              NOR=Filtype;
+                                                              SVE=Fil„ndelse] }
+    { 9   ;   ;Modified Date       ;Date          ;CaptionML=[ENU=Modified Date;
+                                                              NOR=Endringsdato;
+                                                              SVE=Žndrad den] }
+    { 10  ;   ;Modified Time       ;Time          ;CaptionML=[ENU=Modified Time;
+                                                              NOR=Endringstidspunkt] }
+  }
+  KEYS
+  {
+    {    ;File Name                               ;Clustered=Yes }
+  }
+  FIELDGROUPS
+  {
+    { 1   ;Brick               ;File Name,Item No.,Item Description,Picture }
+  }
+  CODE
+  {
+    VAR
+      SelectZIPFileMsg@1002 : TextConst 'ENU=Select ZIP File;NOR=Velg ZIP-fil';
+
+    PROCEDURE LoadZIPFile@1(ZipFileName@1005 : Text;VAR TotalCount@1010 : Integer;ReplaceMode@1014 : Boolean) : Text;
+    VAR
+      Item@1003 : Record 27;
+      TempNameValueBuffer@1006 : TEMPORARY Record 823;
+      FileMgt@1004 : Codeunit 419;
+      Window@1008 : Dialog;
+      InStream@1007 : InStream;
+      ServerFileName@1002 : Text;
+      ServerDestinationFolder@1001 : Text;
+      FileSize@1000 : BigInteger;
+    BEGIN
+      IF ZipFileName <> '' THEN
+        ServerFileName := ZipFileName
+      ELSE BEGIN
+        IF NOT UPLOADINTOSTREAM(SelectZIPFileMsg,'','Zip Files|*.zip',ZipFileName,InStream) THEN
+          ERROR('');
+        ServerFileName := FileMgt.InstreamExportToServerFile(InStream,'zip');
+      END;
+
+      ServerDestinationFolder := FileMgt.ServerCreateTempSubDirectory;
+      FileMgt.ExtractZipFile(ServerFileName,ServerDestinationFolder);
+      FileMgt.GetServerDirectoryFilesListInclSubDirs(TempNameValueBuffer,ServerDestinationFolder);
+      IF ServerFileName <> ZipFileName THEN
+        FileMgt.DeleteServerFile(ServerFileName);
+
+      Window.OPEN('#1##############################');
+
+      TotalCount := 0;
+      DELETEALL;
+      TempNameValueBuffer.RESET;
+      IF TempNameValueBuffer.FINDSET THEN
+        REPEAT
+          INIT;
+          "File Name" :=
+            COPYSTR(FileMgt.GetFileNameWithoutExtension(TempNameValueBuffer.Name),1,MAXSTRLEN("File Name"));
+          "File Extension" :=
+            COPYSTR(FileMgt.GetExtension(TempNameValueBuffer.Name),1,MAXSTRLEN("File Extension"));
+          IF NOT ISNULLGUID(Picture.IMPORTFILE(TempNameValueBuffer.Name,"File Name")) THEN BEGIN
+            Window.UPDATE(1,"File Name");
+            FileMgt.GetServerFileProperties(TempNameValueBuffer.Name,"Modified Date","Modified Time",FileSize);
+            "File Size (KB)" := ROUND(FileSize / 1000,1);
+            TotalCount += 1;
+            IF STRLEN("File Name") <= MAXSTRLEN(Item."No.") THEN
+              IF Item.GET("File Name") THEN BEGIN
+                "Item No." := Item."No.";
+                IF Item.Picture.COUNT > 0 THEN BEGIN
+                  "Picture Already Exists" := TRUE;
+                  IF ReplaceMode THEN
+                    "Import Status" := "Import Status"::Pending;
+                END ELSE
+                  "Import Status" := "Import Status"::Pending;
+              END;
+            INSERT;
+          END;
+        UNTIL TempNameValueBuffer.NEXT = 0;
+
+      Window.CLOSE;
+      EXIT(ZipFileName);
+    END;
+
+    PROCEDURE ImportPictures@2(ReplaceMode@1005 : Boolean);
+    VAR
+      Item@1003 : Record 27;
+      Window@1002 : Dialog;
+      ImageID@1001 : GUID;
+    BEGIN
+      Window.OPEN('#1############################################');
+
+      IF FINDSET(TRUE,FALSE) THEN
+        REPEAT
+          IF "Import Status" = "Import Status"::Pending THEN
+            IF ("Item No." <> '') AND ShouldImport(ReplaceMode,"Picture Already Exists")THEN BEGIN
+              Window.UPDATE(1,"Item No.");
+              Item.GET("Item No.");
+              ImageID := Picture.MEDIAID;
+              IF "Picture Already Exists" THEN
+                CLEAR(Item.Picture);
+              Item.Picture.INSERT(ImageID);
+              Item.MODIFY;
+              "Import Status" := "Import Status"::Completed;
+              MODIFY;
+            END;
+        UNTIL NEXT = 0;
+
+      Window.CLOSE;
+    END;
+
+    LOCAL PROCEDURE ShouldImport@3(ReplaceMode@1000 : Boolean;PictureExists@1001 : Boolean) : Boolean;
+    BEGIN
+      IF NOT ReplaceMode AND PictureExists THEN
+        EXIT(FALSE);
+
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE GetAddCount@7() : Integer;
+    VAR
+      TempItemPictureBuffer2@1000 : TEMPORARY Record 31;
+    BEGIN
+      WITH TempItemPictureBuffer2 DO BEGIN
+        COPY(Rec,TRUE);
+        SETRANGE("Import Status","Import Status"::Pending);
+        SETRANGE("Picture Already Exists",FALSE);
+        EXIT(COUNT);
+      END;
+    END;
+
+    PROCEDURE GetAddedCount@6() : Integer;
+    VAR
+      TempItemPictureBuffer2@1000 : TEMPORARY Record 31;
+    BEGIN
+      WITH TempItemPictureBuffer2 DO BEGIN
+        COPY(Rec,TRUE);
+        SETRANGE("Import Status","Import Status"::Completed);
+        SETRANGE("Picture Already Exists",FALSE);
+        EXIT(COUNT);
+      END;
+    END;
+
+    PROCEDURE GetReplaceCount@5() : Integer;
+    VAR
+      TempItemPictureBuffer2@1000 : TEMPORARY Record 31;
+    BEGIN
+      WITH TempItemPictureBuffer2 DO BEGIN
+        COPY(Rec,TRUE);
+        SETRANGE("Import Status","Import Status"::Pending);
+        SETRANGE("Picture Already Exists",TRUE);
+        EXIT(COUNT);
+      END;
+    END;
+
+    PROCEDURE GetReplacedCount@4() : Integer;
+    VAR
+      TempItemPictureBuffer2@1000 : TEMPORARY Record 31;
+    BEGIN
+      WITH TempItemPictureBuffer2 DO BEGIN
+        COPY(Rec,TRUE);
+        SETRANGE("Import Status","Import Status"::Completed);
+        SETRANGE("Picture Already Exists",TRUE);
+        EXIT(COUNT);
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

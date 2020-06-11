@@ -1,0 +1,522 @@
+OBJECT Codeunit 11128122 Email Queue Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PSSE,EMAIL;
+  }
+  PROPERTIES
+  {
+    OnRun=VAR
+            EmailSetup@1000000003 : Record 11128122;
+            EmailQueueTemp@1000000002 : TEMPORARY Record 11128125;
+            DocType@1000000001 : 'S.Quote,S.Order,S.Invoice,S.Cr.Memo,Reminder,S.Shipment,P.Order';
+            Ap@1000000000 : Text[1];
+          BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      TemplateNotFound@1000000000 : TextConst 'ENU=Could not find template.;SVE=Kunde inte hitta mall.';
+      CustomerNotFound@1000000001 : TextConst 'ENU=Could not find customer %1.;SVE=Kunde inte hitta kund %1.';
+
+    PROCEDURE InsertQueueEntry@1100285012(RecRef@1000000000 : RecordRef;SkipArchived@1000000001 : Boolean);
+    VAR
+      EmailQueueEntry@1100285000 : Record 11128125;
+      EmailQueueArchive@1000000007 : Record 11128124;
+      EmailSetup@1000000008 : Record 11128122;
+      SalesHeader@1000000003 : Record 36;
+      SalesShipmentHeader@1000000002 : Record 110;
+      PrimaryKey1@1000000006 : Code[20];
+      PrimaryKey2@1000000005 : Code[20];
+      PrimaryKey3@1000000004 : Code[20];
+    BEGIN
+      EmailSetup.GET;
+      IF NOT EmailSetup."Email Queue Active" THEN
+        EXIT;
+
+      IF NOT TemplateExists(RecRef) THEN
+        EXIT;
+
+      EmailQueueEntry.SETRANGE("Record ID", RecRef.RECORDID);
+      IF EmailQueueEntry.FINDFIRST THEN
+        EXIT;
+
+      IF NOT SkipArchived THEN BEGIN
+        EmailQueueArchive.SETRANGE("Record ID", RecRef.RECORDID);
+        IF EmailQueueArchive.FINDFIRST THEN
+          EXIT;
+      END;
+
+      EmailQueueEntry.INIT;
+      EmailQueueEntry."Entry No." := 0; // AutoIncrement
+      EmailQueueEntry."Record ID" := RecRef.RECORDID;
+      EmailQueueEntry."Created Date" := TODAY;
+      EmailQueueEntry."Created Time" := TIME;
+      EmailQueueEntry.INSERT;
+    END;
+
+    PROCEDURE InsertGenericQueueEntry@1000000009(Address@1000000008 : Text;Subject@1000000000 : Text;Body@1000000001 : Text;AttachmentPath@1000000009 : Text);
+    VAR
+      EmailQueueEntry@1100285000 : Record 11128125;
+      EmailQueueArchive@1000000007 : Record 11128124;
+      SalesHeader@1000000003 : Record 36;
+      SalesShipmentHeader@1000000002 : Record 110;
+      PrimaryKey1@1000000006 : Code[20];
+      PrimaryKey2@1000000005 : Code[20];
+      PrimaryKey3@1000000004 : Code[20];
+    BEGIN
+      IF (Address = '') THEN
+        EXIT;
+
+      EmailQueueEntry.INIT;
+      EmailQueueEntry."Entry No." := 0;
+      EmailQueueEntry."Created Date" := TODAY;
+      EmailQueueEntry."Created Time" := TIME;
+      EmailQueueEntry.Generic := TRUE;
+      EmailQueueEntry."Use Specified E-mail Addr." := TRUE;
+      EmailQueueEntry."E-mail" := Address;
+      EmailQueueEntry.Subject := Subject;
+      EmailQueueEntry.Body := Body;
+      EmailQueueEntry."PDF Created Name" := AttachmentPath;
+      EmailQueueEntry.INSERT;
+    END;
+
+    PROCEDURE TemplateExists@1000000013(VAR RecRef@1000000001 : RecordRef) : Boolean;
+    VAR
+      EmailTemplate@1000000000 : Record 11128123;
+      SalesShipmentHeader@1000000002 : Record 110;
+    BEGIN
+      CASE RecRef.NUMBER OF
+        DATABASE::"Sales Header": BEGIN
+          EmailTemplate.SETRANGE("Document Type", EmailTemplate."Document Type"::"S.Order");
+          IF NOT EmailTemplate.ISEMPTY THEN
+            EXIT(TRUE);
+        END;
+        DATABASE::"Sales Shipment Header": BEGIN
+          EmailTemplate.SETRANGE("Document Type", EmailTemplate."Document Type"::"S.Shipment");
+          IF NOT EmailTemplate.ISEMPTY THEN
+            EXIT(TRUE);
+        END;
+        DATABASE::"Sales Invoice Header": BEGIN
+          EmailTemplate.SETRANGE("Document Type", EmailTemplate."Document Type"::"S.Invoice");
+          IF NOT EmailTemplate.ISEMPTY THEN
+            EXIT(TRUE);
+        END;
+        DATABASE::"Sales Cr.Memo Header": BEGIN
+          EmailTemplate.SETRANGE("Document Type", EmailTemplate."Document Type"::"S.Cr.Memo");
+          IF NOT EmailTemplate.ISEMPTY THEN
+            EXIT(TRUE);
+        END;
+      END;
+      EXIT(FALSE);
+    END;
+
+    PROCEDURE CreateAndSendDocument@1000000000(VAR EmailQueueEntry@1000000000 : Record 11128125);
+    VAR
+      RecRef@1000000003 : RecordRef;
+      LText001@1000000001 : TextConst 'ENU=The record could not be found. Table %1.;SVE=Posten kunden inte hittas. Tabell %1.';
+    BEGIN
+      IF EmailQueueEntry.Generic THEN BEGIN
+        CreateAndSendGeneric(EmailQueueEntry);
+        EXIT;
+      END;
+
+      IF NOT RecRef.GET(EmailQueueEntry."Record ID") THEN BEGIN
+        EmailQueueEntry.Status := EmailQueueEntry.Status::Error;
+        EmailQueueEntry.Message := STRSUBSTNO(LText001, RecRef.RECORDID);
+        EmailQueueEntry.MODIFY;
+        EXIT;
+      END;
+
+      CASE RecRef.NUMBER OF
+        DATABASE::"Sales Header": BEGIN
+          SalesOrderConfirmation(RecRef, EmailQueueEntry);
+        END;
+        DATABASE::"Sales Shipment Header": BEGIN
+          SalesShipment(RecRef, EmailQueueEntry);
+        END;
+        DATABASE::"Sales Invoice Header": BEGIN
+          SalesInvoice(RecRef, EmailQueueEntry);
+        END;
+        DATABASE::"Sales Cr.Memo Header": BEGIN
+          SalesCrMemo(RecRef, EmailQueueEntry);
+        END;
+      END;
+    END;
+
+    PROCEDURE SalesOrderConfirmation@1000000001(VAR RecRef@1000000000 : RecordRef;VAR EmailQueueEntry@1000000002 : Record 11128125);
+    VAR
+      EmailSetup@1000000004 : Record 11128122;
+      EmailTemplate@1000000006 : Record 11128123;
+      ReportSelection@1000000005 : Record 77;
+      SalesHeader@1000000008 : Record 36;
+      ShiptoAddress@1000000003 : Record 222;
+      Customer@1000000001 : Record 18;
+      TempBlob@1000000009 : Record 99008535;
+      OStream@1000000014 : OutStream;
+      IStream@1000000015 : InStream;
+      RecipientList@1000000013 : Text;
+      LongFileName@1000000012 : Text;
+      FileName@1000000011 : Text[50];
+      Subject@1000000010 : Text;
+      Body@1000000007 : Text;
+      CustomLayoutCode@1000000016 : Code[20];
+    BEGIN
+      EmailTemplate.SETRANGE("Document Type", EmailTemplate."Document Type"::"S.Order");
+      IF NOT EmailTemplate.FINDFIRST THEN BEGIN
+        EmailQueueEntry.Status := EmailQueueEntry.Status::Error;
+        EmailQueueEntry.Message := TemplateNotFound;
+        EmailQueueEntry.MODIFY;
+        EXIT;
+      END;
+      Body := ParseLine(GetBody(EmailTemplate), RecRef);
+
+      RecRef.SETTABLE(SalesHeader);
+      SalesHeader.SETRECFILTER;
+      Customer.GET(SalesHeader."Sell-to Customer No.");
+      RecipientList := Customer."E-Mail";
+      EmailSetup.GET;
+      // CHECK TEST MODE
+      IF EmailSetup."Test Mode" THEN
+        RecipientList := EmailSetup."Test Recipient Address";
+
+      IF RecipientList = '' THEN BEGIN
+        EmailQueueEntry.DELETE;
+        EXIT;
+      END;
+
+      ReportSelection.SETRANGE(Usage, ReportSelection.Usage::"S.Order");
+      IF ReportSelection.FINDFIRST THEN BEGIN
+        Subject := ParseLine(EmailTemplate.Subject, RecRef);
+        FileName := SalesHeader."No." + '.pdf';
+        SendDocument(EmailSetup."From Email Address",RecipientList, Subject, Body, FileName, ReportSelection."Report ID", CustomLayoutCode, RecRef);
+
+        EmailQueueEntry.Status := EmailQueueEntry.Status::Finished;
+        EmailQueueEntry.Message := '';
+        ArchiveQueueEntry(EmailQueueEntry);
+      END;
+    END;
+
+    PROCEDURE SalesShipment@1000000007(VAR RecRef@1000000000 : RecordRef;VAR EmailQueueEntry@1000000002 : Record 11128125);
+    VAR
+      EmailSetup@1000000004 : Record 11128122;
+      EmailTemplate@1000000006 : Record 11128123;
+      ReportSelection@1000000005 : Record 77;
+      SalesShipmentHeader@1000000009 : Record 110;
+      ShiptoAddress@1000000003 : Record 222;
+      Customer@1000000001 : Record 18;
+      RecipientList@1000000013 : Text;
+      LongFileName@1000000012 : Text;
+      FileName@1000000011 : Text[50];
+      Subject@1000000010 : Text;
+      Body@1000000007 : Text;
+      CustomLayoutCode@1000000008 : Code[20];
+    BEGIN
+      EmailTemplate.SETRANGE("Document Type", EmailTemplate."Document Type"::"S.Shipment");
+      IF NOT EmailTemplate.FINDFIRST THEN BEGIN
+        EmailQueueEntry.Status := EmailQueueEntry.Status::Error;
+        EmailQueueEntry.Message := TemplateNotFound;
+        EmailQueueEntry.MODIFY;
+        EXIT;
+      END;
+      Body := ParseLine(GetBody(EmailTemplate), RecRef);
+
+      RecRef.SETTABLE(SalesShipmentHeader);
+      SalesShipmentHeader.SETRECFILTER;
+      Customer.GET(SalesShipmentHeader."Sell-to Customer No.");
+      RecipientList := Customer."E-Mail";
+
+      EmailSetup.GET;
+      // CHECK TEST MODE
+      IF EmailSetup."Test Mode" THEN
+        RecipientList := EmailSetup."Test Recipient Address";
+
+      IF RecipientList = '' THEN BEGIN
+        EmailQueueEntry.DELETE;
+        EXIT;
+      END;
+
+      ReportSelection.SETRANGE(Usage, ReportSelection.Usage::"S.Shipment");
+      IF ReportSelection.FINDFIRST THEN BEGIN
+        Subject := ParseLine(EmailTemplate.Subject, RecRef);
+        FileName := SalesShipmentHeader."No." + '.pdf';
+        SendDocument(EmailSetup."From Email Address",RecipientList, Subject, Body, FileName, ReportSelection."Report ID", CustomLayoutCode, RecRef);
+
+        EmailQueueEntry.Status := EmailQueueEntry.Status::Finished;
+        EmailQueueEntry.Message := '';
+        ArchiveQueueEntry(EmailQueueEntry);
+      END;
+    END;
+
+    PROCEDURE SalesInvoice@1000000008(VAR RecRef@1000000000 : RecordRef;VAR EmailQueueEntry@1000000002 : Record 11128125);
+    VAR
+      EmailSetup@1000000004 : Record 11128122;
+      EmailTemplate@1000000006 : Record 11128123;
+      ReportSelection@1000000005 : Record 77;
+      SalesInvoiceHeader@1000000008 : Record 112;
+      ShiptoAddress@1000000003 : Record 222;
+      Customer@1000000001 : Record 18;
+      IStream@1000000009 : InStream;
+      RecipientList@1000000013 : Text;
+      LongFileName@1000000012 : Text;
+      FileName@1000000011 : Text[50];
+      Subject@1000000010 : Text;
+      Body@1000000007 : Text;
+      CustomLayoutCode@1000000015 : Code[20];
+    BEGIN
+      EmailTemplate.SETRANGE("Document Type", EmailTemplate."Document Type"::"S.Invoice");
+      IF NOT EmailTemplate.FINDFIRST THEN BEGIN
+        EmailQueueEntry.Status := EmailQueueEntry.Status::Error;
+        EmailQueueEntry.Message := TemplateNotFound;
+        EmailQueueEntry.MODIFY;
+        EXIT;
+      END;
+      Body := ParseLine(GetBody(EmailTemplate), RecRef);
+
+      RecRef.SETTABLE(SalesInvoiceHeader);
+      SalesInvoiceHeader.SETRECFILTER;
+      Customer.GET(SalesInvoiceHeader."Bill-to Customer No.");
+      RecipientList := Customer."E-Mail (Invoices)";
+      EmailSetup.GET;
+      // CHECK TEST MODE
+      IF EmailSetup."Test Mode" THEN
+        RecipientList := EmailSetup."Test Recipient Address";
+
+      IF RecipientList = '' THEN BEGIN
+        EmailQueueEntry.DELETE;
+        EXIT;
+      END;
+
+      ReportSelection.SETRANGE(Usage, ReportSelection.Usage::"S.Invoice");
+      IF ReportSelection.FINDFIRST THEN BEGIN
+        //PageHeader.SETRANGE("Report ID", ReportSelection."Report ID");
+        //IF PageHeader.FINDFIRST THEN
+        //  CustomLayoutCode := PageHeader."Custom Report Layout Code"
+        //ELSE
+        //  CustomLayoutCode := '';
+        Subject := ParseLine(EmailTemplate.Subject, RecRef);
+        FileName := SalesInvoiceHeader."No." + '.pdf';
+        SendDocument(EmailSetup."From Email Address",RecipientList, Subject, Body, FileName, ReportSelection."Report ID", CustomLayoutCode, RecRef);
+
+        EmailQueueEntry.Status := EmailQueueEntry.Status::Finished;
+        EmailQueueEntry.Message := '';
+        ArchiveQueueEntry(EmailQueueEntry);
+      END;
+    END;
+
+    PROCEDURE SalesCrMemo@1000000012(VAR RecRef@1000000000 : RecordRef;VAR EmailQueueEntry@1000000002 : Record 11128125);
+    VAR
+      EmailSetup@1000000004 : Record 11128122;
+      EmailTemplate@1000000006 : Record 11128123;
+      ReportSelection@1000000005 : Record 77;
+      SalesCrMemoHeader@1000000008 : Record 114;
+      ShiptoAddress@1000000003 : Record 222;
+      Customer@1000000001 : Record 18;
+      TempBlob@1000000009 : Record 99008535;
+      OStream@1000000014 : OutStream;
+      IStream@1000000015 : InStream;
+      RecipientList@1000000013 : Text;
+      LongFileName@1000000012 : Text;
+      FileName@1000000011 : Text[50];
+      Subject@1000000010 : Text;
+      Body@1000000007 : Text;
+      CustomLayoutCode@1000000016 : Code[20];
+    BEGIN
+      EmailTemplate.SETRANGE("Document Type", EmailTemplate."Document Type"::"S.Cr.Memo");
+      IF NOT EmailTemplate.FINDFIRST THEN BEGIN
+        EmailQueueEntry.Status := EmailQueueEntry.Status::Error;
+        EmailQueueEntry.Message := TemplateNotFound;
+        EmailQueueEntry.MODIFY;
+        EXIT;
+      END;
+      Body := ParseLine(GetBody(EmailTemplate), RecRef);
+
+      RecRef.SETTABLE(SalesCrMemoHeader);
+      SalesCrMemoHeader.SETRECFILTER;
+      Customer.GET(SalesCrMemoHeader."Bill-to Customer No.");
+      RecipientList := Customer."E-Mail (Invoices)";
+      EmailSetup.GET;
+      // CHECK TEST MODE
+      IF EmailSetup."Test Mode" THEN
+        RecipientList := EmailSetup."Test Recipient Address";
+
+      IF RecipientList = '' THEN BEGIN
+        EmailQueueEntry.DELETE;
+        EXIT;
+      END;
+
+      ReportSelection.SETRANGE(Usage, ReportSelection.Usage::"S.Cr.Memo");
+      IF ReportSelection.FINDFIRST THEN BEGIN
+        Subject := ParseLine(EmailTemplate.Subject, RecRef);
+        FileName := SalesCrMemoHeader."No." + '.pdf';
+        SendDocument(EmailSetup."From Email Address",RecipientList, Subject, Body, FileName, ReportSelection."Report ID", CustomLayoutCode, RecRef);
+
+        EmailQueueEntry.Status := EmailQueueEntry.Status::Finished;
+        EmailQueueEntry.Message := '';
+        ArchiveQueueEntry(EmailQueueEntry);
+      END;
+    END;
+
+    PROCEDURE SendDocument@1000000003(Sender@1000000004 : Text;RecipientList@1000000006 : Text;Subject@1000000005 : Text;Body@1000000007 : Text;FileName@1000000008 : Text;ReportID@1000000012 : Integer;CustomLayoutCode@1000000014 : Code[20];RecRef@1000000009 : RecordRef);
+    VAR
+      TempBlob@1000000010 : Record 99008535;
+      ReportLayoutSelection@1000000013 : Record 9651;
+      SMTPMail@1000000001 : Codeunit 400;
+      IStream@1000000000 : InStream;
+      OStream@1000000011 : OutStream;
+      Recipients@1000000003 : ARRAY [10] OF Text;
+      I@1000000002 : Integer;
+    BEGIN
+      CLEAR(SMTPMail);
+      SMTPMail.CreateMessage(Sender,Sender,'',Subject,Body, FALSE); // TRUE = HTML, FALSE = plain text
+      SplitString(RecipientList, Recipients);
+      FOR I := 1 TO 10 DO BEGIN
+        Recipients[I] := StrReplace(Recipients[I], ' ', '');
+        IF Recipients[I] <> '' THEN
+          SMTPMail.AddRecipients(Recipients[I]);
+      END;
+
+      IF RecRef.NUMBER <> 0 THEN BEGIN
+        RecRef.SETRECFILTER;
+        TempBlob.Blob.CREATEOUTSTREAM(OStream);
+
+        ReportLayoutSelection.SetTempLayoutSelected(CustomLayoutCode);
+        REPORT.SAVEAS(ReportID, '', REPORTFORMAT::Pdf, OStream, RecRef);
+        TempBlob.Blob.CREATEINSTREAM(IStream);
+        SMTPMail.AddAttachmentStream(IStream, FileName);
+      END;
+      SMTPMail.Send();
+    END;
+
+    PROCEDURE SendDocumentHTML@1000000014(Sender@1000000004 : Text;RecipientList@1000000006 : Text;Subject@1000000005 : Text;Body@1000000007 : Text;LongFileName@1000000000 : Text);
+    VAR
+      SMTPMail@1000000001 : Codeunit 400;
+      Recipients@1000000003 : ARRAY [10] OF Text;
+      I@1000000002 : Integer;
+    BEGIN
+      CLEAR(SMTPMail);
+      SMTPMail.CreateMessage(Sender,Sender,'',Subject,Body, TRUE); // TRUE = HTML, FALSE = plain text
+      SplitString(RecipientList, Recipients);
+      FOR I := 1 TO 10 DO BEGIN
+        Recipients[I] := StrReplace(Recipients[I], ' ', '');
+        IF Recipients[I] <> '' THEN
+          SMTPMail.AddRecipients(Recipients[I]);
+      END;
+      // 666 SMTPMail.AddAttachment(LongFileName);
+      SMTPMail.Send();
+    END;
+
+    PROCEDURE CreateAndSendGeneric@1000000011(VAR EmailQueueEntry@1000000000 : Record 11128125);
+    VAR
+      LText001@1000000001 : TextConst 'ENU=The record could not be found. Table %1.;SVE=Posten kunden inte hittas. Tabell %1.';
+      EmailSetup@1000000002 : Record 11128122;
+      EmailTemplate@1000000003 : Record 11128123;
+    BEGIN
+      EmailSetup.GET;
+      SendDocumentHTML(EmailSetup."From Email Address",EmailQueueEntry."E-mail", EmailQueueEntry.Subject, EmailQueueEntry.Body, EmailQueueEntry."PDF Created Name");
+      EmailQueueEntry.Status := EmailQueueEntry.Status::Finished;
+      EmailQueueEntry.Message := '';
+      ArchiveQueueEntry(EmailQueueEntry);
+    END;
+
+    PROCEDURE ArchiveQueueEntry@1000000006(VAR EmailQueueEntry@1000000001 : Record 11128125);
+    VAR
+      EmailQueueArchive@1000000000 : Record 11128124;
+    BEGIN
+      EmailQueueArchive.TRANSFERFIELDS(EmailQueueEntry);
+      EmailQueueArchive."Created Date" := TODAY;
+      EmailQueueArchive."Created Time" := TIME;
+      IF NOT EmailQueueArchive.INSERT THEN;
+      EmailQueueEntry.DELETE;
+    END;
+
+    PROCEDURE MarkEntryWithError@1000000010(VAR EmailQueueEntry@1000000000 : Record 11128125);
+    BEGIN
+      EmailQueueEntry.Status := EmailQueueEntry.Status::Error;
+      EmailQueueEntry.Message := GETLASTERRORTEXT;
+      EmailQueueEntry.MODIFY;
+      CLEARLASTERROR;
+      COMMIT;
+    END;
+
+    PROCEDURE GetBody@1000000002(VAR EmailTemplate@1000000001 : Record 11128123) : Text;
+    VAR
+      IStream@1000000004 : InStream;
+      I@1000000002 : Integer;
+      ShortText@1000000005 : Text;
+      CRLF@1000000003 : Text;
+      TextLine@1000000006 : Text;
+    BEGIN
+      IF NOT EmailTemplate.Body.HASVALUE THEN
+        EXIT('');
+      EmailTemplate.CALCFIELDS(Body);
+      EmailTemplate.Body.CREATEINSTREAM(IStream);
+
+      CRLF := ' ';
+      CRLF[1] := 13;
+      CRLF[2] := 10;
+
+      WHILE NOT IStream.EOS() DO BEGIN
+        IStream.READTEXT(ShortText,1);
+        IF STRLEN(ShortText) = 0 THEN BEGIN
+          ShortText := CRLF;
+          I +=1;
+        END;
+
+        TextLine += ShortText;
+      END;
+
+      EXIT(TextLine);
+    END;
+
+    PROCEDURE ParseLine@1100285004(String@1100285000 : Text;RecRef@1100285001 : RecordRef) : Text;
+    VAR
+      Fref@1100285002 : FieldRef;
+      I@1100285003 : Integer;
+    BEGIN
+      FOR I := 1 TO RecRef.FIELDCOUNT DO BEGIN
+        Fref := RecRef.FIELDINDEX(I);
+        String := StrReplace(String, '[' + Fref.NAME + ']', FORMAT(Fref.VALUE));
+      END;
+
+      EXIT(String);
+    END;
+
+    LOCAL PROCEDURE SplitString@1000000004(String@1000000001 : Text;VAR Elements@1000000002 : ARRAY [10] OF Text);
+    VAR
+      S1@1000000000 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.String";
+      SplitChar@1000000005 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.String";
+      StringSplitOptions@1000000006 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.StringSplitOptions";
+      Arr@1000000003 : DotNet "'mscorlib, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Array";
+      I@1000000004 : Integer;
+    BEGIN
+      SplitChar := ';';
+      S1 := String;
+      Arr := S1.Split(SplitChar.ToCharArray());
+      FOR I:=0 TO (Arr.Length()-1) DO
+      BEGIN
+          Elements[I+1] := Arr.GetValue(I);
+      END;
+    END;
+
+    LOCAL PROCEDURE StrReplace@1000000005(MainString@1000000003 : Text;OldValue@1000000001 : Text;NewValue@1000000002 : Text) : Text;
+    VAR
+      S1@1000000000 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.String";
+    BEGIN
+      S1 := MainString;
+      MainString := S1.Replace(OldValue, NewValue);
+      EXIT(MainString);
+    END;
+
+    BEGIN
+    {
+      190828 ORANGO.LP New Codeunit
+    }
+    END.
+  }
+}
+

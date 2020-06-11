@@ -1,0 +1,950 @@
+OBJECT Codeunit 12057140 RO API Mgt.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=EXF512000;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData 12013601=rm,
+                TableData 12057083=rimd;
+    OnRun=VAR
+            ExFlowSetup@1100285000 : Record 12013601;
+          BEGIN
+            IF NOT CheckSetup(ExFlowSetup,TRUE) THEN
+              EXIT;
+
+            DownloadDocuments;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Default_RO_ApiKey@1100285006 : TextConst 'ENU=03e9e247cdbb410e82c864d00b7bdc4e;SVE=03e9e247cdbb410e82c864d00b7bdc4e';
+      RO_ServiceUri@1100285007 : TextConst 'ENU=https://services.readsoftonline.com;SVE=https://services.readsoftonline.com';
+      g_Request@1100285016 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebRequest";
+      EXF002@1100285002 : TextConst 'ENU=Could not connect to Readsoft Online. Check Credentials in ExFlow Setup;SVE=Kan inte ansluta till Readsoft Online. Kontrollera anslutnings info i ExFlow Inst„llningar.';
+      EXF004@1100285009 : TextConst 'ENU=Could not get current user info from Readsoft Online. Check credentials in ExFlow Setup;SVE=Kan ej h„mta info om aktuell anv„ndare fr†n Readsoft Online. Kontrollera anslutningsinformationen i ExFlow Setup.';
+      apiKey@1100285000 : Text[100];
+      userName@1100285004 : Text[100];
+      passWord@1100285003 : Text[50];
+      EXF005@1100285005 : TextConst 'ENU=Master data syncronized with ReadSoft Online;SVE=Master data har nu synkoniserats med ReadSoft Online';
+      EXF006@1100285001 : TextConst 'ENU=Master data synchronization is not active.;SVE=Masterdata synkronisering „r ej aktiverad.';
+      EXF007@1100285008 : TextConst 'ENU=RSO XSLT transformation file must be imported in ExFlow Setup;SVE=RSO XSLT m†ste importeras i ExFlow inst„llingar';
+      EXF008@1100285010 : TextConst 'ENU=Buyer %1 does not exist in ReadSoft Online;SVE=K”pare %1 finns ej i ReadSoft Online';
+      HideDialog@1100285011 : Boolean;
+
+    LOCAL PROCEDURE DownloadDocuments@1100285030();
+    VAR
+      l_Response@1100285016 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebResponse";
+      l_Stream@1100285015 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.Stream";
+      l_Reader@1100285014 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlTextReader";
+      l_document@1100285013 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      l_xmlNodeList@1100285012 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      l_xmlNode@1100285005 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      l_docID@1100285004 : Text[50];
+      l_sessionCookie@1100285009 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.Cookie";
+      l_ndx@1100285002 : Integer;
+      l_noOfDocuments@1100285001 : Integer;
+      currUserId@1100285018 : Text[40];
+      currUserName@1100285008 : Text[100];
+      currCustomerId@1100285006 : Text[100];
+    BEGIN
+      SignIn(l_sessionCookie,currUserId,currUserName,currCustomerId,TRUE);
+
+      MarkDocumentsAsDownloaded(l_sessionCookie);
+
+      IF GetNumberOfOutputDocuments(currCustomerId,l_noOfDocuments,l_sessionCookie) THEN BEGIN
+        IF l_noOfDocuments > 0 THEN BEGIN
+          CreateRequest('/documents/rest/customers/outputdocumentsbycurrentcustomer','GET',l_sessionCookie);
+          l_Response := g_Request.GetResponse();
+          l_Stream := l_Response.GetResponseStream();
+          l_Reader := l_Reader.XmlTextReader(l_Stream);
+          l_document := l_document.XmlDocument();
+          l_document.Load(l_Reader);
+          l_Reader.Close();
+          l_Stream.Close();
+          // Get invoices for all buyers that the current user has access to in RO
+          l_xmlNodeList := l_document.SelectNodes('DocumentReferences/DocumentReference');
+          IF (l_xmlNodeList.ToString() <> '') THEN BEGIN
+            FOR l_ndx := 0 TO l_xmlNodeList.Count - 1 DO BEGIN
+              l_xmlNode := l_xmlNodeList.Item(l_ndx);
+              l_docID := l_xmlNode.SelectNodes('DocumentId').Item(0).InnerText;
+              DownloadDocument(l_docID,l_sessionCookie);
+            END;
+          END;
+        END;
+      END;
+
+      SignOut(l_sessionCookie);
+    END;
+
+    PROCEDURE UpdateMasterData@1100285020(Forced@1100285005 : Boolean);
+    VAR
+      l_SessionCookie@1100285000 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.Cookie";
+      l_exSetup@1100285033 : Record 12013601;
+      l_buyerID@1100285037 : Text[100];
+      l_fieldValues@1100285001 : 'BuyerContactPersonName';
+      currUserId@1100285004 : Text[40];
+      currUserName@1100285003 : Text[100];
+      currCustomerId@1100285002 : Text[100];
+    BEGIN
+      IF NOT CheckSetup(l_exSetup,Forced) THEN
+        EXIT;
+
+      IF (NOT l_exSetup."Upload vendors to RO") AND (NOT l_exSetup."Upload references to RO") THEN BEGIN
+        IF Forced THEN
+          ERROR(EXF006)
+        ELSE
+          EXIT;
+      END;
+
+      IF NOT Forced THEN
+        IF l_exSetup."RO Latest MD update" >= TODAY THEN
+          EXIT;
+
+      IF l_exSetup."RO Buyer Name" = '' THEN BEGIN
+        IF Forced THEN
+          l_exSetup.TESTFIELD("RO Buyer Name")
+        ELSE
+          EXIT;
+      END;
+
+      //To avoid download lockdown as the function is called from pre import func
+      IF NOT SignIn(l_SessionCookie,currUserId,currUserName,currCustomerId,Forced) THEN
+        EXIT;
+
+      l_buyerID := GetCurrBuyerId(l_SessionCookie,currUserId,currUserName,currCustomerId);
+      IF l_buyerID = '' THEN BEGIN
+        SignOut(l_SessionCookie);
+        IF Forced THEN
+          ERROR(EXF008,l_exSetup."RO Buyer Name")
+        ELSE
+          EXIT;
+      END;
+
+      IF l_exSetup."Upload vendors to RO" THEN
+        UpdateVendors(l_buyerID,l_SessionCookie);
+
+      IF l_exSetup."Upload references to RO" THEN
+        UpdateFieldValues(l_fieldValues::BuyerContactPersonName,l_buyerID,l_SessionCookie);
+
+      l_exSetup."RO Latest MD update" := TODAY;
+      l_exSetup.MODIFY;
+
+      IF Forced THEN
+        MESSAGE(EXF005);
+    END;
+
+    LOCAL PROCEDURE SignIn@1100285035(VAR l_SessionCookie@1100285002 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.Cookie";VAR currUserId@1100285005 : Text[40];VAR currUserName@1100285004 : Text[100];VAR currCustomerId@1100285003 : Text[100];Forced@1100285000 : Boolean) LoggedIn : Boolean;
+    BEGIN
+      IF NOT AuthenticateAndGetCookie(l_SessionCookie) THEN BEGIN
+        IF Forced THEN
+          ERROR(EXF002)
+        ELSE
+          EXIT(FALSE);
+      END;
+
+      IF NOT GetCurrentUser(l_SessionCookie,currUserId,currUserName,currCustomerId) THEN BEGIN
+        IF Forced THEN
+          ERROR(EXF004)
+        ELSE
+          EXIT(FALSE);
+      END;
+
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE CheckSetup@1100285036(VAR ExflowSetup@1100285002 : Record 12013601;Forced@1100285000 : Boolean) Acitve : Boolean;
+    VAR
+      SecurityElement@1100285001 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Security.SecurityElement";
+    BEGIN
+      ExflowSetup.GET;
+
+      IF Forced THEN BEGIN
+        ExflowSetup.TESTFIELD("Readsoft Online integration");
+        ExflowSetup.TESTFIELD("RO Connect User");
+        ExflowSetup.TESTFIELD("RO Connect Password");
+        IF NOT ExflowSetup."RO XSLT".HASVALUE THEN
+          ERROR(EXF007);
+      END ELSE BEGIN
+        IF NOT ExflowSetup."Readsoft Online integration" THEN
+          EXIT(FALSE);
+
+        IF ExflowSetup."RO Connect User" = '' THEN
+          EXIT(FALSE);
+
+        IF ExflowSetup."RO Connect Password" = '' THEN
+          EXIT(FALSE);
+
+        IF NOT ExflowSetup."RO XSLT".HASVALUE THEN
+          EXIT(FALSE);
+      END;
+
+      userName := ExflowSetup."RO Connect User";
+      passWord := SecurityElement.Escape(ExflowSetup."RO Connect Password");
+
+      IF ExflowSetup."Customized RO ApiKey" <> '' THEN
+        apiKey := ExflowSetup."Customized RO ApiKey"
+      ELSE
+        apiKey := Default_RO_ApiKey;
+
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE DownloadDocument@1100285037(VAR l_docID@1100285002 : Text[50];VAR l_sessionCookie@1100285001 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.Cookie");
+    VAR
+      l_roDoc@1100285000 : Record 12057083;
+    BEGIN
+      IF IsDocumentExists(l_docID) THEN
+        EXIT;
+
+      InitRoDoc(l_roDoc,l_docID);
+
+      IF NOT GetDocumentOutputData(l_docID,l_roDoc,l_sessionCookie) THEN
+        EXIT;
+
+      IF NOT GetDocumentOutputImage(l_docID,l_roDoc,l_sessionCookie) THEN
+        EXIT;
+
+      l_roDoc.INSERT;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE GetCurrBuyerId@1100285034(VAR p_SessionCookie@1100285000 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.Cookie";VAR currUserId@1100285004 : Text[40];VAR currUserName@1100285003 : Text[100];VAR currCustomerId@1100285002 : Text[100]) : Code[50];
+    VAR
+      l_buyersPerUser@1100285006 : TEMPORARY Record 12057082;
+      l_buyerID@1100285005 : Code[50];
+      l_exSetup@1100285001 : Record 12013601;
+    BEGIN
+      l_exSetup.GET;
+      IF l_exSetup."RO Buyer Name" <> '' THEN
+        IF GetAllBuyersByUser(currCustomerId,currUserId,currUserName,l_buyersPerUser,p_SessionCookie) THEN BEGIN
+          l_buyersPerUser.SETRANGE("User Name",currUserName);
+          l_buyersPerUser.SETRANGE("Buyer Name",l_exSetup."RO Buyer Name");
+          IF l_buyersPerUser.FINDFIRST THEN
+            l_buyerID := l_buyersPerUser."Buyer ID";
+        END;
+
+      EXIT(l_buyerID);
+    END;
+
+    LOCAL PROCEDURE MarkDocumentAsDownloaded@1100285028(p_documentId@1100285008 : Text[50];VAR p_SessionCookie@1100285009 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.Cookie") : Boolean;
+    VAR
+      l_Response@1100285007 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebResponse";
+      l_Stream@1100285006 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.Stream";
+      l_Reader@1100285005 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlTextReader";
+      l_Document@1100285004 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      l_xmlNodeList@1100285003 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      l_stringBuilder@1100285011 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.StringBuilder";
+      l_streamWriter@1100285015 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.StreamWriter";
+      l_ascii@1100285012 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.Encoding";
+    BEGIN
+      CreateRequest('/documents/rest/' + p_documentId + '/downloaded','PUT',p_SessionCookie);
+
+      l_stringBuilder := l_stringBuilder.StringBuilder();
+      l_stringBuilder.Append('<Metadatas xmlns:i="http://www.w3.org/2001/XMLSchema-instance"/>');
+      l_streamWriter := l_streamWriter.StreamWriter(g_Request.GetRequestStream(), l_ascii.ASCII);
+      l_streamWriter.Write(l_stringBuilder.ToString());
+      l_streamWriter.Close();
+
+      l_Response := g_Request.GetResponse();
+      l_Stream := l_Response.GetResponseStream();
+      l_Reader := l_Reader.XmlTextReader(l_Stream);
+      l_Document := l_Document.XmlDocument();
+      l_Document.Load(l_Reader);
+      l_Reader.Close();
+      l_Stream.Close();
+
+      l_xmlNodeList := l_Document.SelectNodes('//*');
+      IF (l_xmlNodeList.ToString() <> '') THEN BEGIN
+        EXIT(TRUE);
+      END;
+
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE InitRoDoc@1100285033(VAR l_roDoc@1100285000 : Record 12057083;l_docID@1100285001 : Text[50]);
+    BEGIN
+      l_roDoc.INIT;
+      l_roDoc."Entry No." := 0;
+      l_roDoc.DocumentId := l_docID;
+      l_roDoc."Created at" := CURRENTDATETIME;
+      l_roDoc."Created By User" := USERID;
+      l_roDoc."Created in Company" := COMPANYNAME;
+    END;
+
+    LOCAL PROCEDURE UpdateVendors@1100285012(p_buyerID@1100285016 : Text[100];VAR p_SessionCookie@1100285000 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.Cookie") : Boolean;
+    VAR
+      l_vendor@1100285014 : Record 23;
+      l_tempVendor@1100285013 : TEMPORARY Record 23;
+      l_glSetup@1100285012 : Record 98;
+      l_pmtTerm@1100285011 : Record 3;
+      l_newDate@1100285006 : Date;
+      l_tempDays@1100285005 : Integer;
+      l_Response@1100285007 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebResponse";
+      l_Stream@1100285008 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.Stream";
+      EXF101@1100285019 : TextConst 'ENU=Uploading vendors    @1@@@@@@@@@@@@@@@@@@@;SVE=Laddar upp leverant”rer   @1@@@@@@@@@@@@@@@@@@@';
+      UNKNOWN@1100285017 : TextConst 'ENU=UNKNOWN;SVE=UNKNOWN';
+      l_stringBuilder@1100285001 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.StringBuilder";
+      l_streamWriter@1100285002 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.StreamWriter";
+      l_ascii@1100285004 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.Encoding";
+      l_Reader@1100285021 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlTextReader";
+      l_document@1100285020 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      l_xmlNodeList@1100285015 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      l_noOfVendors@1100285024 : Integer;
+      l_ndx@1100285023 : Integer;
+      l_win@1100285022 : Dialog;
+      l_tempStr@1100285028 : Text[250];
+      l_countryReg@1100285030 : Record 9;
+      l_exImpMgt@1100285032 : Codeunit 12013604;
+      l_paymentInt@1100285031 : Integer;
+    BEGIN
+      l_vendor.RESET;
+      IF l_vendor.FINDSET THEN BEGIN
+        l_glSetup.GET;
+        REPEAT
+          IF l_vendor.Name <> '' THEN BEGIN
+            l_tempVendor.INIT;
+            l_tempVendor.TRANSFERFIELDS(l_vendor);
+            l_tempVendor.Name := DELCHR(l_vendor.Name,'<');
+            IF STRLEN(l_tempVendor.Name) > 1 THEN BEGIN
+              IF l_vendor."Currency Code" = '' THEN
+                l_tempVendor."Currency Code" := l_glSetup."LCY Code";
+              l_tempVendor."Payment Terms Code" := '';
+              IF l_pmtTerm.GET(l_vendor."Payment Terms Code") THEN
+                IF FORMAT(l_pmtTerm."Due Date Calculation") <> '' THEN BEGIN
+                  l_newDate := CALCDATE(l_pmtTerm."Due Date Calculation",TODAY);
+                  l_tempDays := l_newDate - TODAY;
+                  IF l_tempDays > 0 THEN
+                    l_tempVendor."Payment Terms Code" := FORMAT(l_tempDays);
+                END;
+              l_tempVendor.INSERT;
+            END;
+          END;
+        UNTIL l_vendor.NEXT = 0;
+      END;
+
+      l_tempVendor.RESET;
+      l_tempVendor.SETRANGE("No.",UNKNOWN);
+      IF NOT l_tempVendor.FINDFIRST THEN BEGIN
+        l_tempVendor.INIT;
+        l_tempVendor."No." := UNKNOWN;
+        l_tempVendor.Name := UNKNOWN;
+        l_tempVendor.INSERT;
+      END;
+
+      l_tempVendor.RESET;
+      IF l_tempVendor.FINDSET THEN BEGIN
+        l_ndx := 0;
+        l_noOfVendors := l_tempVendor.COUNT;
+        IF GUIALLOWED THEN
+          IF NOT HideDialog THEN
+            l_win.OPEN(EXF101);
+        CreateRequest('/masterdata/rest/' + p_buyerID + '/suppliers','PUT',p_SessionCookie);
+        l_stringBuilder := l_stringBuilder.StringBuilder();
+        l_stringBuilder.Append('<Suppliers>');
+        REPEAT
+          l_stringBuilder.Append('<Supplier>');
+            l_stringBuilder.Append('<SupplierNumber>' + Webalize(l_tempVendor."No.") + '</SupplierNumber>');
+            l_tempStr := GetBankInfo(l_tempVendor);
+            IF UPPERCASE(l_tempStr) <> l_tempVendor."No." THEN
+              l_tempStr := l_tempVendor.Name + ' ' + l_tempStr
+            ELSE
+              l_tempStr := l_tempVendor.Name;
+            l_stringBuilder.Append('<Name>' + Webalize(l_tempStr) + '</Name>');
+            l_stringBuilder.Append('<Description>' + Webalize(l_tempVendor."Name 2") + '</Description>');
+            l_stringBuilder.Append('<TaxRegistrationNumber>' + Webalize(l_tempVendor."VAT Registration No.") + '</TaxRegistrationNumber>');
+            l_tempStr := GetBankInfo(l_tempVendor);
+            l_stringBuilder.Append('<OrganizationNunmber>' + Webalize(l_tempStr) + '</OrganizationNunmber>');
+            l_stringBuilder.Append('<Street>' + Webalize(l_tempVendor.Address) + '</Street>');
+            l_stringBuilder.Append('<PostalCode>' + Webalize(l_tempVendor."Post Code") + '</PostalCode>');
+            l_stringBuilder.Append('<City>' + Webalize(l_tempVendor.City) + '</City>');
+            IF l_countryReg.GET(l_tempVendor."Country/Region Code") THEN
+              l_tempStr := l_countryReg.Name
+            ELSE
+              l_tempStr := '';
+            l_stringBuilder.Append('<CountryName>' + Webalize(l_tempStr) + '</CountryName>');
+            IF l_tempVendor."Payment Terms Code" <> '' THEN BEGIN
+              l_exImpMgt.TransformInteger(l_tempVendor."Payment Terms Code",l_paymentInt);
+              l_tempStr := FORMAT(l_paymentInt);
+            END
+            ELSE
+              l_tempStr := '';
+            l_stringBuilder.Append('<PaymentTerm>' + Webalize(l_tempStr) + '</PaymentTerm>');
+            //l_stringBuilder.Append('<PaymentMethod>' + l_tempVendor."Payment Method Code" + '</PaymentMethod>');
+            l_stringBuilder.Append('<CurrencyCode>' + Webalize(l_tempVendor."Currency Code") + '</CurrencyCode>');
+            l_stringBuilder.Append('<Blocked>');
+            IF l_tempVendor.Blocked = l_tempVendor.Blocked::All THEN
+              l_stringBuilder.Append('true')
+            ELSE
+              l_stringBuilder.Append('false');
+            l_stringBuilder.Append('</Blocked>');
+          l_stringBuilder.Append('</Supplier>');
+          l_ndx += 1;
+          IF GUIALLOWED THEN
+            IF NOT HideDialog THEN
+              l_win.UPDATE(1, ROUND(l_ndx / l_noOfVendors * 10000,1));
+        UNTIL (l_tempVendor.NEXT = 0);
+        l_stringBuilder.Append('</Suppliers>');
+        l_streamWriter := l_streamWriter.StreamWriter(g_Request.GetRequestStream(), l_ascii.UTF8);
+        l_streamWriter.Write(l_stringBuilder.ToString());
+        l_streamWriter.Close();
+        l_Response := g_Request.GetResponse();
+        l_Stream := l_Response.GetResponseStream();
+        l_Reader := l_Reader.XmlTextReader(l_Stream);
+        l_document := l_document.XmlDocument();
+        l_document.Load(l_Reader);
+        l_Reader.Close();
+        l_Stream.Close();
+        IF GUIALLOWED THEN
+          IF NOT HideDialog THEN
+            l_win.CLOSE;
+        l_xmlNodeList := l_document.SelectNodes('//*');
+        IF (l_xmlNodeList.ToString() <> '') THEN BEGIN
+          EXIT(TRUE);
+        END;
+      END;
+
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE GetDocumentOutputImage@1100285025(p_documentId@1100285008 : Text[50];VAR p_roDoc@1100285000 : Record 12057083;VAR p_SessionCookie@1100285009 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.Cookie") : Boolean;
+    VAR
+      l_Response@1100285007 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebResponse";
+      l_Stream@1100285006 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.Stream";
+      l_outStream@1100285010 : OutStream;
+    BEGIN
+      CreateRequest('/documents/rest/file/' + p_documentId + '/image','GET',p_SessionCookie);
+
+      l_Response := g_Request.GetResponse();
+      l_Stream := l_Response.GetResponseStream();
+      IF NOT ISNULL(l_Stream) THEN BEGIN
+        p_roDoc."Image File Name" := p_documentId + '.pdf';
+        p_roDoc."Image File".CREATEOUTSTREAM(l_outStream);
+        COPYSTREAM(l_outStream,l_Stream);
+        l_Stream.Close();
+        EXIT(TRUE);
+      END;
+
+      l_Stream.Close();
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE GetDocumentOutputData@1100285027(p_documentId@1100285008 : Text[50];VAR p_roDoc@1100285014 : Record 12057083;VAR p_sessionCookie@1100285009 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.Cookie") : Boolean;
+    VAR
+      l_stringBuilder@1100285012 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.StringBuilder";
+      l_Response@1100285007 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebResponse";
+      l_Stream@1100285006 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.Stream";
+      l_streamWriter@1100285013 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.StreamWriter";
+      l_outStream@1100285016 : OutStream;
+      l_ascii@1100285000 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.Encoding";
+    BEGIN
+      CreateRequest('/documents/rest/file/' + p_documentId + '/data','POST',p_sessionCookie);
+
+      l_stringBuilder := l_stringBuilder.StringBuilder();
+      l_stringBuilder.Append('<Metadatas xmlns:i="http://www.w3.org/2001/XMLSchema-instance"/>');
+      l_streamWriter := l_streamWriter.StreamWriter(g_Request.GetRequestStream(), l_ascii.ASCII);
+      l_streamWriter.Write(l_stringBuilder.ToString());
+      l_streamWriter.Close();
+
+      l_Response := g_Request.GetResponse();
+      l_Stream := l_Response.GetResponseStream();
+
+      IF NOT ISNULL(l_Stream) THEN BEGIN
+        p_roDoc."XML File Name" := p_documentId + '.xml';
+        p_roDoc."XML File".CREATEOUTSTREAM(l_outStream);
+        COPYSTREAM(l_outStream,l_Stream);
+        l_Stream.Close();
+        EXIT(TRUE);
+      END;
+
+      l_Stream.Close();
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE UpdateFieldValues@1100285021(p_fieldType@1100285005 : 'BuyerContactPersonName,InvoiceCurrency';p_buyerId@1100285011 : Text[100];VAR p_SessionCookie@1100285000 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.Cookie") : Boolean;
+    VAR
+      l_Response@1100285007 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebResponse";
+      l_Stream@1100285008 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.Stream";
+      EXF101@1100285019 : TextConst 'ENU=Uploading field values    @1@@@@@@@@@@@@@@@@@@@;SVE=Laddar upp f„ltv„rden   @1@@@@@@@@@@@@@@@@@@@';
+      l_stringBuilder@1100285001 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.StringBuilder";
+      l_streamWriter@1100285002 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.StreamWriter";
+      l_ascii@1100285004 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.Encoding";
+      l_Reader@1100285021 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlTextReader";
+      l_document@1100285020 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      l_xmlNodeList@1100285015 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      l_noOfValues@1100285024 : Integer;
+      l_ndx@1100285023 : Integer;
+      l_win@1100285022 : Dialog;
+      l_exReference@1100285006 : Record 12013632;
+    BEGIN
+      CreateRequest('/masterdata/rest/' + p_buyerId + '/fieldvalues','PUT',p_SessionCookie);
+
+      l_stringBuilder := l_stringBuilder.StringBuilder();
+
+      l_stringBuilder.Append('<FieldValues>');
+
+      CASE p_fieldType OF
+        p_fieldType::BuyerContactPersonName: BEGIN
+          l_exReference.RESET;
+          l_exReference.SETFILTER(Reference,'<>%1','');
+          l_exReference.SETRANGE("Vendor No.", '');
+          IF l_exReference.FINDSET THEN BEGIN
+            l_noOfValues := l_exReference.COUNT;
+            IF GUIALLOWED THEN
+              IF NOT HideDialog THEN
+                l_win.OPEN(EXF101);
+            REPEAT
+              l_stringBuilder.Append('<FieldValue>');
+              l_stringBuilder.Append('<FieldTypeName>BuyerContactPersonName</FieldTypeName>');
+              l_stringBuilder.Append('<Value>' + l_exReference.Reference + '</Value>');
+              l_stringBuilder.Append('</FieldValue>');
+              l_ndx += 1;
+              IF GUIALLOWED THEN
+                IF NOT HideDialog THEN
+                  l_win.UPDATE(1, ROUND(l_ndx / l_noOfValues * 10000,1));
+            UNTIL l_exReference.NEXT = 0;
+            IF GUIALLOWED THEN
+              IF NOT HideDialog THEN
+                l_win.CLOSE;
+          END;
+        END;
+      END;
+
+      l_stringBuilder.Append('</FieldValues>');
+
+      l_streamWriter := l_streamWriter.StreamWriter(g_Request.GetRequestStream(), l_ascii.UTF8);
+      l_streamWriter.Write(l_stringBuilder.ToString());
+      l_streamWriter.Close();
+
+      l_Response := g_Request.GetResponse();
+      l_Stream := l_Response.GetResponseStream();
+
+      l_Reader := l_Reader.XmlTextReader(l_Stream);
+      l_document := l_document.XmlDocument();
+      l_document.Load(l_Reader);
+      l_Reader.Close();
+      l_Stream.Close();
+
+      l_xmlNodeList := l_document.SelectNodes('//*');
+
+      IF (l_xmlNodeList.ToString() <> '') THEN BEGIN
+        EXIT(TRUE);
+      END;
+
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE AuthenticateAndGetCookie@1100285000(VAR p_SessionCookie@1100285013 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.Cookie") : Boolean;
+    VAR
+      l_stringBuilder@1100285008 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.StringBuilder";
+      l_Response@1100285006 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebResponse";
+      l_Stream@1100285005 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.Stream";
+      l_streamWriter@1100285009 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.StreamWriter";
+      l_reader@1100285004 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlTextReader";
+      l_Document@1100285003 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      l_xmlNodeList@1100285002 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      l_cookieCollection@1100285007 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.CookieCollection";
+      l_uriObj@1100285010 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Uri";
+      l_ascii@1100285011 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.Encoding";
+      ExFlowSetup@1100285000 : Record 12013601;
+    BEGIN
+      CreateRequest('/authentication/rest/Authenticate','POST',p_SessionCookie);
+
+      l_stringBuilder := l_stringBuilder.StringBuilder();
+      l_stringBuilder.Append('<AuthenticationCredentials>');
+      l_stringBuilder.Append('<UserName>' + userName + '</UserName>');
+      l_stringBuilder.Append('<Password>' + passWord + '</Password>');
+      l_stringBuilder.Append('<AuthenticationType>SetCookie</AuthenticationType>');
+      l_stringBuilder.Append('</AuthenticationCredentials>');
+
+      l_streamWriter := l_streamWriter.StreamWriter(g_Request.GetRequestStream(), l_ascii.ASCII);
+
+      l_streamWriter.Write(l_stringBuilder.ToString());
+      l_streamWriter.Close();
+      l_Response := g_Request.GetResponse();
+      l_Stream := l_Response.GetResponseStream();
+
+      IF ExFlowSetup.GET THEN BEGIN
+        IF ExFlowSetup."RO Service URL" <> '' THEN
+          l_cookieCollection := g_Request.CookieContainer.GetCookies(l_uriObj.Uri(ExFlowSetup."RO Service URL"))
+        ELSE
+          l_cookieCollection := g_Request.CookieContainer.GetCookies(l_uriObj.Uri(RO_ServiceUri));
+      END ELSE
+      l_cookieCollection := g_Request.CookieContainer.GetCookies(l_uriObj.Uri(RO_ServiceUri));
+
+      IF l_cookieCollection.Count > 0 THEN BEGIN
+        l_reader := l_reader.XmlTextReader(l_Stream);
+        l_Document := l_Document.XmlDocument();
+        l_Document.Load(l_reader);
+        l_reader.Close();
+        l_Stream.Close();
+
+        l_xmlNodeList := l_Document.SelectNodes('//AuthenticationResult[contains(Status,"Success")]');
+
+        IF (l_xmlNodeList.ToString() <> '') THEN BEGIN
+          IF l_Response.Cookies.Count > 0 THEN BEGIN
+            p_SessionCookie := l_Response.Cookies.Item(0);
+            EXIT(TRUE);
+          END;
+          CLEAR(p_SessionCookie);
+          EXIT(FALSE);
+        END;
+      END;
+
+      CLEAR(p_SessionCookie);
+
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE GetCurrentUser@1100285003(VAR p_SessionCookie@1100285008 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.Cookie";VAR currUserId@1100285009 : Text[40];VAR currUserName@1100285007 : Text[100];VAR currCustomerId@1100285005 : Text[100]) : Boolean;
+    VAR
+      l_Response@1100285000 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebResponse";
+      l_Stream@1100285003 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.Stream";
+      l_Reader@1100285002 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlTextReader";
+      l_Document@1100285001 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      l_xmlNodeList@1100285006 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      l_xmlNode@1100285004 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+    BEGIN
+      CreateRequest('/users/rest/currentuser','GET',p_SessionCookie);
+
+      l_Response := g_Request.GetResponse();
+      l_Stream := l_Response.GetResponseStream();
+
+      l_Reader := l_Reader.XmlTextReader(l_Stream);
+      l_Document := l_Document.XmlDocument();
+      l_Document.Load(l_Reader);
+      l_Reader.Close();
+      l_Stream.Close();
+
+      l_xmlNodeList := l_Document.SelectNodes('//User2');
+
+      IF (l_xmlNodeList.ToString() <> '') THEN BEGIN
+        l_xmlNode := l_xmlNodeList.Item(0);
+        currUserId := l_xmlNode.SelectNodes('Id').Item(0).InnerText;
+        currCustomerId := l_xmlNode.SelectNodes('OrganizationId').Item(0).InnerText;
+        currUserName := l_xmlNode.SelectNodes('UserName').Item(0).InnerText;
+        EXIT(TRUE);
+      END;
+
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE GetNumberOfOutputDocuments@1100285018(p_organizationID@1100285008 : Text[250];VAR p_NoOfDocuments@1100285009 : Integer;VAR p_SessionCookie@1100285010 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.Cookie") : Boolean;
+    VAR
+      l_Response@1100285007 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebResponse";
+      l_Stream@1100285006 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.Stream";
+      l_Reader@1100285005 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlTextReader";
+      l_Document@1100285004 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      l_xmlNodeList@1100285003 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      l_Ndx@1100285002 : Integer;
+      l_xmlNode@1100285001 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      l_outStr@1100285000 : Text[250];
+    BEGIN
+      p_NoOfDocuments := 0;
+
+      CreateRequest('/documents/rest/customers/' + p_organizationID + '/outputdocumentcount','GET',p_SessionCookie);
+
+      l_Response := g_Request.GetResponse();
+      l_Stream := l_Response.GetResponseStream();
+
+      l_Reader := l_Reader.XmlTextReader(l_Stream);
+      l_Document := l_Document.XmlDocument();
+      l_Document.Load(l_Reader);
+      l_Reader.Close();
+      l_Stream.Close();
+
+      l_xmlNodeList := l_Document.SelectNodes('//*');
+
+      l_outStr := 'GetNumberOfOutputDocuments\';
+
+      IF (l_xmlNodeList.ToString() <> '') THEN BEGIN
+        FOR l_Ndx := 0 TO l_xmlNodeList.Count - 2 DO BEGIN
+          l_xmlNode := l_xmlNodeList.Item(l_Ndx);
+          l_outStr := l_outStr + '\' + l_xmlNode.Name + ': ' + l_xmlNode.FirstChild.InnerText;
+          CASE l_xmlNode.Name OF
+            'IntValue':
+              BEGIN
+                IF EVALUATE(p_NoOfDocuments,l_xmlNode.FirstChild.InnerText) THEN BEGIN
+                  EXIT(TRUE);
+                END;
+              END;
+          END;
+        END;
+      END;
+
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE GetAllBuyersByUser@1100285014(p_organizationID@1100285008 : Text[50];p_userId@1100285012 : Text[40];p_userName@1100285009 : Text[100];VAR l_buyersPerUser@1100285011 : TEMPORARY Record 12057082;VAR p_SessionCookie@1100285010 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.Cookie") : Boolean;
+    VAR
+      l_Response@1100285007 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebResponse";
+      l_Stream@1100285006 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.Stream";
+      l_Reader@1100285005 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlTextReader";
+      l_Document@1100285004 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      l_xmlNodeList@1100285003 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      l_Ndx@1100285002 : Integer;
+      l_xmlNode@1100285001 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+    BEGIN
+      CreateRequest('/accounts/rest/customers/' + p_organizationID + '/' + p_userName + '/buyers','GET',p_SessionCookie);
+
+      l_Response := g_Request.GetResponse();
+      l_Stream := l_Response.GetResponseStream();
+
+      l_Reader := l_Reader.XmlTextReader(l_Stream);
+      l_Document := l_Document.XmlDocument();
+      l_Document.Load(l_Reader);
+      l_Reader.Close();
+      l_Stream.Close();
+
+      l_xmlNodeList := l_Document.SelectNodes('Buyers/Buyer');
+      IF (l_xmlNodeList.ToString() <> '') THEN BEGIN
+        l_buyersPerUser.SETRANGE("User Name",p_userName);
+        l_buyersPerUser.DELETEALL;
+        FOR l_Ndx := 0 TO l_xmlNodeList.Count - 1 DO BEGIN
+          l_xmlNode := l_xmlNodeList.Item(l_Ndx);
+          l_buyersPerUser.INIT;
+          l_buyersPerUser."Buyer ID" := l_xmlNode.SelectNodes('Id').Item(0).InnerText;
+          l_buyersPerUser."User Id" := p_userId;
+          l_buyersPerUser."User Name" := p_userName;
+          l_buyersPerUser."Buyer Name" := l_xmlNode.SelectNodes('Name').Item(0).InnerText;
+          l_buyersPerUser."Buyer External ID" := l_xmlNode.SelectNodes('ExternalId').Item(0).InnerText;
+          l_buyersPerUser.INSERT(TRUE);
+        END;
+        EXIT(TRUE);
+      END;
+
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE SignOut@1100285001(VAR p_SessionCookie@1100285008 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.Cookie") : Boolean;
+    VAR
+      l_stringBuilder@1100285002 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.StringBuilder";
+      l_Response@1100285007 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebResponse";
+      l_Stream@1100285006 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.Stream";
+      l_streamWriter@1100285003 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.StreamWriter";
+      l_Reader@1100285005 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlTextReader";
+      l_Document@1100285004 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      l_xmlNodeList@1100285000 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      l_ascii@1100285010 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.Encoding";
+    BEGIN
+      CreateRequest('/authentication/rest/signout','POST',p_SessionCookie);
+
+      l_stringBuilder := l_stringBuilder.StringBuilder();
+      l_stringBuilder.Append('<AuthenticationCredentials>');
+      l_stringBuilder.Append('<UserName>' + userName + '</UserName>');
+      l_stringBuilder.Append('<Password>' + passWord + '</Password>');
+      l_stringBuilder.Append('<AuthenticationType>SetCookie</AuthenticationType>');
+      l_stringBuilder.Append('</AuthenticationCredentials>');
+
+      l_streamWriter := l_streamWriter.StreamWriter(g_Request.GetRequestStream(), l_ascii.ASCII);
+
+      l_streamWriter.Write(l_stringBuilder.ToString());
+      l_streamWriter.Close();
+
+      l_Response := g_Request.GetResponse();
+      l_Stream := l_Response.GetResponseStream();
+
+      l_Reader := l_Reader.XmlTextReader(l_Stream);
+      l_Document := l_Document.XmlDocument();
+      l_Document.Load(l_Reader);
+      l_Reader.Close();
+      l_Stream.Close();
+
+      l_xmlNodeList := l_Document.SelectNodes('//*');
+
+      IF (l_xmlNodeList.ToString() <> '') THEN BEGIN
+        CLEAR(p_SessionCookie);
+        EXIT(TRUE);
+      END;
+
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE CreateRequest@1100285008(p_relativeUri@1100285000 : Text[250];p_httpMethod@1100285001 : Code[10];VAR p_SessionCookie@1100285005 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.Cookie");
+    VAR
+      l_uriObj@1100285002 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Uri";
+      l_cookieContainer@1100285003 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.CookieContainer";
+      l_cultureInfo@1100285004 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Globalization.CultureInfo";
+    BEGIN
+      l_uriObj := l_uriObj.Uri(RO_ServiceUri + ':443' + p_relativeUri);
+      g_Request := g_Request.CreateDefault(l_uriObj);
+      g_Request.Method := p_httpMethod;
+      g_Request.ContentType := 'application/xml';
+      g_Request.Accept := 'application/xml';
+      g_Request.Headers.Add('x-rs-version', '2011-10-14');
+      g_Request.Headers.Add('x-rs-key', apiKey);
+      g_Request.Headers.Add('x-rs-culture', l_cultureInfo.CurrentCulture.Name);
+      g_Request.Headers.Add('x-rs-uiculture', l_cultureInfo.CurrentUICulture.Name);
+      g_Request.Timeout := 120000;
+
+      l_cookieContainer := l_cookieContainer.CookieContainer;
+      IF NOT ISNULL(p_SessionCookie) THEN
+        l_cookieContainer.Add(p_SessionCookie);
+      g_Request.CookieContainer := l_cookieContainer;
+
+      // Debug with proxy
+      //l_webProxy := l_webProxy.WebProxy('127.0.0.1',8888);
+      //g_Request.Proxy := l_webProxy;
+    END;
+
+    LOCAL PROCEDURE Webalize@1100285029(p_str@1100285000 : Text[512]) : Text[512];
+    VAR
+      l_workStr@1100285001 : Text[512];
+    BEGIN
+      l_workStr := p_str;
+      l_workStr := CONVERTSTR(l_workStr,'&',' ');
+      l_workStr := CONVERTSTR(l_workStr,'?',' ');
+      l_workStr := CONVERTSTR(l_workStr,'#',' ');
+      l_workStr := CONVERTSTR(l_workStr,'%',' ');
+      l_workStr := CONVERTSTR(l_workStr,'"',' ');
+      l_workStr := CONVERTSTR(l_workStr,'<',' ');
+      l_workStr := CONVERTSTR(l_workStr,'>',' ');
+      EXIT(l_workStr);
+    END;
+
+    PROCEDURE GetBankInfo@1100285004(Vendor@1100285000 : Record 23) : Text[150];
+    VAR
+      VendorIDField@1100285001 : Record 12013668;
+      VendorBankAccount@1100285002 : Record 288;
+      Field@1100285005 : Record 2000000041;
+      RecRef@1100285003 : RecordRef;
+      FldRef@1100285004 : FieldRef;
+    BEGIN
+      VendorIDField.RESET;
+      IF VendorIDField.ISEMPTY THEN
+        EXIT;
+
+      VendorBankAccount.SETRANGE("Vendor No.", Vendor."No.");
+      IF NOT VendorBankAccount.FINDFIRST THEN
+        CLEAR(VendorBankAccount);
+
+      VendorIDField.SETCURRENTKEY("RS Export order");
+      VendorIDField.SETFILTER("RS Export order", '<>%1', 0);
+      IF NOT VendorIDField.FINDSET THEN BEGIN
+        VendorIDField.SETRANGE("RS Export order");
+        VendorIDField.FINDSET;
+      END;
+
+      REPEAT
+        CASE VendorIDField."Table No." OF
+          DATABASE::Vendor: RecRef.GETTABLE(Vendor);
+          DATABASE::"Vendor Bank Account":
+            BEGIN
+              IF VendorBankAccount."Vendor No." <> '' THEN
+                RecRef.GETTABLE(VendorBankAccount)
+              ELSE
+                RecRef.GETTABLE(Vendor);
+            END;
+        END;
+
+        Field.RESET;
+        Field.SETRANGE(TableNo, RecRef.NUMBER);
+        Field.SETRANGE("No.", VendorIDField."Field No.");
+        IF Field.FINDFIRST THEN BEGIN
+          FldRef := RecRef.FIELD(VendorIDField."Field No.");
+          IF FORMAT(FldRef.VALUE) <> '' THEN
+            EXIT(FORMAT(FldRef.VALUE));
+        END;
+      UNTIL VendorIDField.NEXT = 0;
+
+      EXIT('');
+    END;
+
+    LOCAL PROCEDURE IsDocumentExists@1100285002(lDocumentId@1100285000 : Text[50]) : Boolean;
+    VAR
+      RoDocument@1100285001 : Record 12057083;
+    BEGIN
+      WITH RoDocument DO BEGIN
+        RESET;
+        SETCURRENTKEY(DocumentId);
+        SETRANGE(DocumentId,lDocumentId);
+        EXIT(FINDFIRST);
+      END;
+    END;
+
+    PROCEDURE InitROApi@1100285005(VAR lSessionCookie@1100285002 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.Cookie") : Boolean;
+    VAR
+      ExFlowSetup@1100285000 : Record 12013601;
+      TmpStr@1100285001 : Text[100];
+    BEGIN
+      IF NOT CheckSetup(ExFlowSetup,TRUE) THEN
+        EXIT(FALSE);
+
+      EXIT(SignIn(lSessionCookie,TmpStr,TmpStr,TmpStr,TRUE));
+    END;
+
+    PROCEDURE DisposeROApi@1100285006(VAR lSessionCookie@1100285000 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.Cookie") : Boolean;
+    BEGIN
+      EXIT(SignOut(lSessionCookie));
+    END;
+
+    LOCAL PROCEDURE MarkDocumentsAsDownloaded@1100285010(VAR lSessionCookie@1100285000 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.Cookie");
+    VAR
+      RoDocument@1100285001 : Record 12057083;
+    BEGIN
+      WITH RoDocument DO BEGIN
+        RESET;
+        SETCURRENTKEY(Status,Errors);
+        SETRANGE(Status,Status::Processed);
+        IF NOT FINDSET(TRUE) THEN
+          EXIT;
+
+        REPEAT
+          IF MarkDocumentAsDownloaded(DocumentId,lSessionCookie) THEN BEGIN
+            DELETE;
+            COMMIT;
+          END;
+        UNTIL NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE MarkDocumentAsRejected@1100285007(lDocumentId@1100285008 : Text[50];VAR lSessionCookie@1100285009 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.Cookie";lMessage@1100285000 : Text) lMarked : Boolean;
+    VAR
+      lResponse@1100285007 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpWebResponse";
+      lStream@1100285006 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.Stream";
+      lReader@1100285005 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlTextReader";
+      lDocument@1100285004 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      lXmlNodeList@1100285003 : DotNet "'System.Xml, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      lStringBuilder@1100285011 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.StringBuilder";
+      lStreamWriter@1100285015 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.StreamWriter";
+      lAscii@1100285012 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Text.Encoding";
+      XMLNode@1100285002 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+    BEGIN
+      CreateRequest(STRSUBSTNO('/documents/rest/%1/rejected?message=%2',lDocumentId,lMessage),'PUT',lSessionCookie);
+      lStringBuilder := lStringBuilder.StringBuilder();
+      lStringBuilder.Append('<Metadatas xmlns:i="http://www.w3.org/2001/XMLSchema-instance"/>');
+      lStreamWriter := lStreamWriter.StreamWriter(g_Request.GetRequestStream(), lAscii.ASCII);
+      lStreamWriter.Write(lStringBuilder.ToString());
+      lStreamWriter.Close();
+
+      lResponse := g_Request.GetResponse();
+      lStream := lResponse.GetResponseStream();
+      lReader := lReader.XmlTextReader(lStream);
+      lDocument := lDocument.XmlDocument();
+      lDocument.Load(lReader);
+      lReader.Close();
+      lStream.Close();
+
+      lXmlNodeList := lDocument.SelectNodes('BoolValue');
+      XMLNode := lXmlNodeList.Item(0);
+      IF NOT EVALUATE(lMarked,XMLNode.SelectNodes('Value').Item(0).InnerText) THEN
+        EXIT(FALSE);
+
+      EXIT(lMarked);
+    END;
+
+    PROCEDURE SilentMode@1100285011();
+    BEGIN
+      HideDialog := TRUE;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

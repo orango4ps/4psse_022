@@ -1,0 +1,498 @@
+OBJECT Codeunit 11012466 CCA Replication Msg. Processor
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      AppReplicationMsgManager@1100528102 : Codeunit 11130047;
+      BaseLib@1100528101 : Codeunit 11130048;
+      Text000@1100528103 : TextConst 'DEU=Kein solcher Befehl: %1 - %2;ENU=No such command: %1 - %2;NLD=Command %1 - %2 niet aanwezig';
+      Text001@1100527200 : TextConst 'DEU=Kann %1 nicht in %2 vorfinden;ENU=Could not find %1 in %2;NLD=Kan %1 niet vinden in %2';
+      Text002@1100527201 : TextConst 'DEU=Kann Artikel %1 nicht fÅr Anfrage %2 erstellen;ENU=Unable to create Item %1 for Resource Request %2;NLD="Kan artikel %1 niet aanmaken voor aanvraag %2 "';
+      Text003@1100527202 : TextConst 'DEU=Zusammenfassung_%1;ENU=Summary_%1;NLD=Samenvatting_%1';
+      Text004@1100527203 : TextConst 'DEU=Zusammenfassung;ENU=Summary;NLD=Samenvatting;SVE=Sammanfattning';
+      CCAAppSetup@1100527204 : Record 11128520;
+      Text005@1100528000 : TextConst 'DEU="Kann keinen Arbeitsauftrag fur Anfrage %1 erstellen ";ENU=Unable to create Work Order for Resource Request %1;NLD=Kan geen werkorder aanmaken voor aanvraag %1';
+
+    PROCEDURE ProcessReplicationMessage@1100528004(VAR AppReplicationMessage@1100528000 : Record 11130032) : Boolean;
+    BEGIN
+      AppReplicationMessage.TESTFIELD(App, BaseLib.AppCodeCCA);
+
+      CASE AppReplicationMessage."Request Type" OF
+          'WorkOrderUpdateStatus': ProcessPostStatusLog(AppReplicationMessage);
+          'WorkOrderFinish': ProcessFinishWorkOrder(AppReplicationMessage);
+          'AcknowledgeDeletedWorkOrder': ProcessAcknowledgeDeletedWorkOrder(AppReplicationMessage);
+          'HourLinesSend': ProcessHourlines(AppReplicationMessage);
+        ELSE
+          ERROR(Text000, AppReplicationMessage.App, AppReplicationMessage."Request Type");
+      END;
+    END;
+
+    LOCAL PROCEDURE "=== Processors ==="@1100528003();
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE ProcessPostStatusLog@1100525000(VAR AppReplicationMessage@1100525000 : Record 11130032);
+    VAR
+      WorkOrder@1100527201 : Record 11229279;
+      ReferencePoint@1100527204 : Record 11020271;
+      JsonManagement@1100528701 : Codeunit 5459;
+      JObject@1100528700 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+    BEGIN
+      CLEAR(JsonManagement);
+      JsonManagement.InitializeObject(AppReplicationMessage.GetRequestDataUTF8);
+      JsonManagement.GetJSONObject(JObject);
+
+      UpdateWorkOrderStatus(BaseLib.GetPropertyValueByNameAsText(JObject, 'No'), BaseLib.GetPropertyValueByNameAsInt(JObject, 'FieldServiceStatus'));
+
+      AppReplicationMessage."Response Type" := BaseLib.ResponseOK;
+      AppReplicationMessage.SetResponseData(BaseLib.ConvertUTF8ToBase64('Completed'));
+    END;
+
+    LOCAL PROCEDURE ProcessFinishWorkOrder@1100527201(VAR AppReplicationMessage@1100527200 : Record 11130032);
+    VAR
+      WorkOrder@1100527202 : Record 11229279;
+      AdditionalInfoRequestWO@1100527204 : Record 11124915;
+      ResourceRequestItemLine@1100527206 : Record 11124908;
+      FieldServiceCode@1100527208 : Record 11012274;
+      SummaryDocumentPath@1100527207 : Text;
+      WorkOrderNo@1100528700 : Text;
+      JsonManagement@1100528702 : Codeunit 5459;
+      JObject@1100528701 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      Lines@1100528703 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JArray";
+      Line@1100528704 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      Value@1100528705 : Variant;
+    BEGIN
+      CLEAR(JsonManagement);
+      JsonManagement.InitializeObject(AppReplicationMessage.GetRequestDataUTF8);
+      JsonManagement.GetJSONObject(JObject);
+
+      WorkOrderNo := BaseLib.GetPropertyValueByNameAsText(JObject, 'No');
+
+      IF WorkOrder.GET(WorkOrderNo) AND AdditionalInfoRequestWO.GET(WorkOrderNo) THEN BEGIN
+        WorkOrder."Project Element" := BaseLib.GetPropertyValueByNameAsText(JObject, 'ProjectElement');
+        WorkOrder.MODIFY(TRUE);
+
+        AdditionalInfoRequestWO."Actual Hours" := BaseLib.GetPropertyValueByNameAsDecimal(JObject, 'ActualHours');
+        AdditionalInfoRequestWO.MODIFY(TRUE);
+
+        BaseLib.GetPropertyValueByName(JObject, 'ResourceRequestItemLines', Value);
+        Lines := Value;
+        IF NOT ISNULL(Lines) AND Lines.HasValues THEN
+          FOREACH Line IN Lines DO BEGIN
+            InsertResourceRequestItemLine(Line);
+          END;
+
+        BaseLib.GetPropertyValueByName(JObject, 'HourLines', Value);
+        Lines := Value;
+
+        IF NOT ISNULL(Lines) AND Lines.HasValues THEN
+          FOREACH Line IN Lines DO BEGIN
+            ProcessWorkOrderHourline(Line);
+          END;
+
+        BaseLib.GetPropertyValueByName(JObject, 'WorkOrderSummary', Value);
+        Line := Value;
+        IF NOT ISNULL(Line) AND Line.HasValues  THEN
+           SummaryDocumentPath := CreateSummaryDocument(JObject, AppReplicationMessage);
+
+        BaseLib.GetPropertyValueByName(JObject, 'WorkOrderSignature', Value);
+        Line := Value;
+
+        IF NOT ISNULL(Line) AND Line.HasValues THEN
+          SaveWorkOrderSignature(WorkOrderNo, Line);
+
+
+        BaseLib.GetPropertyValueByName(JObject, 'WorkOrderSummary', Value);
+        Line := Value;
+
+        IF NOT ISNULL(Line) AND Line.HasValues THEN
+          IF BaseLib.GetPropertyValueByNameAsBoolean(Line, 'SendEmailToSigner') THEN
+            IF SummaryDocumentPath <> '' THEN BEGIN
+              MailSummary(BaseLib.GetPropertyValueByNameAsText(Line, 'WorkOrderSignerEmail'), SummaryDocumentPath);
+            END;
+
+        ProcessPostStatusLog(AppReplicationMessage);
+
+        CreateHourAccountingResourceRequest(WorkOrder);
+
+        AppReplicationMessage."Response Type" := BaseLib.ResponseOK;
+        AppReplicationMessage.SetResponseData(BaseLib.ConvertUTF8ToBase64('Completed'));
+      END ELSE BEGIN
+        AppReplicationMessage."Response Type" := BaseLib.ResponseError;
+        ERROR(Text001, WorkOrderNo, WorkOrder.TABLECAPTION);
+      END;
+    END;
+
+    LOCAL PROCEDURE InsertResourceRequestItemLine@1100527206(VAR ResourceRequestItemLineDotNet@1100527200 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject");
+    VAR
+      ResourceRequestItemLine@1100527201 : Record 11124908;
+      EnumAsInt@1100526200 : Integer;
+    BEGIN
+      WITH ResourceRequestItemLine DO BEGIN
+        INIT;
+        "Request No." := BaseLib.GetPropertyValueByNameAsText(ResourceRequestItemLineDotNet, 'RequestNo');
+        "Line No." := GetResourceRequestItemLineNo("Request No.");
+        EnumAsInt := BaseLib.GetPropertyValueByNameAsInt(ResourceRequestItemLineDotNet, 'ItemLineType');
+        CASE EnumAsInt OF
+          0: "Item No." := BaseLib.GetPropertyValueByNameAsText(ResourceRequestItemLineDotNet, 'ItemNo');
+          1: "Cost Object" := BaseLib.GetPropertyValueByNameAsText(ResourceRequestItemLineDotNet, 'ItemNo');
+        END;
+        Quantity := BaseLib.GetPropertyValueByNameAsDecimal(ResourceRequestItemLineDotNet, 'Quantity');
+        Description := BaseLib.GetPropertyValueByNameAsText(ResourceRequestItemLineDotNet, 'Description');
+        "Unit of Measure" := BaseLib.GetPropertyValueByNameAsText(ResourceRequestItemLineDotNet, 'UnitOfMeasure');
+        IF NOT INSERT(TRUE) THEN
+          ERROR(Text002, BaseLib.GetPropertyValueByNameAsText(ResourceRequestItemLineDotNet, 'ItemNo'), BaseLib.GetPropertyValueByNameAsText(ResourceRequestItemLineDotNet, 'RequestNo'));
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateSummaryDocument@1100527204(WorkOrderDotNet@1100527200 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";VAR AppReplicationMessage@1100527210 : Record 11130032) : Text;
+    VAR
+      ResourceRequest@1100527204 : Record 11124901;
+      WorkOrder@1100527203 : Record 11229279;
+      DocumentType@1100527209 : Record 11012405;
+      Convert@1100527211 : DotNet "'mscorlib, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Convert";
+      Document@1100527213 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      EntityKeys@1100527212 : ARRAY [5] OF Code[20];
+      DocumentContent@1100527206 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      DocumentProperties@1100527201 : Record 11012746;
+      Value@1100528700 : Variant;
+      WorkOrderSummaryDontNet@1100528701 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+    BEGIN
+      CCAAppSetup.GET;
+      DocumentType.GET(CCAAppSetup."Summary Document Type");
+      IF ResourceRequest.GET(BaseLib.GetPropertyValueByNameAsText(WorkOrderDotNet, 'SourceNo')) THEN BEGIN
+        Document := Document.JObject;
+
+        InitDocument(Document, BaseLib.GetPropertyValueByNameAsText(WorkOrderDotNet, 'No'));
+
+        EntityKeys[1] := BaseLib.GetPropertyValueByNameAsText(WorkOrderDotNet, 'SourceNo');
+
+        BaseLib.InsertNewDocument(Document, AppReplicationMessage."Sent by", FALSE, FALSE);
+        BaseLib.InsertNewDocumentLink(ResourceRequest.RECORDID.TABLENO, EntityKeys, BaseLib.GetPropertyValueByNameAsText(Document, 'DocumentNo'));
+
+        DocumentContent := DocumentContent.JObject;
+        BaseLib.GetPropertyValueByName(WorkOrderDotNet, 'WorkOrderSummary', Value);
+        WorkOrderSummaryDontNet := Value;
+        BaseLib.SetPropertyByName(DocumentContent, 'Content', BaseLib.GetPropertyValueByNameAsText(WorkOrderSummaryDontNet, 'Summary'));
+        BaseLib.SetPropertyByName(DocumentContent, 'DocumentNo', BaseLib.GetPropertyValueByNameAsText(Document, 'DocumentNo'));
+
+        BaseLib.WriteContentToFile(DocumentContent);
+        DocumentProperties.GET(BaseLib.GetPropertyValueByNameAsText(Document, 'DocumentNo'));
+
+        EXIT(DocumentProperties.FullFileName);
+      END;
+    END;
+
+    LOCAL PROCEDURE GetHtmlTextFromSummaryDocument@1100527222();
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE RemoveTempFile@1100527200(Path@1100527200 : Text);
+    BEGIN
+      ERASE(Path);
+    END;
+
+    LOCAL PROCEDURE InitDocument@1100525017(Document@1100527204 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";WorkOrderNo@1100527200 : Code[20]);
+    BEGIN
+      CCAAppSetup.GET;
+      BaseLib.SetPropertyByName(Document, 'Description', STRSUBSTNO(Text003, WorkOrderNo));
+      BaseLib.SetPropertyByName(Document, 'CreationDate', CURRENTDATETIME);
+      BaseLib.SetPropertyByName(Document, 'DocumentType', CCAAppSetup."Summary Document Type");
+      BaseLib.SetPropertyByName(Document, 'FileName', 'Summary_' + WorkOrderNo + '.html');
+      BaseLib.SetPropertyByName(Document, 'FileNameShort', 'Summary_' + WorkOrderNo + '.html');
+    END;
+
+    LOCAL PROCEDURE SaveWorkOrderSignature@1100527209(WorkOrderNo@1100527201 : Code[20];WorkOrderSignatureDotNet@1100527204 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject");
+    VAR
+      WorkOrderSignature@1100527200 : Record 11229280;
+      MemoryStream@1100527202 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.MemoryStream";
+      Outstream@1100527203 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.MemoryStream";
+      Bitmap@1100527205 : DotNet "'System.Drawing, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Drawing.Bitmap";
+      ImageFormat@1100527206 : DotNet "'System.Drawing, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Drawing.Imaging.ImageFormat";
+      System@1100527207 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.Microsoft.CSharp.CSharpCodeProvider";
+      ByteArray@1100527208 : DotNet "'mscorlib, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Array";
+      Convert@1100527209 : DotNet "'mscorlib, Version=2.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Convert";
+    BEGIN
+      IF NOT WorkOrderSignature.GET(WorkOrderNo) THEN BEGIN
+        WorkOrderSignature.INIT;
+        WorkOrderSignature."Work Order No." := WorkOrderNo;
+
+        Outstream := Outstream.MemoryStream;
+        ByteArray := Convert.FromBase64String(BaseLib.GetPropertyValueByNameAsText(WorkOrderSignatureDotNet, 'Signature'));
+        MemoryStream := MemoryStream.MemoryStream(ByteArray);
+        Bitmap := Bitmap.FromStream(MemoryStream);
+        Bitmap.Save(Outstream, ImageFormat.Png);
+
+        WorkOrderSignature.Signature.IMPORTSTREAM(Outstream, '');
+
+        WorkOrderSignature.INSERT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE MailSummary@1100527213(Address@1100527201 : Text;SummaryFilePath@1100527200 : Text);
+    VAR
+      DocumentMailing@1100527205 : Codeunit 260;
+      MailTemplateNo@1100528300 : Integer;
+    BEGIN
+      MailTemplateNo := 170;
+      DocumentMailing.EmailFile4PS(SummaryFilePath, Text004 + '.html', '', '', Address, MailTemplateNo, '', '', '', Text004, '', TRUE);
+    END;
+
+    LOCAL PROCEDURE ProcessAcknowledgeDeletedWorkOrder@1100527203(VAR AppReplicationMessage@1100527200 : Record 11130032);
+    VAR
+      DeletedWorkOrderDotNet@1100527203 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      DeletedWorkOrder@1100527202 : Record 11229281;
+      JsonManagement@1100528700 : Codeunit 5459;
+    BEGIN
+      JsonManagement.InitializeObject(AppReplicationMessage.GetRequestDataUTF8);
+      JsonManagement.GetJSONObject(DeletedWorkOrderDotNet);
+
+      IF DeletedWorkOrder.GET(BaseLib.GetPropertyValueByNameAsText(DeletedWorkOrderDotNet, 'ResourceNo'), BaseLib.GetPropertyValueByNameAsText(DeletedWorkOrderDotNet, 'WorkOrderNo')) THEN BEGIN
+        DeletedWorkOrder.DELETE(TRUE);
+        AppReplicationMessage."Response Type" := BaseLib.ResponseOK;
+      END ELSE BEGIN
+        AppReplicationMessage."Response Type" := BaseLib.ResponseError;
+        ERROR(Text001, BaseLib.GetPropertyValueByNameAsText(DeletedWorkOrderDotNet, 'ResourceNo') + '/'+ BaseLib.GetPropertyValueByNameAsText(DeletedWorkOrderDotNet, 'WorkOrderNo'), DeletedWorkOrder.TABLECAPTION);
+      END;
+    END;
+
+    LOCAL PROCEDURE ProcessHourlines@1100527202(VAR AppReplicationMessage@1100527200 : Record 11130032);
+    VAR
+      HourLineReplicationObject@1100527201 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      HourLineTemplate@1100527204 : Record 11229799;
+      HourLineTemplateLine@1100527205 : Record 11012078;
+      EnumAsInt@1100528000 : Integer;
+      Lines@1100528702 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JArray";
+      HourLineDotNet@1100528701 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      Value@1100528700 : Variant;
+      JsonManagement@1100528703 : Codeunit 5459;
+    BEGIN
+      JsonManagement.InitializeObject(AppReplicationMessage.GetRequestDataUTF8);
+      JsonManagement.GetJSONObject(HourLineReplicationObject);
+
+      BaseLib.GetPropertyValueByName(HourLineReplicationObject, 'HourLines', Value);
+      Lines := Value;
+
+      FOREACH HourLineDotNet IN Lines DO BEGIN
+        EnumAsInt := BaseLib.GetPropertyValueByNameAsInt(HourLineDotNet, 'HourLineType');
+        IF EnumAsInt = 0 THEN BEGIN // C# Enum HourLineType.HourLineTemplate
+          ProcessTemplateHourline(HourLineDotNet);
+        END;
+      END;
+      AppReplicationMessage."Response Type" := BaseLib.ResponseOK;
+    END;
+
+    LOCAL PROCEDURE InsertHourAccountingLine@1100527216(HourLineTemplateCode@1100527208 : Code[20];HourLineDotNet@1100527201 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";HourLineTemplateLine@1100527200 : Record 11012078);
+    VAR
+      ResourceWOP@1100527202 : Record 11229278;
+      Employee@1100527207 : Record 5200;
+      YearNo@1100527203 : Integer;
+      WeekNo@1100527204 : Integer;
+      HourAccountingLine@1100527205 : Record 11012039;
+      HourAccounting@1100527206 : Record 11012038;
+    BEGIN
+      IF ResourceWOP.GET(BaseLib.GetPropertyValueByNameAsText(HourLineDotNet, 'ResourceNo')) THEN
+        IF NOT Employee.GET(ResourceWOP."Source No.") THEN
+          EXIT;
+      YearNo := DATE2DMY(DT2DATE(BaseLib.GetPropertyValueByNameAsDateTime(HourLineDotNet, 'RegistrationDate')),3);
+      WeekNo := DATE2DWY(DT2DATE(BaseLib.GetPropertyValueByNameAsDateTime(HourLineDotNet, 'RegistrationDate')),2);
+
+      IF NOT HourAccounting.GET(YearNo, WeekNo, Employee."No.") THEN
+        CreateHourAccounting(YearNo, WeekNo, Employee."No.");
+
+      HourAccountingLine.INIT;
+      HourAccountingLine."Hour Line Template Code" := HourLineTemplateCode;
+      HourAccountingLine."Employee No." := Employee."No.";
+      HourAccountingLine.Year := YearNo;
+      HourAccountingLine.Week := WeekNo;
+      HourAccountingLine."Line No." := HourAccountingLine.GetNextFreeLineNo;
+      HourAccountingLine."Posting Date" := DT2DATE(BaseLib.GetPropertyValueByNameAsDateTime(HourLineDotNet, 'RegistrationDate'));
+      HourAccountingLine."Department Code" := HourLineTemplateLine."Department Code";
+      HourAccountingLine."Cost Object" := HourLineTemplateLine."Cost Object";
+      HourAccountingLine."Wage Component" := HourLineTemplateLine."Wage Component";
+      HourAccountingLine.Element := HourLineTemplateLine.Element;
+      CASE HourLineTemplateLine.Type OF
+        HourLineTemplateLine.Type::Indirect: HourAccountingLine.Type := HourAccountingLine.Type::Indirect;
+        HourLineTemplateLine.Type::Plant: HourAccountingLine.Type := HourAccountingLine.Type::Plant;
+        HourLineTemplateLine.Type::Project: HourAccountingLine.Type := HourAccountingLine.Type::Project;
+        HourLineTemplateLine.Type::Service: HourAccountingLine.Type := HourAccountingLine.Type::Service;
+      END;
+      HourAccountingLine.Description := BaseLib.GetPropertyValueByNameAsText(HourLineDotNet, 'Description');
+
+      CASE DATE2DWY(DT2DATE(BaseLib.GetPropertyValueByNameAsDateTime(HourLineDotNet, 'RegistrationDate')), 1) OF
+        1: HourAccountingLine.Monday := BaseLib.GetPropertyValueByNameAsDecimal(HourLineDotNet, 'Quantity');
+        2: HourAccountingLine.Tuesday := BaseLib.GetPropertyValueByNameAsDecimal(HourLineDotNet, 'Quantity');
+        3: HourAccountingLine.Wednesday := BaseLib.GetPropertyValueByNameAsDecimal(HourLineDotNet, 'Quantity');
+        4: HourAccountingLine.Thursday := BaseLib.GetPropertyValueByNameAsDecimal(HourLineDotNet, 'Quantity');
+        5: HourAccountingLine.Friday := BaseLib.GetPropertyValueByNameAsDecimal(HourLineDotNet, 'Quantity');
+        6: HourAccountingLine.Saturday := BaseLib.GetPropertyValueByNameAsDecimal(HourLineDotNet, 'Quantity');
+        7: HourAccountingLine.Sunday := BaseLib.GetPropertyValueByNameAsDecimal(HourLineDotNet, 'Quantity');
+      END;
+
+      HourAccountingLine.INSERT(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateHourAccounting@1100527220(YearNo@1100527201 : Integer;WeekNo@1100527202 : Integer;EmployeeCode@1100527203 : Code[20]);
+    VAR
+      HourAccounting@1100527200 : Record 11012038;
+    BEGIN
+      HourAccounting.INIT;
+      HourAccounting.Year := YearNo;
+      HourAccounting.Week := WeekNo;
+      HourAccounting."Employee No." := EmployeeCode;
+      HourAccounting.INSERT(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateHourAccountingResourceRequest@1100527210(WorkOrder@1100527200 : Record 11229279);
+    VAR
+      CreateHourAccResRequests@1100527201 : Report 11124902;
+      HourDate@1100527204 : Date;
+      YearNo@1100527202 : Integer;
+      WeekNo@1100527203 : Integer;
+    BEGIN
+      IF (WorkOrder."Source Type" <> WorkOrder."Source Type"::Request) OR (WorkOrder."Source No." = '') OR
+         (WorkOrder."Source Company" <> COMPANYNAME) OR (WorkOrder."Resource No." = '') OR (WorkOrder."Starting Date/Time" = 0DT)
+      THEN
+        EXIT;
+
+      CreateHourAccResRequests.USEREQUESTPAGE(FALSE);
+      HourDate := DT2DATE(WorkOrder."Starting Date/Time");
+      YearNo := DATE2DWY(HourDate, 3);
+      WeekNo := DATE2DWY(HourDate, 2);
+      CreateHourAccResRequests.SetSelections(YearNo, WeekNo);
+      WorkOrder.SETRANGE("No.", WorkOrder."No.");
+      CreateHourAccResRequests.SETTABLEVIEW(WorkOrder);
+      CreateHourAccResRequests.RUNMODAL;
+    END;
+
+    LOCAL PROCEDURE GetResourceRequestItemLineNo@1100526203(ResourceRequestNo@1100526201 : Code[20]) : Integer;
+    VAR
+      ResourceRequestItemLine@1100526200 : Record 11124908;
+    BEGIN
+      ResourceRequestItemLine.SETRANGE("Request No.", ResourceRequestNo);
+      IF ResourceRequestItemLine.FINDLAST THEN
+        EXIT(ResourceRequestItemLine."Line No." + 1)
+      ELSE
+        EXIT(1);
+    END;
+
+    LOCAL PROCEDURE ProcessTemplateHourline@1100528002(HourLineDotNet@1100528002 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject");
+    VAR
+      HourLineTemplate@1100527204 : Record 11229799;
+      HourLineTemplateLine@1100527205 : Record 11012078;
+    BEGIN
+      IF HourLineTemplate.GET(HourLineTemplate.Source::"Hour Accounting", BaseLib.GetPropertyValueByNameAsText(HourLineDotNet, 'ReceivingCompany'), BaseLib.GetPropertyValueByNameAsText(HourLineDotNet, 'Code')) THEN BEGIN
+        HourLineTemplateLine.RESET;
+        HourLineTemplateLine.SETRANGE(Source, HourLineTemplate.Source);
+        HourLineTemplateLine.SETRANGE("Receiving Company", HourLineTemplate."Receiving Company");
+        HourLineTemplateLine.SETRANGE("Template Code", HourLineTemplate.Code);
+        IF HourLineTemplateLine.FINDSET THEN
+          REPEAT
+            HourLineTemplateLine.CALCFIELDS(Type);
+            InsertHourAccountingLine(HourLineTemplate.Code, HourLineDotNet, HourLineTemplateLine);
+          UNTIL HourLineTemplateLine.NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE ProcessWorkOrderHourline@1100528008(HourLineDotNet@1100528002 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject");
+    VAR
+      WorkOrder@1100528003 : Record 11229279;
+      ResourceRequestItemLine@1100528001 : Record 11124908;
+      FieldServiceCode@1100528000 : Record 11012274;
+      WorkOrderPlant@1100528004 : Record 11229279;
+      WorkOrderEmployee@1100528005 : Record 11229279;
+      AdditionalInfoRequestWO@1100528006 : Record 11124915;
+      PlantResourceNo@1100528007 : Text;
+      WorkOrderNo@1100528700 : Text;
+    BEGIN
+      WorkOrderNo := BaseLib.GetPropertyValueByNameAsText(HourLineDotNet, 'WorkOrderNo');
+      IF WorkOrder.GET(WorkOrderNo) AND AdditionalInfoRequestWO.GET(WorkOrderNo) THEN BEGIN
+        WITH WorkOrderEmployee DO BEGIN
+          INIT;
+          "Source Company" := WorkOrder."Source Company";
+          "Source Type" := WorkOrder."Source Type";
+          "Source No." := WorkOrder."Source No.";
+          Description := BaseLib.GetPropertyValueByNameAsText(HourLineDotNet, 'Description');
+          "Project Element" := BaseLib.GetPropertyValueByNameAsText(HourLineDotNet, 'Element');
+          "Starting Date/Time" := WorkOrder."Starting Date/Time";
+          "Ending Date/Time" := WorkOrder."Ending Date/Time";
+          "Resource Company" := WorkOrder."Resource Company";
+          "Resource No." := WorkOrder."Resource No.";
+          "Resource Type" := WorkOrder."Resource Type";
+          IF NOT INSERT(TRUE) THEN
+            ERROR(Text005, WorkOrder."Source No.");
+
+          IF AdditionalInfoRequestWO.GET(WorkOrderEmployee."No.") THEN BEGIN
+            AdditionalInfoRequestWO."Actual Hours" := BaseLib.GetPropertyValueByNameAsDecimal(HourLineDotNet, 'Quantity');
+            AdditionalInfoRequestWO.MODIFY();
+          END;
+
+          UpdateWorkOrderStatus(WorkOrderEmployee."No.", 100);
+        END;
+
+        PlantResourceNo := BaseLib.GetPropertyValueByNameAsText(HourLineDotNet, 'PlantResourceNo');
+        IF PlantResourceNo <> '' THEN BEGIN
+          WITH WorkOrderPlant DO BEGIN
+            INIT;
+            "Source Company" := WorkOrder."Source Company";
+            "Source Type" := WorkOrder."Source Type";
+            "Source No." := WorkOrder."Source No.";
+            Description := BaseLib.GetPropertyValueByNameAsText(HourLineDotNet, 'Description');
+            "Project Element" := BaseLib.GetPropertyValueByNameAsText(HourLineDotNet, 'Element');
+            "Starting Date/Time" := WorkOrder."Starting Date/Time";
+            "Ending Date/Time" := WorkOrder."Ending Date/Time";
+            "Resource Company" := WorkOrder."Resource Company";
+            "Resource No." := PlantResourceNo;
+            "Resource Type" := "Resource Type"::Plant;
+            IF NOT INSERT(TRUE) THEN
+              ERROR(Text005, WorkOrder."Source No.");
+
+            IF AdditionalInfoRequestWO.GET(WorkOrderPlant."No.") THEN BEGIN
+              AdditionalInfoRequestWO."Actual Hours" := BaseLib.GetPropertyValueByNameAsDecimal(HourLineDotNet, 'Quantity');
+              AdditionalInfoRequestWO.MODIFY();
+            END;
+
+            UpdateWorkOrderStatus(WorkOrderPlant."No.", 100);
+          END;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateWorkOrderStatus@1100528001(WorkOrderNo@1100525000 : Text;FieldServiceStatus@1100528000 : Integer);
+    VAR
+      WorkOrder@1100527201 : Record 11229279;
+      ReferencePoint@1100527204 : Record 11020271;
+    BEGIN
+      ReferencePoint.SETRANGE("No.", FieldServiceStatus);
+
+      IF NOT ReferencePoint.FINDFIRST THEN
+        ERROR('Could not find Reference Point in Table');
+
+      IF WorkOrder.GET(WorkOrderNo) THEN BEGIN
+        IF WorkOrder."Export to FSA" THEN
+          WorkOrder."Export to FSA" := FALSE;
+        WorkOrder.VALIDATE("Actual Field Service Status", FORMAT(FieldServiceStatus));
+        IF WorkOrder."Actual Field Service Status" = '100' THEN
+          WorkOrder.Finished := TRUE;
+        WorkOrder.MODIFY(TRUE);
+      END ELSE
+        ERROR(Text001, WorkOrderNo, 'Work Order Table');
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -1,0 +1,387 @@
+OBJECT Report 11020514 Plant Coverage Cost
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    CaptionML=[DEU=Werkzeugdeckungskosten;
+               ENU=Plant Coverage Cost;
+               NLD=Dekkingskosten materieel];
+    ProcessingOnly=Yes;
+    OnInitReport=BEGIN
+                   PlantSetup.GET;
+                   PlantSetup.TESTFIELD("Gen. Journ. Temp. Cover. Costs");
+                   PlantSetup.TESTFIELD("Gen. Journ. Batch Cover. Costs");
+                   PlantSetup.TESTFIELD("Availabe Rental Days by Year");
+
+                   GenJnlTemplate.GET(PlantSetup."Gen. Journ. Temp. Cover. Costs");
+                   GenJnlBatch.GET(PlantSetup."Gen. Journ. Temp. Cover. Costs", PlantSetup."Gen. Journ. Batch Cover. Costs");
+                 END;
+
+    OnPreReport=BEGIN
+                  IF ReportDate = 0D THEN
+                    ERROR(Text001);
+
+                  IF PostingGroup = '' THEN
+                    ERROR(Text002);
+
+                  IF LineDescription = '' THEN
+                    ERROR(Text005);
+
+                  HasGotFASetup := FALSE;
+                  TmpBulkPlantType.DELETEALL;
+                END;
+
+    UsageCategory=Tasks;
+  }
+  DATASET
+  {
+    { 1100529700;;DataItem;                  ;
+               DataItemTable=Table11012552;
+               DataItemTableView=SORTING(Plant Type,Receipt Date,No.)
+                                 WHERE(External=CONST(No));
+               OnPreDataItem=BEGIN
+                               SETFILTER("Receipt Date", '<=%1', ReportDate);
+                               SETFILTER("Coverage Date", '<%1', ReportDate);
+
+                               GenJnlLine.SETRANGE("Journal Template Name", PlantSetup."Gen. Journ. Temp. Cover. Costs");
+                               GenJnlLine.SETRANGE("Journal Batch Name", PlantSetup."Gen. Journ. Batch Cover. Costs");
+                               LastGenJnlLine.SETRANGE("Journal Template Name", PlantSetup."Gen. Journ. Temp. Cover. Costs");
+                               LastGenJnlLine.SETRANGE("Journal Batch Name", PlantSetup."Gen. Journ. Batch Cover. Costs");
+                               IF LastGenJnlLine.FINDLAST THEN
+                                 LineNo := LastGenJnlLine."Line No." + 10000
+                               ELSE
+                                 LineNo := 10000;
+                               LastGenJnlLine.CALCSUMS("Balance (LCY)");
+                               Balance := LastGenJnlLine."Balance (LCY)";
+
+                               CoverageCostPlantNumber.SETFILTER("Cost Component", GETFILTER("Cost Component Filter"));
+                               PlantCostCompPostingSetup.SETRANGE("Plant Posting Group Code", PostingGroup);
+                               PlantCostCompPostingSetup.SETFILTER("Vendor Posting Group No.", '=''''');
+                               IF GUIALLOWED THEN
+                                 Window.OPEN(Text000);
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  IF GUIALLOWED THEN BEGIN
+                                    Window.UPDATE(1, "Plant Type");
+                                    Window.UPDATE(2, "No.");
+                                  END;
+                                  CoverageCostPlantNumber.SETRANGE("Plant Type", "Plant Type");
+                                  CoverageCostPlantNumber.SETRANGE("Plant No.", "No.");
+                                  IF CoverageCostPlantNumber.ISEMPTY THEN
+                                    CoverageCostPlantNumber.SETRANGE("Plant No.", '');
+                                  IF NOT CoverageCostPlantNumber.FINDSET THEN
+                                    CurrReport.SKIP;
+
+                                  CalcNumberOfDays;
+                                  CalcPlantNumberStockQty;
+
+                                  REPEAT
+                                    IF NOT SkipLine THEN BEGIN
+                                      IF GUIALLOWED THEN
+                                        Window.UPDATE(3, CoverageCostPlantNumber."Cost Component");
+                                      CostComponentPlant.GET(CoverageCostPlantNumber."Cost Component");
+
+                                      InsertGenJournalLine(NumberOfDays * PlantNumberStockQty, NumberOfDays, PlantNumberStockQty);
+                                      IF Bulk AND (NegNumberOfDays > 0) THEN
+                                        InsertGenJournalLine(- NegAmountBulk, NegNumberOfDays, - ROUND(NegAmountBulk / NegNumberOfDays, 0.01));
+                                    END;
+                                  UNTIL CoverageCostPlantNumber.NEXT = 0;
+
+                                  IF Bulk THEN BEGIN
+                                    IF NOT TmpBulkPlantType.GET("Plant Type") THEN BEGIN
+                                      TmpBulkPlantType.Code := "Plant Type";
+                                      TmpBulkPlantType.INSERT;
+                                    END;
+
+                                    MarkPlantNumber.SETRANGE("Plant Type", "Plant Type");
+                                    MarkPlantNumber.SETRANGE(External, FALSE);
+                                    IF MarkPlantNumber.FINDSET THEN
+                                      REPEAT
+                                        MarkPlantNumber.MARK(TRUE);
+                                      UNTIL MarkPlantNumber.NEXT = 0;
+                                    MarkPlantNumber.SETRANGE(External);
+                                    MarkPlantNumber.SETRANGE("Plant Type");
+                                  END ELSE BEGIN
+                                    MarkPlantNumber := "Plant Number";
+                                    MarkPlantNumber.MARK(TRUE);
+                                  END;
+                                END;
+
+               OnPostDataItem=BEGIN
+                                MarkPlantNumber.MARKEDONLY(TRUE);
+                                MarkPlantNumber.MODIFYALL("Coverage Date", ReportDate, FALSE);
+
+                                IF GUIALLOWED THEN BEGIN
+                                  Window.CLOSE;
+                                  MESSAGE(Text003, Counter);
+                                END
+                              END;
+
+               ReqFilterFields=Plant Type,No.,Cost Component Filter;
+               CalcFields=Bulk }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+    }
+    CONTROLS
+    {
+      { 1100529705;;Container;
+                  ContainerType=ContentArea }
+
+      { 1100529704;1;Group  ;
+                  CaptionML=[DEU=Optionen;
+                             ENU=Options;
+                             NLD=Opties;
+                             NOR=Alternativer;
+                             SVE=Alternativ];
+                  GroupType=Group }
+
+      { 1100529700;2;Field  ;
+                  Name=Report Date;
+                  CaptionML=[DEU=Berichtsdatum;
+                             ENU=Report Date;
+                             NLD=Datum];
+                  SourceExpr=ReportDate }
+
+      { 1100529701;2;Field  ;
+                  Name=Use Report Date as Posting Date;
+                  CaptionML=[DEU=Berichtsdatum als Buchungsdatum verwenden;
+                             ENU=Use Report Date as Posting Date;
+                             NLD=Gebruik rapportdatum als verzenddatum];
+                  SourceExpr=UseReportDateAsPostingDate }
+
+      { 1100529702;2;Field  ;
+                  Name=Posting Group;
+                  CaptionML=[DEU=Buchungsgruppe;
+                             ENU=Posting Group;
+                             NLD=Boekingsgroep;
+                             NOR=Bokf›ringsgruppe;
+                             SVE=Bokf”ringsmall];
+                  SourceExpr=PostingGroup;
+                  TableRelation="Plant Posting Group".Code }
+
+      { 1100529600;2;Field  ;
+                  Name=Line Description;
+                  CaptionML=[DEU=Zeilenbeschreibung;
+                             ENU=Line Description;
+                             NLD=Regelomschrijving;
+                             NOR=Linjebeskrivelse;
+                             SVE=Radbeskrivning];
+                  SourceExpr=LineDescription }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      ReportDate@1100529700 : Date;
+      UseReportDateAsPostingDate@1100529710 : Boolean;
+      PostingGroup@1100529715 : Code[10];
+      PlantSetup@1100529701 : Record 11012550;
+      Text000@1100529713 : TextConst 'DEU=Verarbeitung\Werkzeugart #1##################\ Werkzeugnummer #2##################\Kostenkomponente #3##################;ENU=Processing\Plant Type #1##################\ Plant Number #2##################\Cost Component #3##################;NLD=Verwerken\Materieelsoort #1##################\ Materieelnr. #2##################\Kostencomponent #3##################';
+      Text001@1100529702 : TextConst 'DEU=Berichtsdatum darf nicht leer sein.;ENU=Report Date cannot be empty.;NLD=Datum mag niet leeg zijn.';
+      TmpBulkPlantType@1100529609 : TEMPORARY Record 11012551;
+      MarkPlantNumber@1100529610 : Record 11012552;
+      FASetup@1100529601 : Record 5603;
+      CoverageCostPlantNumber@1100529707 : Record 11020496;
+      CostComponentPlant@1100529613 : Record 11012575;
+      PlantCostCompPostingSetup@1100529718 : Record 11012570;
+      GenJnlTemplate@1100529705 : Record 80;
+      GenJnlBatch@1100529704 : Record 232;
+      GenJnlLine@1100529703 : Record 81;
+      LastGenJnlLine@1100529708 : Record 81;
+      LineNo@1100529706 : Integer;
+      Balance@1100529709 : Decimal;
+      Counter@1100529711 : Integer;
+      Text002@1100529717 : TextConst 'DEU=Buchungsgruppe darf nicht leer sein.;ENU=Posting Group cannot be empty.;NLD=Boekingsgroep mag niet leeg zijn.';
+      Text003@1100529712 : TextConst 'DEU=Anzahl der erstellten Zeilen ist %1.;ENU=Number of created lines is %1.;NLD=Aantal aangemaakte regels is %1.';
+      Window@1100529714 : Dialog;
+      NumberOfDays@1100529719 : Integer;
+      Text004@1100529720 : TextConst 'DEU=Preis %1, Tage %2, Menge %3;ENU=Price %1, Days %2, Quantity %3;NLD=Prijs %1, Dagen %2, Aantal %3';
+      NegNumberOfDays@1100529612 : Integer;
+      NegAmountBulk@1100529611 : Decimal;
+      HasGotFASetup@1100529602 : Boolean;
+      LineDescription@1100529603 : Text[100];
+      Text005@1100529604 : TextConst 'DEU=Zeilenbeschreibung kann nicht leer sein.;ENU=Line Description cannot be empty.;NLD=Regelomschrijving mag niet leeg zijn.';
+      StartingDate@1100529606 : Date;
+      EndingDate@1100529605 : Date;
+      PlantNumberStockQty@1100529600 : Decimal;
+
+    LOCAL PROCEDURE SkipLine@1100529600() : Boolean;
+    VAR
+      FixedAsset@1100529601 : Record 5600;
+      FADepreciationBook@1100529600 : Record 5612;
+    BEGIN
+      IF PlantNumberStockQty <= 0 THEN
+        EXIT(TRUE);
+
+      IF CoverageCostPlantNumber.Percentage * CoverageCostPlantNumber.Amount * NumberOfDays * PlantNumberStockQty = 0 THEN
+        EXIT(TRUE);
+
+      IF "Plant Number".Bulk THEN
+        IF TmpBulkPlantType.GET("Plant Number"."Plant Type") THEN
+          EXIT(TRUE);
+
+      IF CoverageCostPlantNumber."Check Book Value" THEN BEGIN
+        IF "Plant Number"."Fixed Asset" = '' THEN
+          EXIT(TRUE);
+        GetFASetup;
+
+        IF NOT FixedAsset.GET("Plant Number"."Fixed Asset") THEN
+          EXIT(TRUE);
+        IF FixedAsset."Main Asset/Component" = FixedAsset."Main Asset/Component"::"Main Asset" THEN
+          FixedAsset.SETRANGE("Component of Main Asset", FixedAsset."No.")
+        ELSE
+          FixedAsset.SETRANGE("No.", FixedAsset."No.");
+
+        FADepreciationBook.SETFILTER("FA Posting Date Filter", '..%1', EndingDate);
+        FADepreciationBook.SETAUTOCALCFIELDS("Book Value");
+
+        FixedAsset.FINDSET;
+        REPEAT
+          IF FADepreciationBook.GET(FixedAsset."No.", FASetup."Default Depr. Book") THEN
+            IF (FADepreciationBook."Disposal Date" < StartingDate) AND (FADepreciationBook."Book Value" > 0) THEN
+              EXIT(FALSE);
+        UNTIL FixedAsset.NEXT = 0;
+
+        EXIT(TRUE);
+      END;
+
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE GetFASetup@1100529601();
+    BEGIN
+      IF HasGotFASetup THEN
+        EXIT;
+
+      FASetup.GET;
+      HasGotFASetup := TRUE;
+    END;
+
+    LOCAL PROCEDURE CalcNumberOfDays@1100529603();
+    VAR
+      ExitOrderLine@1100529600 : Record 11012560;
+      PlantLocation@1100529603 : Record 11012554;
+      CalculateRentalPeriods@1100529601 : Codeunit 11012568;
+      NumberOfDaysLoc@1100529602 : Integer;
+    BEGIN
+      NumberOfDays := 0;
+      NegNumberOfDays := 0;
+      NegAmountBulk := 0;
+      StartingDate := 0D;
+      EndingDate := 0D;
+
+      IF ("Plant Number"."Coverage Date" = 0D) AND ("Plant Number"."Receipt Date" = 0D) THEN
+        EXIT;
+
+      IF "Plant Number"."Coverage Date" <> 0D THEN
+        StartingDate := "Plant Number"."Coverage Date"
+      ELSE
+        StartingDate := "Plant Number"."Receipt Date" + 1;
+
+      EndingDate := ReportDate;
+      ExitOrderLine.SETRANGE("Plant Type", "Plant Number"."Plant Type");
+      ExitOrderLine.SETRANGE("Exit-date", StartingDate, EndingDate);
+      IF NOT "Plant Number".Bulk THEN BEGIN
+        ExitOrderLine.SETRANGE("No.", "Plant Number"."No.");
+        IF ExitOrderLine.FINDLAST THEN
+          EndingDate := ExitOrderLine."Exit-date";
+      END ELSE
+        IF ExitOrderLine.FINDSET THEN
+          REPEAT
+            NumberOfDaysLoc := ExitOrderLine."Exit-date" - StartingDate -
+              CalculateRentalPeriods.NumberRentFreeDays(PlantLocation, StartingDate, ExitOrderLine."Exit-date", "Plant Number"."Plant Type", "Plant Number"."No.");
+            NegNumberOfDays += NumberOfDaysLoc;
+            NegAmountBulk += NumberOfDaysLoc * ExitOrderLine.Quantity;
+          UNTIL ExitOrderLine.NEXT = 0;
+
+      NumberOfDays := EndingDate - StartingDate -
+        CalculateRentalPeriods.NumberRentFreeDays(PlantLocation, StartingDate, EndingDate, "Plant Number"."Plant Type", "Plant Number"."No.")
+    END;
+
+    LOCAL PROCEDURE InsertGenJournalLine@1100529614(LineQty@1100529601 : Decimal;NumberOfDaysLoc@1100529602 : Integer;DescrQty@1100529600 : Decimal);
+    BEGIN
+      GenJnlLine.INIT;
+      GenJnlLine."Journal Template Name" := PlantSetup."Gen. Journ. Temp. Cover. Costs";
+      GenJnlLine."Journal Batch Name" := PlantSetup."Gen. Journ. Batch Cover. Costs";
+      GenJnlLine."Line No." := LineNo;
+      GenJnlLine."Source Code" := GenJnlTemplate."Source Code";
+      GenJnlLine."Reason Code" := GenJnlBatch."Reason Code";
+      GenJnlLine.SetUpNewLine(LastGenJnlLine, Balance, TRUE);
+      IF UseReportDateAsPostingDate THEN
+        GenJnlLine.VALIDATE("Posting Date", ReportDate);
+      GenJnlLine.VALIDATE("Plant Type", "Plant Number"."Plant Type");
+      IF NOT "Plant Number".Bulk THEN
+        GenJnlLine.VALIDATE("Plant No.", "Plant Number"."No.");
+
+      GenJnlLine.VALIDATE("Account Type", GenJnlLine."Account Type"::"G/L Account");
+      PlantCostCompPostingSetup.SETRANGE("Cost Component", CoverageCostPlantNumber."Cost Component");
+      IF PlantCostCompPostingSetup.FINDFIRST THEN
+        GenJnlLine.VALIDATE("Account No.", PlantCostCompPostingSetup."Plant Cost Account");
+      GenJnlLine.VALIDATE("Posting Group", PostingGroup);
+
+      GenJnlLine."Cost Component Plant" := CostComponentPlant.Code;
+      GenJnlLine.VALIDATE("Bal. Account Type", GenJnlLine."Bal. Account Type"::"G/L Account");
+      GenJnlLine.VALIDATE("Bal. Account No.", CostComponentPlant."Coverage Account No.");
+      GenJnlLine.Quantity := LineQty;
+      GenJnlLine.Description := LineDescription;
+      GenJnlLine."Description 2" := COPYSTR(
+        STRSUBSTNO(Text004, (CoverageCostPlantNumber.Percentage/100 * CoverageCostPlantNumber.Amount)/PlantSetup."Availabe Rental Days by Year", NumberOfDaysLoc, DescrQty),
+        1, MAXSTRLEN(GenJnlLine."Description 2"));
+      GenJnlLine.VALIDATE(Amount, (CoverageCostPlantNumber.Percentage/100 * CoverageCostPlantNumber.Amount) / PlantSetup."Availabe Rental Days by Year" * LineQty);
+      GenJnlLine.INSERT(TRUE);
+
+      LastGenJnlLine := GenJnlLine;
+      Balance += LastGenJnlLine."Balance (LCY)";
+      LineNo += 10000;
+      Counter += 1;
+    END;
+
+    LOCAL PROCEDURE CalcPlantNumberStockQty@1100529602();
+    VAR
+      PlantInventory@1100529600 : Record 11012555;
+    BEGIN
+      PlantNumberStockQty := 0;
+
+      IF NOT "Plant Number".Bulk THEN BEGIN
+        IF NumberOfDays <> 0 THEN
+          PlantNumberStockQty := 1;
+        EXIT;
+      END;
+
+      PlantInventory.SETRANGE("Plant Type", "Plant Number"."Plant Type");
+      PlantInventory.SETRANGE("Plant No.", "Plant Number"."Stock No.");
+      PlantInventory.SETRANGE(Removed, FALSE);
+      PlantInventory.SETFILTER("Present from", '<=%1', StartingDate);
+      PlantInventory.CALCSUMS(Quantity);
+      PlantNumberStockQty := PlantInventory.Quantity;
+
+      PlantInventory.SETRANGE(Removed, TRUE);
+      PlantInventory.SETRANGE("Removal Order Type", PlantInventory."Removal Order Type"::"Exit Order");
+      PlantInventory.SETRANGE("Present from");
+      PlantInventory.SETRANGE("Removed on", StartingDate, EndingDate);
+      PlantInventory.CALCSUMS(Quantity);
+      PlantNumberStockQty += PlantInventory.Quantity;
+    END;
+
+    BEGIN
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

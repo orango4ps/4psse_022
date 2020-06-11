@@ -1,0 +1,3711 @@
+OBJECT Report 81606 Timesheet
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PSSE,REP-100-024,REP-100-032,IME205-2,RFC097;
+  }
+  PROPERTIES
+  {
+    CaptionML=[ENU=Timesheet;
+               NOR=Tidrapport;
+               SVE=Tidrapport];
+    OnPreReport=VAR
+                  TEMPDimValueChains@1100285502 : TEMPORARY Record 11128020;
+                  EmployeeRec@1100285501 : Record 5200;
+                  locUserSetup@1100285503 : Record 91;
+                  First@1100285500 : Boolean;
+                  lvDefaultDim@1100285504 : Record 352;
+                BEGIN
+                  TEMPHourAccoutBuffer.DELETEALL;
+                  CompanyInformation.GET;
+                  CompanyInformation.CALCFIELDS(Picture);
+                  EntryNo := 1;
+
+                  //*** Filters on cost center from dimension filter ***
+                  GLSetup.GET;
+                  FilterCostCenter := '';
+
+                   IF DimensionValueCode = '' THEN BEGIN
+                    ERROR(Text002);
+                    //REPORT.RUN(81606);
+                   END;
+
+                  IF DimensionCode = GLSetup."Shortcut Dimension 1 Code" THEN BEGIN
+
+                    FilterCostCenter := DimensionValueCode;
+
+                  END ELSE BEGIN
+
+                    IF DimensionValueCode <> '' THEN
+                      TEMPDimValueChains.getSourceDimensions(DimensionCode, DimensionValueCode, GLSetup."Shortcut Dimension 1 Code", TEMPDimValueChains);
+
+                    First := TRUE;
+                    IF TEMPDimValueChains.FINDSET(FALSE) THEN REPEAT
+
+                      IF First THEN BEGIN
+                        FilterCostCenter := TEMPDimValueChains."Start Dimension Value Code";
+                        First := FALSE
+                      END ELSE
+                        FilterCostCenter += '|' + TEMPDimValueChains."Start Dimension Value Code";
+                    UNTIL TEMPDimValueChains.NEXT = 0;
+
+                  END;
+
+                  //*** Filters on the employees from cost cente and employee ***
+                  IF (FilterCostCenter <> '') OR (FilterEmployee <> '') THEN BEGIN
+                    First := TRUE;
+
+                    IF FilterEmployee <> '' THEN
+                      EmployeeRec.SETFILTER("No.", FilterEmployee);
+
+                    IF FilterCostCenter <> '' THEN
+                      EmployeeRec.SETFILTER("Global Dimension 1 Code", FilterCostCenter);
+
+                    IF EmployeeRec.FINDSET(FALSE) THEN REPEAT
+
+                      //** Check to see if the user is autorized to see other employees hours
+                      locUserSetup.GET(USERID);
+                      IF (EmployeeRec."No." <> locUserSetup."Employee No.") AND (NOT locUserSetup."Access own Hours only") AND (locUserSetup."Department Authoriz. Active")
+                              AND (locUserSetup."Department Code Filter" <> '') THEN BEGIN
+                        IF NOT CheckEmployee(EmployeeRec."No.", locUserSetup."Department Code Filter") THEN BEGIN
+                      ///***
+                          //>>141103 ITERO.GH
+                          //IF First THEN BEGIN
+                          //  FilterEmployee := EmployeeRec."No.";
+                          //  First := FALSE
+                          //END ELSE
+                          //  FilterEmployee += '|' + EmployeeRec."No.";
+
+
+                          IF ( DimensionCode <> '' ) AND
+                             ( DimensionCode <> GLSetup."Global Dimension 1 Code" ) AND
+                             ( DimensionCode <> GLSetup."Global Dimension 2 Code" ) THEN BEGIN
+                             CLEAR(lvDefaultDim);
+                             lvDefaultDim.SETRANGE("Table ID" , 5200 ); //Employee
+                             lvDefaultDim.SETRANGE("No."                  , EmployeeRec."No.");
+                             lvDefaultDim.SETRANGE("Dimension Code"       , DimensionCode );
+                             lvDefaultDim.SETRANGE("Dimension Value Code" , DimensionValueCode );
+                             IF lvDefaultDim.FINDSET THEN
+                                IF First THEN BEGIN
+                                    FilterEmployee := EmployeeRec."No.";
+                                    First := FALSE
+                                END ELSE
+                                    FilterEmployee += '|' + EmployeeRec."No.";
+
+                            END
+                          ELSE BEGIN
+                            IF First THEN BEGIN
+                               FilterEmployee := EmployeeRec."No.";
+                               First := FALSE
+                             END ELSE
+                               FilterEmployee += '|' + EmployeeRec."No.";
+                           END;
+                          //<<141103 ITERO.GH
+                        END;
+                      END;
+                    UNTIL EmployeeRec.NEXT = 0;
+
+                    //+++4PSSE.MK 140218
+                    IF FilterEmployee = '' THEN
+                      CurrReport.SKIP;
+                    //---4PSSE.MK
+
+                  END;
+
+                  // *** Convert filter date ***
+
+                  IF FromWeek <> 0 THEN
+                    PeriodStart := DWY2DATE(1, FromWeek, FromYear);
+                  IF ToWeek <> 0 THEN
+                    PeriodEnd := DWY2DATE(7, ToWeek, ToYear);
+
+                  //>>REP-100-024
+                  IF FromDate <> 0D THEN BEGIN
+                     PeriodStart := FromDate;
+                     PeriodEnd   := ToDate;
+                  END;
+                  //<<REP-100-024
+
+                  EntryNo := 1;
+                  // *** Creates records from the hour accounting line ****
+                  IF ShowOpenHours THEN
+                    CreateOpenHours;
+
+
+                  //**** Create from posted lines *** //       //////////////////////////////
+                  IF ShowPostedHours THEN
+                    CreatedPostedHours;
+
+
+                  // *** Create temptable and present information***
+                  TEMPHourAccoutBuffer.SETCURRENTKEY("Last Name","First Name", Date);
+
+                  IF FilterHours <> '' THEN
+                    TEMPHourAccoutBuffer.SETFILTER(Hours, FilterHours);
+                  IF FilterAmount <> '' THEN
+                    TEMPHourAccoutBuffer.SETFILTER(Amount, FilterAmount);
+                  IF FilterWageCostCode <> '' THEN
+                    TEMPHourAccoutBuffer.SETFILTER("Wage Component /Cost Code", FilterWageCostCode);
+
+                  // >> REP-100-032
+                  //** If the report is filtering on date instead of weeks and year a second filer
+                  //** is need to be make to remove the hours that is not in the correct date period
+                  IF FromDate <> 0D THEN BEGIN
+                    IF (PeriodStart <> 0D) AND (PeriodEnd <> 0D) THEN
+                     TEMPHourAccoutBuffer.SETRANGE(Date, PeriodStart, PeriodEnd)
+                    ELSE IF (PeriodStart <> 0D) THEN
+                      TEMPHourAccoutBuffer.SETFILTER(Date, '%1..', PeriodStart)
+                    ELSE IF (PeriodEnd <> 0D) THEN
+                      TEMPHourAccoutBuffer.SETFILTER(Date, '..%1', PeriodEnd);
+                  END;
+                  // << REP-100-032
+                END;
+
+  }
+  DATASET
+  {
+    { 1100285500;;DataItem;CompanuInfo       ;
+               DataItemTable=Table2000000026;
+               DataItemTableView=SORTING(Number)
+                                 WHERE(Number=CONST(1)) }
+
+    { 1100285506;1;Column;COMPANYNAME        ;
+               SourceExpr=COMPANYNAME }
+
+    { 1100285505;1;Column;CompanyPicture     ;
+               SourceExpr=CompanyInformation.Picture }
+
+    { 1100285504;1;Column;REPORTNAME         ;
+               SourceExpr=GetReportName }
+
+    { 1100285503;1;Column;REPORTFILTER1      ;
+               SourceExpr=GetReportFilter1 }
+
+    { 1100285502;1;Column;REPORTFILTER2      ;
+               SourceExpr=GetReportFilter2 }
+
+    { 1100285501;1;Column;REPORTFILTER3      ;
+               SourceExpr=GetReportFilter3 }
+
+    { 1100285508;1;DataItem;                 ;
+               DataItemTable=Table5200;
+               DataItemTableView=SORTING(No.);
+               OnPreDataItem=BEGIN
+
+                               SETFILTER("No.",FilterEmployee);
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  IF FilterEmployee = '' THEN
+                                    CurrReport.SKIP;
+                                END;
+                                 }
+
+    { 1100285509;2;Column;No_Employee        ;
+               SourceExpr=Employee."No." }
+
+    { 1100285510;2;Column;FullName_Employee  ;
+               SourceExpr=Employee."Full Name" }
+
+    { 1100285511;2;Column;SalaryNo_Employee  ;
+               SourceExpr=Employee."Salary No." }
+
+    { 1100285507;2;DataItem;                 ;
+               DataItemTable=Table2000000026;
+               DataItemTableView=SORTING(Number)
+                                 WHERE(Number=FILTER(1..));
+               OnPreDataItem=BEGIN
+                               TEMPHourAccoutBuffer.SETRANGE("No.", Employee."No.");
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  OK@1100285500 : Boolean;
+                                BEGIN
+                                  //>> 160724 ITERO.AC GCI Call IM5221405
+                                  IF gvLogoOutPut THEN
+                                    CLEAR(CompanyInformation.Picture)
+                                  ELSE
+                                    gvLogoOutPut := TRUE;
+                                  //<< 160724 ITERO.AC IM5221405
+
+                                  IF Number = 1 THEN
+                                    OK := TEMPHourAccoutBuffer.FIND('-')
+                                  ELSE
+                                    OK := TEMPHourAccoutBuffer.NEXT <> 0;
+                                  IF NOT OK THEN
+                                    CurrReport.BREAK;
+                                END;
+                                 }
+
+    { 1100285512;3;Column;No_HourAccount     ;
+               SourceExpr=TEMPHourAccoutBuffer."No." }
+
+    { 1100285513;3;Column;Date__HourAccount  ;
+               SourceExpr=TEMPHourAccoutBuffer.Date }
+
+    { 1100285514;3;Column;ProjectNo__HourAccount;
+               SourceExpr=TEMPHourAccoutBuffer."Project No." }
+
+    { 1100285515;3;Column;ProjectDesc_HourAccount;
+               SourceExpr=TEMPHourAccoutBuffer."Project Description" }
+
+    { 1100285516;3;Column;TeamCode__HourAccount;
+               SourceExpr=TEMPHourAccoutBuffer."Team Code" }
+
+    { 1100285517;3;Column;Week__HourAccount  ;
+               SourceExpr=TEMPHourAccoutBuffer.Week }
+
+    { 1100285518;3;Column;WageCost_HourAccount;
+               SourceExpr=TEMPHourAccoutBuffer."Wage Component /Cost Code" }
+
+    { 1100285519;3;Column;WageCostDesc_HourAccount;
+               SourceExpr=TEMPHourAccoutBuffer."Wage Comp. /Cost Code Descrip." }
+
+    { 1100285520;3;Column;Hours_HourAccount  ;
+               SourceExpr=TEMPHourAccoutBuffer.Hours }
+
+    { 1100285521;3;Column;Amount__HourAccount;
+               SourceExpr=TEMPHourAccoutBuffer.Amount }
+
+    { 1100285522;3;Column;Comment__HourAccount;
+               SourceExpr=TEMPHourAccoutBuffer.Comment }
+
+    { 1100285523;3;Column;Consent01_HourAccount;
+               SourceExpr=TEMPHourAccoutBuffer."Consenter Level 0" }
+
+    { 1100285524;3;Column;Consent02_HourAccount;
+               SourceExpr=TEMPHourAccoutBuffer."Consenter Level 1" }
+
+    { 1100285525;3;Column;DeniedBy_HourAccount;
+               SourceExpr=TEMPHourAccoutBuffer."Consent by/ Denied by" }
+
+    { 1100285535;3;Column;ReleasedBy_HourAccount;
+               SourceExpr=TEMPHourAccoutBuffer."Released by" }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      OnInit=VAR
+               locUserSetup@1100285500 : Record 91;
+               locEmployee@1100285501 : Record 5200;
+               GLSetup@1000000000 : Record 98;
+             BEGIN
+               FromYear := DATE2DMY(TODAY, 3);
+               ToYear := DATE2DMY(TODAY, 3);
+               ShowOpenHours := TRUE;
+               ShowPostedHours := TRUE;
+
+               FromWeek := 1;
+               ToWeek   := 1;
+
+               GLSetup.GET;
+               DimensionCode := GLSetup."Global Dimension 1 Code";
+
+               IF locUserSetup.GET(USERID) THEN
+                 IF locEmployee.GET(locUserSetup."Employee No.") THEN
+                   FilterEmployee := locEmployee."No.";
+
+               //** Check to see if the user is autorized to see other employees hours
+               AuthorizedDepartment := '';
+
+               IF (NOT locUserSetup."Access own Hours only") AND (locUserSetup."Department Authoriz. Active")
+                       AND (locUserSetup."Department Code Filter" <> '') THEN
+                 AuthorizedDepartment := locUserSetup."Department Code Filter";
+             END;
+
+    }
+    CONTROLS
+    {
+      { 1100285515;;Container;
+                  Name=Container;
+                  ContainerType=ContentArea }
+
+      { 1100285514;1;Field  ;
+                  CaptionML=[ENU=Open Hours;
+                             NOR=èpne timer;
+                             SVE=ôppna timmar];
+                  SourceExpr=ShowOpenHours }
+
+      { 1100285513;1;Field  ;
+                  CaptionML=[ENU=Posted Hours;
+                             NOR=Bokfõrte timer;
+                             SVE=Bokfîrda timmar];
+                  SourceExpr=ShowPostedHours }
+
+      { 1100285512;1;Field  ;
+                  CaptionML=[ENU=From Year;
+                             NOR=Fra Ür;
+                             SVE=Fr.o.m. Ür];
+                  SourceExpr=FromYear }
+
+      { 1100285511;1;Field  ;
+                  CaptionML=[ENU=From Week;
+                             NOR=Fra uke;
+                             SVE=Fr.o.m. vecka];
+                  SourceExpr=FromWeek;
+                  OnValidate=BEGIN
+                               IF (FromWeek < 1) OR (FromWeek > 53) THEN
+                                 ERROR(Text000, FromWeek);
+
+                               IF (FromDate <> 0D) AND (FromWeek <> 0) THEN BEGIN
+                                  FromDate := 0D;
+                                  ToDate   := 0D;
+                               END;
+                             END;
+
+                  OnLookup=BEGIN
+                             DateSelectionManagement.GetWeekYear(FromWeek, FromYear);
+                           END;
+                            }
+
+      { 1100285500;1;Field  ;
+                  CaptionML=[ENU=From Date;
+                             NOR=Fra dato;
+                             SVE=Fr.o.m. datum];
+                  SourceExpr=FromDate;
+                  OnValidate=BEGIN
+                               IF FromDate <> 0D THEN BEGIN
+                                  ToDate := CALCDATE('<+CM>',FromDate);
+                                  IF (FromWeek <> 0) OR (ToWeek <> 0) THEN BEGIN
+                                     FromWeek := 0;
+                                     ToWeek   := 0;
+                                  END;
+                               END;
+                             END;
+                              }
+
+      { 1100285510;1;Field  ;
+                  CaptionML=[ENU=Until Year;
+                             NOR=Frem til Ür;
+                             SVE=T.o.m. Ür];
+                  SourceExpr=ToYear }
+
+      { 1100285509;1;Field  ;
+                  CaptionML=[ENU=Until Week;
+                             NOR=Frem til uke;
+                             SVE=T.o.m. vecka];
+                  SourceExpr=ToWeek;
+                  OnValidate=BEGIN
+                               IF (ToWeek < 1) OR (ToWeek > 53) THEN
+                                 ERROR(Text000, ToWeek);
+                             END;
+
+                  OnLookup=VAR
+                             DateSelectionManagement@1100285500 : Codeunit 11130005;
+                           BEGIN
+                             DateSelectionManagement.GetWeekYear(ToWeek, ToYear);
+                           END;
+                            }
+
+      { 1100285501;1;Field  ;
+                  CaptionML=[ENU=Until Date;
+                             NOR=Til dato;
+                             SVE=T.o.m. datum];
+                  SourceExpr=ToDate }
+
+      { 1100285508;1;Field  ;
+                  CaptionML=[ENU=Dimension;
+                             NOR=Dimensjon;
+                             SVE=Dimension];
+                  SourceExpr=DimensionCode;
+                  OnLookup=VAR
+                             Dimension@1100285000 : Record 348;
+                           BEGIN
+                             IF PAGE.RUNMODAL(0, Dimension) = ACTION::LookupOK THEN
+                               DimensionCode := Dimension.Code;
+                             RequestOptionsPage.UPDATE;
+                           END;
+                            }
+
+      { 1100285507;1;Field  ;
+                  CaptionML=[ENU=Dimension Value;
+                             NOR=Dimensjonsverdi;
+                             SVE=DimensionsvÑrde];
+                  SourceExpr=DimensionValueCode;
+                  OnLookup=VAR
+                             DimensionValue@1100285000 : Record 349;
+                           BEGIN
+                             DimensionValue.SETRANGE("Dimension Code", DimensionCode);
+                             IF PAGE.RUNMODAL(0, DimensionValue) = ACTION::LookupOK THEN
+                               DimensionValueCode := DimensionValue.Code;
+                             RequestOptionsPage.UPDATE;
+                           END;
+                            }
+
+      { 1100285505;1;Field  ;
+                  CaptionML=[ENU=No.;
+                             NOR=Nr.;
+                             SVE=Nr];
+                  SourceExpr=FilterEmployee;
+                  OnValidate=VAR
+                               locUserSetup@1100285400 : Record 91;
+                             BEGIN
+                               IF NOT locUserSetup.GET(USERID) THEN BEGIN
+                                 MESSAGE(STRSUBSTNO(TxtUserID, USERID));
+                                 FilterEmployee := '';
+                               END;
+                               //** Check to see if the user is autorized to see other employees hours
+                               IF (FilterEmployee <> locUserSetup."Employee No.") AND (NOT locUserSetup."Access own Hours only") AND (locUserSetup."Department Authoriz. Active")
+                                       AND (locUserSetup."Department Code Filter" <> '') THEN BEGIN
+                                 IF CheckEmployee(FilterEmployee, locUserSetup."Department Code Filter") THEN BEGIN
+
+                                   MESSAGE(TxtAuthorized);
+                                   FilterEmployee := locUserSetup."Employee No.";
+                                 END;
+                               END ELSE BEGIN
+                                 MESSAGE(TxtAuthorized);
+                                 FilterEmployee := locUserSetup."Employee No.";
+                               END;
+                               RequestOptionsPage.UPDATE;
+                             END;
+
+                  OnLookup=VAR
+                             locEmployee@1100285500 : Record 5200;
+                             locUserSetup@1100285502 : Record 91;
+                           BEGIN
+                             IF PAGE.RUNMODAL(0, locEmployee) = ACTION::LookupOK THEN
+                               FilterEmployee := locEmployee."No.";
+                             //RequestOptionsPage.UPDATE;
+
+                             IF NOT locUserSetup.GET(USERID) THEN BEGIN
+                               MESSAGE(STRSUBSTNO(TxtUserID, USERID));
+                               FilterEmployee := '';
+                             END;
+
+                             //** Check to see if the user is autorized to see other employees hours
+                             IF (FilterEmployee <> locUserSetup."Employee No.") AND (NOT locUserSetup."Access own Hours only") AND (locUserSetup."Department Authoriz. Active")
+                                     AND (locUserSetup."Department Code Filter" <> '') THEN BEGIN
+                               IF CheckEmployee(FilterEmployee, locUserSetup."Department Code Filter") THEN BEGIN
+
+                                 MESSAGE(TxtAuthorized);
+                                 FilterEmployee := locUserSetup."Employee No.";
+                               END;
+                             END ELSE BEGIN
+                               MESSAGE(TxtAuthorized);
+                               FilterEmployee := locUserSetup."Employee No.";
+                             END;
+                             RequestOptionsPage.UPDATE;
+                           END;
+                            }
+
+      { 1100285503;1;Field  ;
+                  CaptionML=[ENU=Wage Component /Cost Code;
+                             NOR=Lõnnsart/kostkode;
+                             SVE=Lîneart /kostnadskod];
+                  SourceExpr=FilterWageCostCode;
+                  OnLookup=VAR
+                             WageComponentRec@1100285500 : Record 11012014;
+                           BEGIN
+                             IF PAGE.RUNMODAL(0, WageComponentRec) = ACTION::LookupOK THEN
+                              FilterWageCostCode := WageComponentRec.Code;
+                             RequestOptionsPage.UPDATE;
+                           END;
+                            }
+
+    }
+  }
+  LABELS
+  {
+    { 1100285533;HoursCaption  ;CaptionML=[ENU=Hours;
+                                           NOR="Timer ";
+                                           SVE=Timmar] }
+    { 1100285532;ReleasedByCaption;
+                                CaptionML=[ENU=Released by;
+                                           NOR=Frigitt av;
+                                           SVE=SlÑppt av] }
+    { 1100285531;ConcentDateCaption;
+                                CaptionML=[ENU=Consent Date;
+                                           NOR=Godkjenningsdato;
+                                           SVE=Attest- datum] }
+    { 1100285530;AgdaCaption   ;CaptionML=[ENU=Agda No:;
+                                           NOR=Agda-nr:;
+                                           SVE=Agda-nr:] }
+    { 1100285529;SumCaption    ;CaptionML=[ENU=Total Wage Component/Cost Code;
+                                           NOR=Total lõnnsart/Kostkode;
+                                           SVE=Totalt lîneart/kostnadskod] }
+    { 1100285528;ConsentDeniedByCaption;
+                                CaptionML=[ENU=Consent by/ Denied by;
+                                           NOR=Attestert av/Avvist av;
+                                           SVE=Attesterad av/ nekad av] }
+    { 1100285527;PageCaption   ;CaptionML=[ENU=Page;
+                                           NOR=Side;
+                                           SVE=Sida] }
+    { 1100285526;WageCostCaption;
+                                CaptionML=[ENU=Wage Component /Cost Code;
+                                           NOR=Lõnnsart/kostkode;
+                                           SVE=Lîneart /Kostnadskod] }
+    { 1100285536;DateCaption   ;CaptionML=[ENU=Date;
+                                           NOR=Dato;
+                                           SVE=Datum] }
+    { 1100285537;ProjectNoCaption;
+                                CaptionML=[ENU=Project No.;
+                                           NOR=Prosjektnr;
+                                           SVE=Projektnr] }
+    { 1100285538;ProjectDescCaption;
+                                CaptionML=[ENU=Project Description;
+                                           NOR=Prosjektbeskrivelse;
+                                           SVE=Projektbeskrivning] }
+    { 1100285540;WeekCaption   ;CaptionML=[ENU=Week;
+                                           NOR=Uke;
+                                           SVE=Vecka] }
+    { 1100285541;AmountCaption ;CaptionML=[ENU=Amount;
+                                           NOR=Belõp;
+                                           SVE=Belopp] }
+    { 1100285543;SerialNumber0Caption;
+                                CaptionML=[ENU=Consenter Project;
+                                           NOR=Attestant, prosjekt;
+                                           SVE=Attestant projekt] }
+    { 1100285542;SerialNumber1Caption;
+                                CaptionML=[ENU=Consenter All Hours;
+                                           NOR=Attestant, alle timer;
+                                           SVE=Attestant alla timmar] }
+    { 1100285544;DeniedByCaption;
+                                CaptionML=[ENU=Denied by;
+                                           NOR=Avvist av;
+                                           SVE=Nekad av] }
+    { 1100285539;TeamCodeCaption;
+                                CaptionML=[ENU=Team Code;
+                                           NOR=Prosjektgruppekode;
+                                           SVE=Arbetslag] }
+    { 1100285534;CommentCaption;CaptionML=[ENU=Comment;
+                                           NOR=Merknad;
+                                           SVE=Kommentar] }
+  }
+  CODE
+  {
+    VAR
+      TEMPHourAccoutBuffer@1100285502 : TEMPORARY Record 81622;
+      CompanyInformation@1100285505 : Record 79;
+      GLSetup@1100285511 : Record 98;
+      DateSelectionManagement@1100285526 : Codeunit 11130005;
+      FilterCostCenter@1100285516 : Text;
+      FilterManager@1100285515 : Text;
+      FilterEmployee@1100285514 : Text;
+      FilterProject@1100285513 : Text;
+      FilterWageCostCode@1100285512 : Text;
+      FilterHours@1100285510 : Text[10];
+      FilterAmount@1100285509 : Text[10];
+      DimensionCode@1100285508 : Code[20];
+      DimensionValueCode@1100285507 : Code[20];
+      AuthorizedDepartment@1100285530 : Code[245];
+      ShowOpenHours@1100285504 : Boolean;
+      ShowPostedHours@1100285503 : Boolean;
+      TeamCodeEmpty@1100285506 : Boolean;
+      FromWeek@1100285501 : Integer;
+      ToWeek@1100285500 : Integer;
+      TextDateFilter@1100285523 : TextConst 'ENU=Date Filter:;NOR=Datofilter:;SVE=Datumfilter:';
+      TextWeek@1100285522 : TextConst 'ENU=Week;NOR=Uke;SVE=Vecka';
+      TextYear@1100285521 : TextConst 'ENU=Year;NOR=èr;SVE=èr';
+      TextHours@1100285520 : TextConst 'ENU="Open Hours: %1, Posted Hours: %2 ";NOR=èpne timer: %1, Bokfõrte timer: %2;SVE=ôppna timmar %1, Bokfîrda timmar %2';
+      TextManager@1100285519 : TextConst 'ENU=Manager No. %1;NOR=Sjef nr. %1;SVE=Chefsnr. %1';
+      TextTeamCodeEmpty@1100285518 : TextConst 'ENU=Team Code Empty:;NOR=Teamkode mangler:;SVE=Teamkod saknas:';
+      TextEmployee@1100285517 : TextConst 'ENU=Employee No.: %1;NOR=Ansatt nr.: %1;SVE=AnstÑllningsnr: %1';
+      FromYear@1100285525 : Integer;
+      ToYear@1100285524 : Integer;
+      EntryNo@1100285529 : Integer;
+      PeriodStart@1100285527 : Date;
+      PeriodEnd@1100285528 : Date;
+      FromDate@1100285531 : Date;
+      ToDate@1100285532 : Date;
+      TxtUserID@1100285401 : TextConst 'ENU=User ID %1 is missing in User Setup.;NOR=Bruker-ID %1 mangler i Brukerinnstillinger;SVE=AnvÑndarID %1 saknas i anvÑndarinstÑllningar.';
+      TxtAuthorized@1100285400 : TextConst 'ENU=You have not permission to see the selected employee hours.;NOR=Du har ikke tillatelse til Ü se de valgte timene for ansatte;SVE=Ni har ej behîrighet att se vald anstÑlldas timmar.';
+      gvLogoOutPut@1100409000 : Boolean;
+      Text000@1000000002 : TextConst 'ENU=Week %1 is not a valid choice;NOR=Uke% 1 er ikke et gyldig valg;SVE=Vecka %1 Ñr inte ett giltigt val';
+      Text001@1000000001 : TextConst 'ENU=To Week can''t be less than From Week;NOR=Frem til Uke kan ikke vëre mindre enn Fra  uke;SVE=T.o.m. vecka kan inte vara mindre Ñn Fr.o.m. vecka';
+      Text002@1000000000 : TextConst 'ENU=Dimension Value cannot be blank;NOR=Dimensjonsverdi mÜ ikke vëre tom;SVE=DimensionsvÑrde fÜr inte vara blank';
+
+    PROCEDURE CreateOpenHours@1100285507();
+    VAR
+      HourAccountingLine@1100285506 : Record 11012039;
+      HourAccounting@1100285507 : Record 11012038;
+      HourAccounting2@1100285508 : Record 11012038;
+      WageComponent@1100285505 : Record 11012014;
+      EmployeeRec@1100285504 : Record 5200;
+      HoursConsentLine@1100285503 : Record 11020437;
+      PostedHoursConsentLine@1100285502 : Record 11020439;
+      UserSetup@1100285501 : Record 91;
+      ConsentDeniedBy@1100285500 : Text[30];
+      CostCodeDescription@1100285100 : Text;
+      CostCode@1100285101 : Record 11012083;
+    BEGIN
+      // >> REP-100-032 ITERO.MK
+      IF (PeriodStart <> 0D) AND (PeriodEnd <> 0D) THEN
+        //>>141104 ENH050
+        //HourAccounting2.SETRANGE("Posting Date", PeriodStart, PeriodEnd)
+        HourAccounting2.SETRANGE("Document Date", PeriodStart, PeriodEnd)
+        //<<141104 ENH050
+      ELSE IF (PeriodStart <> 0D) THEN
+        //>>141104 ENH050
+        //HourAccounting2.SETFILTER("Posting Date", '%1..', PeriodStart)
+        HourAccounting2.SETFILTER("Document Date", '%1..', PeriodStart)
+        //<<141104 ENH050
+      ELSE IF (PeriodEnd <> 0D) THEN
+        //>>141104 ENH050
+        //HourAccounting2.SETFILTER("Posting Date", '..%1', PeriodEnd);
+        HourAccounting2.SETFILTER("Document Date", '..%1', PeriodEnd);
+        //<<141104 ENH050
+      IF FilterEmployee <> '' THEN
+        HourAccounting2.SETFILTER("Employee No.", FilterEmployee);
+      IF HourAccounting2.FINDSET(FALSE) THEN REPEAT
+
+        //HourAccountingLine.SETCURRENTKEY(Year,Week,"Project No.","Employee No.");
+
+        //IF (PeriodStart <> 0D) AND (PeriodEnd <> 0D) THEN
+        //  HourAccountingLine.SETRANGE("Posting Date", PeriodStart, PeriodEnd)
+        //ELSE IF (PeriodStart <> 0D) THEN
+        //  HourAccountingLine.SETFILTER("Posting Date", '%1..', PeriodStart)
+        //ELSE IF (PeriodEnd <> 0D) THEN
+        //  HourAccountingLine.SETFILTER("Posting Date", '..%1', PeriodEnd);
+        HourAccountingLine.RESET;
+        HourAccountingLine.SETRANGE(Year, HourAccounting2.Year);
+        HourAccountingLine.SETRANGE(Week, HourAccounting2.Week);
+        HourAccountingLine.SETRANGE("Employee No.", HourAccounting2."Employee No.");
+        // << REP-100-032 MK
+
+        IF FilterProject <> '' THEN
+          HourAccountingLine.SETFILTER("Project No.", FilterProject);
+        IF FilterEmployee <> '' THEN
+          HourAccountingLine.SETFILTER("Employee No.", FilterEmployee);
+        IF TeamCodeEmpty THEN
+          HourAccountingLine.SETRANGE("Team Code", '');
+
+        IF HourAccountingLine.FINDSET(FALSE) THEN REPEAT
+
+          WITH TEMPHourAccoutBuffer DO BEGIN
+            INIT;
+            "Entry No." := EntryNo;
+
+            IF EmployeeRec.GET(HourAccountingLine."Employee No.") THEN BEGIN
+              "Last Name" := EmployeeRec."Last Name";
+              "First Name" := EmployeeRec."First Name";
+              "No." := HourAccountingLine."Employee No.";
+              "Agda No." := EmployeeRec."Salary No.";
+            END;
+            Year := HourAccountingLine.Year;
+            Week := HourAccountingLine.Week;
+            // >> REP-100-032 MK
+            //Date := DWY2DATE(CheckWeekDayOpenHours(HourAccountingLine), HourAccountingLine.Week, HourAccountingLine.Year);
+            //>>141104 ENH050
+            //Date := HourAccountingLine."Posting Date";
+            Date := HourAccountingLine."Actual date of line";
+            //<<141104 ENH050
+            // << REP-100-032 MK
+            "Project No." := HourAccountingLine."Project No.";
+            HourAccountingLine.CALCFIELDS("Project Description");
+            "Project Description" := HourAccountingLine."Project Description";
+            "Team Code":= HourAccountingLine."Team Code";
+            Hours := HourAccountingLine."Total Line";
+
+            //>>141105 ITERO.WG
+            HourAccountingLine.CALCFIELDS("Component Type");
+            //IF HourAccountingLine."Component Type" = HourAccountingLine."Component Type"::"Expense hours" THEN
+            IF (HourAccountingLine."Component Type" = HourAccountingLine."Component Type"::"Expense hours") OR (HourAccountingLine."Component Type" = HourAccountingLine."Component Type"::Expenses) THEN
+              Amount := HourAccountingLine."Amount (LCY)";
+            //<<141105 ITERO.WG
+
+            //>>141123 REP-100-038
+            Comment := HourAccountingLine.Comment;
+            //<<141123 REP-100-038
+
+      //      HourAccountingLine.CALCFIELDS("Cost Code Description");
+            CostCodeDescription := '';
+            IF CostCode.GET(HourAccountingLine."Cost Code") THEN
+              CostCodeDescription := CostCode.Description;
+
+            IF HourAccountingLine."Cost Code" <> '' THEN BEGIN
+              "Wage Component /Cost Code" := HourAccountingLine."Cost Code";
+              "Wage Comp. /Cost Code Descrip." := CostCodeDescription;
+            END ELSE IF HourAccountingLine."Wage Component" <> '' THEN BEGIN
+              "Wage Component /Cost Code" := HourAccountingLine."Wage Component";
+              IF WageComponent.GET(HourAccountingLine."Wage Component") THEN
+                "Wage Comp. /Cost Code Descrip." := WageComponent.Description
+              ELSE
+                "Wage Comp. /Cost Code Descrip." := '';
+            END ELSE BEGIN
+              "Wage Component /Cost Code" := '';
+              "Wage Comp. /Cost Code Descrip." := '';
+            END;
+
+            //***Get the employee who released the lines
+            IF HourAccounting.GET(HourAccountingLine.Year,HourAccountingLine.Week,HourAccountingLine."Employee No.") THEN BEGIN
+              IF UserSetup.GET(HourAccounting."Released by") THEN BEGIN
+                UserSetup.CALCFIELDS("Name Employee");
+                "Released by" := UserSetup."Name Employee";
+              END;
+            END;
+
+
+            //***Get Concent Lines form regular or posted ***//
+            HoursConsentLine.RESET;
+            HoursConsentLine.SETRANGE(Year, HourAccountingLine.Year);
+            HoursConsentLine.SETRANGE(Week, HourAccountingLine.Week);
+            HoursConsentLine.SETRANGE(Employee, HourAccountingLine."Employee No.");
+            HoursConsentLine.SETRANGE("Line No.", HourAccountingLine."Line No.");
+            HoursConsentLine.SETRANGE(LineType, HoursConsentLine.LineType::Normal);
+
+            IF HoursConsentLine.FINDSET(FALSE) THEN BEGIN
+
+              REPEAT
+
+                IF HoursConsentLine."Serial Number" = 0 THEN BEGIN
+
+                  IF HoursConsentLine.Denied THEN BEGIN
+                    "Consent by/ Denied by" := HoursConsentLine."Denied By";
+
+                    IF UserSetup.GET(HoursConsentLine."Denied By") THEN BEGIN
+                      UserSetup.CALCFIELDS("Name Employee");
+                      IF UserSetup."Name Employee" <> '' THEN
+                       "Consent by/ Denied by" := UserSetup."Name Employee";
+                    END;
+
+                  END ELSE IF HoursConsentLine.Consent THEN BEGIN
+                    "Consenter Level 0" := HoursConsentLine."Consent By";
+
+                    IF UserSetup.GET(HoursConsentLine."Consent By") THEN BEGIN
+                      UserSetup.CALCFIELDS("Name Employee");
+                      IF UserSetup."Name Employee" <> '' THEN
+                       "Consenter Level 0" := UserSetup."Name Employee";
+                    END;
+                  END;
+
+                END ELSE IF HoursConsentLine."Serial Number" = 1 THEN BEGIN
+
+                  IF HoursConsentLine.Denied THEN BEGIN
+                    "Consent by/ Denied by" := HoursConsentLine."Denied By";
+
+                    IF UserSetup.GET(HoursConsentLine."Denied By") THEN BEGIN
+                      UserSetup.CALCFIELDS("Name Employee");
+                      IF UserSetup."Name Employee" <> '' THEN
+                       "Consent by/ Denied by" := UserSetup."Name Employee";
+                    END;
+
+                  END ELSE IF HoursConsentLine.Consent THEN BEGIN
+                    "Consenter Level 1" := HoursConsentLine."Consent By";
+
+                    IF UserSetup.GET(HoursConsentLine."Consent By") THEN BEGIN
+                      UserSetup.CALCFIELDS("Name Employee");
+                      IF UserSetup."Name Employee" <> '' THEN
+                       "Consenter Level 1" := UserSetup."Name Employee";
+                    END;
+                  END;
+                END;
+
+              UNTIL HoursConsentLine.NEXT = 0;
+
+            END ELSE BEGIN
+              PostedHoursConsentLine.RESET;
+              PostedHoursConsentLine.SETRANGE(Year, HourAccountingLine.Year);
+              PostedHoursConsentLine.SETRANGE(Week, HourAccountingLine.Week);
+              PostedHoursConsentLine.SETRANGE(Employee, HourAccountingLine."Employee No.");
+              PostedHoursConsentLine.SETRANGE("Line No.", HourAccountingLine."Line No.");
+              PostedHoursConsentLine.SETRANGE(LineType, PostedHoursConsentLine.LineType::Normal);
+
+              IF PostedHoursConsentLine.FINDSET(FALSE) THEN REPEAT
+
+                IF PostedHoursConsentLine."Serial Number" = 0 THEN BEGIN
+
+                  IF PostedHoursConsentLine.Denied THEN BEGIN
+                    "Consent by/ Denied by" := PostedHoursConsentLine."Denied By";
+
+                    IF UserSetup.GET(PostedHoursConsentLine."Denied By") THEN BEGIN
+                      UserSetup.CALCFIELDS("Name Employee");
+                      IF UserSetup."Name Employee" <> '' THEN
+                       "Consent by/ Denied by" := UserSetup."Name Employee";
+                    END;
+
+                  END ELSE IF PostedHoursConsentLine.Consent THEN BEGIN
+                    "Consenter Level 0" := PostedHoursConsentLine."Consent By";
+
+                    IF UserSetup.GET(PostedHoursConsentLine."Consent By") THEN BEGIN
+                      UserSetup.CALCFIELDS("Name Employee");
+                      IF UserSetup."Name Employee" <> '' THEN
+                       "Consenter Level 0" := UserSetup."Name Employee";
+                    END;
+                  END;
+
+                END ELSE IF PostedHoursConsentLine."Serial Number" = 1 THEN BEGIN
+
+                  IF PostedHoursConsentLine.Denied THEN BEGIN
+                    "Consent by/ Denied by" := PostedHoursConsentLine."Denied By";
+
+                    IF UserSetup.GET(PostedHoursConsentLine."Denied By") THEN BEGIN
+                      UserSetup.CALCFIELDS("Name Employee");
+                      IF UserSetup."Name Employee" <> '' THEN
+                       "Consent by/ Denied by" := UserSetup."Name Employee";
+                    END;
+
+                  END ELSE IF PostedHoursConsentLine.Consent THEN BEGIN
+                    "Consenter Level 1" := PostedHoursConsentLine."Consent By";
+
+                    IF UserSetup.GET(PostedHoursConsentLine."Consent By") THEN BEGIN
+                      UserSetup.CALCFIELDS("Name Employee");
+                      IF UserSetup."Name Employee" <> '' THEN
+                       "Consenter Level 1" := UserSetup."Name Employee";
+                    END;
+                  END;
+                END;
+
+              UNTIL PostedHoursConsentLine.NEXT = 0;
+            END;
+            //***End Consent Line***
+
+
+            //***Information if the consenter is a super consenter, uses the release name
+      //>>141022 ITERO.WG
+      {      IF ("Consenter Level 0" = '') AND ("Consenter Level 1" = '') THEN BEGIN
+              IF HourAccounting.GET(HourAccountingLine.Year,HourAccountingLine.Week,HourAccountingLine."Employee No.") THEN BEGIN
+                IF HourAccounting.Consented THEN BEGIN
+      //>>141017 ITERO.WG
+      //            IF HourAccountingLine.Type = HourAccountingLine.Type::Project THEN
+      //              "Consenter Level 0" := "Released by"
+                  IF HourAccountingLine.Type = HourAccountingLine.Type::Project THEN BEGIN
+                    "Consenter Level 0" := "Released by";
+                    "Consenter Level 1" := "Released by";
+                  END
+      //<<141017 ITERO.WG
+                  ELSE IF HourAccountingLine.Type = HourAccountingLine.Type::Indirect THEN
+                    "Consenter Level 1" := "Released by";
+                END;
+              END;
+            END;
+
+      }
+            IF ("Consenter Level 0" = '') THEN BEGIN
+              IF HourAccounting.GET(HourAccountingLine.Year,HourAccountingLine.Week,HourAccountingLine."Employee No.") THEN BEGIN
+                IF HourAccounting.Consented THEN BEGIN
+                  IF HourAccountingLine.Type = HourAccountingLine.Type::Project THEN
+                    "Consenter Level 0" := "Released by";
+                END;
+              END;
+            END;
+
+            IF ("Consenter Level 1" = '') THEN BEGIN
+              IF HourAccounting.GET(HourAccountingLine.Year,HourAccountingLine.Week,HourAccountingLine."Employee No.") THEN BEGIN
+                IF HourAccounting.Consented THEN BEGIN
+                  IF HourAccountingLine.Type = HourAccountingLine.Type::Project THEN
+                    "Consenter Level 1" := "Released by"
+                  ELSE IF HourAccountingLine.Type = HourAccountingLine.Type::Indirect THEN
+                    "Consenter Level 1" := "Released by";
+                END;
+              END;
+            END;
+      //<<141022 ITERO.WG
+            //****************
+
+            Open := TRUE;
+
+            INSERT;
+            EntryNo += 1;
+          END;
+
+        UNTIL HourAccountingLine.NEXT = 0;
+
+      UNTIL HourAccounting2.NEXT = 0;
+    END;
+
+    PROCEDURE CreatedPostedHours@1100285508();
+    VAR
+      PostedHourLine@1100285508 : Record 11012085;
+      PostedHourHeader@1100285500 : Record 11012084;
+      PostedHourHeader2@1100285501 : Record 11012084;
+      EmployeeRec@1100285507 : Record 5200;
+      HoursConsentLine@1100285506 : Record 11020437;
+      PostedHoursConsentLine@1100285505 : Record 11020439;
+      UserSetup@1100285504 : Record 91;
+      ConsentDeniedBy@1100285503 : Text[30];
+    BEGIN
+      // >> REP-100-032 MK
+      IF (PeriodStart <> 0D) AND (PeriodEnd <> 0D) THEN
+        //>>141104 ENH050
+        //PostedHourHeader2.SETRANGE("Posting Date", PeriodStart, PeriodEnd)
+        PostedHourHeader2.SETRANGE("Document Date", PeriodStart, PeriodEnd)
+        //<<141104 ENH050
+      ELSE IF (PeriodStart <> 0D) THEN
+        //>>141104 ENH050
+        //PostedHourHeader2.SETFILTER("Posting Date", '%1..', PeriodStart)
+        PostedHourHeader2.SETFILTER("Document Date", '%1..', PeriodStart)
+        //<<141104 ENH050
+      ELSE IF (PeriodEnd <> 0D) THEN
+        //>>141104 ENH050
+        //PostedHourHeader2.SETFILTER("Posting Date", '..%1', PeriodEnd);
+        PostedHourHeader2.SETFILTER("Document Date", '..%1', PeriodEnd);
+        //<<141104 ENH050
+      IF FilterEmployee <> '' THEN
+        PostedHourHeader2.SETFILTER("Employee No.", FilterEmployee);
+      IF PostedHourHeader2.FINDSET(FALSE) THEN REPEAT
+
+        //PostedHourLine.SETCURRENTKEY(Year,Week,"Project No.","Employee No.");
+
+        //IF (PeriodStart <> 0D) AND (PeriodEnd <> 0D) THEN
+        //  PostedHourLine.SETRANGE("Posting Date", PeriodStart, PeriodEnd)
+        //ELSE IF (PeriodStart <> 0D) THEN
+        //  PostedHourLine.SETFILTER("Posting Date", '%1..', PeriodStart)
+        //ELSE IF (PeriodEnd <> 0D) THEN
+        //  PostedHourLine.SETFILTER("Posting Date", '..%1', PeriodEnd);
+        PostedHourLine.RESET;
+        PostedHourLine.SETRANGE(Year, PostedHourHeader2.Year);
+        PostedHourLine.SETRANGE(Week, PostedHourHeader2.Week);
+        PostedHourLine.SETRANGE("Employee No.", PostedHourHeader2."Employee No.");
+        // << REP-100-032 MK
+
+        IF FilterProject <> '' THEN
+          PostedHourLine.SETFILTER("Project No.", FilterProject);
+        IF FilterEmployee <> '' THEN
+          PostedHourLine.SETFILTER("Employee No.", FilterEmployee);
+        IF TeamCodeEmpty THEN
+          PostedHourLine.SETRANGE("Team Code", '');
+
+        IF PostedHourLine.FINDSET(FALSE) THEN REPEAT
+
+          WITH TEMPHourAccoutBuffer DO BEGIN
+            INIT;
+            "Entry No." := EntryNo;
+
+            IF EmployeeRec.GET(PostedHourLine."Employee No.") THEN BEGIN
+              "Last Name" := EmployeeRec."Last Name";
+              "First Name" := EmployeeRec."First Name";
+              "No." := PostedHourLine."Employee No.";
+              "Agda No." := Employee."Salary No.";
+            END;
+
+            Week := PostedHourLine.Week;
+            Hours := PostedHourLine."Total Line";
+            // >> REP-100-032 MK
+            //Date := DWY2DATE(CheckWeekDayPostedHours(PostedHourLine), PostedHourLine.Week, PostedHourLine.Year);
+            //>>141104 ENH050
+            //Date := PostedHourLine."Posting Date";
+            Date := PostedHourLine."Actual date of line";
+            //<<141104 ENH050
+            // << REP-100-032 MK
+            "Project No." := PostedHourLine."Project No.";
+            PostedHourLine.CALCFIELDS("Project Description");
+            "Project Description" := PostedHourLine."Project Description";
+            "Team Code" := PostedHourLine."Team Code";
+
+            //>>141105 ITERO.WG
+            //PostedHourLine.CALCFIELDS("Component Type");
+            //IF PostedHourLine."Component Type" = PostedHourLine."Component Type"::"Expense hours" THEN
+            IF (PostedHourLine."Component Type" = PostedHourLine."Component Type"::"Expense hours") OR (PostedHourLine."Component Type" = PostedHourLine."Component Type"::Expenses) THEN
+            Amount := PostedHourLine."Amount (LCY)";
+            //<<141105
+
+            //>>141123 REP-100-038
+            Comment := PostedHourLine.Comment;
+            //<<141123 REP-100-038
+
+            PostedHourLine.CALCFIELDS("Cost Code Description", "Description Wage Component");
+            IF PostedHourLine."Cost Code" <> '' THEN BEGIN
+              "Wage Component /Cost Code" := PostedHourLine."Cost Code";
+              "Wage Comp. /Cost Code Descrip." := PostedHourLine."Cost Code Description";
+            END ELSE IF PostedHourLine."Wage Component" <> '' THEN BEGIN
+              "Wage Component /Cost Code" := PostedHourLine."Wage Component";
+              "Wage Comp. /Cost Code Descrip." := PostedHourLine."Description Wage Component";
+            END;
+
+            //***Get the employee who released the lines
+            IF PostedHourHeader.GET(PostedHourLine.Year, PostedHourLine.Week, PostedHourLine."Employee No.") THEN BEGIN
+              IF UserSetup.GET(PostedHourHeader."Released by") THEN BEGIN
+                UserSetup.CALCFIELDS("Name Employee");
+                "Released by" := UserSetup."Name Employee";
+              END;
+            END;
+
+            //***Get Concent Lines , can be in either the posted or the regular consent lines ***
+            HoursConsentLine.RESET;
+            HoursConsentLine.SETRANGE(Year, PostedHourLine.Year);
+            HoursConsentLine.SETRANGE(Week, PostedHourLine.Week);
+            HoursConsentLine.SETRANGE(Employee, PostedHourLine."Employee No.");
+            HoursConsentLine.SETRANGE("Line No.", PostedHourLine."Line No.");
+            HoursConsentLine.SETRANGE(LineType, HoursConsentLine.LineType::Normal);
+
+            IF HoursConsentLine.FINDSET(FALSE) THEN BEGIN
+
+              REPEAT
+
+                IF HoursConsentLine."Serial Number" = 0 THEN BEGIN
+
+                  IF HoursConsentLine.Denied THEN BEGIN
+                    "Consent by/ Denied by" := HoursConsentLine."Denied By";
+
+                    IF UserSetup.GET(HoursConsentLine."Denied By") THEN BEGIN
+                      UserSetup.CALCFIELDS("Name Employee");
+                      IF UserSetup."Name Employee" <> '' THEN
+                        "Consent by/ Denied by" := UserSetup."Name Employee";
+                    END;
+
+                  END ELSE IF HoursConsentLine.Consent THEN BEGIN
+                    "Consenter Level 0" := HoursConsentLine."Consent By";
+
+                    IF UserSetup.GET(HoursConsentLine."Consent By") THEN BEGIN
+                      UserSetup.CALCFIELDS("Name Employee");
+                      IF UserSetup."Name Employee" <> '' THEN
+                        "Consenter Level 0" := UserSetup."Name Employee";
+                    END;
+                  END;
+
+                END ELSE IF HoursConsentLine."Serial Number" = 1 THEN BEGIN
+
+                  "Consent by/ Denied by" := HoursConsentLine."Denied By";
+                  IF HoursConsentLine.Denied THEN BEGIN
+
+                    IF UserSetup.GET(HoursConsentLine."Denied By") THEN BEGIN
+                      UserSetup.CALCFIELDS("Name Employee");
+                      IF UserSetup."Name Employee" <> '' THEN
+                        "Consent by/ Denied by" := UserSetup."Name Employee";
+                    END;
+
+                  END ELSE IF HoursConsentLine.Consent THEN BEGIN
+                    "Consenter Level 1" := HoursConsentLine."Consent By";
+
+                    IF UserSetup.GET(HoursConsentLine."Consent By") THEN BEGIN
+                      UserSetup.CALCFIELDS("Name Employee");
+                      IF UserSetup."Name Employee" <> '' THEN
+                        "Consenter Level 1" := UserSetup."Name Employee";
+                    END;
+                  END;
+                END;
+
+              UNTIL HoursConsentLine.NEXT = 0;
+
+            END ELSE BEGIN
+              PostedHoursConsentLine.RESET;
+              PostedHoursConsentLine.SETRANGE(Year, PostedHourLine.Year);
+              PostedHoursConsentLine.SETRANGE(Week, PostedHourLine.Week);
+              PostedHoursConsentLine.SETRANGE(Employee, PostedHourLine."Employee No.");
+              PostedHoursConsentLine.SETRANGE("Line No.", PostedHourLine."Line No.");
+              PostedHoursConsentLine.SETRANGE(LineType, PostedHoursConsentLine.LineType::Normal);
+
+              IF PostedHoursConsentLine.FINDSET(FALSE) THEN REPEAT
+
+                IF PostedHoursConsentLine."Serial Number" = 0 THEN BEGIN
+
+                  IF PostedHoursConsentLine.Denied THEN BEGIN
+                   "Consent by/ Denied by" := PostedHoursConsentLine."Denied By";
+
+                    IF UserSetup.GET(PostedHoursConsentLine."Denied By") THEN BEGIN
+                      UserSetup.CALCFIELDS("Name Employee");
+                      IF UserSetup."Name Employee" <> '' THEN
+                        "Consent by/ Denied by" := UserSetup."Name Employee";
+                    END;
+
+                  END ELSE IF PostedHoursConsentLine.Consent THEN BEGIN
+                    "Consenter Level 0" := PostedHoursConsentLine."Consent By";
+
+                    IF UserSetup.GET(PostedHoursConsentLine."Consent By") THEN BEGIN
+                      UserSetup.CALCFIELDS("Name Employee");
+                      IF UserSetup."Name Employee" <> '' THEN
+                        "Consenter Level 0" := UserSetup."Name Employee"
+                    END;
+                  END;
+
+                END ELSE IF PostedHoursConsentLine."Serial Number" = 1 THEN BEGIN
+
+                  IF PostedHoursConsentLine.Denied THEN BEGIN
+                    "Consent by/ Denied by" := PostedHoursConsentLine."Denied By";
+
+                    IF UserSetup.GET(PostedHoursConsentLine."Denied By") THEN BEGIN
+                      UserSetup.CALCFIELDS("Name Employee");
+                      IF UserSetup."Name Employee" <> '' THEN
+                       "Consent by/ Denied by" := UserSetup."Name Employee";
+                    END;
+
+                  END ELSE IF PostedHoursConsentLine.Consent THEN BEGIN
+                    "Consenter Level 1" := PostedHoursConsentLine."Consent By";
+
+                    IF UserSetup.GET(PostedHoursConsentLine."Consent By") THEN BEGIN
+                      UserSetup.CALCFIELDS("Name Employee");
+                      IF UserSetup."Name Employee" <> '' THEN
+                       "Consenter Level 1" := UserSetup."Name Employee";
+                    END;
+                  END;
+                END;
+
+              UNTIL PostedHoursConsentLine.NEXT = 0;
+
+            END;
+            //***End Consent Lines***
+
+            //***Information if the consenter is a super consenter, uses the release name
+      //>>141022 ITERO.WG
+      {      IF ("Consenter Level 0" = '') AND ("Consenter Level 1" = '') THEN BEGIN
+              IF PostedHourHeader.GET(PostedHourLine.Year,PostedHourLine.Week,PostedHourLine."Employee No.") THEN BEGIN
+                IF PostedHourLine.Type = PostedHourLine.Type::Project THEN BEGIN
+                  "Consenter Level 0" := "Released by";
+                  "Consenter Level 1" := "Released by";
+                END
+                ELSE IF PostedHourLine.Type = PostedHourLine.Type::Indirect THEN
+                "Consenter Level 1" := "Released by";
+               END;
+              END;
+      }
+
+            IF ("Consenter Level 0" = '') THEN BEGIN
+              IF PostedHourHeader.GET(PostedHourLine.Year,PostedHourLine.Week,PostedHourLine."Employee No.") THEN BEGIN
+                IF PostedHourLine.Type = PostedHourLine.Type::Project THEN
+                  "Consenter Level 0" := "Released by";
+              END;
+            END;
+
+            IF ("Consenter Level 1" = '') THEN BEGIN
+              IF PostedHourHeader.GET(PostedHourLine.Year,PostedHourLine.Week,PostedHourLine."Employee No.") THEN BEGIN
+                IF PostedHourLine.Type = PostedHourLine.Type::Project THEN
+                  "Consenter Level 1" := "Released by"
+                ELSE IF PostedHourLine.Type = PostedHourLine.Type::Indirect THEN
+                  "Consenter Level 1" := "Released by";
+              END;
+            END;
+      //<<141022 ITERO.WG
+            //****************
+
+            Open := FALSE;
+
+            INSERT;
+
+          END;
+          EntryNo += 1;
+        UNTIL PostedHourLine.NEXT = 0;
+      UNTIL PostedHourHeader2.NEXT = 0;
+    END;
+
+    PROCEDURE CheckEmployee@1100285501(parFilterEmployee@1100285500 : Text;parFilterDepartment@1100285503 : Text) : Boolean;
+    VAR
+      locEmployee@1100285501 : Record 5200;
+      locUserSetup@1100285502 : Record 91;
+      locEmployeeNo@1100285505 : Code[20];
+      Pos@1100285504 : Integer;
+    BEGIN
+      REPEAT
+
+        Pos := STRPOS(parFilterEmployee, '|');
+        IF Pos = 0 THEN
+          locEmployeeNo := parFilterEmployee
+        ELSE
+          locEmployeeNo := COPYSTR(parFilterEmployee, 1, Pos -1 );
+
+        //***Last employee no
+        IF Pos = 0 THEN
+          parFilterEmployee := ''
+        ELSE
+          parFilterEmployee := COPYSTR(parFilterEmployee, Pos +1 );
+
+        //***Check Department Filter
+        //>> ITERO.LP: Diabled code that checks to User Setup
+        //locUserSetup.RESET;
+        //locUserSetup.SETRANGE("Employee No.", locEmployeeNo);
+        //locUserSetup.SETFILTER("Department Code",parFilterDepartment);
+        //IF NOT locUserSetup.FINDFIRST THEN
+        //  EXIT(TRUE);
+
+        // New code to check table Employee instead
+        locEmployee.SETRANGE("No.", locEmployeeNo);
+        locEmployee.SETFILTER("Global Dimension 1 Code",parFilterDepartment);
+        IF NOT locEmployee.FINDFIRST THEN
+        EXIT(TRUE);
+        //<< ITERO.LP
+
+        //IF locUserSetup."Department Code" <> parFilterDepartment THEN
+        //  EXIT(TRUE);
+      UNTIL parFilterEmployee = '';
+
+
+      EXIT(FALSE);
+    END;
+
+    PROCEDURE CheckWeekDayOpenHours@1100285505(HourAccountingLine@1100285500 : Record 11012039) : Integer;
+    BEGIN
+      IF HourAccountingLine.Monday <> 0 THEN
+        EXIT(1)
+      ELSE IF HourAccountingLine.Tuesday <> 0 THEN
+        EXIT(2)
+      ELSE IF HourAccountingLine.Wednesday <> 0 THEN
+        EXIT(3)
+      ELSE IF HourAccountingLine.Thursday <> 0 THEN
+        EXIT(4)
+      ELSE IF HourAccountingLine.Friday <> 0 THEN
+        EXIT(5)
+      ELSE IF HourAccountingLine.Saturday <> 0 THEN
+        EXIT(6)
+      ELSE IF HourAccountingLine.Sunday <> 0 THEN
+        EXIT(7)
+      ELSE
+        EXIT(1);
+    END;
+
+    PROCEDURE CheckWeekDayPostedHours@1100285506(PostedHourLine@1100285500 : Record 11012085) : Integer;
+    BEGIN
+      IF PostedHourLine.Monday <> 0 THEN
+        EXIT(1)
+      ELSE IF PostedHourLine.Tuesday <> 0 THEN
+        EXIT(2)
+      ELSE IF PostedHourLine.Wednesday <> 0 THEN
+        EXIT(3)
+      ELSE IF PostedHourLine.Thursday <> 0 THEN
+        EXIT(4)
+      ELSE IF PostedHourLine.Friday <> 0 THEN
+        EXIT(5)
+      ELSE IF PostedHourLine.Saturday <> 0 THEN
+        EXIT(6)
+      ELSE IF PostedHourLine.Sunday <> 0 THEN
+        EXIT(7)
+      ELSE
+        EXIT(1);
+    END;
+
+    PROCEDURE GetReportName@1100525003() : Text;
+    BEGIN
+      EXIT(DELSTR(CurrReport.OBJECTID, 1, STRPOS(CurrReport.OBJECTID, ' ')));
+    END;
+
+    PROCEDURE GetReportFilter1@1100525000() : Text;
+    VAR
+      FilterString@1100285000 : Text;
+    BEGIN
+      IF (FromWeek <> 0) OR (ToWeek <> 0) THEN BEGIN
+
+        FilterString := TextDateFilter;
+
+        IF (FromWeek <> 0) AND (ToWeek <> 0) THEN
+          FilterString += ' '+ TextWeek +' '+ FORMAT(FromWeek) +' '+ TextYear +' '+ FORMAT(FromYear) +' ... '+
+                                TextWeek +' '+ FORMAT(ToWeek) +' '+ TextYear +' '+ FORMAT(ToYear)
+        ELSE IF (FromWeek <> 0) THEN
+          FilterString += ' '+ TextWeek +' '+ FORMAT(FromWeek) +' '+ TextYear +' '+ FORMAT(FromYear) +' ... '
+        ELSE IF (ToWeek <> 0) THEN
+          FilterString += ' ' + TextWeek +' '+ FORMAT(ToWeek) +' '+ TextYear +' '+ FORMAT(ToYear);
+
+      END ELSE
+        FilterString := '';
+
+      EXIT(FilterString);
+    END;
+
+    PROCEDURE GetReportFilter2@1100285503() : Text;
+    VAR
+      FilterString@1100285500 : Text;
+    BEGIN
+      IF DimensionValueCode <> '' THEN
+        FilterString := DimensionCode + ': ' + DimensionValueCode
+      ELSE
+        FilterString := '';
+
+      IF FilterString <> '' THEN
+        FilterString += ' / ';
+
+      FilterString += STRSUBSTNO(TextHours, ShowOpenHours, ShowPostedHours);
+
+      IF TeamCodeEmpty THEN BEGIN //**140416
+        IF FilterString <> '' THEN
+          FilterString += ' / ';
+
+        FilterString += TextTeamCodeEmpty +' ' + FORMAT(TeamCodeEmpty);
+      END;
+
+      EXIT(FilterString);
+    END;
+
+    PROCEDURE GetReportFilter3@1100285504() : Text;
+    VAR
+      FilterString@1100285501 : Text;
+    BEGIN
+
+      IF FilterProject <> '' THEN BEGIN
+        IF FilterString <> '' THEN
+          FilterString += ' / ';
+
+        FilterString += TEMPHourAccoutBuffer.FIELDCAPTION("Project No.") + ' ' + FilterProject;
+      END;
+
+      IF FilterWageCostCode <> '' THEN BEGIN
+        IF FilterString <> '' THEN
+          FilterString += ' / ';
+
+        FilterString += TEMPHourAccoutBuffer.FIELDCAPTION("Wage Component /Cost Code") + ' ' + FilterWageCostCode;
+      END;
+
+      IF FilterEmployee <> '' THEN BEGIN
+        IF FilterString <> '' THEN
+          FilterString += ' / ';
+
+        FilterString += STRSUBSTNO(TextEmployee, FilterEmployee);
+      END;
+
+      IF FilterManager <> '' THEN BEGIN
+        IF FilterString <> '' THEN
+          FilterString += ' / ';
+
+        FilterString += STRSUBSTNO(TextManager, FilterManager);
+      END;
+
+
+
+      IF FilterHours <> '' THEN BEGIN
+        IF FilterString <> '' THEN
+          FilterString += ' / ';
+
+        FilterString += TEMPHourAccoutBuffer.FIELDCAPTION(Hours) + ' ' + FilterHours;
+      END;
+
+      IF FilterAmount <> '' THEN BEGIN
+        IF FilterString <> '' THEN
+          FilterString += ' / ';
+
+        FilterString += TEMPHourAccoutBuffer.FIELDCAPTION(Amount) + ' ' + FilterAmount;
+      END;
+
+      EXIT(FilterString);
+    END;
+
+    BEGIN
+    {
+      140701 ITERO.MK REP-100-022
+      140811 ITERO.GH REP-100-024
+      141015 ITERO.MK REP-100-032 Changed report from filtering on posting date on lines to filtering on the posting date on header
+      141017 ITERO.WG REP-100-032 'Released by' now also on all hours when there is no consenter
+      141022 ITERO.WG REP-100-032 Changed 'Released by' for open and posted hours
+
+      141103 ITERO:GH IME205-2
+      141104 ITERO.WG ENH-050 Changed filter from posting date to document date or actual date of line
+      141105 ITERO.WG Added showing amount of Expenses
+      141123 ITERO.WG REP-100-038 added comment
+      150428 ITERO.WG IME337 Changed length of AuthorizedDepartment to be able to handle longer filter
+      160121 ITERO.LP RFC097 Changed function CheckEmployee to check in table Employee instead of User Setup.
+      160724 ITERO.AC GCI Call IM5221405 - Fix OutOfMemory Exception
+    }
+    END.
+  }
+  RDLDATA
+  {
+    <?xml version="1.0" encoding="utf-8"?>
+<Report xmlns:rd="http://schemas.microsoft.com/SQLServer/reporting/reportdesigner" xmlns:cl="http://schemas.microsoft.com/sqlserver/reporting/2010/01/componentdefinition" xmlns="http://schemas.microsoft.com/sqlserver/reporting/2010/01/reportdefinition">
+  <AutoRefresh>0</AutoRefresh>
+  <DataSources>
+    <DataSource Name="DataSource">
+      <ConnectionProperties>
+        <DataProvider>SQL</DataProvider>
+        <ConnectString />
+      </ConnectionProperties>
+      <rd:SecurityType>None</rd:SecurityType>
+      <rd:DataSourceID>3ab38f2b-d241-4616-a056-01eae23a4432</rd:DataSourceID>
+    </DataSource>
+  </DataSources>
+  <DataSets>
+    <DataSet Name="DataSet_Result">
+      <Query>
+        <DataSourceName>DataSource</DataSourceName>
+        <CommandText />
+      </Query>
+      <Fields>
+        <Field Name="COMPANYNAME">
+          <DataField>COMPANYNAME</DataField>
+        </Field>
+        <Field Name="CompanyPicture">
+          <DataField>CompanyPicture</DataField>
+        </Field>
+        <Field Name="REPORTNAME">
+          <DataField>REPORTNAME</DataField>
+        </Field>
+        <Field Name="REPORTFILTER1">
+          <DataField>REPORTFILTER1</DataField>
+        </Field>
+        <Field Name="REPORTFILTER2">
+          <DataField>REPORTFILTER2</DataField>
+        </Field>
+        <Field Name="REPORTFILTER3">
+          <DataField>REPORTFILTER3</DataField>
+        </Field>
+        <Field Name="No_Employee">
+          <DataField>No_Employee</DataField>
+        </Field>
+        <Field Name="FullName_Employee">
+          <DataField>FullName_Employee</DataField>
+        </Field>
+        <Field Name="SalaryNo_Employee">
+          <DataField>SalaryNo_Employee</DataField>
+        </Field>
+        <Field Name="No_HourAccount">
+          <DataField>No_HourAccount</DataField>
+        </Field>
+        <Field Name="Date__HourAccount">
+          <DataField>Date__HourAccount</DataField>
+        </Field>
+        <Field Name="ProjectNo__HourAccount">
+          <DataField>ProjectNo__HourAccount</DataField>
+        </Field>
+        <Field Name="ProjectDesc_HourAccount">
+          <DataField>ProjectDesc_HourAccount</DataField>
+        </Field>
+        <Field Name="TeamCode__HourAccount">
+          <DataField>TeamCode__HourAccount</DataField>
+        </Field>
+        <Field Name="Week__HourAccount">
+          <DataField>Week__HourAccount</DataField>
+        </Field>
+        <Field Name="WageCost_HourAccount">
+          <DataField>WageCost_HourAccount</DataField>
+        </Field>
+        <Field Name="WageCostDesc_HourAccount">
+          <DataField>WageCostDesc_HourAccount</DataField>
+        </Field>
+        <Field Name="Hours_HourAccount">
+          <DataField>Hours_HourAccount</DataField>
+        </Field>
+        <Field Name="Hours_HourAccountFormat">
+          <DataField>Hours_HourAccountFormat</DataField>
+        </Field>
+        <Field Name="Amount__HourAccount">
+          <DataField>Amount__HourAccount</DataField>
+        </Field>
+        <Field Name="Amount__HourAccountFormat">
+          <DataField>Amount__HourAccountFormat</DataField>
+        </Field>
+        <Field Name="Comment__HourAccount">
+          <DataField>Comment__HourAccount</DataField>
+        </Field>
+        <Field Name="Consent01_HourAccount">
+          <DataField>Consent01_HourAccount</DataField>
+        </Field>
+        <Field Name="Consent02_HourAccount">
+          <DataField>Consent02_HourAccount</DataField>
+        </Field>
+        <Field Name="DeniedBy_HourAccount">
+          <DataField>DeniedBy_HourAccount</DataField>
+        </Field>
+        <Field Name="ReleasedBy_HourAccount">
+          <DataField>ReleasedBy_HourAccount</DataField>
+        </Field>
+      </Fields>
+      <rd:DataSetInfo>
+        <rd:DataSetName>DataSet</rd:DataSetName>
+        <rd:SchemaPath>Report.xsd</rd:SchemaPath>
+        <rd:TableName>Result</rd:TableName>
+      </rd:DataSetInfo>
+    </DataSet>
+  </DataSets>
+  <ReportSections>
+    <ReportSection>
+      <Body>
+        <ReportItems>
+          <Tablix Name="Tablix1">
+            <TablixBody>
+              <TablixColumns>
+                <TablixColumn>
+                  <Width>11.20351in</Width>
+                </TablixColumn>
+              </TablixColumns>
+              <TablixRows>
+                <TablixRow>
+                  <Height>1.15331in</Height>
+                  <TablixCells>
+                    <TablixCell>
+                      <CellContents>
+                        <Rectangle Name="Rectangle2">
+                          <ReportItems>
+                            <Tablix Name="Tablix2">
+                              <TablixBody>
+                                <TablixColumns>
+                                  <TablixColumn>
+                                    <Width>0.60329in</Width>
+                                  </TablixColumn>
+                                  <TablixColumn>
+                                    <Width>0.57441in</Width>
+                                  </TablixColumn>
+                                  <TablixColumn>
+                                    <Width>1.21243in</Width>
+                                  </TablixColumn>
+                                  <TablixColumn>
+                                    <Width>0.60813in</Width>
+                                  </TablixColumn>
+                                  <TablixColumn>
+                                    <Width>0.43751in</Width>
+                                  </TablixColumn>
+                                  <TablixColumn>
+                                    <Width>0.53324in</Width>
+                                  </TablixColumn>
+                                  <TablixColumn>
+                                    <Width>0.9499in</Width>
+                                  </TablixColumn>
+                                  <TablixColumn>
+                                    <Width>0.47421in</Width>
+                                  </TablixColumn>
+                                  <TablixColumn>
+                                    <Width>0.6756in</Width>
+                                  </TablixColumn>
+                                  <TablixColumn>
+                                    <Width>1.59444in</Width>
+                                  </TablixColumn>
+                                  <TablixColumn>
+                                    <Width>0.875in</Width>
+                                  </TablixColumn>
+                                  <TablixColumn>
+                                    <Width>0.80144in</Width>
+                                  </TablixColumn>
+                                  <TablixColumn>
+                                    <Width>0.72917in</Width>
+                                  </TablixColumn>
+                                  <TablixColumn>
+                                    <Width>0.80139in</Width>
+                                  </TablixColumn>
+                                </TablixColumns>
+                                <TablixRows>
+                                  <TablixRow>
+                                    <Height>0.1823in</Height>
+                                    <TablixCells>
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="Textbox3">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Parameters!DateCaption.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                      <FontWeight>Bold</FontWeight>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style />
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>Textbox3</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BottomBorder>
+                                                <Color>Black</Color>
+                                                <Style>Solid</Style>
+                                                <Width>1pt</Width>
+                                              </BottomBorder>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                        </CellContents>
+                                      </TablixCell>
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="Textbox4">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Parameters!ProjectNoCaption.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                      <FontWeight>Bold</FontWeight>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style />
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>Textbox4</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Color>LightGrey</Color>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BottomBorder>
+                                                <Color>Black</Color>
+                                                <Style>Solid</Style>
+                                                <Width>1pt</Width>
+                                              </BottomBorder>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                        </CellContents>
+                                      </TablixCell>
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="Textbox7">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Parameters!ProjectDescCaption.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                      <FontWeight>Bold</FontWeight>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style />
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>Textbox7</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Color>LightGrey</Color>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BottomBorder>
+                                                <Color>Black</Color>
+                                                <Style>Solid</Style>
+                                                <Width>1pt</Width>
+                                              </BottomBorder>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                        </CellContents>
+                                      </TablixCell>
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="Textbox9">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Parameters!TeamCodeCaption.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                      <FontWeight>Bold</FontWeight>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style>
+                                                  <TextAlign>Right</TextAlign>
+                                                </Style>
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>Textbox9</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Color>LightGrey</Color>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BottomBorder>
+                                                <Color>Black</Color>
+                                                <Style>Solid</Style>
+                                                <Width>1pt</Width>
+                                              </BottomBorder>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                        </CellContents>
+                                      </TablixCell>
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="Textbox13">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Parameters!WeekCaption.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                      <FontWeight>Bold</FontWeight>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style>
+                                                  <TextAlign>Center</TextAlign>
+                                                </Style>
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>Textbox13</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Color>LightGrey</Color>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BottomBorder>
+                                                <Color>Black</Color>
+                                                <Style>Solid</Style>
+                                                <Width>1pt</Width>
+                                              </BottomBorder>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                        </CellContents>
+                                      </TablixCell>
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="Textbox11">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Parameters!WageCostCaption.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                      <FontWeight>Bold</FontWeight>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style />
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>Textbox11</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Color>LightGrey</Color>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BottomBorder>
+                                                <Color>Black</Color>
+                                                <Style>Solid</Style>
+                                                <Width>1pt</Width>
+                                              </BottomBorder>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                          <ColSpan>2</ColSpan>
+                                        </CellContents>
+                                      </TablixCell>
+                                      <TablixCell />
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="Textbox5">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Parameters!HoursCaption.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                      <FontWeight>Bold</FontWeight>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style>
+                                                  <TextAlign>Right</TextAlign>
+                                                </Style>
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>Textbox5</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Color>LightGrey</Color>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BottomBorder>
+                                                <Color>Black</Color>
+                                                <Style>Solid</Style>
+                                                <Width>1pt</Width>
+                                              </BottomBorder>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                        </CellContents>
+                                      </TablixCell>
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="Textbox17">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Parameters!AmountCaption.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                      <FontWeight>Bold</FontWeight>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style>
+                                                  <TextAlign>Right</TextAlign>
+                                                </Style>
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>Textbox17</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Color>LightGrey</Color>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BottomBorder>
+                                                <Color>Black</Color>
+                                                <Style>Solid</Style>
+                                                <Width>1pt</Width>
+                                              </BottomBorder>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                        </CellContents>
+                                      </TablixCell>
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="Textbox19">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Parameters!CommentCaption.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                      <FontWeight>Bold</FontWeight>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style />
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>Textbox19</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Color>LightGrey</Color>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BottomBorder>
+                                                <Color>Black</Color>
+                                                <Style>Solid</Style>
+                                                <Width>1pt</Width>
+                                              </BottomBorder>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                        </CellContents>
+                                      </TablixCell>
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="Textbox2">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Parameters!ReleasedByCaption.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                      <FontWeight>Bold</FontWeight>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style />
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>Textbox2</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Color>LightGrey</Color>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BottomBorder>
+                                                <Color>Black</Color>
+                                                <Style>Solid</Style>
+                                                <Width>1pt</Width>
+                                              </BottomBorder>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                        </CellContents>
+                                      </TablixCell>
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="Textbox21">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Parameters!SerialNumber0Caption.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                      <FontWeight>Bold</FontWeight>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style />
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>Textbox21</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Color>LightGrey</Color>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BottomBorder>
+                                                <Color>Black</Color>
+                                                <Style>Solid</Style>
+                                                <Width>1pt</Width>
+                                              </BottomBorder>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                        </CellContents>
+                                      </TablixCell>
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="Textbox23">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Parameters!SerialNumber1Caption.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                      <FontWeight>Bold</FontWeight>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style />
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>Textbox23</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Color>LightGrey</Color>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BottomBorder>
+                                                <Color>Black</Color>
+                                                <Style>Solid</Style>
+                                                <Width>1pt</Width>
+                                              </BottomBorder>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                        </CellContents>
+                                      </TablixCell>
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="Textbox25">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Parameters!DeniedByCaption.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                      <FontWeight>Bold</FontWeight>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style />
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>Textbox25</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Color>LightGrey</Color>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BottomBorder>
+                                                <Color>Black</Color>
+                                                <Style>Solid</Style>
+                                                <Width>1pt</Width>
+                                              </BottomBorder>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                        </CellContents>
+                                      </TablixCell>
+                                    </TablixCells>
+                                  </TablixRow>
+                                  <TablixRow>
+                                    <Height>0.16146in</Height>
+                                    <TablixCells>
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="Date__HourAccount">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Fields!Date__HourAccount.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                      <Format>yyyy-MM-dd</Format>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style>
+                                                  <TextAlign>Left</TextAlign>
+                                                </Style>
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>Date__HourAccount</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BackgroundColor>WhiteSmoke</BackgroundColor>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                        </CellContents>
+                                      </TablixCell>
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="ProjectNo__HourAccount">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Fields!ProjectNo__HourAccount.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style />
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>ProjectNo__HourAccount</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Color>LightGrey</Color>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BackgroundColor>WhiteSmoke</BackgroundColor>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                        </CellContents>
+                                      </TablixCell>
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="ProjectDesc_HourAccount">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Fields!ProjectDesc_HourAccount.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style />
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>ProjectDesc_HourAccount</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Color>LightGrey</Color>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BackgroundColor>WhiteSmoke</BackgroundColor>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                        </CellContents>
+                                      </TablixCell>
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="TeamCode__HourAccount">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Fields!TeamCode__HourAccount.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style />
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>TeamCode__HourAccount</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Color>LightGrey</Color>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BackgroundColor>WhiteSmoke</BackgroundColor>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                        </CellContents>
+                                      </TablixCell>
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="Week__HourAccount">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Fields!Week__HourAccount.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style>
+                                                  <TextAlign>Center</TextAlign>
+                                                </Style>
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>Week__HourAccount</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Color>LightGrey</Color>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BackgroundColor>WhiteSmoke</BackgroundColor>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                          <rd:Selected>true</rd:Selected>
+                                        </CellContents>
+                                      </TablixCell>
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="WageCost_HourAccount">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Fields!WageCost_HourAccount.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style>
+                                                  <TextAlign>Right</TextAlign>
+                                                </Style>
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>WageCost_HourAccount</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Color>LightGrey</Color>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BackgroundColor>WhiteSmoke</BackgroundColor>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                        </CellContents>
+                                      </TablixCell>
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="WageCostDesc_HourAccount">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Fields!WageCostDesc_HourAccount.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style />
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>WageCostDesc_HourAccount</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Color>LightGrey</Color>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BackgroundColor>WhiteSmoke</BackgroundColor>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                        </CellContents>
+                                      </TablixCell>
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="Hours_HourAccount">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Fields!Hours_HourAccount.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style />
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>Hours_HourAccount</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Color>LightGrey</Color>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BackgroundColor>WhiteSmoke</BackgroundColor>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                        </CellContents>
+                                      </TablixCell>
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="Amount__HourAccount">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Fields!Amount__HourAccount.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                      <Format>=Fields!Hours_HourAccountFormat.Value</Format>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style />
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>Amount__HourAccount</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Color>LightGrey</Color>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BackgroundColor>WhiteSmoke</BackgroundColor>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                        </CellContents>
+                                      </TablixCell>
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="Comment__HourAccount">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Fields!Comment__HourAccount.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style />
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>Comment__HourAccount</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Color>LightGrey</Color>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BackgroundColor>WhiteSmoke</BackgroundColor>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                        </CellContents>
+                                      </TablixCell>
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="ReleasedBy_HourAccount">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Fields!ReleasedBy_HourAccount.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style />
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>ReleasedBy_HourAccount</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Color>LightGrey</Color>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BackgroundColor>WhiteSmoke</BackgroundColor>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                        </CellContents>
+                                      </TablixCell>
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="Consent01_HourAccount">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Fields!Consent01_HourAccount.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style />
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>Consent01_HourAccount</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Color>LightGrey</Color>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BackgroundColor>WhiteSmoke</BackgroundColor>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                        </CellContents>
+                                      </TablixCell>
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="Consent02_HourAccount">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Fields!Consent02_HourAccount.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style />
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>Consent02_HourAccount</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Color>LightGrey</Color>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BackgroundColor>WhiteSmoke</BackgroundColor>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                        </CellContents>
+                                      </TablixCell>
+                                      <TablixCell>
+                                        <CellContents>
+                                          <Textbox Name="DeniedBy_HourAccount">
+                                            <CanGrow>true</CanGrow>
+                                            <KeepTogether>true</KeepTogether>
+                                            <Paragraphs>
+                                              <Paragraph>
+                                                <TextRuns>
+                                                  <TextRun>
+                                                    <Value>=Fields!DeniedBy_HourAccount.Value</Value>
+                                                    <Style>
+                                                      <FontFamily>Segoe UI</FontFamily>
+                                                      <FontSize>6pt</FontSize>
+                                                    </Style>
+                                                  </TextRun>
+                                                </TextRuns>
+                                                <Style />
+                                              </Paragraph>
+                                            </Paragraphs>
+                                            <rd:DefaultName>DeniedBy_HourAccount</rd:DefaultName>
+                                            <Style>
+                                              <Border>
+                                                <Color>LightGrey</Color>
+                                                <Style>None</Style>
+                                              </Border>
+                                              <BackgroundColor>WhiteSmoke</BackgroundColor>
+                                              <PaddingLeft>2pt</PaddingLeft>
+                                              <PaddingRight>2pt</PaddingRight>
+                                              <PaddingTop>2pt</PaddingTop>
+                                              <PaddingBottom>2pt</PaddingBottom>
+                                            </Style>
+                                          </Textbox>
+                                        </CellContents>
+                                      </TablixCell>
+                                    </TablixCells>
+                                  </TablixRow>
+                                </TablixRows>
+                              </TablixBody>
+                              <TablixColumnHierarchy>
+                                <TablixMembers>
+                                  <TablixMember />
+                                  <TablixMember />
+                                  <TablixMember />
+                                  <TablixMember />
+                                  <TablixMember />
+                                  <TablixMember />
+                                  <TablixMember />
+                                  <TablixMember />
+                                  <TablixMember />
+                                  <TablixMember />
+                                  <TablixMember />
+                                  <TablixMember />
+                                  <TablixMember />
+                                  <TablixMember />
+                                </TablixMembers>
+                              </TablixColumnHierarchy>
+                              <TablixRowHierarchy>
+                                <TablixMembers>
+                                  <TablixMember>
+                                    <KeepWithGroup>After</KeepWithGroup>
+                                    <RepeatOnNewPage>true</RepeatOnNewPage>
+                                  </TablixMember>
+                                  <TablixMember>
+                                    <Group Name="Details1" />
+                                  </TablixMember>
+                                </TablixMembers>
+                              </TablixRowHierarchy>
+                              <RepeatColumnHeaders>true</RepeatColumnHeaders>
+                              <RepeatRowHeaders>true</RepeatRowHeaders>
+                              <DataSetName>DataSet_Result</DataSetName>
+                              <Top>0.10764in</Top>
+                              <Left>0in</Left>
+                              <Height>0.34376in</Height>
+                              <Width>10.87016in</Width>
+                              <Style>
+                                <Border>
+                                  <Style>None</Style>
+                                </Border>
+                              </Style>
+                            </Tablix>
+                            <Textbox Name="HiddenBody">
+                              <CanGrow>true</CanGrow>
+                              <KeepTogether>true</KeepTogether>
+                              <Paragraphs>
+                                <Paragraph>
+                                  <TextRuns>
+                                    <TextRun>
+                                      <Value>=Cstr(Fields!No_Employee.Value) + Chr(177) +
+ Cstr(Fields!FullName_Employee.Value) + Chr(177) +
+Cstr(Parameters!AgdaCaption.Value) + Chr(177) +
+Cstr(Fields!SalaryNo_Employee.Value) + Chr(177) +
+Cstr(Parameters!PageCaption.Value) + Chr(177) +
+Cstr(Fields!REPORTFILTER1.Value) + Chr(177) +
+Cstr(Fields!REPORTFILTER2.Value) + Chr(177) +
+Cstr(Fields!REPORTFILTER3.Value) + Chr(177)</Value>
+                                      <Style />
+                                    </TextRun>
+                                  </TextRuns>
+                                  <Style />
+                                </Paragraph>
+                              </Paragraphs>
+                              <Height>0.09375in</Height>
+                              <Width>1.34254in</Width>
+                              <ZIndex>1</ZIndex>
+                              <Visibility>
+                                <Hidden>true</Hidden>
+                              </Visibility>
+                              <Style>
+                                <Border>
+                                  <Style>None</Style>
+                                </Border>
+                                <BackgroundColor>Red</BackgroundColor>
+                                <PaddingLeft>2pt</PaddingLeft>
+                                <PaddingRight>2pt</PaddingRight>
+                                <PaddingTop>2pt</PaddingTop>
+                                <PaddingBottom>2pt</PaddingBottom>
+                              </Style>
+                            </Textbox>
+                            <Rectangle Name="Rectangle3">
+                              <ReportItems>
+                                <Tablix Name="Tablix5">
+                                  <TablixBody>
+                                    <TablixColumns>
+                                      <TablixColumn>
+                                        <Width>0.54167in</Width>
+                                      </TablixColumn>
+                                      <TablixColumn>
+                                        <Width>1.07292in</Width>
+                                      </TablixColumn>
+                                      <TablixColumn>
+                                        <Width>0.75in</Width>
+                                      </TablixColumn>
+                                    </TablixColumns>
+                                    <TablixRows>
+                                      <TablixRow>
+                                        <Height>0.19481in</Height>
+                                        <TablixCells>
+                                          <TablixCell>
+                                            <CellContents>
+                                              <Textbox Name="Textbox8">
+                                                <CanGrow>true</CanGrow>
+                                                <KeepTogether>true</KeepTogether>
+                                                <Paragraphs>
+                                                  <Paragraph>
+                                                    <TextRuns>
+                                                      <TextRun>
+                                                        <Value>=Parameters!SumCaption.Value</Value>
+                                                        <Style>
+                                                          <FontFamily>Segoe UI</FontFamily>
+                                                          <FontSize>6.5pt</FontSize>
+                                                          <FontWeight>Bold</FontWeight>
+                                                        </Style>
+                                                      </TextRun>
+                                                    </TextRuns>
+                                                    <Style />
+                                                  </Paragraph>
+                                                </Paragraphs>
+                                                <rd:DefaultName>Textbox8</rd:DefaultName>
+                                                <Style>
+                                                  <Border>
+                                                    <Style>None</Style>
+                                                  </Border>
+                                                  <PaddingLeft>2pt</PaddingLeft>
+                                                  <PaddingRight>2pt</PaddingRight>
+                                                  <PaddingTop>2pt</PaddingTop>
+                                                  <PaddingBottom>2pt</PaddingBottom>
+                                                </Style>
+                                              </Textbox>
+                                              <ColSpan>2</ColSpan>
+                                            </CellContents>
+                                          </TablixCell>
+                                          <TablixCell />
+                                          <TablixCell>
+                                            <CellContents>
+                                              <Textbox Name="Textbox6">
+                                                <CanGrow>true</CanGrow>
+                                                <KeepTogether>true</KeepTogether>
+                                                <Paragraphs>
+                                                  <Paragraph>
+                                                    <TextRuns>
+                                                      <TextRun>
+                                                        <Value>=Parameters!HoursCaption.Value</Value>
+                                                        <Style>
+                                                          <FontFamily>Segoe UI</FontFamily>
+                                                          <FontSize>6.5pt</FontSize>
+                                                          <FontWeight>Bold</FontWeight>
+                                                        </Style>
+                                                      </TextRun>
+                                                    </TextRuns>
+                                                    <Style>
+                                                      <TextAlign>Right</TextAlign>
+                                                    </Style>
+                                                  </Paragraph>
+                                                </Paragraphs>
+                                                <rd:DefaultName>Textbox6</rd:DefaultName>
+                                                <Style>
+                                                  <Border>
+                                                    <Style>None</Style>
+                                                  </Border>
+                                                  <PaddingLeft>2pt</PaddingLeft>
+                                                  <PaddingRight>2pt</PaddingRight>
+                                                  <PaddingTop>2pt</PaddingTop>
+                                                  <PaddingBottom>2pt</PaddingBottom>
+                                                </Style>
+                                              </Textbox>
+                                            </CellContents>
+                                          </TablixCell>
+                                        </TablixCells>
+                                      </TablixRow>
+                                      <TablixRow>
+                                        <Height>0.06771in</Height>
+                                        <TablixCells>
+                                          <TablixCell>
+                                            <CellContents>
+                                              <Textbox Name="WageComponentCostCode">
+                                                <CanGrow>true</CanGrow>
+                                                <KeepTogether>true</KeepTogether>
+                                                <Paragraphs>
+                                                  <Paragraph>
+                                                    <TextRuns>
+                                                      <TextRun>
+                                                        <Value>=Fields!WageCost_HourAccount.Value</Value>
+                                                        <Style>
+                                                          <FontFamily>Segoe UI</FontFamily>
+                                                          <FontSize>6.5pt</FontSize>
+                                                        </Style>
+                                                      </TextRun>
+                                                    </TextRuns>
+                                                    <Style />
+                                                  </Paragraph>
+                                                </Paragraphs>
+                                                <rd:DefaultName>WageComponentCostCode</rd:DefaultName>
+                                                <Style>
+                                                  <Border>
+                                                    <Style>None</Style>
+                                                  </Border>
+                                                  <PaddingLeft>2pt</PaddingLeft>
+                                                  <PaddingRight>2pt</PaddingRight>
+                                                  <PaddingTop>2pt</PaddingTop>
+                                                  <PaddingBottom>2pt</PaddingBottom>
+                                                </Style>
+                                              </Textbox>
+                                            </CellContents>
+                                          </TablixCell>
+                                          <TablixCell>
+                                            <CellContents>
+                                              <Textbox Name="WageCostDescription">
+                                                <CanGrow>true</CanGrow>
+                                                <KeepTogether>true</KeepTogether>
+                                                <Paragraphs>
+                                                  <Paragraph>
+                                                    <TextRuns>
+                                                      <TextRun>
+                                                        <Value>=Fields!WageCostDesc_HourAccount.Value</Value>
+                                                        <Style>
+                                                          <FontFamily>Segoe UI</FontFamily>
+                                                          <FontSize>6.5pt</FontSize>
+                                                        </Style>
+                                                      </TextRun>
+                                                    </TextRuns>
+                                                    <Style />
+                                                  </Paragraph>
+                                                </Paragraphs>
+                                                <rd:DefaultName>WageCostDescription</rd:DefaultName>
+                                                <Style>
+                                                  <Border>
+                                                    <Style>None</Style>
+                                                  </Border>
+                                                  <PaddingLeft>2pt</PaddingLeft>
+                                                  <PaddingRight>2pt</PaddingRight>
+                                                  <PaddingTop>2pt</PaddingTop>
+                                                  <PaddingBottom>2pt</PaddingBottom>
+                                                </Style>
+                                              </Textbox>
+                                            </CellContents>
+                                          </TablixCell>
+                                          <TablixCell>
+                                            <CellContents>
+                                              <Textbox Name="Textbox18">
+                                                <CanGrow>true</CanGrow>
+                                                <KeepTogether>true</KeepTogether>
+                                                <Paragraphs>
+                                                  <Paragraph>
+                                                    <TextRuns>
+                                                      <TextRun>
+                                                        <Value>=Fields!Hours_HourAccount.Value</Value>
+                                                        <Style>
+                                                          <FontFamily>Segoe UI</FontFamily>
+                                                          <FontSize>6.5pt</FontSize>
+                                                        </Style>
+                                                      </TextRun>
+                                                    </TextRuns>
+                                                    <Style />
+                                                  </Paragraph>
+                                                </Paragraphs>
+                                                <rd:DefaultName>Textbox17</rd:DefaultName>
+                                                <Style>
+                                                  <Border>
+                                                    <Style>None</Style>
+                                                  </Border>
+                                                  <PaddingLeft>2pt</PaddingLeft>
+                                                  <PaddingRight>2pt</PaddingRight>
+                                                  <PaddingTop>2pt</PaddingTop>
+                                                  <PaddingBottom>2pt</PaddingBottom>
+                                                </Style>
+                                              </Textbox>
+                                            </CellContents>
+                                          </TablixCell>
+                                        </TablixCells>
+                                      </TablixRow>
+                                      <TablixRow>
+                                        <Height>0.16945in</Height>
+                                        <TablixCells>
+                                          <TablixCell>
+                                            <CellContents>
+                                              <Textbox Name="WageCost_HourAccount1">
+                                                <CanGrow>true</CanGrow>
+                                                <KeepTogether>true</KeepTogether>
+                                                <Paragraphs>
+                                                  <Paragraph>
+                                                    <TextRuns>
+                                                      <TextRun>
+                                                        <Value>=Fields!WageCost_HourAccount.Value</Value>
+                                                        <Style>
+                                                          <FontFamily>Segoe UI</FontFamily>
+                                                          <FontSize>6.5pt</FontSize>
+                                                        </Style>
+                                                      </TextRun>
+                                                    </TextRuns>
+                                                    <Style />
+                                                  </Paragraph>
+                                                </Paragraphs>
+                                                <rd:DefaultName>WageCost_HourAccount1</rd:DefaultName>
+                                                <Style>
+                                                  <Border>
+                                                    <Style>None</Style>
+                                                  </Border>
+                                                  <PaddingLeft>2pt</PaddingLeft>
+                                                  <PaddingRight>2pt</PaddingRight>
+                                                  <PaddingTop>2pt</PaddingTop>
+                                                  <PaddingBottom>2pt</PaddingBottom>
+                                                </Style>
+                                              </Textbox>
+                                            </CellContents>
+                                          </TablixCell>
+                                          <TablixCell>
+                                            <CellContents>
+                                              <Textbox Name="WageCostDesc_HourAccount1">
+                                                <CanGrow>true</CanGrow>
+                                                <KeepTogether>true</KeepTogether>
+                                                <Paragraphs>
+                                                  <Paragraph>
+                                                    <TextRuns>
+                                                      <TextRun>
+                                                        <Value>=Fields!WageCostDesc_HourAccount.Value</Value>
+                                                        <Style>
+                                                          <FontFamily>Segoe UI</FontFamily>
+                                                          <FontSize>6.5pt</FontSize>
+                                                        </Style>
+                                                      </TextRun>
+                                                    </TextRuns>
+                                                    <Style />
+                                                  </Paragraph>
+                                                </Paragraphs>
+                                                <rd:DefaultName>WageCostDesc_HourAccount1</rd:DefaultName>
+                                                <Style>
+                                                  <Border>
+                                                    <Style>None</Style>
+                                                  </Border>
+                                                  <PaddingLeft>2pt</PaddingLeft>
+                                                  <PaddingRight>2pt</PaddingRight>
+                                                  <PaddingTop>2pt</PaddingTop>
+                                                  <PaddingBottom>2pt</PaddingBottom>
+                                                </Style>
+                                              </Textbox>
+                                            </CellContents>
+                                          </TablixCell>
+                                          <TablixCell>
+                                            <CellContents>
+                                              <Textbox Name="Textbox24">
+                                                <CanGrow>true</CanGrow>
+                                                <KeepTogether>true</KeepTogether>
+                                                <Paragraphs>
+                                                  <Paragraph>
+                                                    <TextRuns>
+                                                      <TextRun>
+                                                        <Value>=Sum(Fields!Hours_HourAccount.Value)</Value>
+                                                        <Style>
+                                                          <FontFamily>Segoe UI</FontFamily>
+                                                          <FontSize>6.5pt</FontSize>
+                                                        </Style>
+                                                      </TextRun>
+                                                    </TextRuns>
+                                                    <Style />
+                                                  </Paragraph>
+                                                </Paragraphs>
+                                                <rd:DefaultName>Textbox23</rd:DefaultName>
+                                                <Style>
+                                                  <Border>
+                                                    <Style>None</Style>
+                                                  </Border>
+                                                  <PaddingLeft>2pt</PaddingLeft>
+                                                  <PaddingRight>2pt</PaddingRight>
+                                                  <PaddingTop>2pt</PaddingTop>
+                                                  <PaddingBottom>2pt</PaddingBottom>
+                                                </Style>
+                                              </Textbox>
+                                            </CellContents>
+                                          </TablixCell>
+                                        </TablixCells>
+                                      </TablixRow>
+                                    </TablixRows>
+                                  </TablixBody>
+                                  <TablixColumnHierarchy>
+                                    <TablixMembers>
+                                      <TablixMember />
+                                      <TablixMember />
+                                      <TablixMember />
+                                    </TablixMembers>
+                                  </TablixColumnHierarchy>
+                                  <TablixRowHierarchy>
+                                    <TablixMembers>
+                                      <TablixMember />
+                                      <TablixMember>
+                                        <Group Name="Group3">
+                                          <GroupExpressions>
+                                            <GroupExpression>=Fields!WageCost_HourAccount.Value</GroupExpression>
+                                          </GroupExpressions>
+                                        </Group>
+                                        <SortExpressions>
+                                          <SortExpression>
+                                            <Value>=Fields!WageCost_HourAccount.Value</Value>
+                                          </SortExpression>
+                                        </SortExpressions>
+                                        <TablixMembers>
+                                          <TablixMember>
+                                            <Group Name="Details4" />
+                                            <Visibility>
+                                              <Hidden>true</Hidden>
+                                            </Visibility>
+                                          </TablixMember>
+                                          <TablixMember>
+                                            <KeepWithGroup>Before</KeepWithGroup>
+                                          </TablixMember>
+                                        </TablixMembers>
+                                      </TablixMember>
+                                    </TablixMembers>
+                                  </TablixRowHierarchy>
+                                  <DataSetName>DataSet_Result</DataSetName>
+                                  <Top>0.10624in</Top>
+                                  <Left>0.13345in</Left>
+                                  <Height>0.43197in</Height>
+                                  <Width>2.36459in</Width>
+                                  <Style>
+                                    <Border>
+                                      <Style>None</Style>
+                                    </Border>
+                                  </Style>
+                                </Tablix>
+                              </ReportItems>
+                              <KeepTogether>true</KeepTogether>
+                              <Top>0.52656in</Top>
+                              <Left>8.27069in</Left>
+                              <Height>0.62675in</Height>
+                              <Width>2.59947in</Width>
+                              <ZIndex>2</ZIndex>
+                              <Style>
+                                <Border>
+                                  <Style>Solid</Style>
+                                </Border>
+                              </Style>
+                            </Rectangle>
+                          </ReportItems>
+                          <KeepTogether>true</KeepTogether>
+                          <Style>
+                            <Border>
+                              <Style>None</Style>
+                            </Border>
+                          </Style>
+                        </Rectangle>
+                      </CellContents>
+                    </TablixCell>
+                  </TablixCells>
+                </TablixRow>
+              </TablixRows>
+            </TablixBody>
+            <TablixColumnHierarchy>
+              <TablixMembers>
+                <TablixMember />
+              </TablixMembers>
+            </TablixColumnHierarchy>
+            <TablixRowHierarchy>
+              <TablixMembers>
+                <TablixMember>
+                  <Group Name="Details">
+                    <GroupExpressions>
+                      <GroupExpression>=Fields!No_HourAccount.Value</GroupExpression>
+                    </GroupExpressions>
+                    <PageBreak>
+                      <BreakLocation>Between</BreakLocation>
+                    </PageBreak>
+                  </Group>
+                </TablixMember>
+              </TablixMembers>
+            </TablixRowHierarchy>
+            <DataSetName>DataSet_Result</DataSetName>
+            <Top>0.0925in</Top>
+            <Left>0in</Left>
+            <Height>1.15331in</Height>
+            <Width>11.20351in</Width>
+            <Style>
+              <Border>
+                <Style>None</Style>
+              </Border>
+            </Style>
+          </Tablix>
+        </ReportItems>
+        <Height>1.29389in</Height>
+        <Style />
+      </Body>
+      <Width>11.20351in</Width>
+      <Page>
+        <PageHeader>
+          <Height>1.64271in</Height>
+          <PrintOnFirstPage>true</PrintOnFirstPage>
+          <PrintOnLastPage>true</PrintOnLastPage>
+          <ReportItems>
+            <Image Name="Logo">
+              <Source>Database</Source>
+              <Value>=First(Fields!CompanyPicture.Value, "DataSet_Result")</Value>
+              <MIMEType>image/bmp</MIMEType>
+              <Sizing>FitProportional</Sizing>
+              <Top>0.13785in</Top>
+              <Height>0.53125in</Height>
+              <Width>1.78125in</Width>
+              <Style>
+                <Border>
+                  <Style>None</Style>
+                </Border>
+              </Style>
+            </Image>
+            <Textbox Name="Textbox422">
+              <CanGrow>true</CanGrow>
+              <KeepTogether>true</KeepTogether>
+              <Paragraphs>
+                <Paragraph>
+                  <TextRuns>
+                    <TextRun>
+                      <Value>=Code.GetData(2,1)</Value>
+                      <Style>
+                        <FontFamily>Segoe UI</FontFamily>
+                        <FontSize>8pt</FontSize>
+                      </Style>
+                    </TextRun>
+                  </TextRuns>
+                  <Style />
+                </Paragraph>
+              </Paragraphs>
+              <rd:DefaultName>Textbox421</rd:DefaultName>
+              <Top>1.12222in</Top>
+              <Height>0.13889in</Height>
+              <Width>1.67708in</Width>
+              <ZIndex>1</ZIndex>
+              <Style>
+                <Border>
+                  <Style>None</Style>
+                </Border>
+                <PaddingLeft>2pt</PaddingLeft>
+                <PaddingRight>2pt</PaddingRight>
+                <PaddingTop>2pt</PaddingTop>
+                <PaddingBottom>2pt</PaddingBottom>
+              </Style>
+            </Textbox>
+            <Textbox Name="Textbox423">
+              <CanGrow>true</CanGrow>
+              <KeepTogether>true</KeepTogether>
+              <Paragraphs>
+                <Paragraph>
+                  <TextRuns>
+                    <TextRun>
+                      <Value>=First(Fields!REPORTNAME.Value, "DataSet_Result")</Value>
+                      <Style>
+                        <FontFamily>Segoe UI</FontFamily>
+                        <FontSize>14pt</FontSize>
+                        <FontWeight>Bold</FontWeight>
+                      </Style>
+                    </TextRun>
+                  </TextRuns>
+                  <Style />
+                </Paragraph>
+              </Paragraphs>
+              <rd:DefaultName>Textbox421</rd:DefaultName>
+              <Top>0.77499in</Top>
+              <Height>0.27778in</Height>
+              <Width>1.67708in</Width>
+              <ZIndex>2</ZIndex>
+              <Style>
+                <Border>
+                  <Style>None</Style>
+                </Border>
+                <PaddingLeft>2pt</PaddingLeft>
+                <PaddingRight>2pt</PaddingRight>
+                <PaddingTop>2pt</PaddingTop>
+                <PaddingBottom>2pt</PaddingBottom>
+              </Style>
+            </Textbox>
+            <Textbox Name="Textbox425">
+              <CanGrow>true</CanGrow>
+              <KeepTogether>true</KeepTogether>
+              <Paragraphs>
+                <Paragraph>
+                  <TextRuns>
+                    <TextRun>
+                      <Value>=Code.GetData(3,1)</Value>
+                      <Style>
+                        <FontFamily>Segoe UI</FontFamily>
+                        <FontSize>8pt</FontSize>
+                      </Style>
+                    </TextRun>
+                  </TextRuns>
+                  <Style />
+                </Paragraph>
+              </Paragraphs>
+              <rd:DefaultName>Textbox421</rd:DefaultName>
+              <Top>1.12222in</Top>
+              <Left>5.21671cm</Left>
+              <Height>0.13889in</Height>
+              <Width>0.77083in</Width>
+              <ZIndex>3</ZIndex>
+              <Style>
+                <Border>
+                  <Style>None</Style>
+                </Border>
+                <PaddingLeft>2pt</PaddingLeft>
+                <PaddingRight>2pt</PaddingRight>
+                <PaddingTop>2pt</PaddingTop>
+                <PaddingBottom>2pt</PaddingBottom>
+              </Style>
+            </Textbox>
+            <Textbox Name="Textbox426">
+              <CanGrow>true</CanGrow>
+              <KeepTogether>true</KeepTogether>
+              <Paragraphs>
+                <Paragraph>
+                  <TextRuns>
+                    <TextRun>
+                      <Value>=Code.GetData(4,1)</Value>
+                      <Style>
+                        <FontFamily>Segoe UI</FontFamily>
+                        <FontSize>8pt</FontSize>
+                      </Style>
+                    </TextRun>
+                  </TextRuns>
+                  <Style>
+                    <TextAlign>Left</TextAlign>
+                  </Style>
+                </Paragraph>
+              </Paragraphs>
+              <rd:DefaultName>Textbox421</rd:DefaultName>
+              <Top>1.12222in</Top>
+              <Left>7.35101cm</Left>
+              <Height>0.13889in</Height>
+              <Width>1.67708in</Width>
+              <ZIndex>4</ZIndex>
+              <Style>
+                <Border>
+                  <Style>None</Style>
+                </Border>
+                <PaddingLeft>2pt</PaddingLeft>
+                <PaddingRight>2pt</PaddingRight>
+                <PaddingTop>2pt</PaddingTop>
+                <PaddingBottom>2pt</PaddingBottom>
+              </Style>
+            </Textbox>
+            <Textbox Name="Textbox424">
+              <CanGrow>true</CanGrow>
+              <KeepTogether>true</KeepTogether>
+              <Paragraphs>
+                <Paragraph>
+                  <TextRuns>
+                    <TextRun>
+                      <Value>=Code.GetData(6,1)</Value>
+                      <Style>
+                        <FontFamily>Segoe UI</FontFamily>
+                        <FontSize>6.5pt</FontSize>
+                      </Style>
+                    </TextRun>
+                  </TextRuns>
+                  <Style>
+                    <TextAlign>Left</TextAlign>
+                  </Style>
+                </Paragraph>
+              </Paragraphs>
+              <rd:DefaultName>Textbox421</rd:DefaultName>
+              <Top>1.31667in</Top>
+              <Height>0.09897in</Height>
+              <Width>10.2521in</Width>
+              <ZIndex>5</ZIndex>
+              <Visibility>
+                <Hidden>=Code.GetData(6,1) = ""</Hidden>
+              </Visibility>
+              <Style>
+                <Border>
+                  <Style>None</Style>
+                </Border>
+                <PaddingLeft>2pt</PaddingLeft>
+                <PaddingRight>2pt</PaddingRight>
+                <PaddingTop>2pt</PaddingTop>
+                <PaddingBottom>2pt</PaddingBottom>
+              </Style>
+            </Textbox>
+            <Textbox Name="Textbox427">
+              <CanGrow>true</CanGrow>
+              <KeepTogether>true</KeepTogether>
+              <Paragraphs>
+                <Paragraph>
+                  <TextRuns>
+                    <TextRun>
+                      <Value>=Code.GetData(7,1)</Value>
+                      <Style>
+                        <FontFamily>Segoe UI</FontFamily>
+                        <FontSize>6.5pt</FontSize>
+                      </Style>
+                    </TextRun>
+                  </TextRuns>
+                  <Style>
+                    <TextAlign>Left</TextAlign>
+                  </Style>
+                </Paragraph>
+              </Paragraphs>
+              <rd:DefaultName>Textbox421</rd:DefaultName>
+              <Top>1.41944in</Top>
+              <Height>0.09897in</Height>
+              <Width>10.2521in</Width>
+              <ZIndex>6</ZIndex>
+              <Visibility>
+                <Hidden>=Code.GetData(7,1) = ""</Hidden>
+              </Visibility>
+              <Style>
+                <Border>
+                  <Style>None</Style>
+                </Border>
+                <PaddingLeft>2pt</PaddingLeft>
+                <PaddingRight>2pt</PaddingRight>
+                <PaddingTop>2pt</PaddingTop>
+                <PaddingBottom>2pt</PaddingBottom>
+              </Style>
+            </Textbox>
+            <Textbox Name="Textbox428">
+              <CanGrow>true</CanGrow>
+              <KeepTogether>true</KeepTogether>
+              <Paragraphs>
+                <Paragraph>
+                  <TextRuns>
+                    <TextRun>
+                      <Value>=Code.GetData(8,1)</Value>
+                      <Style>
+                        <FontFamily>Segoe UI</FontFamily>
+                        <FontSize>6.5pt</FontSize>
+                      </Style>
+                    </TextRun>
+                  </TextRuns>
+                  <Style>
+                    <TextAlign>Left</TextAlign>
+                  </Style>
+                </Paragraph>
+              </Paragraphs>
+              <rd:DefaultName>Textbox421</rd:DefaultName>
+              <Top>1.53333in</Top>
+              <Height>0.10938in</Height>
+              <Width>10.2521in</Width>
+              <ZIndex>7</ZIndex>
+              <Visibility>
+                <Hidden>=Code.GetData(8,1) = ""</Hidden>
+              </Visibility>
+              <Style>
+                <Border>
+                  <Style>None</Style>
+                </Border>
+                <PaddingLeft>2pt</PaddingLeft>
+                <PaddingRight>2pt</PaddingRight>
+                <PaddingTop>2pt</PaddingTop>
+                <PaddingBottom>2pt</PaddingBottom>
+              </Style>
+            </Textbox>
+            <Textbox Name="Textbox32">
+              <CanGrow>true</CanGrow>
+              <KeepTogether>true</KeepTogether>
+              <Paragraphs>
+                <Paragraph>
+                  <TextRuns>
+                    <TextRun>
+                      <Value>=Globals!ExecutionTime</Value>
+                      <Style>
+                        <FontFamily>Segoe UI</FontFamily>
+                        <FontSize>8pt</FontSize>
+                        <Format>f</Format>
+                      </Style>
+                    </TextRun>
+                  </TextRuns>
+                  <Style>
+                    <TextAlign>Right</TextAlign>
+                  </Style>
+                </Paragraph>
+              </Paragraphs>
+              <rd:DefaultName>Textbox1</rd:DefaultName>
+              <Top>1.97556pt</Top>
+              <Left>24.04442cm</Left>
+              <Height>10pt</Height>
+              <Width>4.4125cm</Width>
+              <ZIndex>8</ZIndex>
+              <Style>
+                <Border>
+                  <Style>None</Style>
+                </Border>
+                <PaddingLeft>5pt</PaddingLeft>
+                <PaddingRight>5pt</PaddingRight>
+              </Style>
+            </Textbox>
+            <Textbox Name="Textbox33">
+              <CanGrow>true</CanGrow>
+              <KeepTogether>true</KeepTogether>
+              <Paragraphs>
+                <Paragraph>
+                  <TextRuns>
+                    <TextRun>
+                      <Value>=Code.GetData(5,1) &amp; " " &amp; Globals!PageNumber &amp; "/" &amp; Globals!TotalPages</Value>
+                      <Style>
+                        <FontFamily>Segoe UI</FontFamily>
+                        <FontSize>8pt</FontSize>
+                      </Style>
+                    </TextRun>
+                  </TextRuns>
+                  <Style>
+                    <TextAlign>Right</TextAlign>
+                  </Style>
+                </Paragraph>
+              </Paragraphs>
+              <rd:DefaultName>Textbox1</rd:DefaultName>
+              <Top>11.97556pt</Top>
+              <Left>24.04442cm</Left>
+              <Height>10pt</Height>
+              <Width>4.4125cm</Width>
+              <ZIndex>9</ZIndex>
+              <Style>
+                <Border>
+                  <Style>None</Style>
+                </Border>
+                <PaddingLeft>5pt</PaddingLeft>
+                <PaddingRight>5pt</PaddingRight>
+              </Style>
+            </Textbox>
+            <Textbox Name="Textbox35">
+              <CanGrow>true</CanGrow>
+              <KeepTogether>true</KeepTogether>
+              <Paragraphs>
+                <Paragraph>
+                  <TextRuns>
+                    <TextRun>
+                      <Value>=User!UserID</Value>
+                      <Style>
+                        <FontFamily>Segoe UI</FontFamily>
+                        <FontSize>8pt</FontSize>
+                      </Style>
+                    </TextRun>
+                  </TextRuns>
+                  <Style>
+                    <TextAlign>Right</TextAlign>
+                  </Style>
+                </Paragraph>
+              </Paragraphs>
+              <rd:DefaultName>Textbox1</rd:DefaultName>
+              <Top>21.97556pt</Top>
+              <Left>24.04442cm</Left>
+              <Height>10pt</Height>
+              <Width>4.4125cm</Width>
+              <ZIndex>10</ZIndex>
+              <Style>
+                <Border>
+                  <Style>None</Style>
+                </Border>
+                <PaddingLeft>5pt</PaddingLeft>
+                <PaddingRight>5pt</PaddingRight>
+              </Style>
+            </Textbox>
+            <Textbox Name="HiddenBody2">
+              <CanGrow>true</CanGrow>
+              <KeepTogether>true</KeepTogether>
+              <Paragraphs>
+                <Paragraph>
+                  <TextRuns>
+                    <TextRun>
+                      <Value />
+                      <Style />
+                    </TextRun>
+                  </TextRuns>
+                  <Style />
+                </Paragraph>
+              </Paragraphs>
+              <Top>0.04147cm</Top>
+              <Height>0.09375in</Height>
+              <Width>1.34254in</Width>
+              <ZIndex>11</ZIndex>
+              <Visibility>
+                <Hidden>=Code.SetData(ReportItems!HiddenBody.Value,1)</Hidden>
+              </Visibility>
+              <Style>
+                <Border>
+                  <Style>None</Style>
+                </Border>
+                <PaddingLeft>2pt</PaddingLeft>
+                <PaddingRight>2pt</PaddingRight>
+                <PaddingTop>2pt</PaddingTop>
+                <PaddingBottom>2pt</PaddingBottom>
+              </Style>
+            </Textbox>
+          </ReportItems>
+          <Style>
+            <Border>
+              <Style>None</Style>
+            </Border>
+          </Style>
+        </PageHeader>
+        <PageHeight>8.27in</PageHeight>
+        <PageWidth>11.69in</PageWidth>
+        <LeftMargin>0in</LeftMargin>
+        <RightMargin>0in</RightMargin>
+        <TopMargin>0in</TopMargin>
+        <BottomMargin>0in</BottomMargin>
+        <Style />
+      </Page>
+    </ReportSection>
+  </ReportSections>
+  <ReportParameters>
+    <ReportParameter Name="HoursCaption">
+      <DataType>String</DataType>
+      <DefaultValue>
+        <Values>
+          <Value>HoursCaption</Value>
+        </Values>
+      </DefaultValue>
+      <Prompt>HoursCaption</Prompt>
+    </ReportParameter>
+    <ReportParameter Name="ReleasedByCaption">
+      <DataType>String</DataType>
+      <DefaultValue>
+        <Values>
+          <Value>ReleasedByCaption</Value>
+        </Values>
+      </DefaultValue>
+      <Prompt>ReleasedByCaption</Prompt>
+    </ReportParameter>
+    <ReportParameter Name="ConcentDateCaption">
+      <DataType>String</DataType>
+      <DefaultValue>
+        <Values>
+          <Value>ConcentDateCaption</Value>
+        </Values>
+      </DefaultValue>
+      <Prompt>ConcentDateCaption</Prompt>
+    </ReportParameter>
+    <ReportParameter Name="AgdaCaption">
+      <DataType>String</DataType>
+      <DefaultValue>
+        <Values>
+          <Value>AgdaCaption</Value>
+        </Values>
+      </DefaultValue>
+      <Prompt>AgdaCaption</Prompt>
+    </ReportParameter>
+    <ReportParameter Name="SumCaption">
+      <DataType>String</DataType>
+      <DefaultValue>
+        <Values>
+          <Value>SumCaption</Value>
+        </Values>
+      </DefaultValue>
+      <Prompt>SumCaption</Prompt>
+    </ReportParameter>
+    <ReportParameter Name="ConsentDeniedByCaption">
+      <DataType>String</DataType>
+      <DefaultValue>
+        <Values>
+          <Value>ConsentDeniedByCaption</Value>
+        </Values>
+      </DefaultValue>
+      <Prompt>ConsentDeniedByCaption</Prompt>
+    </ReportParameter>
+    <ReportParameter Name="PageCaption">
+      <DataType>String</DataType>
+      <DefaultValue>
+        <Values>
+          <Value>PageCaption</Value>
+        </Values>
+      </DefaultValue>
+      <Prompt>PageCaption</Prompt>
+    </ReportParameter>
+    <ReportParameter Name="WageCostCaption">
+      <DataType>String</DataType>
+      <DefaultValue>
+        <Values>
+          <Value>WageCostCaption</Value>
+        </Values>
+      </DefaultValue>
+      <Prompt>WageCostCaption</Prompt>
+    </ReportParameter>
+    <ReportParameter Name="DateCaption">
+      <DataType>String</DataType>
+      <DefaultValue>
+        <Values>
+          <Value>DateCaption</Value>
+        </Values>
+      </DefaultValue>
+      <Prompt>DateCaption</Prompt>
+    </ReportParameter>
+    <ReportParameter Name="ProjectNoCaption">
+      <DataType>String</DataType>
+      <DefaultValue>
+        <Values>
+          <Value>ProjectNoCaption</Value>
+        </Values>
+      </DefaultValue>
+      <Prompt>ProjectNoCaption</Prompt>
+    </ReportParameter>
+    <ReportParameter Name="ProjectDescCaption">
+      <DataType>String</DataType>
+      <DefaultValue>
+        <Values>
+          <Value>ProjectDescCaption</Value>
+        </Values>
+      </DefaultValue>
+      <Prompt>ProjectDescCaption</Prompt>
+    </ReportParameter>
+    <ReportParameter Name="WeekCaption">
+      <DataType>String</DataType>
+      <DefaultValue>
+        <Values>
+          <Value>WeekCaption</Value>
+        </Values>
+      </DefaultValue>
+      <Prompt>WeekCaption</Prompt>
+    </ReportParameter>
+    <ReportParameter Name="AmountCaption">
+      <DataType>String</DataType>
+      <DefaultValue>
+        <Values>
+          <Value>AmountCaption</Value>
+        </Values>
+      </DefaultValue>
+      <Prompt>AmountCaption</Prompt>
+    </ReportParameter>
+    <ReportParameter Name="SerialNumber0Caption">
+      <DataType>String</DataType>
+      <DefaultValue>
+        <Values>
+          <Value>SerialNumber0Caption</Value>
+        </Values>
+      </DefaultValue>
+      <Prompt>SerialNumber0Caption</Prompt>
+    </ReportParameter>
+    <ReportParameter Name="SerialNumber1Caption">
+      <DataType>String</DataType>
+      <DefaultValue>
+        <Values>
+          <Value>SerialNumber1Caption</Value>
+        </Values>
+      </DefaultValue>
+      <Prompt>SerialNumber1Caption</Prompt>
+    </ReportParameter>
+    <ReportParameter Name="DeniedByCaption">
+      <DataType>String</DataType>
+      <DefaultValue>
+        <Values>
+          <Value>DeniedByCaption</Value>
+        </Values>
+      </DefaultValue>
+      <Prompt>DeniedByCaption</Prompt>
+    </ReportParameter>
+    <ReportParameter Name="TeamCodeCaption">
+      <DataType>String</DataType>
+      <DefaultValue>
+        <Values>
+          <Value>TeamCodeCaption</Value>
+        </Values>
+      </DefaultValue>
+      <Prompt>TeamCodeCaption</Prompt>
+    </ReportParameter>
+    <ReportParameter Name="CommentCaption">
+      <DataType>String</DataType>
+      <DefaultValue>
+        <Values>
+          <Value>CommentCaption</Value>
+        </Values>
+      </DefaultValue>
+      <Prompt>CommentCaption</Prompt>
+    </ReportParameter>
+  </ReportParameters>
+  <Code>Public Function BlankZero(ByVal Value As Decimal)
+    if Value = 0 then
+        Return ""
+    end if
+    Return Value
+End Function
+
+Public Function BlankPos(ByVal Value As Decimal)
+    if Value &gt; 0 then
+        Return ""
+    end if
+    Return Value
+End Function
+
+Public Function BlankZeroAndPos(ByVal Value As Decimal)
+    if Value &gt;= 0 then
+        Return ""
+    end if
+    Return Value
+End Function
+
+Public Function BlankNeg(ByVal Value As Decimal)
+    if Value &lt; 0 then
+        Return ""
+    end if
+    Return Value
+End Function
+
+Public Function BlankNegAndZero(ByVal Value As Decimal)
+    if Value &lt;= 0 then
+        Return ""
+    end if
+    Return Value
+End Function
+
+Shared Data1 as Object
+Shared Data2 as Object
+Shared Data3 as Object
+Shared Data4 as Object
+
+Public Function GetData(Num as Integer, Group as integer) as Object
+if Group = 1 then
+   Return Cstr(Choose(Num, Split(Cstr(Data1),Chr(177))))
+End If
+
+if Group = 2 then
+   Return Cstr(Choose(Num, Split(Cstr(Data2),Chr(177))))
+End If
+
+if Group = 3 then
+   Return Cstr(Choose(Num, Split(Cstr(Data3),Chr(177))))
+End If
+
+if Group = 4 then
+   Return Cstr(Choose(Num, Split(Cstr(Data4),Chr(177))))
+End If
+End Function
+
+Public Function SetData(NewData as Object,Group as integer)
+  If Group = 1 and NewData &gt; "" Then
+      Data1 = NewData
+  End If
+
+  If Group = 2 and NewData &gt; "" Then
+      Data2 = NewData
+  End If
+
+  If Group = 3 and NewData &gt; "" Then
+      Data3 = NewData
+  End If
+
+  If Group = 4 and NewData &gt; "" Then
+      Data4 = NewData
+  End If
+
+  Return True
+End Function
+
+</Code>
+  <Language>=User!Language</Language>
+  <ConsumeContainerWhitespace>true</ConsumeContainerWhitespace>
+  <rd:ReportUnitType>Inch</rd:ReportUnitType>
+  <rd:ReportID>0eeb6585-38ae-40f1-885b-8d50088d51b4</rd:ReportID>
+</Report>
+    END_OF_RDLDATA
+  }
+}
+

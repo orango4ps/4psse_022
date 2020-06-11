@@ -1,0 +1,212 @@
+OBJECT Codeunit 11124904 Create Purch. Order Res. Req.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      PlantSetup@1100529000 : Record 11012550;
+      Text001@1100529001 : TextConst 'DEU=Den Kaufauftrag fÅr Unterauftragsvergabe und/oder externes Werkzeug erstellen?;ENU=Create purchase order for subcontracting and/or external plant?;NLD=Inkooporder aanmaken voor onderaanneming en/of extern materieel?';
+      Text002@1100529002 : TextConst 'DEU=Bestellung(en) %1 erstellt.;ENU=Created purchase order(s): %1;NLD=Aangemaakt inkooporder(s): %1';
+
+    PROCEDURE CreatePurchaseOrder@1100529000(Rec@1100529000 : Record 11124901);
+    VAR
+      ResourceRequest@1100529001 : Record 11124901;
+      WorkOrder@1100529002 : Record 11229279;
+      AdditionalInfoRequestWO@1100529006 : Record 11124915;
+      Resource@1100529007 : Record 11229278;
+      ResourceRequestType@1100529008 : Record 11124907;
+      PurchaseOrder@1100529005 : Record 38;
+      TmpPurchaseOrder@1100529004 : TEMPORARY Record 38;
+      VendorNo@1100529003 : Code[20];
+    BEGIN
+      IF NOT CONFIRM(Text001, TRUE) THEN
+        EXIT;
+      ResourceRequest.COPY(Rec);
+      PlantSetup.GET;
+      PlantSetup.TESTFIELD("Plant Hours Unit of Measure");
+      WITH ResourceRequest DO BEGIN
+        TESTFIELD("No.");
+        TESTFIELD(Status, Status::Open);
+        TESTFIELD("Source No.");
+        TESTFIELD("Request Type");
+        ResourceRequestType.GET("Request Type");
+
+        WorkOrder.SETCURRENTKEY("Source Company", "Source Type", "Source No.");
+        WorkOrder.SETRANGE("Source Company", COMPANYNAME);
+        WorkOrder.SETRANGE("Source Type", WorkOrder."Source Type"::Request);
+        WorkOrder.SETRANGE("Source No.", ResourceRequest."No.");
+        WorkOrder.SETFILTER("Resource Type", '%1|%2', WorkOrder."Resource Type"::Plant,  WorkOrder."Resource Type"::Subcontractor);
+        WorkOrder.SETFILTER("Resource No.", '<>%1', '');
+        WorkOrder.SETRANGE("Resource Company", COMPANYNAME);  // Only for (external) resources of the own/current company
+        IF WorkOrder.FINDSET THEN BEGIN
+          REPEAT
+            AdditionalInfoRequestWO.GET(WorkOrder."No.");
+            IF (AdditionalInfoRequestWO."Purchase Order No" = '') OR
+               (NOT PurchaseOrder.GET(PurchaseOrder."Document Type"::Order, AdditionalInfoRequestWO."Purchase Order No"))
+            THEN BEGIN
+              Resource.GET(WorkOrder."Resource No.");
+              VendorNo := GetResourceVendor(WorkOrder, Resource);
+              IF VendorNo <> '' THEN BEGIN
+                IF WorkOrder."Resource Type" = WorkOrder."Resource Type"::Subcontractor THEN BEGIN
+                  WorkOrder.TESTFIELD("Resource Group No.");
+                  ResourceRequestType.TESTFIELD("Cost Account Subcontracting");
+                END;
+                TmpPurchaseOrder.SETRANGE("Document Type", PurchaseOrder."Document Type"::Order);
+                TmpPurchaseOrder.SETRANGE("Buy-from Vendor No.", VendorNo);
+                IF TmpPurchaseOrder.FINDFIRST THEN
+                  PurchaseOrder.GET(TmpPurchaseOrder."Document Type", TmpPurchaseOrder."No.")
+                ELSE BEGIN
+                  InsertPurchaseOrderHead(VendorNo, ResourceRequest, PurchaseOrder);
+                  TmpPurchaseOrder."Document Type" := PurchaseOrder."Document Type"::Order;
+                  TmpPurchaseOrder."No." := PurchaseOrder."No.";
+                  TmpPurchaseOrder."Buy-from Vendor No." := VendorNo;
+                  TmpPurchaseOrder.INSERT;
+                END;
+                InsertPurchaseOrderLine(PurchaseOrder,
+                  ResourceRequest, WorkOrder, AdditionalInfoRequestWO, Resource, ResourceRequestType, TmpPurchaseOrder."No. Printed");
+                TmpPurchaseOrder.MODIFY;  //Update LastLineNo (in field "No. Printed")
+                AdditionalInfoRequestWO."Purchase Order No" := PurchaseOrder."No.";
+                AdditionalInfoRequestWO.MODIFY;
+              END;
+            END;
+          UNTIL WorkOrder.NEXT = 0;
+        END;
+        TmpPurchaseOrder.RESET;
+        MESSAGE(Text002, TmpPurchaseOrder.COUNT);
+      END;
+    END;
+
+    LOCAL PROCEDURE GetResourceVendor@1100529002(WorkOrder@1100529001 : Record 11229279;Resource@1100529000 : Record 11229278) : Code[20];
+    VAR
+      PlantNumber@1100529003 : Record 11012552;
+    BEGIN
+      CASE WorkOrder."Resource Type" OF
+        WorkOrder."Resource Type"::Subcontractor:
+          BEGIN
+            Resource.TESTFIELD(Type, Resource.Type::Subcontractor);
+            Resource.TESTFIELD("Source No.");
+            EXIT(Resource."Source No.");
+          END;
+        WorkOrder."Resource Type"::Plant:
+          BEGIN
+            Resource.TESTFIELD(Type, Resource.Type::Plant);
+            Resource.TESTFIELD("Source No.");
+            Resource.TESTFIELD("Source No. 2");
+            PlantNumber.GET(Resource."Source No.", Resource."Source No. 2");
+            IF PlantNumber.External THEN BEGIN
+              PlantNumber.TESTFIELD(Vendor);
+              EXIT(PlantNumber.Vendor);
+            END;
+          END;
+      END;
+      EXIT('');
+    END;
+
+    LOCAL PROCEDURE InsertPurchaseOrderHead@1100529001(VendorNo@1100529000 : Code[20];ResourceRequest@1100529002 : Record 11124901;VAR PurchaseOrder@1100529001 : Record 38);
+    BEGIN
+      PurchaseOrder.INIT;
+      PurchaseOrder."Document Type" := PurchaseOrder."Document Type"::Order;
+      PurchaseOrder."No." := '';
+      PurchaseOrder.INSERT(TRUE);
+      PurchaseOrder.TESTFIELD("No.");
+      PurchaseOrder.VALIDATE("Buy-from Vendor No.", VendorNo);
+      PurchaseOrder."Amounts only" := FALSE;
+      PurchaseOrder."Hours Hire Order Type" := PurchaseOrder."Hours Hire Order Type"::Plant;
+      PurchaseOrder."Resource Request No." := ResourceRequest."No.";
+      PurchaseOrder.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE InsertPurchaseOrderLine@1100529003(PurchaseOrder@1100529000 : Record 38;ResourceRequest@1100529003 : Record 11124901;WorkOrder@1100529005 : Record 11229279;AdditionalInfoRequestWO@1100529004 : Record 11124915;Resource@1100529006 : Record 11229278;ResourceRequestType@1100529008 : Record 11124907;VAR LastLineNo@1100529002 : Integer);
+    VAR
+      PurchaseOrderLine@1100529001 : Record 39;
+      CostObjectCostPrice@1100529009 : Record 11020356;
+    BEGIN
+      PurchaseOrderLine.INIT;
+      PurchaseOrderLine."Document Type" := PurchaseOrder."Document Type";
+      PurchaseOrderLine."Document No." := PurchaseOrder."No.";
+      PurchaseOrderLine."Line No." := LastLineNo + 10000;
+      PurchaseOrderLine.InitRecord();
+      PurchaseOrderLine.INSERT(TRUE);
+      PurchaseOrderLine.Type := PurchaseOrderLine.Type::"G/L Account";
+      PurchaseOrderLine."System-Created Entry" := TRUE;
+      CASE WorkOrder."Resource Type" OF
+        WorkOrder."Resource Type"::Subcontractor:
+          BEGIN
+            PurchaseOrderLine.VALIDATE("No.", ResourceRequestType."Cost Account Subcontracting");
+            FillPurchLineCostObject(WorkOrder, Resource, ResourceRequestType, PurchaseOrderLine);
+            IF PurchaseOrderLine."Shortcut Dimension 2 Code" <> '' THEN BEGIN
+              CostObjectCostPrice.SETRANGE("Cost Object", PurchaseOrderLine."Shortcut Dimension 2 Code");
+              CostObjectCostPrice.SETRANGE("Starting Date", 0D, PurchaseOrderLine."Posting Date");
+              CostObjectCostPrice.SETFILTER("Ending Date",'%1|>=%2',0D, PurchaseOrderLine."Posting Date");
+              IF CostObjectCostPrice.FINDLAST THEN
+                PurchaseOrderLine.VALIDATE("Direct Unit Cost", CostObjectCostPrice."Cost Price");
+            END;
+            WorkOrder.CALCFIELDS("Resource Group Name");
+            PurchaseOrderLine.Description := WorkOrder."Resource Group Name";
+          END;
+        WorkOrder."Resource Type"::Plant:
+          BEGIN
+            PurchaseOrderLine.VALIDATE("Plant Type", Resource."Source No.");
+            PurchaseOrderLine.VALIDATE("Plant No.", Resource."Source No. 2");
+            PlantSetup.TESTFIELD("Cost Component Rent");
+            PurchaseOrderLine.VALIDATE("Cost Component Plant",  PlantSetup."Cost Component Rent");
+            FillPurchLineCostObject(WorkOrder, Resource, ResourceRequestType, PurchaseOrderLine);
+            PurchaseOrderLine.Description := Resource.Name;
+          END;
+      END;
+      PurchaseOrderLine.VALIDATE("Unit of Measure Code", PlantSetup."Plant Hours Unit of Measure");
+      PurchaseOrderLine.VALIDATE(Quantity, AdditionalInfoRequestWO."Planned Hours");
+      IF WorkOrder."Starting Date/Time" <> 0DT THEN
+        PurchaseOrderLine.VALIDATE("Planned Receipt Date", DT2DATE(WorkOrder."Starting Date/Time"));
+      PurchaseOrderLine.MODIFY(TRUE);
+      LastLineNo := PurchaseOrderLine."Line No.";
+    END;
+
+    LOCAL PROCEDURE FillPurchLineCostObject@1100529004(WorkOrder@1100529004 : Record 11229279;Resource@1100529003 : Record 11229278;ResourceRequestType@1100529002 : Record 11124907;VAR PurchaseOrderLine@1100529000 : Record 39);
+    VAR
+      PlantType@1100529007 : Record 11012551;
+      DimValue@1100529006 : Record 349;
+      DimMgt@1100529005 : Codeunit 408;
+      DefaultCostType@1100529008 : Option;
+      CostObject@1100529001 : Code[20];
+    BEGIN
+      CASE WorkOrder."Resource Type" OF
+        WorkOrder."Resource Type"::Subcontractor:
+          BEGIN
+            CostObject := ResourceRequestType."Cost Object Subcontracting";
+            DefaultCostType := PurchaseOrderLine."Cost Type"::Subcontracting;
+          END;
+        WorkOrder."Resource Type"::Plant:
+          BEGIN
+            PlantType.GET(Resource."Source No.");
+            CostObject := PlantType."Cost Object";
+            DefaultCostType := PurchaseOrderLine."Cost Type"::Subcontracting;
+          END;
+      ELSE
+        EXIT;
+      END;
+      IF (PurchaseOrderLine."Shortcut Dimension 2 Code" <> CostObject) AND (CostObject <> '') THEN BEGIN
+        DimMgt.GetDimValueRec(2, CostObject, DimValue, TRUE, '');
+        PurchaseOrderLine."Cost Type" := DimValue."Cost Type" + 1;
+        PurchaseOrderLine.VALIDATE("Shortcut Dimension 2 Code", CostObject);
+      END;
+      IF PurchaseOrderLine."Shortcut Dimension 2 Code" = '' THEN
+        PurchaseOrderLine."Cost Type" := DefaultCostType;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

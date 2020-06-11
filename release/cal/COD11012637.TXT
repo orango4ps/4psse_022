@@ -1,0 +1,1146 @@
+OBJECT Codeunit 11012637 Signhost Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    TableNo=11229468;
+    OnRun=VAR
+            RecordID2@1100528400 : RecordID;
+            WordDocumentNo@1100528401 : Code[20];
+          BEGIN
+            RecordID2 := "Record ID";
+            WordDocumentNo := "Sent Word Document No.";
+            UpdateSignhostData(RecordID2, WordDocumentNo);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text000@1100528400 : TextConst 'ENU=Purchase Order %1';
+      Text001@1100528401 : TextConst 'ENU=Signed Document';
+      Text002@1100528402 : TextConst 'ENU=Transaction Receipt';
+      Text003@1100528403 : TextConst 'ENU=Sign Request %1';
+      Text004@1100528404 : TextConst 'ENU=%1 has already been sent.';
+      SignhostSetup@1100528405 : Record 11229471;
+      SignhostSignPositioning@1100528407 : Record 11229472;
+      MailTemplateManagement@1100525000 : Codeunit 11012622;
+      SignhostSetupRead@1100528406 : Boolean;
+      SignhostSignPositioningReadForDocumentType@1100528408 : Integer;
+      Text005@1100528410 : TextConst 'ENU=The approval process must be complete.';
+      Text006@1100528411 : TextConst 'ENU=Signed Document %1';
+      Text007@1100528409 : TextConst 'ENU=Signed';
+      Text008@1100528412 : TextConst 'ENU=Receipt;SVE=Inleverans';
+      Client@1100527600 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.HttpClient";
+      Request@1100527601 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.HttpRequestMessage";
+      Response@1100527602 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.HttpResponseMessage";
+      StringContent@1100527605 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.StringContent";
+      StreamContent@1100527603 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.StreamContent";
+
+    PROCEDURE SendDocumentToSignhost@1100528400(RecordID@1100528400 : RecordID;DocumentProperties@1100528401 : Record 11012746);
+    VAR
+      SignhostDocument@1100528407 : Record 11229468;
+      OrigSignhostDocument@1100528405 : Record 11229468;
+      XmlDocument@1100528406 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+      SignhostLicenseManagement@1100528408 : Codeunit 11012655;
+      ServerFileName@1100528403 : Text;
+      TransactionId@1100528404 : Text;
+      NoOfPages@1100528402 : Integer;
+    BEGIN
+      SignhostLicenseManagement.TestIfUsingSignhostIsAllowed;
+      IF NOT WordDocumentHasSignhostSigners(RecordID, DocumentProperties."No.") THEN
+        CopySignhostSignersOfRecordIDToWordDocument(RecordID, DocumentProperties."No.");
+      COMMIT; //Database transaction should be closed before creating and uploading pdf.
+      CheckIfDocumentCanBeSentToSignhost(RecordID, DocumentProperties."No.");
+      ServerFileName := UploadPdfToServer(RecordID, DocumentProperties, NoOfPages);
+      CreateTransaction(RecordID, DocumentProperties."No.", SignhostDocument, XmlDocument);
+      TransactionId := GetTransactionId(XmlDocument);
+      GetSignhostSignPositioning(RecordID);
+      IF NOT SignhostSignPositioning."Use Signer Tags in PDF" THEN
+        AddFileMetaDataToTransaction(RecordID, DocumentProperties."No.", TransactionId, NoOfPages);
+      AddFileToTransaction(RecordID, TransactionId, ServerFileName);
+      StartTransaction(TransactionId);
+      FILE.ERASE(ServerFileName);
+      CreateSignhostDocument(RecordID, DocumentProperties."No.", TransactionId, SignhostDocument);
+      OrigSignhostDocument := SignhostDocument;
+      UpdateSignhostDocument(SignhostDocument, XmlDocument);
+      UpdateSignhostSigners(SignhostDocument, XmlDocument);
+      UpdateSourceRecord(OrigSignhostDocument, SignhostDocument);
+      COMMIT; //Database transaction should be closed before sending e-mails.
+      SendSignRequestEMailToSigners(RecordID, DocumentProperties."No.", FALSE);
+    END;
+
+    LOCAL PROCEDURE UpdateSignhostData@1100528417(RecordID@1100528400 : RecordID;WordDocumentNo@1100528403 : Code[20]);
+    VAR
+      SignhostDocument@1100528401 : Record 11229468;
+      OrigSignhostDocument@1100528404 : Record 11229468;
+      XmlDocument@1100528402 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument";
+    BEGIN
+      GetSignhostSetup;
+      GetSignhostDocument(RecordID, WordDocumentNo, TRUE, SignhostDocument);
+      OrigSignhostDocument := SignhostDocument;
+      GetTransaction(SignhostDocument."Transaction Id", XmlDocument);
+      UpdateSignhostDocument(SignhostDocument, XmlDocument);
+      UpdateSignhostSigners(SignhostDocument, XmlDocument);
+      UpdateSourceRecord(OrigSignhostDocument, SignhostDocument);
+      COMMIT; //Database transaction should be closed before sending e-mails.
+      SendSignRequestEMailToSigners(RecordID, WordDocumentNo, FALSE);
+      IF SignhostDocument.Status = SignhostDocument.Status::Signed THEN BEGIN
+        IF SignhostDocument."Signed Document No." = '' THEN BEGIN
+          AddSignedDocumentAsExternalDocument(SignhostDocument, RecordID);
+          COMMIT; //Database transaction should be closed before calling web service.
+        END;
+        IF SignhostDocument."Receipt Document No." = '' THEN BEGIN
+          AddTransactionReceiptAsExternalDocument(SignhostDocument, RecordID);
+          COMMIT; //Database transaction should be closed before sending e-mails.
+        END;
+        IF SignhostSetup."Send Signed Doc. to Signers" THEN
+          SendSignedDocumentEMailToSigners(
+            RecordID, WordDocumentNo, SignhostDocument."Signed Document No.", FALSE);
+        SignhostDocument."Signing Process Finished" := TRUE;
+        SignhostDocument.MODIFY;
+      END;
+    END;
+
+    PROCEDURE GetSignhostDocument@1100528406(RecordID@1100528400 : RecordID;WordDocumentNo@1100528403 : Code[20];ThrowError@1100528402 : Boolean;VAR SignhostDocument@1100528401 : Record 11229468);
+    BEGIN
+      SignhostDocument.SETRANGE("Record ID", RecordID);
+      SignhostDocument.SETRANGE("Sent Word Document No.", WordDocumentNo);
+      IF ThrowError THEN
+        SignhostDocument.FINDFIRST
+      ELSE
+        IF SignhostDocument.FINDFIRST THEN;
+    END;
+
+    PROCEDURE GetLastSignhostDocumentOfRecordID@1100528443(RecordID@1100528400 : RecordID;VAR SignhostDocument@1100528401 : Record 11229468);
+    BEGIN
+      SignhostDocument.SETCURRENTKEY("Record ID", "Sent Date-Time");
+      SignhostDocument.SETRANGE("Record ID", RecordID);
+      IF SignhostDocument.FINDLAST THEN;
+    END;
+
+    PROCEDURE SendSignRequestEMailToSigners@1100528413(RecordID@1100528400 : RecordID;WordDocumentNo@1100528404 : Code[20];Resend@1100528402 : Boolean);
+    VAR
+      SignhostSigner@1100528401 : Record 11229467;
+      CurrentSequenceNo@1100528403 : Integer;
+    BEGIN
+      IF NOT GetCurrentSequenceNo(RecordID, WordDocumentNo, CurrentSequenceNo) THEN
+        EXIT;
+
+      SignhostSigner.SETRANGE("Record ID", RecordID);
+      SignhostSigner.SETRANGE("Word Document No.", WordDocumentNo);
+      SignhostSigner.SETFILTER("Sign Url", '<>%1', '');
+      IF NOT Resend THEN
+        SignhostSigner.SETRANGE("Sign Request Sent Date-Time", 0DT);
+      SignhostSigner.SETRANGE("Signed Date-Time", 0DT);
+      SignhostSigner.SETRANGE("Rejected Date-Time", 0DT);
+      SignhostSigner.SETRANGE("Sequence No.", CurrentSequenceNo);
+      IF SignhostSigner.FINDSET THEN
+        REPEAT
+          SendSignRequestEMailToSigner(RecordID, SignhostSigner);
+          COMMIT; //Database transaction should be closed before sending next e-mail.
+        UNTIL SignhostSigner.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE SendSignedDocumentEMailToSigners@1100528440(RecordID@1100528400 : RecordID;WordDocumentNo@1100528403 : Code[20];SignedDocumentNo@1100528404 : Code[20];Resend@1100528402 : Boolean);
+    VAR
+      SignhostSigner@1100528401 : Record 11229467;
+    BEGIN
+      SignhostSigner.SETRANGE("Record ID", RecordID);
+      SignhostSigner.SETRANGE("Word Document No.", WordDocumentNo);
+      SignhostSigner.SETFILTER("Sign Url", '<>%1', '');
+      IF NOT Resend THEN
+        SignhostSigner.SETRANGE("Signed Document Sent Date-Time", 0DT);
+      SignhostSigner.SETFILTER("Signed Date-Time", '<>%1', 0DT);
+      IF SignhostSigner.FINDSET THEN
+        REPEAT
+          SendSignedDocumentEMailToSigner(RecordID, SignhostSigner, SignedDocumentNo);
+          COMMIT; //Database transaction should be closed before sending next e-mail.
+        UNTIL SignhostSigner.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE GetCurrentSequenceNo@1100528437(RecordID@1100528400 : RecordID;WordDocumentNo@1100528403 : Code[20];VAR CurrentSequenceNo@1100528402 : Integer) SequenceNoFound : Boolean;
+    VAR
+      SignhostSigner@1100528401 : Record 11229467;
+    BEGIN
+      SignhostSigner.SETCURRENTKEY("Record ID", "Sequence No.");
+      SignhostSigner.SETRANGE("Record ID", RecordID);
+      SignhostSigner.SETRANGE("Word Document No.", WordDocumentNo);
+      SignhostSigner.SETRANGE("Signed Date-Time", 0DT);
+      IF SignhostSigner.FINDFIRST THEN BEGIN
+        CurrentSequenceNo := SignhostSigner."Sequence No.";
+        SequenceNoFound := TRUE;
+      END ELSE
+        SequenceNoFound := FALSE;
+    END;
+
+    LOCAL PROCEDURE SendSignRequestEMailToSigner@1100528415(RecordID@1100528400 : RecordID;SignhostSigner@1100528401 : Record 11229467);
+    VAR
+      MailTemplate@1100528402 : Record 11229450;
+      DocumentMailing@1100528409 : Codeunit 260;
+      Subject@1100528405 : Text;
+      MailTemplateNo@1100525000 : Integer;
+    BEGIN
+      Subject := STRSUBSTNO(Text003, DeriveDocumentNameFromRecordID(RecordID));
+      MailTemplateNo := 118;
+      MailTemplateManagement.GetMailTemplate(MailTemplate, MailTemplateNo, '');
+      IF (MailTemplate."Use Mail Template Subject Text") THEN
+        Subject := MailTemplateManagement.GetLayoutTextSubstitutedSubjectOnly(MailTemplateNo, SignhostSigner.GetLanguageCode, SignhostSigner);
+
+      DocumentMailing.EmailMessageWithoutAttachment(
+        '', SignhostSigner.GetEMail, MailTemplateNo, '', SignhostSigner.GetLanguageCode, SignhostSigner, Subject, FALSE);
+      SignhostSigner."Sign Request Sent Date-Time" := CURRENTDATETIME;
+      SignhostSigner.MODIFY;
+    END;
+
+    LOCAL PROCEDURE SendSignedDocumentEMailToSigner@1100528441(RecordID@1100528400 : RecordID;SignhostSigner@1100528401 : Record 11229467;SignedDocumentNo@1100528408 : Code[20]);
+    VAR
+      MailTemplate@1100528402 : Record 11229450;
+      ReportSelections@1100528406 : Record 77;
+      TempEmailAttachment@1100528407 : TEMPORARY Record 11229294;
+      DocumentProperties@1100528410 : Record 11012746;
+      DocumentMailing@1100528409 : Codeunit 260;
+      Subject@1100528405 : Text;
+      MailTemplateNo@1100525000 : Integer;
+    BEGIN
+      Subject := STRSUBSTNO(Text006, DeriveDocumentNameFromRecordID(RecordID));
+      MailTemplateNo := 119;
+      DocumentProperties.SETRANGE("No.", SignedDocumentNo);
+      ReportSelections.AddRelatedDocuments(TempEmailAttachment, DocumentProperties, FALSE, FALSE);
+      TempEmailAttachment."Attachment Name" := DerivePDFFileNameFromRecordID(RecordID);
+      TempEmailAttachment.MODIFY;
+      MailTemplateManagement.GetMailTemplate(MailTemplate, MailTemplateNo, '');
+      IF (MailTemplate."Use Mail Template Subject Text") THEN
+        Subject := MailTemplateManagement.GetLayoutTextSubstitutedSubjectOnly(MailTemplateNo, SignhostSigner.GetLanguageCode, SignhostSigner);
+
+      DocumentMailing.EmailFile4PS(
+        TempEmailAttachment."Attachment Server File Path", TempEmailAttachment."Attachment Name", '', '',
+        SignhostSigner.GetEMail, MailTemplateNo, '', SignhostSigner.GetLanguageCode, SignhostSigner, Subject, '', TRUE);
+      SignhostSigner."Signed Document Sent Date-Time" := CURRENTDATETIME;
+      SignhostSigner.MODIFY;
+    END;
+
+    LOCAL PROCEDURE CheckIfDocumentCanBeSentToSignhost@1100528430(RecordID@1100528400 : RecordID;WordDocumentNo@1100528405 : Code[20]);
+    VAR
+      SignhostDocument@1100528401 : Record 11229468;
+      PurchaseHeader@1100528403 : Record 38;
+      RecRef@1100528402 : RecordRef;
+      ApprovalsMgmt@1100528404 : Codeunit 1535;
+    BEGIN
+      SignhostDocument.SETRANGE("Record ID", RecordID);
+      SignhostDocument.SETRANGE("Sent Word Document No.", WordDocumentNo);
+      IF SignhostDocument.FINDFIRST THEN
+        ERROR(Text004, SignhostDocument.TABLECAPTION);
+      RecRef := RecordID.GETRECORD;
+      CASE RecRef.NUMBER OF
+        DATABASE::"Purchase Header":
+          BEGIN
+            RecRef.SETTABLE(PurchaseHeader);
+            CASE PurchaseHeader."Document Type" OF
+              PurchaseHeader."Document Type"::Order:
+                IF PurchaseHeader.GET(PurchaseHeader."Document Type", PurchaseHeader."No.") THEN BEGIN
+                  IF ApprovalsMgmt.IsPurchaseApprovalsWorkflowEnabled(PurchaseHeader) AND
+                     (PurchaseHeader.Status = PurchaseHeader.Status::Open)
+                  THEN
+                    ERROR(Text005);
+                  IF ApprovalsMgmt.HasOpenOrPendingApprovalEntries(PurchaseHeader.RECORDID) AND
+                     (PurchaseHeader.Status = PurchaseHeader.Status::"Pending Approval")
+                  THEN
+                    ERROR(Text005);
+                END;
+            END;
+          END;
+      END;
+      GetSignhostSignPositioning(RecordID);
+    END;
+
+    LOCAL PROCEDURE AddSignedDocumentAsExternalDocument@1100528408(VAR SignhostDocument@1100528404 : Record 11229468;RecordID@1100528400 : RecordID);
+    VAR
+      HttpWebRequestMgt@1100528403 : Codeunit 1297;
+      PDFFileName@1100528402 : Text;
+    BEGIN
+      PDFFileName := DerivePDFFileNameFromRecordID(RecordID);
+      CreateHttpRequest(STRSUBSTNO('%1transaction/%2/file/%3', BaseUrl, SignhostDocument."Transaction Id", PDFFileName), 'GET');
+      SignhostDocument."Signed Document No." := AddFileAsExternalDocument(RecordID, Text001, Text007);
+      SignhostDocument.MODIFY;
+    END;
+
+    LOCAL PROCEDURE AddTransactionReceiptAsExternalDocument@1100528410(VAR SignhostDocument@1100528401 : Record 11229468;RecordID@1100528400 : RecordID);
+    VAR
+      HttpWebRequestMgt@1100528406 : Codeunit 1297;
+    BEGIN
+      CreateHttpRequest(STRSUBSTNO('%1file/receipt/%2', BaseUrl, SignhostDocument."Transaction Id"), 'GET');
+      SignhostDocument."Receipt Document No." := AddFileAsExternalDocument(RecordID, Text002, Text008);
+      SignhostDocument.MODIFY;
+    END;
+
+    LOCAL PROCEDURE AddFileAsExternalDocument@1100528403(RecordID@1100528402 : RecordID;Description@1100528408 : Text;Prefix@1100528404 : Text) DocumentPropertiesNo : Code[20];
+    VAR
+      DocumentProperties@1100528405 : Record 11012746;
+      TempBlob@1100528409 : Record 99008535;
+      RecRef@1100528403 : RecordRef;
+      ExternalDocumentManagement@1100528401 : Codeunit 11012403;
+      FileManagement@1100528411 : Codeunit 419;
+      ResponseInStream@1100528407 : InStream;
+      OutStream@1100528410 : OutStream;
+      ClientTempFileName@1100528406 : Text;
+    BEGIN
+      TempBlob.Blob.CREATEINSTREAM(ResponseInStream);
+      InvokeHttpRequest(ResponseInStream, FALSE);
+      TempBlob.Blob.CREATEOUTSTREAM(OutStream);
+      COPYSTREAM(OutStream, ResponseInStream);
+      IF FileManagement.ClientAvailable THEN
+          ClientTempFileName := FileManagement.ClientTempFileName('pdf')
+      ELSE
+          ClientTempFileName := FileManagement.ServerTempFileName('pdf');
+      ClientTempFileName :=
+        FileManagement.GetDirectoryNameWithBackSlash(ClientTempFileName) +
+        Prefix + '_' + DerivePDFFileNameFromRecordID(RecordID);
+      FileManagement.BLOBExport4PS(
+        TempBlob, ClientTempFileName, FALSE, GUIALLOWED);
+      RecRef := RecordID.GETRECORD;
+      DocumentPropertiesNo := ExternalDocumentManagement.AddExternalDocument(RecRef, ClientTempFileName, '');
+      DocumentProperties.GET(DocumentPropertiesNo);
+      DocumentProperties.Description := Description;
+      DocumentProperties.MODIFY;
+      FileManagement.DeleteClientFile(ClientTempFileName);
+    END;
+
+    LOCAL PROCEDURE UploadPdfToServer@1100528402(RecordID@1100528400 : RecordID;DocumentProperties@1100528401 : Record 11012746;VAR NoOfPages@1100528410 : Integer) : Text;
+    VAR
+      PurchaseHeader@1100528402 : Record 38;
+      DocumentProperties2@1100528403 : Record 11012746;
+      DocumentRelation@1100528404 : Record 11012407;
+      ReportSelections@1100528406 : Record 77;
+      TempEmailAttachment@1100528405 : TEMPORARY Record 11229294;
+      RecRef@1100528407 : RecordRef;
+      PDFFileManagement@1100528408 : Codeunit 11020228;
+    BEGIN
+      DocumentProperties.SETRECFILTER;
+      ReportSelections.AddRelatedDocuments(TempEmailAttachment, DocumentProperties, TRUE, TRUE);
+      RecRef := RecordID.GETRECORD;
+      CASE RecRef.NUMBER OF
+        DATABASE::"Purchase Header":
+          BEGIN
+            RecRef.SETTABLE(PurchaseHeader);
+            CASE PurchaseHeader."Document Type" OF
+              PurchaseHeader."Document Type"::Order:
+                DocumentProperties2.GetDocumentsFromDocumentRelations(
+                  DocumentProperties2, DocumentRelation."Document Type"::"Purchase Order",
+                  PurchaseHeader."No.", TRUE);
+            END;
+          END;
+      END;
+      DocumentProperties2.MARKEDONLY(TRUE);
+      IF DocumentProperties2.FINDSET THEN
+        REPEAT
+          IF NOT PDFFileManagement.FileCanBeConvertedToPDF(DocumentProperties2.FullFileName) AND
+             NOT PDFFileManagement.FileCanBeConvertedToPDF(DocumentProperties2."Document Service URL")
+          THEN
+            DocumentProperties2.MARK(FALSE);
+        UNTIL DocumentProperties2.NEXT = 0;
+      ReportSelections.AddRelatedDocuments(TempEmailAttachment, DocumentProperties2, FALSE, TRUE);
+      PDFFileManagement.MergePDFEmailAttachmentsOnServer(TempEmailAttachment);
+      NoOfPages := PDFFileManagement.GetNoOfPagesOfPDF(TempEmailAttachment."Attachment Server File Path");
+      EXIT(TempEmailAttachment."Attachment Server File Path");
+    END;
+
+    LOCAL PROCEDURE CreateTransaction@1100528401(RecordID@1100528400 : RecordID;WordDocumentNo@1100528401 : Code[20];VAR SignhostDocument@1100528408 : Record 11229468;VAR XmlDocument@1100528416 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument");
+    VAR
+      TempBlob@1100528405 : Record 99008535;
+      HttpWebRequestMgt@1100528404 : Codeunit 1297;
+      GetJsonStructure@1100528406 : Codeunit 1237;
+      ResponseInStream@1100528403 : InStream;
+      OutStream@1100528407 : OutStream;
+      Body@1100528402 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      NewContent@1100527600 : Text;
+    BEGIN
+      CreateHttpRequest(STRSUBSTNO('%1transaction/', BaseUrl), 'POST');
+      GetbodyForCreateTransaction(RecordID, WordDocumentNo, Body);
+      AddJsonBodyToRequest(Body, TRUE);
+
+      TempBlob.Blob.CREATEINSTREAM(ResponseInStream);
+      InvokeHttpRequest(ResponseInStream, FALSE);
+      TempBlob.Blob.CREATEOUTSTREAM(OutStream);
+      GetJsonStructure.JsonToXMLCreateDefaultRoot(ResponseInStream, OutStream);
+      XmlDocument := XmlDocument.XmlDocument;
+      XmlDocument.Load(OutStream);
+    END;
+
+    LOCAL PROCEDURE AddFileMetaDataToTransaction@1100528405(RecordID@1100528400 : RecordID;WordDocumentNo@1100528407 : Code[20];TransactionId@1100528401 : Text;NoOfPages@1100528402 : Integer);
+    VAR
+      ResponseInStream@1100528406 : InStream;
+      HttpWebRequestMgt@1100528403 : Codeunit 1297;
+      PDFFileName@1100528404 : Text;
+      Body@1100527600 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      TempBlob@1100527601 : Record 99008535;
+    BEGIN
+      PDFFileName := DerivePDFFileNameFromRecordID(RecordID);
+      CreateHttpRequest(STRSUBSTNO('%1transaction/%2/file/%3', BaseUrl, TransactionId, PDFFileName), 'PUT');
+      GetBodyForAddFileMetaDataToTransaction(RecordID, WordDocumentNo, NoOfPages, Body);
+      AddJsonBodyToRequest(Body, TRUE);
+      TempBlob.Blob.CREATEINSTREAM(ResponseInStream);
+      InvokeHttpRequest(ResponseInStream, FALSE);
+    END;
+
+    LOCAL PROCEDURE AddFileToTransaction@1100528412(RecordID@1100528403 : RecordID;TransactionId@1100528407 : Text;ServerFileName@1100528410 : Text);
+    VAR
+      HttpWebRequestMgt@1100528400 : Codeunit 1297;
+      ResponseInStream@1100528402 : InStream;
+      PDFFileName@1100528401 : Text;
+      HttpStatusCode@1100527600 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpStatusCode";
+      ResponseHeaders@1100527601 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Collections.Specialized.NameValueCollection";
+      WebRequestHelper@1100527609 : Codeunit 1299;
+      WebException@1100527608 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.WebException";
+      ResponseInStream2@1100527607 : InStream;
+      ServiceURL@1100527606 : Text;
+      ErrorText@1100527605 : Text;
+      ResponseText@1100527604 : Text;
+      SupportInfo@1100527603 : Text;
+    BEGIN
+      // not able to refactor this to .NET compliant variables. StreamContent won't work properly with NAV Instreams.
+      // main purpose of this refactor was to remove the BOM character from the JSON bodies being sent to ondertekenen.nl
+      PDFFileName := DerivePDFFileNameFromRecordID(RecordID);
+      HttpWebRequestMgt.Initialize(STRSUBSTNO('%1transaction/%2/file/%3', BaseUrl, TransactionId, PDFFileName));
+      HttpWebRequestMgt.SetMethod('PUT');
+      HttpWebRequestMgt.AddHeader('Authorization', 'APIKey ' + SignhostSetup."API Key");
+      HttpWebRequestMgt.AddHeader('Application', 'APPKey ' + SignhostSetup."APP Key");
+      HttpWebRequestMgt.AddHeader('SH-DisplayName', DeriveDocumentNameFromRecordID(RecordID));
+      HttpWebRequestMgt.SetContentType('application/pdf');
+      HttpWebRequestMgt.AddBody(ServerFileName);
+
+      HttpWebRequestMgt.CreateInstream(ResponseInStream);
+      IF NOT HttpWebRequestMgt.GetResponse(ResponseInStream, HttpStatusCode, ResponseHeaders) THEN BEGIN
+        ErrorText := WebRequestHelper.GetWebResponseError(WebException, ServiceURL);
+        IF NOT ISNULL(WebException.Response) THEN BEGIN
+          WebException.Response.GetResponseStream.CopyTo(ResponseInStream);
+          ResponseInStream2 := WebException.Response.GetResponseStream;
+          ResponseInStream2.READTEXT(ResponseText);
+          IF ResponseText <> '' THEN BEGIN
+              ERROR(ErrorText + '\\' + ResponseText)
+          END ELSE
+            HttpWebRequestMgt.ProcessFaultResponse(SupportInfo);
+        END ELSE
+          HttpWebRequestMgt.ProcessFaultResponse(SupportInfo);
+      END;
+    END;
+
+    LOCAL PROCEDURE StartTransaction@1100528419(TransactionId@1100528407 : Text);
+    VAR
+      ResponseInStream@1100528402 : InStream;
+      EmptyJObject@1100527600 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      TempBlob@1100527601 : Record 99008535;
+    BEGIN
+      CreateHttpRequest(STRSUBSTNO('%1transaction/%2/start', BaseUrl, TransactionId), 'PUT');
+      TempBlob.Blob.CREATEINSTREAM(ResponseInStream);
+      EmptyJObject := EmptyJObject.JObject;
+      AddJsonBodyToRequest(EmptyJObject, FALSE);
+      InvokeHttpRequest(ResponseInStream, FALSE);
+    END;
+
+    LOCAL PROCEDURE GetTransaction@1100528411(TransactionId@1100528407 : Text;VAR XmlDocument@1100528412 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument");
+    VAR
+      TempBlob@1100528408 : Record 99008535;
+      HttpWebRequestMgt@1100528400 : Codeunit 1297;
+      GetJsonStructure@1100528406 : Codeunit 1237;
+      ResponseInStream@1100528402 : InStream;
+      OutStream@1100528405 : OutStream;
+    BEGIN
+      CreateHttpRequest(STRSUBSTNO('%1transaction/%2', BaseUrl, TransactionId), 'GET');
+      TempBlob.Blob.CREATEINSTREAM(ResponseInStream);
+      InvokeHttpRequest(ResponseInStream, TRUE);
+      TempBlob.Blob.CREATEOUTSTREAM(OutStream);
+      GetJsonStructure.JsonToXMLCreateDefaultRoot(ResponseInStream, OutStream);
+      XmlDocument := XmlDocument.XmlDocument;
+      XmlDocument.Load(OutStream);
+    END;
+
+    LOCAL PROCEDURE GetTransactionId@1100528418(XmlDocument@1100528402 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument") TransactionId : Text;
+    VAR
+      XmlNodeId@1100528403 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      XMLDOMManagement@1100528405 : Codeunit 6224;
+    BEGIN
+      XMLDOMManagement.FindNode(XmlDocument.DocumentElement, '//root/Id', XmlNodeId);
+      IF NOT ISNULL(XmlNodeId) THEN
+        TransactionId := XmlNodeId.InnerText;
+    END;
+
+    LOCAL PROCEDURE CreateSignhostDocument@1100528423(RecordID@1100528402 : RecordID;WordDocumentNo@1100528404 : Code[20];TransactionId@1100528401 : Text;VAR SignhostDocument@1100528400 : Record 11229468);
+    BEGIN
+      SignhostDocument."Record ID" := RecordID;
+      SignhostDocument."Sent Word Document No." := WordDocumentNo;
+      SignhostDocument."Transaction Id" := TransactionId;
+      SignhostDocument.TESTFIELD("Transaction Id");
+      SignhostDocument.INSERT;
+    END;
+
+    LOCAL PROCEDURE UpdateSignhostDocument@1100528427(VAR SignhostDocument@1100528400 : Record 11229468;XmlDocument@1100528402 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument");
+    VAR
+      XmlNodeStatus@1100528401 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      XMLDOMManagement@1100528405 : Codeunit 6224;
+      TransactionId@1100528406 : Text;
+      DocumentStatusNo@1100528407 : Text[20];
+    BEGIN
+      TransactionId := GetTransactionId(XmlDocument);
+      SignhostDocument.TESTFIELD("Transaction Id", TransactionId);
+      XMLDOMManagement.FindNode(XmlDocument.DocumentElement, '//root/Status', XmlNodeStatus);
+      IF NOT ISNULL(XmlNodeStatus) THEN
+        DocumentStatusNo := XmlNodeStatus.InnerText;
+      SignhostDocument.Status := GetDocumentStatusBasedOnStatusNo(DocumentStatusNo);
+      IF SignhostDocument."Sent Date-Time" = 0DT THEN
+        SignhostDocument."Sent Date-Time" := CURRENTDATETIME;
+      SignhostDocument.MODIFY;
+    END;
+
+    LOCAL PROCEDURE UpdateSignhostSigners@1100528428(SignhostDocument@1100528411 : Record 11229468;XmlDocument@1100528400 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlDocument");
+    VAR
+      SignhostSigner@1100528410 : Record 11229467;
+      XmlNodeList@1100528404 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      XmlNodeSigner@1100528403 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      XmlNodeId@1100528408 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      XmlNodeSignUrl@1100528401 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      XMLDOMManagement@1100528405 : Codeunit 6224;
+      SignerId@1100528409 : Text[20];
+    BEGIN
+      XMLDOMManagement.FindNodes(XmlDocument.DocumentElement, '//root/Signers', XmlNodeList);
+      FOREACH XmlNodeSigner IN XmlNodeList DO BEGIN
+        IF NOT ISNULL(XmlNodeSigner) THEN
+          XMLDOMManagement.FindNode(XmlNodeSigner, './Id', XmlNodeId);
+        IF NOT ISNULL(XmlNodeId) THEN
+          SignerId := XmlNodeId.InnerText;
+        SignhostSigner.SETRANGE("Record ID", SignhostDocument."Record ID");
+        SignhostSigner.SETRANGE("Word Document No.", SignhostDocument."Sent Word Document No.");
+        SignhostSigner.SETRANGE(Id, SignerId);
+        IF SignhostSigner.FINDFIRST THEN BEGIN
+          XMLDOMManagement.FindNode(XmlNodeSigner, './SignUrl', XmlNodeSignUrl);
+          IF NOT ISNULL(XmlNodeSignUrl) THEN
+            SignhostSigner."Sign Url" := XmlNodeSignUrl.InnerText;
+          SignhostSigner."Last Activity" := GetLastActivityOfSigner(XmlNodeSigner);
+          SignhostSigner."Signed Date-Time" := GetSignedDateTimeOfSigner(XmlNodeSigner);
+          SignhostSigner."Rejected Date-Time" := GetRejectedDateTimeOfSigner(XmlNodeSigner);
+          UpdateSignhostSignerRejectionText(XmlNodeSigner, SignhostSigner);
+          SignhostSigner.MODIFY;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateSourceRecord@1100528431(OrigSignhostDocument@1100528400 : Record 11229468;SignhostDocument@1100528402 : Record 11229468);
+    VAR
+      PurchaseHeader@1100528403 : Record 38;
+      RecID@1100528404 : RecordID;
+      RecRef@1100528401 : RecordRef;
+    BEGIN
+      RecID := SignhostDocument."Record ID";
+      RecRef := RecID.GETRECORD;
+      CASE RecRef.NUMBER OF
+        DATABASE::"Purchase Header":
+          BEGIN
+            RecRef.SETTABLE(PurchaseHeader);
+            CASE PurchaseHeader."Document Type" OF
+              PurchaseHeader."Document Type"::Order:
+                BEGIN
+                  IF PurchaseHeader.GET(PurchaseHeader."Document Type", PurchaseHeader."No.") THEN BEGIN
+                    IF (OrigSignhostDocument.Status = 0) AND
+                       (SignhostDocument.Status < SignhostDocument.Status::Signed)
+                    THEN BEGIN
+                      PurchaseHeader."Return Date Signed Contract" := 0D; // SignhostDocument is sent to Signhost now.
+                      PurchaseHeader.MODIFY;
+                    END ELSE
+                      IF (OrigSignhostDocument.Status <> OrigSignhostDocument.Status::Signed) AND
+                         (SignhostDocument.Status = SignhostDocument.Status::Signed)
+                      THEN
+                        IF NOT SignhostDocument.OtherPendingSignhostDocumentExistsForSourceRecord THEN BEGIN
+                          PurchaseHeader."Return Date Signed Contract" := SignhostDocument.GetSignDateOfLastSigner;
+                          PurchaseHeader.MODIFY;
+                        END;
+                  END;
+                END;
+            END;
+          END;
+      END;
+    END;
+
+    LOCAL PROCEDURE GetLastActivityOfSigner@1100528407(XmlNodeSigner@1100528400 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode") : Integer;
+    VAR
+      XmlNodeList@1100528403 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNodeList";
+      XmlNodeActivity@1100528402 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      XmlNodeCreatedDateTime@1100528404 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      XmlNodeCode@1100528405 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      XMLDOMManagement@1100528401 : Codeunit 6224;
+      ActivityDateTime@1100528406 : DateTime;
+      LastActivityDateTime@1100528407 : DateTime;
+      ActivityDateTimeTxt@1100528408 : Text;
+      LastActivityCode@1100528409 : Text;
+    BEGIN
+      IF ISNULL(XmlNodeSigner) THEN
+        EXIT;
+      XMLDOMManagement.FindNodes(XmlNodeSigner, './Activities', XmlNodeList);
+      FOREACH XmlNodeActivity IN XmlNodeList DO BEGIN
+        IF NOT ISNULL(XmlNodeActivity) THEN BEGIN
+          XMLDOMManagement.FindNode(XmlNodeActivity, './CreatedDateTime', XmlNodeCreatedDateTime);
+          IF NOT ISNULL(XmlNodeCreatedDateTime) THEN BEGIN
+            ActivityDateTimeTxt := XmlNodeCreatedDateTime.InnerText;
+            IF EVALUATE(ActivityDateTime, ActivityDateTimeTxt, 9) THEN BEGIN
+              IF ActivityDateTime > LastActivityDateTime THEN BEGIN
+                LastActivityDateTime := ActivityDateTime;
+                XMLDOMManagement.FindNode(XmlNodeActivity, './Code', XmlNodeCode);
+                IF NOT ISNULL(XmlNodeCode) THEN
+                  LastActivityCode := XmlNodeCode.InnerText;
+              END;
+            END;
+          END;
+        END;
+      END;
+      EXIT(GetSignerActivityBasedOnSignerActivityCode(LastActivityCode));
+    END;
+
+    LOCAL PROCEDURE GetSignedDateTimeOfSigner@1100528416(XmlNodeSigner@1100528400 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode") ActivityDateTime : DateTime;
+    BEGIN
+      EXIT(GetActivityDateTimeOfSigner(XmlNodeSigner, '203'));
+    END;
+
+    LOCAL PROCEDURE GetRejectedDateTimeOfSigner@1100528444(XmlNodeSigner@1100528400 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode") ActivityDateTime : DateTime;
+    BEGIN
+      EXIT(GetActivityDateTimeOfSigner(XmlNodeSigner, '202'));
+    END;
+
+    LOCAL PROCEDURE GetActivityDateTimeOfSigner@1100528445(XmlNodeSigner@1100528400 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";SignerActivityCode@1100528403 : Text[20]) ActivityDateTime : DateTime;
+    VAR
+      XmlNodeActivity@1100528402 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      XmlNodeCreatedDateTime@1100528404 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      XMLDOMManagement@1100528401 : Codeunit 6224;
+      ActivityDateTimeTxt@1100528408 : Text;
+    BEGIN
+      IF ISNULL(XmlNodeSigner) THEN
+        EXIT;
+      XMLDOMManagement.FindNode(XmlNodeSigner, './Activities[Code="' + SignerActivityCode + '"]', XmlNodeActivity);
+      IF NOT ISNULL(XmlNodeActivity) THEN BEGIN
+        XMLDOMManagement.FindNode(XmlNodeActivity, './CreatedDateTime', XmlNodeCreatedDateTime);
+        IF NOT ISNULL(XmlNodeCreatedDateTime) THEN BEGIN
+          ActivityDateTimeTxt := XmlNodeCreatedDateTime.InnerText;
+          IF EVALUATE(ActivityDateTime, ActivityDateTimeTxt, 9) THEN;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateSignhostSignerRejectionText@1100528439(XmlNodeSigner@1100528400 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";SignhostSigner@1100528409 : Record 11229467) ActivityDateTime : DateTime;
+    VAR
+      SignhostSignerRejectionText@1100528404 : Record 11072462;
+      XmlNodeRejectReason@1100528402 : DotNet "'System.Xml, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Xml.XmlNode";
+      XMLDOMManagement@1100528401 : Codeunit 6224;
+      TextEditor@1100528403 : Codeunit 11012001;
+      RejectReasonTxtArray@1100528405 : ARRAY [10] OF Text;
+      RejectReasonTxt@1100528408 : Text;
+      NoOfLines@1100528406 : Integer;
+      I@1100528407 : Integer;
+    BEGIN
+      IF ISNULL(XmlNodeSigner) THEN
+        EXIT;
+      SignhostSigner.CALCFIELDS("No. of Rejection Text Lines");
+      IF SignhostSigner."No. of Rejection Text Lines" > 0 THEN
+        EXIT;
+
+      XMLDOMManagement.FindNode(XmlNodeSigner, './RejectReason', XmlNodeRejectReason);
+      IF NOT ISNULL(XmlNodeRejectReason) THEN BEGIN
+        RejectReasonTxt := COPYSTR(XmlNodeRejectReason.InnerText, 1, 500);
+        IF RejectReasonTxt <> '' THEN BEGIN
+          NoOfLines := TextEditor.BreakDescription(
+            RejectReasonTxt, MAXSTRLEN(SignhostSignerRejectionText.Comment), TRUE, RejectReasonTxtArray);
+          FOR I := 1 TO NoOfLines DO BEGIN
+            SignhostSignerRejectionText."Record ID" := SignhostSigner."Record ID";
+            SignhostSignerRejectionText."Word Document No." := SignhostSigner."Word Document No.";
+            SignhostSignerRejectionText."Signhost Signer Type" := SignhostSigner.Type;
+            SignhostSignerRejectionText."Signhost Signer No." := SignhostSigner."No.";
+            SignhostSignerRejectionText."Line No." := I * 10000;
+            SignhostSignerRejectionText.Comment := RejectReasonTxtArray[I];
+            SignhostSignerRejectionText.INSERT;
+          END;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateHttpRequest@1100528454(Url@1100528404 : Text;Method@1100528402 : Text);
+    VAR
+      ServicePointManager@1100528401 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.ServicePointManager";
+      SecurityProtocolType@1100528400 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.SecurityProtocolType";
+      EmptyRequest@1100527600 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.HttpRequestMessage";
+      Uri@1100527601 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Uri";
+      HttpMethod@1100527602 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.HttpMethod";
+    BEGIN
+      Client := Client.HttpClient;
+      GetSignhostSetup();
+      ServicePointManager.SecurityProtocol(SecurityProtocolType.Tls12);
+      Request := EmptyRequest.HttpRequestMessage;
+      Request.Headers.Add('Authorization', STRSUBSTNO('APIKey %1', SignhostSetup."API Key"));
+      Request.Headers.Add('Application', STRSUBSTNO('APPKey %1', SignhostSetup."APP Key"));
+      Uri := Uri.Uri(Url);
+      Request.RequestUri := Uri;
+      CASE Method OF
+        'GET':
+          Request.Method := HttpMethod.Get;
+        'PUT':
+          Request.Method := HttpMethod.Put;
+        'POST':
+          Request.Method := HttpMethod.Post;
+      END;
+    END;
+
+    LOCAL PROCEDURE InvokeHttpRequest@1100528464(VAR ResponseInStream@1100528404 : InStream;IgnoreError410Gone@1100528402 : Boolean);
+    VAR
+      HttpStatusCode@1100528401 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.HttpStatusCode";
+      ResponseHeaders@1100528400 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Collections.Specialized.NameValueCollection";
+      HttpResponseContent@1100527600 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.HttpContent";
+      dNetStream@1100527601 : DotNet "'mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.IO.Stream";
+      TempBlob@1100527603 : Record 99008535;
+    BEGIN
+      Response := Client.SendAsync(Request).Result;
+      ProcessFaultResponse(Response, IgnoreError410Gone);
+      HttpResponseContent := Response.Content;
+      dNetStream := HttpResponseContent.ReadAsStreamAsync.Result;
+      dNetStream.CopyTo(ResponseInStream);
+      dNetStream.Close;
+      Client.Dispose;
+    END;
+
+    LOCAL PROCEDURE ProcessFaultResponse@1100528422(VAR response@1100528408 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.HttpResponseMessage";IgnoreError410Gone@1100528409 : Boolean);
+    VAR
+      WebRequestHelper@1100528400 : Codeunit 1299;
+      WebException@1100528402 : DotNet "'System, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089'.System.Net.WebException";
+      ResponseInStream2@1100528403 : InStream;
+      ServiceURL@1100528401 : Text;
+      ErrorText@1100528406 : Text;
+      ResponseText@1100528407 : Text;
+      SupportInfo@1100528405 : Text;
+      HttpResponseContent@1100527600 : DotNet "'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'.System.Net.Http.HttpContent";
+    BEGIN
+      IF NOT response.IsSuccessStatusCode THEN
+          ErrorText := response.ReasonPhrase
+      ELSE
+          EXIT;
+
+      HttpResponseContent := response.Content;
+      IF NOT ISNULL(HttpResponseContent) THEN BEGIN
+        ResponseText := HttpResponseContent.ReadAsStringAsync.Result;
+        IF ResponseText <> '' THEN BEGIN
+            IF IgnoreError410Gone AND Error410GoneOccurred(ErrorText) AND ResponseContainsValidData(ResponseText) THEN
+                EXIT // Despite error 410 the response can be used to update signhost data.
+            ELSE
+                ERROR(ErrorText + '\\' + ResponseText)
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE Error410GoneOccurred@1100528478(ErrorText@1100528400 : Text) : Boolean;
+    BEGIN
+      IF STRPOS(ErrorText, '410') = 0 THEN
+        EXIT(FALSE);
+      IF STRPOS(UPPERCASE(ErrorText), 'GONE') = 0 THEN
+        EXIT(FALSE);
+
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE ResponseContainsValidData@1100528480(ResponseText@1100528400 : Text) : Boolean;
+    BEGIN
+      IF STRPOS(ResponseText, '"Id":') = 0 THEN
+        EXIT(FALSE);
+      IF STRPOS(ResponseText, '"Status":') = 0 THEN
+        EXIT(FALSE);
+      IF STRPOS(ResponseText, '"Files":') = 0 THEN
+        EXIT(FALSE);
+      IF STRPOS(ResponseText, '"Signers":') = 0 THEN
+        EXIT(FALSE);
+
+      EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE BaseUrl@1100528457() : Text;
+    BEGIN
+      GetSignhostSetup;
+      EXIT(DELCHR(SignhostSetup."API URL", '>', '/') + '/api/');
+    END;
+
+    PROCEDURE SetCurrentKeyOfSignerAccordingToPositioning@1100528447(SignhostSignPositioning@1100528402 : Record 11229472;VAR SignhostSigner@1100528401 : Record 11229467);
+    BEGIN
+      CASE SignhostSignPositioning."Signer Order in PDF" OF
+        SignhostSignPositioning."Signer Order in PDF"::"Type; No.":
+          SignhostSigner.SETCURRENTKEY("Record ID", "Word Document No.", Type, "No.");
+        SignhostSignPositioning."Signer Order in PDF"::Id:
+          SignhostSigner.SETCURRENTKEY("Record ID", "Word Document No.", Id);
+      END;
+    END;
+
+    LOCAL PROCEDURE GetDocumentStatusBasedOnStatusNo@1100528409(StatusNo@1100528400 : Text[20]) : Integer;
+    VAR
+      SignhostDocument@1100528401 : Record 11229468;
+    BEGIN
+      CASE StatusNo OF
+        '5':
+          EXIT(SignhostDocument.Status::"Waiting for Document");
+        '10':
+          EXIT(SignhostDocument.Status::"Waiting for Signer");
+        '20':
+          EXIT(SignhostDocument.Status::"In Progress");
+        '30':
+          EXIT(SignhostDocument.Status::Signed);
+        '40':
+          EXIT(SignhostDocument.Status::Rejected);
+        '50':
+          EXIT(SignhostDocument.Status::Expired);
+        '60':
+          EXIT(SignhostDocument.Status::Cancelled);
+        '70':
+          EXIT(SignhostDocument.Status::Failed);
+      END;
+    END;
+
+    LOCAL PROCEDURE GetSignerActivityBasedOnSignerActivityCode@1100528438(SignerActivityCode@1100528400 : Text[20]) : Integer;
+    VAR
+      SignhostSigner@1100528401 : Record 11229467;
+    BEGIN
+      CASE SignerActivityCode OF
+        '101':
+          EXIT(SignhostSigner."Last Activity"::"Invitation Sent");
+        '102':
+          EXIT(SignhostSigner."Last Activity"::Received);
+        '103':
+          EXIT(SignhostSigner."Last Activity"::Opened);
+        '104':
+          EXIT(SignhostSigner."Last Activity"::"Reminder Sent");
+        '105':
+          EXIT(SignhostSigner."Last Activity"::"Document Opened");
+        '201':
+          EXIT(SignhostSigner."Last Activity"::Cancelled);
+        '202':
+          EXIT(SignhostSigner."Last Activity"::Rejected);
+        '203':
+          EXIT(SignhostSigner."Last Activity"::Signed);
+        '301':
+          EXIT(SignhostSigner."Last Activity"::"Signed Document Sent");
+        '302':
+          EXIT(SignhostSigner."Last Activity"::"Signed Document Opened");
+        '303':
+          EXIT(SignhostSigner."Last Activity"::"Signed Document Downloaded");
+        '401':
+          EXIT(SignhostSigner."Last Activity"::"Receipt Sent");
+        '402':
+          EXIT(SignhostSigner."Last Activity"::"Receipt Opened");
+        '403':
+          EXIT(SignhostSigner."Last Activity"::"Receipt Downloaded");
+      END;
+    END;
+
+    LOCAL PROCEDURE DerivePDFFileNameFromRecordID@1100528414(RecordID@1100528400 : RecordID) FileName : Text;
+    VAR
+      DocumentName@1100528401 : Text;
+      DocumentType@1100528402 : Integer;
+    BEGIN
+      DeriveDataFromRecordID(RecordID, FileName, DocumentName, DocumentType);
+    END;
+
+    LOCAL PROCEDURE DeriveDocumentNameFromRecordID@1100528425(RecordID@1100528400 : RecordID) DocumentName : Text;
+    VAR
+      FileName@1100528403 : Text;
+      DocumentType@1100528401 : Integer;
+    BEGIN
+      DeriveDataFromRecordID(RecordID, FileName, DocumentName, DocumentType);
+    END;
+
+    PROCEDURE DeriveDocumentTypeFromRecordID@1100528446(RecordID@1100528400 : RecordID) DocumentType : Integer;
+    VAR
+      FileName@1100528403 : Text;
+      DocumentName@1100528401 : Text;
+    BEGIN
+      DeriveDataFromRecordID(RecordID, FileName, DocumentName, DocumentType);
+    END;
+
+    LOCAL PROCEDURE DeriveDataFromRecordID@1100528426(RecordID@1100528400 : RecordID;VAR FileName@1100528403 : Text;VAR DocumentName@1100528404 : Text;VAR DocumentType@1100528405 : Integer);
+    VAR
+      PurchaseHeader@1100528402 : Record 38;
+      SignhostSignPositioning@1100528406 : Record 11229472;
+      RecRef@1100528401 : RecordRef;
+    BEGIN
+      FileName := '';
+      DocumentName := '';
+      DocumentType := 0;
+      IF RecordID.TABLENO = 0 THEN
+        EXIT;
+      RecRef := RecordID.GETRECORD;
+      CASE RecRef.NUMBER OF
+        DATABASE::"Purchase Header":
+          BEGIN
+            RecRef.SETTABLE(PurchaseHeader);
+            FileName := STRSUBSTNO('%1.pdf', PurchaseHeader."No.");
+            IF NOT NameStartsWithLetter(FileName) THEN
+              FileName := 'po' + FileName; //To prevent error in function JsonToXMLCreateDefaultRoot of codeunit 1237.
+            CASE PurchaseHeader."Document Type" OF
+              PurchaseHeader."Document Type"::Order:
+                BEGIN
+                  DocumentName := STRSUBSTNO(Text000, PurchaseHeader."No.");
+                  DocumentType := SignhostSignPositioning."Document Type"::"Purchase Order";
+                END;
+            END;
+          END;
+      END;
+    END;
+
+    LOCAL PROCEDURE NameStartsWithLetter@1100528448(Name@1100528400 : Text) : Boolean;
+    VAR
+      FirstLetter@1100528401 : Text;
+    BEGIN
+      IF Name = '' THEN
+        EXIT(FALSE);
+      FirstLetter := LOWERCASE(COPYSTR(Name, 1, 1));
+      IF STRPOS('abcdefghijklmnopqrstuvwxyz', FirstLetter) > 0 THEN
+        EXIT(TRUE);
+    END;
+
+    LOCAL PROCEDURE SignatureMustBePutOnPage@1100528429(RecordID@1100528402 : RecordID;PageNo@1100528400 : Integer;NoOfPages@1100528401 : Integer) SignatureRequired : Boolean;
+    BEGIN
+      GetSignhostSignPositioning(RecordID);
+      CASE SignhostSignPositioning."Signature Required on" OF
+        SignhostSignPositioning."Signature Required on"::"First Page":
+          IF PageNo = 1 THEN
+            SignatureRequired := TRUE;
+        SignhostSignPositioning."Signature Required on"::"Last Page":
+          IF PageNo = NoOfPages THEN
+            SignatureRequired := TRUE;
+        SignhostSignPositioning."Signature Required on"::"All Pages":
+          SignatureRequired := TRUE;
+      END;
+    END;
+
+    LOCAL PROCEDURE HorizontalSignaturePosition@1100528433(RecordID@1100528401 : RecordID;SignerSequenceNo@1100528400 : Integer;VAR LocationJObject@1100527600 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject");
+    VAR
+      Value@1100528402 : Integer;
+      ColumnNo@1100528403 : Integer;
+      JValue@1100527601 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JValue";
+    BEGIN
+      GetSignhostSignPositioning(RecordID);
+      ColumnNo := (SignerSequenceNo - 1) MOD SignhostSignPositioning."No. of Signatures in a Row" + 1;
+      Value := 10 + (ColumnNo - 1) * (SignatureWidth + 5);
+      CASE SignhostSignPositioning."Horizontal Positioning" OF
+          SignhostSignPositioning."Horizontal Positioning"::"From Left to Right":
+            BEGIN
+              JValue := JValue.JValue(Value);
+               LocationJObject.Add('Left', JValue);
+            END;
+          SignhostSignPositioning."Horizontal Positioning"::"From Right to Left":
+            BEGIN
+              JValue := JValue.JValue(Value);
+              LocationJObject.Add('Right', JValue);
+            END;
+      END;
+    END;
+
+    LOCAL PROCEDURE VerticalSignaturePosition@1100528434(RecordID@1100528401 : RecordID;SignerSequenceNo@1100528400 : Integer;VAR LocationJObject@1100527602 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject");
+    VAR
+      Value@1100528402 : Integer;
+      RowNo@1100528403 : Integer;
+      JValue@1100527600 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JValue";
+    BEGIN
+      GetSignhostSignPositioning(RecordID);
+      RowNo := (SignerSequenceNo - 1) DIV SignhostSignPositioning."No. of Signatures in a Row" + 1;
+      Value := 10 + (RowNo - 1) * (SignatureHeight + 5);
+      CASE SignhostSignPositioning."Vertical Positioning" OF
+          SignhostSignPositioning."Vertical Positioning"::"From Top to Bottom":
+            BEGIN
+              JValue := JValue.JValue(Value);
+              LocationJObject.Add('Top', JValue);
+            END;
+          SignhostSignPositioning."Vertical Positioning"::"From Bottom to Top":
+            BEGIN
+              JValue := JValue.JValue(Value);
+              LocationJObject.Add('Bottom', JValue);
+            END;
+      END;
+    END;
+
+    LOCAL PROCEDURE SignatureWidth@1100528435() : Integer;
+    BEGIN
+      EXIT(140);
+    END;
+
+    LOCAL PROCEDURE SignatureHeight@1100528436() : Integer;
+    BEGIN
+      EXIT(70);
+    END;
+
+    LOCAL PROCEDURE GetSignhostSetup@1100528420();
+    BEGIN
+      IF NOT SignhostSetupRead THEN BEGIN
+        SignhostSetup.GET;
+        SignhostSetupRead := TRUE;
+      END;
+    END;
+
+    LOCAL PROCEDURE GetSignhostSignPositioning@1100528421(RecordID@1100528400 : RecordID);
+    VAR
+      DocumentType@1100528403 : Integer;
+    BEGIN
+      DocumentType := DeriveDocumentTypeFromRecordID(RecordID);
+      IF SignhostSignPositioningReadForDocumentType <> DocumentType THEN BEGIN
+        IF NOT SignhostSignPositioning.GET(DocumentType) THEN
+          SignhostSignPositioning.GET(SignhostSignPositioning."Document Type"::" ");
+        IF NOT SignhostSignPositioning."Use Signer Tags in PDF" THEN BEGIN
+          SignhostSignPositioning.TESTFIELD("No. of Signatures in a Row");
+          IF (SignhostSignPositioning."Horizontal Positioning" =
+              SignhostSignPositioning."Horizontal Positioning"::"Not Applicable")
+          THEN
+            SignhostSignPositioning.FIELDERROR("Horizontal Positioning");
+          IF (SignhostSignPositioning."Vertical Positioning" =
+              SignhostSignPositioning."Vertical Positioning"::"Not Applicable")
+          THEN
+            SignhostSignPositioning.FIELDERROR("Vertical Positioning");
+          IF (SignhostSignPositioning."Signature Required on" =
+              SignhostSignPositioning."Signature Required on"::"Not Applicable")
+          THEN
+            SignhostSignPositioning.FIELDERROR("Signature Required on");
+        END;
+        SignhostSignPositioningReadForDocumentType := DocumentType;
+      END;
+    END;
+
+    LOCAL PROCEDURE WordDocumentHasSignhostSigners@1100528432(RecordID@1100528400 : RecordID;WordDocumentNo@1100528401 : Code[20]) : Boolean;
+    VAR
+      SignhostSigner@1100528402 : Record 11229467;
+    BEGIN
+      EXIT(SignhostSigner.WordDocumentHasSignhostSigners(RecordID, WordDocumentNo));
+    END;
+
+    LOCAL PROCEDURE CopySignhostSignersOfRecordIDToWordDocument@1100528442(RecordID@1100528402 : RecordID;WordDocumentNo@1100528401 : Code[20]);
+    VAR
+      SignhostSigner@1100528400 : Record 11229467;
+    BEGIN
+      SignhostSigner.CopySignhostSignersWithinRecID(RecordID, '', WordDocumentNo, TRUE);
+    END;
+
+    LOCAL PROCEDURE GetbodyForCreateTransaction@1100527600(RecordID@1100527600 : RecordID;WordDocumentNo@1100527601 : Code[20];VAR JsonObject@1100527602 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject");
+    VAR
+      SignhostSigner@1100527603 : Record 11229467;
+      signersJArray@1100527604 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JArray";
+      signerArrayJObject@1100527605 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      JValue@1100527607 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JValue";
+    BEGIN
+      GetSignhostSignPositioning(RecordID);
+      SetCurrentKeyOfSignerAccordingToPositioning(SignhostSignPositioning, SignhostSigner);
+      SignhostSigner.SETRANGE("Record ID", RecordID);
+      SignhostSigner.SETRANGE("Word Document No.", WordDocumentNo);
+      SignhostSigner.FINDSET();
+
+      signersJArray := signersJArray.JArray();
+
+      REPEAT
+          signerArrayJObject := signerArrayJObject.JObject;
+          JValue := JValue.JValue(SignhostSigner.Id);
+          signerArrayJObject.Add('Id', JValue);
+          JValue := JValue.JValue(SignhostSigner.GetEMail);
+          signerArrayJObject.Add('Email', JValue);
+          JValue := JValue.JValue(TRUE);
+          signerArrayJObject.Add('RequireScribble', JValue);
+          JValue := JValue.JValue(SignhostSigner.GetSignhostLanguage);
+          signerArrayJObject.Add('Language', JValue);
+          JValue := JValue.JValue(FALSE);
+          signerArrayJObject.Add('SendSignRequest', JValue);
+          JValue := JValue.JValue(SignhostSigner.GetFullName);
+          signerArrayJObject.Add('ScribbleName', JValue);
+          JValue := JValue.JValue(FALSE);
+          signerArrayJObject.Add('ScribbleNameFixed', JValue);
+          signersJArray.Add(signerArrayJObject.DeepClone);
+      UNTIL SignhostSigner.NEXT = 0;
+      JsonObject := JsonObject.JObject;
+      JsonObject.Add('Signers', signersJArray.DeepClone);
+    END;
+
+    LOCAL PROCEDURE AddJsonBodyToRequest@1100527601(Body@1100527600 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";AddContentType@1100527601 : Boolean);
+    BEGIN
+      StringContent := StringContent.StringContent(Body.ToString);
+      StringContent.Headers.Remove('Content-Type');
+      IF AddContentType THEN
+          StringContent.Headers.Add('Content-Type', 'application/json');
+
+      Request.Content := StringContent;
+    END;
+
+    LOCAL PROCEDURE GetBodyForAddFileMetaDataToTransaction@1100527602(RecordID@1100527600 : RecordID;WordDocumentNo@1100527601 : Code[20];NoOfPages@1100527602 : Integer;VAR Body@1100527603 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject");
+    VAR
+      SignhostSigner@1100527604 : Record 11229467;
+      SignerSequenceNo@1100527605 : Integer;
+      I@1100527606 : Integer;
+      signersJObject@1100527607 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      signHostSignerJObject@1100527608 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      signformSetJObject@1100527609 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      signformSetsJArray@1100527610 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JArray";
+      formSetsJObject@1100527611 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      formSetJObject@1100527612 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      signatureJObject@1100527613 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      locationJObject@1100527614 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      emptyJObject@1100527615 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JObject";
+      emptyJArray@1100527616 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JArray";
+      JValue@1100527617 : DotNet "'Newtonsoft.Json'.Newtonsoft.Json.Linq.JValue";
+    BEGIN
+      GetSignhostSignPositioning(RecordID);
+      SetCurrentKeyOfSignerAccordingToPositioning(SignhostSignPositioning, SignhostSigner);
+      SignhostSigner.SETRANGE("Record ID", RecordID);
+      SignhostSigner.SETRANGE("Word Document No.", WordDocumentNo);
+      SignhostSigner.FINDSET;
+      Body := Body.JObject;
+      JValue := JValue.JValue(DeriveDocumentNameFromRecordID(RecordID));
+      Body.Add('DisplayName', JValue);
+
+      signersJObject := signersJObject.JObject;
+      REPEAT
+          signformSetsJArray := signformSetsJArray.JArray;
+          signformSetsJArray.Add(STRSUBSTNO('Formset%1', SignhostSigner.Id));
+          signformSetJObject := signformSetJObject.JObject;
+          signformSetJObject.Add('FormSets', signformSetsJArray);
+          signersJObject.Add(SignhostSigner.Id, signformSetJObject.DeepClone);
+      UNTIL SignhostSigner.NEXT = 0;
+      Body.Add('Signers', signersJObject.DeepClone);
+
+      SignhostSigner.FINDSET;
+
+      REPEAT
+          SignerSequenceNo += 1;
+
+          FOR I := 1 TO NoOfPages DO BEGIN
+              IF SignatureMustBePutOnPage(RecordID, I, NoOfPages) THEN BEGIN
+                  locationJObject := locationJObject.JObject;
+                  HorizontalSignaturePosition(RecordID, SignerSequenceNo, locationJObject);
+                  VerticalSignaturePosition(RecordID, SignerSequenceNo, locationJObject);
+                  JValue := JValue.JValue(I);
+                  locationJObject.Add('PageNumber', JValue);
+                  JValue := JValue.JValue(SignatureWidth);
+                  locationJObject.Add('Width', JValue);
+                  JValue := JValue.JValue(SignatureHeight);
+                  locationJObject.Add('Height', JValue);
+
+                  signatureJObject := signatureJObject.JObject;
+                  JValue := JValue.JValue('Signature');
+                  signatureJObject.Add('Type', JValue);
+                  signatureJObject.Add('Location', locationJObject.DeepClone);
+                  formSetJObject := formSetJObject.JObject;
+                  formSetJObject.Add(STRSUBSTNO('Signature%1_%2', SignhostSigner.Id, I), signatureJObject.DeepClone);
+              END;
+          END;
+          formSetsJObject := formSetsJObject.JObject;
+          formSetsJObject.Add(STRSUBSTNO('Formset%1', SignhostSigner.Id), formSetJObject.DeepClone);
+      UNTIL SignhostSigner.NEXT() = 0;
+      Body.Add('FormSets', formSetsJObject.DeepClone);
+    END;
+
+    LOCAL PROCEDURE AddRequestHeader@1100527603(Key@1100527600 : Text;Value@1100527601 : Text);
+    BEGIN
+      Request.Headers.Add(Key, Value);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

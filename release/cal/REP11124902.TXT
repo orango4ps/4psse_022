@@ -1,0 +1,671 @@
+OBJECT Report 11124902 Create Hour Acc. Res. Requests
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    CaptionML=ENU=Create Hour Accounting Resource Requests;
+    ShowPrintStatus=Yes;
+    ProcessingOnly=Yes;
+    OnPreReport=BEGIN
+                  WeekStartDateTime := CREATEDATETIME(DWY2DATE(1, WeekNo, YearNo), 0T);
+                  WeekEndDateTime := CREATEDATETIME(DWY2DATE(7, WeekNo, YearNo)+1, 0T) - 1;
+                  Counter1 := 0;
+                  Counter2 := 0;
+                  ResourcePlanningSetup.GET;
+                  IF GUIALLOWED THEN
+                    Window.OPEN("Work Order".TABLECAPTION + ' #1##########');
+                END;
+
+    OnPostReport=BEGIN
+                   IF GUIALLOWED THEN BEGIN
+                     Window.CLOSE;
+                     MESSAGE(Text001, Counter1, Counter2);
+                   END;
+                 END;
+
+    UsageCategory=Tasks;
+  }
+  DATASET
+  {
+    { 1100529000;0;DataItem;                 ;
+               DataItemTable=Table11229279;
+               DataItemTableView=SORTING(Source Company,Source Type,Starting Date/Time,Resource Type,Resource No.)
+                                 WHERE(Source Type=CONST(Request),
+                                       Resource Type=FILTER(Employee|Plant),
+                                       Finished=CONST(Yes),
+                                       Hour Acc. Created=CONST(No));
+               OnPreDataItem=BEGIN
+                               FILTERGROUP(9);
+                               SETRANGE("Starting Date/Time", WeekStartDateTime, WeekEndDateTime);
+                               SETRANGE("Source Company", COMPANYNAME);  // Only WO's of the request (current) company!
+                               SETFILTER("Source No.", '<>%1', '');
+                               SETFILTER("Resource No.", '<>%1', '');
+                               FILTERGROUP(0);
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  ResourceRequest@1100529007 : Record 11124901;
+                                  HourLine@1100529000 : Record 11012039;
+                                  ProjectNo@1100529002 : Code[20];
+                                  ServiceOrderNo@1100529005 : Code[20];
+                                  PlantType@1100529004 : Code[20];
+                                  PlantNo@1100529003 : Code[10];
+                                  PlantCompany@1100529001 : Text;
+                                BEGIN
+                                  ActualHours := GetActualHours;
+                                  IF ActualHours = 0 THEN
+                                    CurrReport.SKIP;
+                                  IF NOT Resource.GET("Resource No.") THEN
+                                    CurrReport.SKIP;
+                                  IF ResourceRequest.GET("Source No.") THEN BEGIN
+                                    IF GUIALLOWED THEN
+                                      Window.UPDATE(1, "No.");
+                                    CASE ResourceRequest."Source Type" OF
+                                      ResourceRequest."Source Type"::Customer:
+                                        BEGIN
+                                          IF "Resource Type" = "Resource Type"::Employee THEN BEGIN
+                                            IF GetOperatesPlant("No.", "Operates Plant (WO)", PlantType, PlantNo, PlantCompany) THEN
+                                              InsertHourLine(HourLine.Type::Plant, Resource."Source No.", "Source No.", PlantType, PlantNo, '', '', '', '', PlantCompany)
+                                            ELSE
+                                              InsertHourLine(HourLine.Type::ResourceRequest, Resource."Source No.", "Source No.", '', '', '', '', "Source Company", '', '');
+                                          END ELSE BEGIN
+                                            // For resource 'Plant' no hours (cost) that must be posted, and revenues are already invoiced via Request-Customer
+                                            CurrReport.SKIP;
+                                          END;
+                                        END;
+                                      ResourceRequest."Source Type"::Project,
+                                      ResourceRequest."Source Type"::ServiceOrder:
+                                        BEGIN
+                                          IF ResourceRequest."Source Type" = ResourceRequest."Source Type"::Project THEN BEGIN
+                                             HourLine.Type := HourLine.Type::Project;
+                                             ProjectNo := ResourceRequest."Source No.";
+                                          END ELSE BEGIN
+                                             HourLine.Type := HourLine.Type::Service;
+                                             ServiceOrderNo := ResourceRequest."Source No.";
+                                          END;
+                                          CASE "Resource Type" OF
+                                            "Resource Type"::Employee:
+                                              BEGIN
+                                                IF GetOperatesPlant("No.", "Operates Plant (WO)", PlantType, PlantNo, PlantCompany) THEN
+                                                  InsertHourLine(HourLine.Type::Plant, Resource."Source No.", "Source No.", PlantType, PlantNo, ProjectNo, ServiceOrderNo,
+                                                     ResourceRequest."Receiving Company", GetPlantLocationCode(ResourceRequest,PlantCompany), PlantCompany)
+                                                ELSE BEGIN
+                                                  InsertHourLine(HourLine.Type,
+                                                      Resource."Source No.", "Source No.", '', '', ProjectNo, ServiceOrderNo, ResourceRequest."Receiving Company", '', '');
+                                                END;
+                                              END;
+                                            "Resource Type"::Plant:
+                                              BEGIN
+                                                Resource.TESTFIELD("Source No. 2");
+                                                IF CheckUnmannedPlant("Work Order") THEN BEGIN  // Manned Plant already done together with Employee (Operator) Hours
+                                                  IF ResourcePlanningSetup."Hours Destination" <> ResourcePlanningSetup."Hours Destination"::"Site Manager Hour Accounting" THEN
+                                                    InsertUnmannedPlantHourRevenueLine(ResourceRequest)
+                                                  ELSE BEGIN
+                                                    InsertHourLine(-HourLine.Type::Plant, '', "Source No.", Resource."Source No.", Resource."Source No. 2", ProjectNo, ServiceOrderNo,
+                                                       ResourceRequest."Receiving Company", GetPlantLocationCode(ResourceRequest,Resource.Company), Resource.Company);
+                                                  END;
+                                                END;
+                                              END;
+                                          END;
+                                        END;
+                                    ELSE
+                                      CurrReport.SKIP;
+                                    END;
+                                    "Hour Acc. Created" := TRUE;
+                                    MODIFY;
+                                  END;
+                                END;
+
+               ReqFilterFields=No.,Resource No. }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      OnOpenPage=BEGIN
+                   IF NOT YearWeekSelectionIsSet THEN BEGIN
+                     YearNo := DATE2DMY(TODAY,3);
+                     WeekNo := DATE2DWY(TODAY,2);
+                   END;
+                 END;
+
+    }
+    CONTROLS
+    {
+      { 1100529003;;Container;
+                  ContainerType=ContentArea }
+
+      { 1100529002;1;Group  ;
+                  CaptionML=[ENU=Options;
+                             NOR=Alternativer;
+                             SVE=Alternativ];
+                  GroupType=Group }
+
+      { 1100529001;2;Field  ;
+                  CaptionML=[ENU=Year;
+                             NOR=r;
+                             SVE=r];
+                  NotBlank=Yes;
+                  SourceExpr=YearNo }
+
+      { 1100529000;2;Field  ;
+                  CaptionML=[ENU=Week;
+                             NOR=Uke;
+                             SVE=Vecka];
+                  NotBlank=Yes;
+                  SourceExpr=WeekNo;
+                  MinValue=1;
+                  MaxValue=53;
+                  OnLookup=VAR
+                             DateSelectionManagement@1100529001 : Codeunit 11130005;
+                           BEGIN
+                             DateSelectionManagement.GetWeekYear(WeekNo, YearNo);
+                           END;
+                            }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      Resource@1100527201 : Record 11229278;
+      Window@1100529005 : Dialog;
+      WeekStartDateTime@1100529015 : DateTime;
+      WeekEndDateTime@1100529016 : DateTime;
+      YearWeekSelectionIsSet@1100527202 : Boolean;
+      YearNo@1100529000 : Integer;
+      WeekNo@1100529001 : Integer;
+      Counter1@1100529018 : Integer;
+      Counter2@1100529002 : Integer;
+      Text001@1100529019 : TextConst 'ENU=Processed:\ - Hour Accounting Entries: %1 \ - Plant Hours Revenues: %2';
+      ActualHours@1100527200 : Decimal;
+      ResourcePlanningSetup@1100527301 : Record 11124900;
+
+    PROCEDURE SetSelections@1100527205(Year@1100527201 : Integer;Week@1100527200 : Integer);
+    BEGIN
+      YearNo := Year;
+      WeekNo := Week;
+      YearWeekSelectionIsSet := ((Year > 0) AND (Week > 0));
+    END;
+
+    LOCAL PROCEDURE GetActualHours@1100527201() : Decimal;
+    VAR
+      AdditionalInfoRequest@1100527201 : Record 11124915;
+    BEGIN
+      IF AdditionalInfoRequest.GET("Work Order"."No.") THEN
+        EXIT(AdditionalInfoRequest."Actual Hours");
+      EXIT(0);
+    END;
+
+    LOCAL PROCEDURE GetOperatesPlant@1100529001(EmplWorkorderNo@1100529000 : Code[20];OperatesPlantWO@1100529001 : Code[20];VAR PlantType@1100529002 : Code[20];VAR PlantNo@1100529003 : Code[10];VAR PlantCompany@1100529006 : Text) : Boolean;
+    VAR
+      PlantWorkOrder@1100529004 : Record 11229279;
+      ResourcePlant@1100529005 : Record 11229278;
+    BEGIN
+      PlantType := '';
+      PlantNo := '';
+      PlantCompany := '';
+      IF OperatesPlantWO <> '' THEN BEGIN
+        IF PlantWorkOrder.GET(OperatesPlantWO) THEN BEGIN
+          IF (PlantWorkOrder."Resource Type" = PlantWorkOrder."Resource Type"::Plant) THEN BEGIN
+            PlantWorkOrder.TESTFIELD("Resource No.");
+            ResourcePlant.GET(PlantWorkOrder."Resource No.");
+            ResourcePlant.TESTFIELD("Source No.");
+            PlantType := ResourcePlant."Source No.";
+            PlantNo := ResourcePlant."Source No. 2";
+            PlantCompany := ResourcePlant.Company;
+            EXIT(TRUE);
+          END;
+        END;
+      END;
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE InsertHourLine@1100527304(HourAccLineType@1100529002 : Option;EmployeeNo@1100529001 : Code[20];RequestNo@1100529007 : Code[20];PlantType@1100529004 : Code[20];PlantNo@1100529003 : Code[10];ProjectNo@1100529006 : Code[20];ServiceOrderNo@1100529005 : Code[20];ReceivingCompany@1100529600 : Text;PlantLocationCode@1100529601 : Code[20];PlantCompany@1100529008 : Text);
+    VAR
+      HourLine@1100529000 : Record 11012039;
+      SiteMgtHourLine@1100529009 : Record 11012361;
+    BEGIN
+      IF ReceivingCompany = '' THEN
+        ReceivingCompany := COMPANYNAME;
+      IF ResourcePlanningSetup."Hours Destination" = ResourcePlanningSetup."Hours Destination"::"Site Manager Hour Accounting" THEN BEGIN
+        CASE HourAccLineType OF
+          HourLine.Type::Project:
+            HourAccLineType := SiteMgtHourLine.Type::Project;
+          HourLine.Type::Service :
+            HourAccLineType := SiteMgtHourLine.Type::Service;
+          HourLine.Type::Indirect:
+            HourAccLineType := SiteMgtHourLine.Type::Indirect;
+          HourLine.Type::Plant:
+            HourAccLineType := SiteMgtHourLine.Type::Plant;
+          -HourLine.Type::Plant:
+            HourAccLineType := SiteMgtHourLine.Type::UnmannedPlant;
+          HourLine.Type::ResourceRequest:
+            HourAccLineType := SiteMgtHourLine.Type::ResourceRequest;
+        END;
+        InsertSiteMngmntHourAccountingLine(HourAccLineType,
+          EmployeeNo, RequestNo, PlantType, PlantNo, ProjectNo, ServiceOrderNo, ReceivingCompany, PlantLocationCode, PlantCompany)
+      END ELSE BEGIN
+        IF HourAccLineType = HourLine.Type::Plant THEN BEGIN
+          ProjectNo := '';
+          ServiceOrderNo := '';
+          ReceivingCompany := PlantCompany;
+        END;
+        InsertHourAccountingLine(HourAccLineType, EmployeeNo, RequestNo, PlantType, PlantNo, ProjectNo, ServiceOrderNo, ReceivingCompany, PlantLocationCode);
+      END;
+    END;
+
+    LOCAL PROCEDURE InsertHourAccountingLine@1100529000(HourAccLineType@1100529002 : Option;EmployeeNo@1100529001 : Code[20];RequestNo@1100529007 : Code[20];PlantType@1100529004 : Code[20];PlantNo@1100529003 : Code[10];ProjectNo@1100529006 : Code[20];ServiceOrderNo@1100529005 : Code[20];ReceivingCompany@1100529600 : Text;PlantLocationCode@1100529601 : Code[20]);
+    VAR
+      HourAccountingLine@1100529000 : Record 11012039;
+      DayNo@1100529009 : Integer;
+    BEGIN
+      CheckInsertHourAccountingHead(EmployeeNo);
+      HourAccountingLine.CHANGECOMPANY(Resource.Company);
+
+      HourAccountingLine.SETRANGE(Year, YearNo);
+      HourAccountingLine.SETRANGE(Week, WeekNo);
+      HourAccountingLine.SETRANGE("Employee No.", EmployeeNo);
+      HourAccountingLine.SETRANGE(Type, HourAccLineType);
+      IF ReceivingCompany = Resource.Company THEN
+        HourAccountingLine.SETFILTER("Receiving Company", '%1|%2', '', ReceivingCompany)
+      ELSE
+        HourAccountingLine.SETRANGE("Receiving Company", ReceivingCompany);
+      IF Resource.Company = COMPANYNAME THEN
+        HourAccountingLine.SETFILTER("Resource Req. Receiv. Company", '%1|%2', '', COMPANYNAME)
+      ELSE
+        HourAccountingLine.SETRANGE("Resource Req. Receiv. Company", COMPANYNAME);
+      HourAccountingLine.SETRANGE("Resource Request No.", RequestNo);
+      HourAccountingLine.SETRANGE("Plant Location", PlantLocationCode);
+      HourAccountingLine.SETRANGE("Plant Type", PlantType);
+      HourAccountingLine.SETRANGE("Plant No.", PlantNo);
+      HourAccountingLine.SETRANGE("Project No.", ProjectNo);
+      HourAccountingLine.SETRANGE("Service Order No.", ServiceOrderNo);
+      IF ("Work Order"."Project Element" <> '') AND (HourAccLineType = HourAccountingLine.Type::Project) THEN
+        HourAccountingLine.SETRANGE(Element, "Work Order"."Project Element");
+      IF NOT HourAccountingLine.FINDFIRST THEN BEGIN
+        HourAccountingLine.INIT;
+        FillHourAccLineSupplyingCompanyTemporary(HourAccountingLine);
+        HourAccountingLine."Receiving Company" := ReceivingCompany;
+        HourAccountingLine.Year := YearNo;
+        HourAccountingLine.Week := WeekNo;
+        HourAccountingLine.VALIDATE("Employee No.", EmployeeNo);
+        FillHourAccLineNo(HourAccountingLine);
+        IF HourAccountingLine.CURRENTCOMPANY = COMPANYNAME THEN
+          HourAccountingLine.INSERT(TRUE)
+        ELSE BEGIN
+          HourAccountingLine.InitRecord;
+          HourAccountingLine.FillDocNoPostingDate(FALSE);
+          HourAccountingLine.INSERT(FALSE);
+        END;
+        HourAccountingLine.Type := HourAccLineType;
+        CASE HourAccountingLine.Type OF
+          HourAccountingLine.Type::Plant:
+            BEGIN
+              HourAccountingLine.VALIDATE("Plant Location", PlantLocationCode);
+              HourAccountingLine.VALIDATE("Plant Type", PlantType);
+              HourAccountingLine.VALIDATE("Plant No.", PlantNo);
+            END;
+          HourAccountingLine.Type::Project:
+            BEGIN
+              HourAccountingLine.VALIDATE("Project No.", ProjectNo);
+              IF "Work Order"."Project Element" <> '' THEN
+                HourAccountingLine.Element := "Work Order"."Project Element";
+            END;
+          HourAccountingLine.Type::Service:
+            HourAccountingLine.VALIDATE("Service Order No.", ServiceOrderNo);
+        END;
+        IF Resource.Company <> COMPANYNAME THEN
+          HourAccountingLine."Resource Req. Receiv. Company" := COMPANYNAME;
+        HourAccountingLine."Resource Request No." := RequestNo;
+      END;
+      DayNo := DATE2DWY(DT2DATE("Work Order"."Starting Date/Time"), 1);
+      CASE DayNo OF
+        1: HourAccountingLine.Monday := HourAccountingLine.Monday + ActualHours;
+        2: HourAccountingLine.Tuesday := HourAccountingLine.Tuesday + ActualHours;
+        3: HourAccountingLine.Wednesday := HourAccountingLine.Wednesday + ActualHours;
+        4: HourAccountingLine.Thursday := HourAccountingLine.Thursday + ActualHours;
+        5: HourAccountingLine.Friday := HourAccountingLine.Friday + ActualHours;
+        6: HourAccountingLine.Saturday := HourAccountingLine.Saturday + ActualHours;
+        7: HourAccountingLine.Sunday := HourAccountingLine.Sunday + ActualHours;
+      END;
+      FillHourAccLineSupplyingCompanyTemporary(HourAccountingLine);
+      HourAccountingLine.TotalHours;
+      IF HourAccountingLine.CURRENTCOMPANY <> COMPANYNAME THEN BEGIN
+        HourAccountingLine.CheckPostingDate;
+        HourAccountingLine.UpdatePreregistration;
+        HourAccountingLine.UpdateHeaderStatus(FALSE,FALSE,TRUE);
+      END;
+      HourAccountingLine."Supplying Company" := '';  //Reset
+      IF ReceivingCompany = Resource.Company THEN
+        HourAccountingLine."Receiving Company" := '';
+      HourAccountingLine.MODIFY(HourAccountingLine.CURRENTCOMPANY = COMPANYNAME);
+      Counter1 := Counter1 + 1;
+    END;
+
+    LOCAL PROCEDURE InsertSiteMngmntHourAccountingLine@1100527301(HourAccLineType@1100527306 : Option;EmployeeNo@1100527305 : Code[20];RequestNo@1100527304 : Code[20];PlantType@1100527303 : Code[20];PlantNo@1100527302 : Code[10];ProjectNo@1100527301 : Code[20];ServiceOrderNo@1100527300 : Code[20];ReceivingCompany@1100529600 : Text;PlantLocationCode@1100529601 : Code[20];PlantCompany@1100529000 : Text);
+    VAR
+      SiteMngmntHoursLine@1100527309 : Record 11012361;
+      DayNo@1100527308 : Integer;
+    BEGIN
+      CheckInsertSiteMngmntHourAccHead(EmployeeNo);
+      SiteMngmntHoursLine.CHANGECOMPANY(Resource.Company);
+
+      SiteMngmntHoursLine.SETRANGE(Year, YearNo);
+      SiteMngmntHoursLine.SETRANGE(Week, WeekNo);
+      SiteMngmntHoursLine.SETRANGE("Employee No.", EmployeeNo);
+      SiteMngmntHoursLine.SETRANGE(Type, HourAccLineType);
+      IF ReceivingCompany = Resource.Company THEN
+        SiteMngmntHoursLine.SETFILTER("Receiving Company", '%1|%2', '', ReceivingCompany)
+      ELSE
+        SiteMngmntHoursLine.SETRANGE("Receiving Company", ReceivingCompany);
+      IF Resource.Company = COMPANYNAME THEN
+        SiteMngmntHoursLine.SETFILTER("Resource Req. Receiv. Company", '%1|%2', '', COMPANYNAME)
+      ELSE
+        SiteMngmntHoursLine.SETRANGE("Resource Req. Receiv. Company", COMPANYNAME);
+      SiteMngmntHoursLine.SETRANGE("Resource Request No.", RequestNo);
+      SiteMngmntHoursLine.SETRANGE("Plant Company", PlantCompany);
+      SiteMngmntHoursLine.SETRANGE("Plant Location", PlantLocationCode);
+      SiteMngmntHoursLine.SETRANGE("Plant Type", PlantType);
+      SiteMngmntHoursLine.SETRANGE("Plant No.", PlantNo);
+      IF HourAccLineType = SiteMngmntHoursLine.Type::Project THEN
+        SiteMngmntHoursLine.SETRANGE("Object No.", ProjectNo);
+      IF HourAccLineType = SiteMngmntHoursLine.Type::Service THEN
+        SiteMngmntHoursLine.SETRANGE("Object No.", ServiceOrderNo);
+      IF ((HourAccLineType = SiteMngmntHoursLine.Type::Plant) OR (HourAccLineType = SiteMngmntHoursLine.Type::UnmannedPlant)) AND
+         (PlantLocationCode <> '') AND ((ProjectNo <> '') OR (ServiceOrderNo <> ''))
+      THEN BEGIN
+        IF ProjectNo <> '' THEN
+          SiteMngmntHoursLine.SETRANGE("Object No.", ProjectNo)
+        ELSE
+          SiteMngmntHoursLine.SETRANGE("Object No.", ServiceOrderNo);
+      END;
+      IF ("Work Order"."Project Element" <> '') AND (HourAccLineType = SiteMngmntHoursLine.Type::Project) THEN
+        SiteMngmntHoursLine.SETRANGE(Element, "Work Order"."Project Element");
+      IF NOT SiteMngmntHoursLine.FINDFIRST THEN BEGIN
+        SiteMngmntHoursLine.INIT;
+        SiteMngmntHoursLine.SetSkipDefaultTemplateCode;
+        SiteMngmntHoursLine."Supplying Company" := Resource.Company;
+        SiteMngmntHoursLine."Receiving Company" := ReceivingCompany;
+        SiteMngmntHoursLine.Year := YearNo;
+        SiteMngmntHoursLine.Week := WeekNo;
+        SiteMngmntHoursLine."Employee No." := EmployeeNo;
+        SiteMngmntHoursLine.VALIDATE(Type, HourAccLineType);
+        FillSiteMgtHourAccLineNo(SiteMngmntHoursLine);
+        IF SiteMngmntHoursLine.CURRENTCOMPANY = COMPANYNAME THEN
+          SiteMngmntHoursLine.INSERT(TRUE)
+        ELSE BEGIN
+          SiteMngmntHoursLine.FillDocNoPostingDate;
+          SiteMngmntHoursLine.INSERT(FALSE);
+        END;
+
+        CASE HourAccLineType OF
+          SiteMngmntHoursLine.Type::Plant,
+          SiteMngmntHoursLine.Type::UnmannedPlant:
+            BEGIN
+              IF (PlantLocationCode <> '') AND ((ProjectNo <> '') OR (ServiceOrderNo <> '')) THEN BEGIN
+                IF ProjectNo <> '' THEN
+                  SiteMngmntHoursLine.VALIDATE("Object No.", ProjectNo)
+                ELSE
+                  SiteMngmntHoursLine.VALIDATE("Object No.", ServiceOrderNo);
+              END;
+              SiteMngmntHoursLine."Plant Company" := PlantCompany;
+              SiteMngmntHoursLine.VALIDATE("Plant Location", PlantLocationCode);
+              SiteMngmntHoursLine.VALIDATE("Plant Type", PlantType);
+              SiteMngmntHoursLine.VALIDATE("Plant No.", PlantNo);
+            END;
+          SiteMngmntHoursLine.Type::Project:
+            BEGIN
+              SiteMngmntHoursLine.VALIDATE("Object No.", ProjectNo);
+              IF "Work Order"."Project Element" <> '' THEN
+                SiteMngmntHoursLine.Element := "Work Order"."Project Element";
+            END;
+          SiteMngmntHoursLine.Type::Service:
+            BEGIN
+              SiteMngmntHoursLine.VALIDATE("Object No.", ServiceOrderNo);
+            END;
+          SiteMngmntHoursLine.Type::ResourceRequest:
+            BEGIN
+              SiteMngmntHoursLine."Object No." :=  RequestNo;
+            END;
+        END;
+        IF Resource.Company <> COMPANYNAME THEN
+          SiteMngmntHoursLine."Resource Req. Receiv. Company" := COMPANYNAME;
+        SiteMngmntHoursLine."Resource Request No." := RequestNo;
+      END;
+      DayNo := DATE2DWY(DT2DATE("Work Order"."Starting Date/Time"), 1);
+      CASE DayNo OF
+        1: SiteMngmntHoursLine.Monday := SiteMngmntHoursLine.Monday + ActualHours;
+        2: SiteMngmntHoursLine.Tuesday := SiteMngmntHoursLine.Tuesday + ActualHours;
+        3: SiteMngmntHoursLine.Wednesday := SiteMngmntHoursLine.Wednesday + ActualHours;
+        4: SiteMngmntHoursLine.Thursday := SiteMngmntHoursLine.Thursday + ActualHours;
+        5: SiteMngmntHoursLine.Friday := SiteMngmntHoursLine.Friday + ActualHours;
+        6: SiteMngmntHoursLine.Saturday := SiteMngmntHoursLine.Saturday + ActualHours;
+        7: SiteMngmntHoursLine.Sunday := SiteMngmntHoursLine.Sunday + ActualHours;
+      END;
+      SiteMngmntHoursLine.CalculateTotalLine;
+      IF ReceivingCompany = Resource.Company THEN
+        SiteMngmntHoursLine."Receiving Company" := '';
+      IF SiteMngmntHoursLine.CURRENTCOMPANY <> COMPANYNAME THEN
+        SiteMngmntHoursLine.UpdateHeaderStatus(FALSE,FALSE);
+      SiteMngmntHoursLine.MODIFY(FALSE);
+      Counter1 := Counter1 + 1;
+    END;
+
+    LOCAL PROCEDURE CheckInsertHourAccountingHead@1100528700(EmployeeNo@1100529000 : Code[20]);
+    VAR
+      HourAccounting@1100529001 : Record 11012038;
+    BEGIN
+      HourAccounting.CHANGECOMPANY(Resource.Company);
+      IF HourAccounting.GET(YearNo, WeekNo, EmployeeNo) THEN BEGIN
+        HourAccounting.TESTFIELD(Status, HourAccounting.Status::Open);
+        EXIT;
+      END;
+      HourAccounting.INIT;
+      HourAccounting.SetSuppressMessages(TRUE);
+      HourAccounting.Year := YearNo;
+      HourAccounting.Week := WeekNo;
+      HourAccounting.GetPostingDate(Resource.Company);
+      HourAccounting.FillDocumentNo(Resource.Company);
+      HourAccounting."Employee No." := EmployeeNo;
+      HourAccounting."Supplying Company" := Resource.Company;  //Temporary needed for next function (read employee in employee company)
+      HourAccounting.FillEmployeeRelatedFields;
+      HourAccounting."Supplying Company" := '';  //Reset
+      HourAccounting."Check by Empl. No." := HourAccounting.GetDefaultCheckByEmplNo(Resource.Company, HourAccounting."Employee No.", '');
+      HourAccounting.INSERT(FALSE);
+    END;
+
+    LOCAL PROCEDURE CheckInsertSiteMngmntHourAccHead@1100527307(EmployeeNo@1100527300 : Code[20]);
+    VAR
+      SiteMngmntHoursHeader@1100527301 : Record 11012360;
+    BEGIN
+      SiteMngmntHoursHeader.CHANGECOMPANY(Resource.Company);
+      IF SiteMngmntHoursHeader.GET(YearNo, WeekNo, Resource.Company, EmployeeNo) THEN BEGIN
+        SiteMngmntHoursHeader.TESTFIELD(Status, SiteMngmntHoursHeader.Status::Open);
+        EXIT;
+      END;
+      SiteMngmntHoursHeader.INIT;
+      SiteMngmntHoursHeader.Year := YearNo;
+      SiteMngmntHoursHeader.Week := WeekNo;
+      SiteMngmntHoursHeader.GetPostingDate;
+      SiteMngmntHoursHeader.VALIDATE(Week);
+      SiteMngmntHoursHeader."Supplying Company" := Resource.Company;
+      SiteMngmntHoursHeader.VALIDATE("Employee No.", EmployeeNo);
+      SiteMngmntHoursHeader.INSERT;
+    END;
+
+    LOCAL PROCEDURE FillHourAccLineSupplyingCompanyTemporary@1100527202(VAR HourAccountingLine@1100527200 : Record 11012039);
+    BEGIN
+      IF Resource.Company = COMPANYNAME THEN
+        HourAccountingLine."Supplying Company" := ''
+      ELSE
+        HourAccountingLine."Supplying Company" := Resource.Company;
+    END;
+
+    LOCAL PROCEDURE FillHourAccLineNo@1100529002(VAR HourAccountingLine@1100529001 : Record 11012039);
+    VAR
+      HourAccountingLine2@1100529000 : Record 11012039;
+    BEGIN
+      HourAccountingLine2.CHANGECOMPANY(HourAccountingLine.CURRENTCOMPANY);
+      HourAccountingLine2.SETRANGE(Year, HourAccountingLine.Year);
+      HourAccountingLine2.SETRANGE(Week, HourAccountingLine.Week);
+      HourAccountingLine2.SETRANGE("Employee No.", HourAccountingLine."Employee No.");
+      IF HourAccountingLine2.FINDLAST THEN
+        HourAccountingLine."Line No." := HourAccountingLine2."Line No." + 10000
+      ELSE
+        HourAccountingLine."Line No." := 10000;
+    END;
+
+    LOCAL PROCEDURE FillSiteMgtHourAccLineNo@1100529006(VAR SiteMngmntHoursLine@1100529001 : Record 11012361);
+    VAR
+      SiteMngmntHoursLine2@1100529000 : Record 11012361;
+    BEGIN
+      SiteMngmntHoursLine2.CHANGECOMPANY(SiteMngmntHoursLine.CURRENTCOMPANY);
+      SiteMngmntHoursLine2.SETRANGE(Year, SiteMngmntHoursLine.Year);
+      SiteMngmntHoursLine2.SETRANGE(Week, SiteMngmntHoursLine.Week);
+      SiteMngmntHoursLine2.SETRANGE("Supplying Company", SiteMngmntHoursLine."Supplying Company");
+      SiteMngmntHoursLine2.SETRANGE("Employee No.", SiteMngmntHoursLine."Employee No.");
+      IF SiteMngmntHoursLine2.FINDLAST THEN
+        SiteMngmntHoursLine."Line No." := SiteMngmntHoursLine2."Line No." + 10000
+      ELSE
+        SiteMngmntHoursLine."Line No." := 10000;
+    END;
+
+    LOCAL PROCEDURE InsertUnmannedPlantHourRevenueLine@1100529005(ResourceRequest@1100527202 : Record 11124901);
+    VAR
+      PlantHoursRevenuesLine@1100529001 : Record 11012574;
+      HourType@1100529002 : Option;
+      DayNo@1100529008 : Integer;
+      PlantLocationCode@1100527203 : Code[20];
+    BEGIN
+      HourType := PlantHoursRevenuesLine.Type::"Unmanned Hours";
+      PlantLocationCode := GetPlantLocationCode(ResourceRequest, Resource.Company);
+
+      CheckInsertPlantHourRevenuegHead(Resource."Source No.", Resource."Source No. 2");
+      PlantHoursRevenuesLine.CHANGECOMPANY(Resource.Company);
+      PlantHoursRevenuesLine.SETRANGE(Year, YearNo);
+      PlantHoursRevenuesLine.SETRANGE(Week, WeekNo);
+      PlantHoursRevenuesLine.SETRANGE("Plant Type", Resource."Source No.");
+      PlantHoursRevenuesLine.SETRANGE("Plant No.", Resource."Source No. 2");
+      PlantHoursRevenuesLine.SETRANGE(Type, HourType);
+      PlantHoursRevenuesLine.SETRANGE(Status, PlantHoursRevenuesLine.Status::Open);
+      PlantHoursRevenuesLine.SETRANGE("Plant Location", PlantLocationCode);
+      PlantHoursRevenuesLine.SETRANGE("Employee Company", '');
+      PlantHoursRevenuesLine.SETRANGE("Employee No.", '');
+      PlantHoursRevenuesLine.SETRANGE(Origin, PlantHoursRevenuesLine.Origin::ResourceRequest);
+      IF Resource.Company = COMPANYNAME THEN
+        PlantHoursRevenuesLine.SETFILTER("Resource Req. Receiv. Company", '%1|%2', '', COMPANYNAME)
+      ELSE
+        PlantHoursRevenuesLine.SETRANGE("Resource Req. Receiv. Company", COMPANYNAME);
+      PlantHoursRevenuesLine.SETRANGE("Resource Request No.", ResourceRequest."No.");
+      IF ("Work Order"."Project Element" <> '') AND (ResourceRequest."Source Type" = ResourceRequest."Source Type"::Project) THEN
+        PlantHoursRevenuesLine.SETRANGE(Element, "Work Order"."Project Element");
+      IF NOT PlantHoursRevenuesLine.FINDFIRST THEN BEGIN
+        PlantHoursRevenuesLine.INIT;
+        PlantHoursRevenuesLine.Year := YearNo;
+        PlantHoursRevenuesLine.Week := WeekNo;
+        PlantHoursRevenuesLine."Plant Type" := Resource."Source No.";
+        PlantHoursRevenuesLine."Plant No." := Resource."Source No. 2";
+        FillPlantHourRevenueLineNo(PlantHoursRevenuesLine);
+        PlantHoursRevenuesLine.INSERT(FALSE);
+        PlantHoursRevenuesLine.Type := HourType;
+        PlantHoursRevenuesLine."Plant Location" := PlantLocationCode;
+        PlantHoursRevenuesLine."Employee Company" := '';
+        PlantHoursRevenuesLine."Employee No." := '';
+        PlantHoursRevenuesLine.Origin := PlantHoursRevenuesLine.Origin::ResourceRequest;
+        IF Resource.Company <> COMPANYNAME THEN
+          PlantHoursRevenuesLine."Resource Req. Receiv. Company" := COMPANYNAME;
+        PlantHoursRevenuesLine."Resource Request No." := ResourceRequest."No.";
+        IF ("Work Order"."Project Element" <> '') AND (ResourceRequest."Source Type" = ResourceRequest."Source Type"::Project) THEN
+          PlantHoursRevenuesLine.Element := "Work Order"."Project Element";
+      END;
+      DayNo := DATE2DWY(DT2DATE("Work Order"."Starting Date/Time"), 1);
+      CASE DayNo OF
+        1: PlantHoursRevenuesLine.Monday := PlantHoursRevenuesLine.Monday + ActualHours;
+        2: PlantHoursRevenuesLine.Tuesday := PlantHoursRevenuesLine.Tuesday + ActualHours;
+        3: PlantHoursRevenuesLine.Wednesday := PlantHoursRevenuesLine.Wednesday + ActualHours;
+        4: PlantHoursRevenuesLine.Thursday := PlantHoursRevenuesLine.Thursday + ActualHours;
+        5: PlantHoursRevenuesLine.Friday := PlantHoursRevenuesLine.Friday + ActualHours;
+        6: PlantHoursRevenuesLine.Saturday := PlantHoursRevenuesLine.Saturday + ActualHours;
+        7: PlantHoursRevenuesLine.Sunday := PlantHoursRevenuesLine.Sunday + ActualHours;
+      END;
+      PlantHoursRevenuesLine."Total Hours";
+      PlantHoursRevenuesLine.MODIFY(FALSE);
+      Counter2 := Counter2 + 1;
+    END;
+
+    LOCAL PROCEDURE CheckInsertPlantHourRevenuegHead@1100529003(PlantType@1100529003 : Code[20];PlantNo@1100529002 : Code[10]);
+    VAR
+      PlantHoursRevenues@1100529001 : Record 11012573;
+    BEGIN
+      PlantHoursRevenues.CHANGECOMPANY(Resource.Company);
+      IF PlantHoursRevenues.GET(YearNo, WeekNo, PlantType, PlantNo) THEN
+        EXIT;
+      PlantHoursRevenues.INIT;
+      PlantHoursRevenues.Year := YearNo;
+      PlantHoursRevenues.Week := WeekNo;
+      PlantHoursRevenues."Plant Type" := PlantType;
+      PlantHoursRevenues."Plant No." := PlantNo;
+      PlantHoursRevenues.INSERT(FALSE);
+    END;
+
+    LOCAL PROCEDURE CheckUnmannedPlant@1100529007(PlantWorkorder@1100529000 : Record 11229279) : Boolean;
+    VAR
+      EmplWorkorder@1100529001 : Record 11229279;
+    BEGIN
+      EmplWorkorder.SETCURRENTKEY("Source Type","Source No.");
+      EmplWorkorder.SETRANGE("Source Type", EmplWorkorder."Source Type"::Request);
+      EmplWorkorder.SETRANGE("Source No.", PlantWorkorder."Source No.");
+      EmplWorkorder.SETRANGE("Operates Plant (WO)", PlantWorkorder."No.");
+      EmplWorkorder.SETRANGE("Resource Type", EmplWorkorder."Resource Type"::Employee);
+      EmplWorkorder.SETFILTER("Resource No.", '<>%1', '');
+      EXIT(EmplWorkorder.ISEMPTY);
+    END;
+
+    LOCAL PROCEDURE GetPlantLocationCode@1100529008(ResourceRequest@1100529000 : Record 11124901;PlantCompany@1100529002 : Text) : Code[20];
+    VAR
+      ResourceReqPlantLocation@1100529001 : Record 11124914;
+    BEGIN
+      IF PlantCompany = COMPANYNAME THEN BEGIN
+        ResourceRequest.TESTFIELD("Plant Location");
+        EXIT(ResourceRequest."Plant Location");
+      END ELSE BEGIN
+        ResourceReqPlantLocation.GET(ResourceRequest."No.", PlantCompany);
+        ResourceReqPlantLocation.TESTFIELD("Plant Location");
+        EXIT(ResourceReqPlantLocation."Plant Location");
+      END;
+      EXIT('');
+    END;
+
+    LOCAL PROCEDURE FillPlantHourRevenueLineNo@1100529004(VAR PlantHoursRevenuesLine@1100529002 : Record 11012574);
+    VAR
+      PlantHoursRevenuesLine2@1100529000 : Record 11012574;
+    BEGIN
+      PlantHoursRevenuesLine2.CHANGECOMPANY(PlantHoursRevenuesLine.CURRENTCOMPANY);
+      PlantHoursRevenuesLine2.SETRANGE(Year, PlantHoursRevenuesLine.Year);
+      PlantHoursRevenuesLine2.SETRANGE(Week, PlantHoursRevenuesLine.Week);
+      PlantHoursRevenuesLine2.SETRANGE("Plant Type", PlantHoursRevenuesLine."Plant Type");
+      PlantHoursRevenuesLine2.SETRANGE("Plant No.", PlantHoursRevenuesLine."Plant No.");
+      IF PlantHoursRevenuesLine2.FINDLAST THEN
+        PlantHoursRevenuesLine."Line No." := PlantHoursRevenuesLine2."Line No." + 10000
+      ELSE
+        PlantHoursRevenuesLine."Line No." := 10000;
+    END;
+
+    BEGIN
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

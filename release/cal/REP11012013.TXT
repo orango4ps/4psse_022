@@ -1,0 +1,1176 @@
+OBJECT Report 11012013 Create Project Cost Plus
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00,4PSSE;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData 11072005=m;
+    CaptionML=[ENU=Create Project Cost Plus Entries;
+               NOR=Opprette transaksjoner for prosjekt med selvkost;
+               SVE=Skapa transaktioner f”r projekt med sj„lvkostnad];
+    ProcessingOnly=Yes;
+    OnInitReport=BEGIN
+                   ProjSetup.GET;
+                   HumanResourcesSetup.GET;
+                   //+++4PSSE
+                   //OnlyConsentedLines := TRUE;
+                   OnlyConsentedLines := FALSE;
+                   //---4PSSE
+
+                   CreateSurchargeLines := TRUE; //200123
+                 END;
+
+    OnPreReport=BEGIN
+                  ValidateSettlCode;
+                  Window.OPEN(Text000 + Text001);
+                  TmpError.RESET;
+                  TmpError.DELETEALL;
+
+                  JobLedgEntryFilterRec.COPYFILTERS("Job Ledger Entry");
+
+                  RestQuanLedgEntryAlso := RepeatForRestQuantitity AND ("Job Ledger Entry".GETFILTER("Cost Plus Entry Created") = Text012);
+                  RestQuanPostedHourLineAlso := RepeatForRestQuantitity AND ("Posted Hour Line".GETFILTER("Cost Plus Entry Created") = Text012);
+                END;
+
+    OnPostReport=VAR
+                   lJob@1100285100 : Record 11072003;
+                 BEGIN
+
+                   //>>200123
+                   IF CreateSurchargeLines AND lJob.GET(ProjCde)  THEN BEGIN
+                     IF lJob."Auto. Surcharge on Settl.Sheet" THEN BEGIN
+                       SettlRec.SETRANGE("Project No.", ProjCde);
+                       SettlRec.SETRANGE(Principal , gvCust);
+                       SettlRec.SETRANGE("Commission No." , gvComm);
+                       SettlRec.SETRANGE("No." , gvSheet);
+                       IF SettlRec.FINDFIRST THEN BEGIN
+                         SettlRec.CreateSurchargeLines;
+                         CLEAR(SettlRec);
+                       END;
+                     END;
+                   END;
+                   //<<200123
+
+                   COMMIT;
+                   Window.CLOSE;
+                   IF NOT HideMessage THEN BEGIN
+                     IF CounterOK = 0 THEN
+                       MESSAGE(Text007)
+                     ELSE
+                       MESSAGE(Text008,CounterOK);
+                   END;
+                   CheckCompressLines;
+                   TmpError.RESET;
+                   IF (NOT HideMessage) AND TmpError.FINDFIRST THEN BEGIN
+                     COMMIT;
+                     PAGE.RUN(PAGE::Errors, TmpError);
+                   END;
+                 END;
+
+  }
+  DATASET
+  {
+    { 8019;    ;DataItem;                    ;
+               DataItemTable=Table11072003;
+               DataItemTableView=SORTING(No.)
+                                 WHERE(No.=FILTER(<>''));
+               OnPreDataItem=BEGIN
+                               GetSettleInfoPerProject := COUNT > 1;
+
+                               //>>IME-382
+                               IF JobProjectStatusFilter <> '' THEN BEGIN
+                                 Job.SETFILTER("Project Status", JobProjectStatusFilter);
+                                 Job.SETFILTER("Bill-to Customer No.",'<>%1','');
+                               END;
+                               //<<IME-382
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  IF ("No." = '') THEN
+                                    CurrReport.SKIP;
+
+                                  COMMIT;
+                                  Counter := 0;
+                                  CounterTotal := 0;
+                                  ProjCde := "No.";
+                                  ProjCustCde := CustCde;
+                                  ProjCommCde := CommCde;
+                                  ProjSettlCde := SettlCde;
+                                  IF NOT GetSettleInfoPerProject THEN BEGIN
+                                    ProjPrincipalRec.GET(ProjCde, ProjCustCde);
+                                    IF ProjCommCde = '' THEN
+                                      ERROR(Text014);
+                                    IF ProjSettlCde = '' THEN
+                                      ProjSettlCde := SettlRec.GetFreeSettlementNo(ProjCde, ProjCustCde, ProjCommCde);
+                                  END;
+
+                                  // 30671.n, 04-01-12, Improve 22568, changes not marked
+                                  //mg.sn, 03-03-11: M22568
+                                  IF GetSettleInfoPerProject THEN
+                                    IF NOT Check1Princip1Comm1Settl("No.", ProjCustCde, ProjCommCde, ProjSettlCde) THEN
+                                      CurrReport.SKIP;
+                                  //mg.en, 03-03-11: M22568
+
+                                  CostPlusRec.LOCKTABLE;
+                                END;
+
+               ReqFilterFields=No. }
+
+    { 5612;1   ;DataItem;                    ;
+               DataItemTable=Table11072005;
+               DataItemTableView=SORTING(Job No.,Cost Type,Global Dimension 2 Code,Entry Type,Posting Date)
+                                 WHERE(Project Invoice=CONST(No),
+                                       Chargeable=CONST(Yes),
+                                       Processed=CONST(No),
+                                       Project Interest=CONST(No));
+               OnPreDataItem=BEGIN
+                               LOCKTABLE;
+
+                               FILTERGROUP(6);
+                               IF (Job."Small Project" AND
+                                   (ProjSetup."Small Project Cost Plus Hours" = ProjSetup."Small Project Cost Plus Hours"::"Job Ledger Entries"))
+                                 OR
+                                  (NOT Job."Small Project" AND
+                                   (ProjSetup."Project Cost Plus Hours from" = ProjSetup."Project Cost Plus Hours from"::"Job Ledger Entries"))
+                               THEN
+                                 SETRANGE("Cost Type")
+                               ELSE
+                                 SETFILTER("Cost Type", '<>%1', "Cost Type"::Labor);
+                               FILTERGROUP(0);
+
+                               IF RestQuanLedgEntryAlso THEN
+                                 SETRANGE("Cost Plus Entry Created");
+
+                               IF SortEntry = SortEntry::EntryNo THEN  //DP00495
+                                 SETCURRENTKEY("Entry No.");
+
+                               CounterTotal := CounterTotal + COUNT;
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  IF (Job."Small Project" AND
+                                      (ProjSetup."Small Project Cost Plus Hours" <> ProjSetup."Small Project Cost Plus Hours"::"Job Ledger Entries"))
+                                    OR
+                                     (NOT Job."Small Project" AND
+                                      (ProjSetup."Project Cost Plus Hours from" <> ProjSetup."Project Cost Plus Hours from"::"Job Ledger Entries"))
+                                  THEN BEGIN
+                                    //* Skip expenses created for an external employee via a purchase order (if not create via purchorder then Chargeble is false)
+                                    IF ("Employee No." <> '') AND "Employee External" AND ("Wage Component" <> '') AND (NOT "Created from Intercompany") THEN BEGIN
+                                      IF WageCompRec.GET("Wage Component") THEN BEGIN
+                                        IF WageCompRec."Component Type" = WageCompRec."Component Type"::Expenses THEN
+                                          CurrReport.SKIP;
+                                      END;
+                                    END;
+                                  END;
+
+                                  //>> 150915 ITERO.PR RFC001
+                                  IF ("Global Dimension 2 Code" <> '') THEN BEGIN
+                                    DimMgt.GetDimValueRec(2, "Global Dimension 2 Code", DimValRec, TRUE, ProjCde);
+                                    IF DimValRec."Exclude Cost Plus" THEN
+                                      CurrReport.SKIP;
+                                  END;
+                                  //<<RFC001
+
+                                  IF NOT ProcessJobLedgerEntry("Job Ledger Entry") THEN
+                                    CurrReport.SKIP;
+                                END;
+
+               ReqFilterFields=Cost Type,Element,Extension Contract,Posting Date;
+               DataItemLink=Job No.=FIELD(No.) }
+
+    { 3913;1   ;DataItem;JobLedgerEntryIC    ;
+               DataItemTable=Table11072005;
+               DataItemTableView=SORTING(Job No.,Posting Date)
+                                 WHERE(Chargeable=CONST(Yes),
+                                       Project Interest=CONST(No));
+               OnPreDataItem=BEGIN
+                               //* Melding: 9135
+                               //* Als aanmaken regiemutaties op basis van de urenverantwoording (niet-geboekte en/of geboekte uren) dan werden in geval
+                               //* van rekening courant geen regiemutaties aangemaakt. Bv: In bedrijf 10 boeken op project van bedrijf 22, de uren
+                               //* staan dan in bedrijf 10 en de projectposten in bedrijf 22. Bij het aanmaken van de regiemutaties voor 'Arbeid'
+                               //* daarom in geval van RC altijd op basis van de projectposten.
+
+                               IF (Job."Small Project" AND
+                                   (ProjSetup."Small Project Cost Plus Hours" = ProjSetup."Small Project Cost Plus Hours"::"Job Ledger Entries"))
+                                 OR
+                                  (NOT Job."Small Project" AND
+                                   (ProjSetup."Project Cost Plus Hours from" = ProjSetup."Project Cost Plus Hours from"::"Job Ledger Entries"))
+                               THEN
+                                 CurrReport.BREAK;
+
+                               COPYFILTERS(JobLedgEntryFilterRec);
+                               FILTERGROUP(4);
+                               SETRANGE("Job No.", Job."No.");   //* Herstellen 'DataItemLink' (is bij copyfilter verdwenen).
+                               FILTERGROUP(0);
+
+                               FILTERGROUP(6);
+                               SETRANGE("Cost Type", "Cost Type"::Labor);
+                               SETRANGE("Created from Intercompany", TRUE);
+                               FILTERGROUP(0);
+
+                               IF RestQuanLedgEntryAlso THEN
+                                 SETRANGE("Cost Plus Entry Created");
+
+                               LOCKTABLE;
+                               CounterTotal := CounterTotal + COUNT;
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  //>> 150915 ITERO.PR RFC001
+                                  IF ("Global Dimension 2 Code" <> '') THEN BEGIN
+                                    DimMgt.GetDimValueRec(2, "Global Dimension 2 Code", DimValRec, TRUE, ProjCde);
+                                    IF DimValRec."Exclude Cost Plus" THEN
+                                      CurrReport.SKIP;
+                                  END;
+                                  //<<RFC001
+
+                                  IF NOT ProcessJobLedgerEntry(JobLedgerEntryIC) THEN
+                                    CurrReport.SKIP;
+                                END;
+
+               DataItemLink=Job No.=FIELD(No.) }
+
+    { 2635;1   ;DataItem;                    ;
+               DataItemTable=Table11012085;
+               DataItemTableView=SORTING(Project No.)
+                                 WHERE(Component Type=FILTER(Hours|Expenses|Expense hours|Addition),
+                                       Chargeable=CONST(Yes),
+                                       Processed=CONST(No));
+               ReqFilterHeadingML=[ENU=Posted Hours;
+                                   NOR=Bokf›rte timer;
+                                   SVE=Bokf”rda timmar];
+               OnPreDataItem=BEGIN
+                               WITH ProjSetup DO BEGIN
+                                 IF (Job."Small Project" AND
+                                     ("Small Project Cost Plus Hours" = "Small Project Cost Plus Hours"::"Job Ledger Entries"))
+                                   OR
+                                    (NOT Job."Small Project" AND
+                                     ("Project Cost Plus Hours from" = "Project Cost Plus Hours from"::"Job Ledger Entries"))
+                                 THEN
+                                   CurrReport.BREAK;
+                               END;
+
+                               IF RestQuanPostedHourLineAlso THEN
+                                 SETRANGE("Cost Plus Entry Created");
+
+                               LOCKTABLE;
+                               CounterTotal := CounterTotal + COUNT;
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  lvProjectCostPlusEntryRec@1100485000 : Record 11012019;
+                                  lvQuantity@1100485001 : Decimal;
+                                  SkipInsert@1100525001 : Boolean;
+                                  CostPlusRec2@1100525002 : Record 11012019;
+                                  lvWageComponent@1100285400 : Record 11012014;
+                                  lvPriceFactor@1100409000 : Decimal;
+                                BEGIN
+                                  //>> 150915 ITERO.PR RFC001
+                                  IF ("Cost Object" <> '') THEN BEGIN
+                                    DimMgt.GetDimValueRec(2, "Cost Object", DimValRec, TRUE, ProjCde);
+                                    IF DimValRec."Exclude Cost Plus" THEN
+                                      CurrReport.SKIP;
+                                  END;
+                                  //<<RFC001
+
+                                  Counter := Counter + 1;
+                                  Window.UPDATE(1,ROUND(Counter / CounterTotal * 10000,1));
+
+                                  ExtContractCde := "Extension Contract";
+                                  IF NOT CheckData() THEN
+                                    CurrReport.SKIP;
+
+                                  GetCommAndSettlData();
+                                  CALCFIELDS("Description Wage Component");
+
+                                  IF "Component Type" = "Component Type"::Expenses THEN
+                                    lvQuantity := Quantity
+                                  ELSE
+                                    lvQuantity := "Total Line";
+
+                                  //>>ADD-Exp.Hrs
+                                  IF lvWageComponent.GET("Posted Hour Line"."Wage Component") THEN BEGIN
+                                     IF lvWageComponent."Component Type" = lvWageComponent."Component Type" :: "Expense hours" THEN BEGIN
+                                        IF ProjSetup."Project Cost Plus Hours from" = ProjSetup."Project Cost Plus Hours from" :: "All Hours" THEN
+                                           lvQuantity := "Total Line";
+                                     END;
+                                  END;
+                                  //<<ADD-Exp.Hrs
+
+                                  IF RestQuanPostedHourLineAlso AND "Cost Plus Entry Created" THEN BEGIN
+                                    IF ("Posting Date" < RestQuantityStartDate) THEN
+                                      CurrReport.SKIP;
+                                    InvoicedQuantityPostedHourLine :=  0;
+                                    lvProjectCostPlusEntryRec.SETCURRENTKEY("Posted Hour Year","Posted Hour Week","Employee No.","Posted Hour Line No.");
+                                    lvProjectCostPlusEntryRec.SETRANGE("Posted Hour Year", Year );
+                                    lvProjectCostPlusEntryRec.SETRANGE("Posted Hour Week", Week );
+                                    lvProjectCostPlusEntryRec.SETRANGE("Posted Hour Line No.", "Line No." );
+                                    lvProjectCostPlusEntryRec.SETRANGE("Employee No.", "Employee No.");
+                                    IF lvProjectCostPlusEntryRec.FIND('-') THEN BEGIN
+                                      REPEAT
+                                        lvProjectCostPlusEntryRec.CALCFIELDS("Invoiced Quantity");
+                                        InvoicedQuantityPostedHourLine := InvoicedQuantityPostedHourLine + lvProjectCostPlusEntryRec."Invoiced Quantity";
+                                      UNTIL lvProjectCostPlusEntryRec.NEXT = 0;
+                                    END;
+                                    lvQuantity := lvQuantity - InvoicedQuantityPostedHourLine;
+                                  END;
+
+                                  IF (lvQuantity <> 0) THEN BEGIN
+                                    CostPlusRec.ProcessPostedHourLine("Posted Hour Line", CostPlusRec2, ProjCde, ProjCustCde, ProjCommCde, ProjSettlCde, lvQuantity, SkipInsert);  //DP00887
+                                    "Cost Plus Entry Created" := TRUE;
+                                    MODIFY;
+                                    CounterOK := CounterOK + 1;
+                                  END;
+                                END;
+
+               ReqFilterFields=Element,Extension Contract,Posting Date;
+               DataItemLink=Project No.=FIELD(No.) }
+
+    { 8729;1   ;DataItem;                    ;
+               DataItemTable=Table11012039;
+               DataItemTableView=SORTING(Project No.)
+                                 WHERE(Component Type=FILTER(Hours|Expenses|Expense hours|Addition),
+                                       Chargeable=CONST(Yes));
+               ReqFilterHeadingML=[ENU=Hour Accounting;
+                                   NOR=Timerapportering;
+                                   SVE=Tidrapportering];
+               OnPreDataItem=BEGIN
+                               WITH ProjSetup DO BEGIN
+                                 IF (Job."Small Project" AND
+                                     ("Small Project Cost Plus Hours" <> "Small Project Cost Plus Hours"::"All Hours"))
+                                   OR
+                                    (NOT Job."Small Project" AND
+                                     ("Project Cost Plus Hours from" <> "Project Cost Plus Hours from"::"All Hours"))
+                                 THEN
+                                   CurrReport.BREAK;
+                               END;
+
+                               LOCKTABLE;
+                               CounterTotal := CounterTotal + COUNT;
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  lvSaveHourLineRec@1100485000 : Record 11012039;
+                                  lvI@1100485001 : Integer;
+                                  lvEndI@1100485002 : Integer;
+                                  lvQuantity@1100525000 : Decimal;
+                                  SkipInsert@1100525002 : Boolean;
+                                  CostPlusRec2@1100525003 : Record 11012019;
+                                  "***ITERO***"@1100285001 : Integer;
+                                  HourAccounting@1100285000 : Record 11012038;
+                                  lvWageComponent@1100285400 : Record 11012014;
+                                BEGIN
+                                  //>> 150915 ITERO.PR RFC001
+                                  IF ("Cost Object" <> '') THEN BEGIN
+                                    DimMgt.GetDimValueRec(2, "Cost Object", DimValRec, TRUE, ProjCde);
+                                    IF DimValRec."Exclude Cost Plus" THEN
+                                      CurrReport.SKIP;
+                                  END;
+                                  //<<RFC001
+
+                                  //+++4PSSE
+                                  IF OnlyConsentedLines THEN BEGIN
+                                    IF HourAccounting.GET(Year, Week, "Employee No.") THEN BEGIN
+                                      IF NOT HourAccounting.Consented THEN
+                                        CurrReport.SKIP;
+                                    END;
+                                  END;
+                                  //---4PSSE
+
+                                  Counter := Counter + 1;
+                                  Window.UPDATE(1,ROUND(Counter / CounterTotal * 10000,1));
+
+                                  ExtContractCde := "Extension Contract";
+                                  IF NOT CheckData() THEN
+                                    CurrReport.SKIP;
+
+                                  GetCommAndSettlData();
+                                  CALCFIELDS(Description, "Component Type");
+
+                                  //* Bij het boeken van de uren wordt record pas gesplitst als instelling aan staat (CU 11012005).
+                                  //* Bij niet geboekte uren is dit nog niet gedaan, en moet het dus hier nog (zoals in CU11012005)
+                                  IF HumanResourcesSetup."Post Hours Per Day" AND ("Component Type" = "Component Type"::Hours) THEN
+                                    lvEndI := 7
+                                  ELSE
+                                    lvEndI := 1;
+
+                                  lvSaveHourLineRec.COPY("Hour Accounting Line");
+                                  FOR lvI := 1 TO lvEndI DO BEGIN
+                                    IF lvEndI = 7 THEN BEGIN
+                                      Monday := 0;
+                                      Tuesday := 0;
+                                      Wednesday := 0;
+                                      Thursday := 0;
+                                      Friday := 0;
+                                      Saturday := 0;
+                                      Sunday := 0;
+                                      CASE lvI OF
+                                        1: Monday := lvSaveHourLineRec.Monday;
+                                        2: Tuesday := lvSaveHourLineRec.Tuesday;
+                                        3: Wednesday := lvSaveHourLineRec.Wednesday;
+                                        4: Thursday := lvSaveHourLineRec.Thursday;
+                                        5: Friday := lvSaveHourLineRec.Friday;
+                                        6: Saturday := lvSaveHourLineRec.Saturday;
+                                        7: Sunday := lvSaveHourLineRec.Sunday;
+                                      END;
+                                      "Total Line" := Monday + Tuesday + Wednesday + Thursday + Friday + Saturday + Sunday;
+                                      "Amount (LCY)" := ROUND("Total Line" * "Unit Cost (LCY)");
+                                      "Posting Date" := lvSaveHourLineRec."Posting Date";
+                                      CheckPostingDate();  //* Functie van T11012039 waar ook posting date gevuld wordt.
+                                    END;
+
+                                    IF "Component Type" = "Component Type"::Expenses THEN
+                                      lvQuantity := Quantity
+                                    ELSE
+                                      lvQuantity := "Total Line";
+
+                                    //>>ADD-Exp.Hrs
+                                    IF lvWageComponent.GET("Posted Hour Line"."Wage Component") THEN BEGIN
+                                       IF lvWageComponent."Component Type" = lvWageComponent."Component Type" :: "Expense hours" THEN BEGIN
+                                          IF ProjSetup."Project Cost Plus Hours from" = ProjSetup."Project Cost Plus Hours from" :: "All Hours" THEN
+                                             lvQuantity := "Total Line";
+                                       END;
+                                    END;
+                                    //<<ADD-Exp.Hrs
+
+                                    IF lvQuantity <> 0 THEN BEGIN
+                                      CostPlusRec.ProcessOpenHourLine("Hour Accounting Line", CostPlusRec2, ProjCde, ProjCustCde, ProjCommCde, ProjSettlCde, lvQuantity, SkipInsert);  //DP00887
+                                      CounterOK := CounterOK + 1;
+                                    END;
+                                  END;
+                                  "Hour Accounting Line".COPY(lvSaveHourLineRec);
+                                  "Cost Plus Entry Created" := TRUE;
+                                  MODIFY;
+                                  IF "Connection No." > 0 THEN BEGIN
+                                    HourAccProjectLine.SETCURRENTKEY("Connection No.");
+                                    HourAccProjectLine.SETRANGE("Connection No.", "Connection No.");
+                                    IF HourAccProjectLine.FIND('-') THEN BEGIN
+                                      HourAccProjectLine."Cost Plus Entry Created" := TRUE;
+                                      HourAccProjectLine.MODIFY;
+                                    END;
+                                  END;
+                                END;
+
+               ReqFilterFields=Element,Extension Contract,Posting Date;
+               DataItemLink=Project No.=FIELD(No.) }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      SaveValues=Yes;
+      OnInit=BEGIN
+               RestQuantityStartDateEditable := TRUE;
+             END;
+
+      OnOpenPage=BEGIN
+                   IF NOT gvSelection THEN BEGIN
+                     CustCde := '';
+                     CommCde := '';
+                     SettlCde := '';
+                   END ELSE BEGIN  //db, 18-07-08
+                     CustCde := gvCust;
+                     CommCde := gvComm;
+                     SettlCde := gvSheet;
+                   END;
+                   RepeatForRestQuantitity := FALSE;
+
+                   IF (ProjCde <> '') THEN BEGIN
+                     ProjPrincipalRec.SETRANGE("Project No.", ProjCde);
+                     ProjPrincipalRec.SETRANGE("Cost Plus Customer",TRUE);
+                     IF ProjPrincipalRec.FINDFIRST THEN
+                       CustCde := ProjPrincipalRec.Principal;
+
+                     CommRec.SETRANGE("Project No.", ProjCde);
+                     CommRec.SETRANGE(Principal, CustCde);
+                     CASE CommRec.COUNT OF
+                       0: CommCde := '1';
+                       1: BEGIN
+                            CommRec.FIND('-');
+                            CommCde := CommRec."No.";
+                          END;
+                     END;
+
+                     IF CommCde <> '' THEN BEGIN
+                       SettlRec.SETRANGE("Project No.", ProjCde);
+                       SettlRec.SETRANGE(Principal, CustCde);
+                       SettlRec.SETRANGE("Commission No.", CommCde);
+                       CASE SettlRec.COUNT OF
+                         0: SettlCde := '1';
+                         1: BEGIN
+                              SettlRec.FIND('-');
+                              SettlCde := SettlRec."No.";
+                            END;
+                       END;
+                     END;
+                   END;
+
+                   IF RepeatForRestQuantitity AND
+                     ((ProjSetup."Small Project Cost Plus Hours" =
+                       ProjSetup."Small Project Cost Plus Hours"::"All Hours") OR
+                      (ProjSetup."Project Cost Plus Hours from" =
+                       ProjSetup."Project Cost Plus Hours from"::"All Hours"))
+                   THEN
+                     RepeatForRestQuantitity := FALSE;
+                   //SetReqForm(FALSE);
+                   SetReqForm(NOT GUIALLOWED); // LAHE 130529
+
+                   RestQuantityStartDateEditable := RepeatForRestQuantitity;
+
+                   IF GenerateNewSettlementSheet THEN BEGIN
+                     SetllCdeEditable := FALSE;
+                     SettlCde := '';
+                   END ELSE
+                     SetllCdeEditable := TRUE;
+                 END;
+
+      OnQueryClosePage=BEGIN
+                         IF CloseAction = ACTION::OK THEN
+                           ValidateSettlCode;
+                       END;
+
+    }
+    CONTROLS
+    {
+      { 1900000001;0;Container;
+                  ContainerType=ContentArea }
+
+      { 1900000002;1;Group  ;
+                  CaptionML=[ENU=Options;
+                             NOR=Alternativer;
+                             SVE=Alternativ] }
+
+      { 1210190004;2;Field  ;
+                  CaptionML=[ENU=Principal;
+                             NOR=Oppdragsgiver;
+                             SVE=Uppdragsgivare];
+                  SourceExpr=CustCde;
+                  OnValidate=BEGIN
+                               IF CustCde <> '' THEN
+                                 ProjPrincipalRec.GET(ProjCde, CustCde);
+                             END;
+
+                  OnLookup=BEGIN
+                             ProjPrincipalRec.RESET;
+                             ProjPrincipalRec.SETRANGE("Project No.", ProjCde);
+                             IF PAGE.RUNMODAL(PAGE::"Project Principal List", ProjPrincipalRec) = ACTION::LookupOK THEN
+                               CustCde := ProjPrincipalRec.Principal;
+                           END;
+                            }
+
+      { 1210190002;2;Field  ;
+                  CaptionML=[ENU=Commission No.;
+                             NOR=Oppdragsnr.;
+                             SVE=Uppdragsnr];
+                  SourceExpr=CommCde;
+                  OnValidate=BEGIN
+                               IF CommCde <> '' THEN //mg, 03-03-11: M22568
+                                 CommRec.GET(ProjCde, CustCde, CommCde);
+                             END;
+
+                  OnLookup=BEGIN
+                             CommRec.SETRANGE("Project No.", ProjCde);
+                             CommRec.SETRANGE(Principal, CustCde);
+                             IF PAGE.RUNMODAL(PAGE::"Commission List", CommRec) = ACTION::LookupOK THEN
+                               CommCde := CommRec."No.";
+                           END;
+                            }
+
+      { 1210190000;2;Field  ;
+                  CaptionML=[ENU=Settlement Sheet;
+                             NOR=Oppgj›rsskjema;
+                             SVE=Avr„kningsark];
+                  SourceExpr=SettlCde;
+                  Editable=SetllCdeEditable;
+                  OnValidate=BEGIN
+                               ValidateSettlCode;
+                             END;
+
+                  OnLookup=BEGIN
+                             SettlRec.RESET;
+                             SettlRec.SETRANGE("Project No.", ProjCde);
+                             SettlRec.SETRANGE(Principal, CustCde);
+                             SettlRec.SETRANGE("Commission No.", CommCde);
+                             SettlRec.SETFILTER(Status, '<>%1', SettlRec.Status::Expired);
+                             IF PAGE.RUNMODAL(PAGE::"Settlement Sheet List", SettlRec) = ACTION::LookupOK THEN BEGIN
+                               IF (SettlRec."No." <> '') AND (SettlRec.Status <> SettlRec.Status::Expired) THEN
+                                 SettlCde := SettlRec."No.";
+                             END;
+                           END;
+                            }
+
+      { 1100528501;2;Field  ;
+                  CaptionML=ENU=Generate New Settlement Sheet;
+                  SourceExpr=GenerateNewSettlementSheet;
+                  OnValidate=BEGIN
+                               IF GenerateNewSettlementSheet THEN BEGIN
+                                 SetllCdeEditable := FALSE;
+                                 SettlCde := '';
+                               END ELSE BEGIN
+                                 SetllCdeEditable := TRUE;
+                               END;
+                             END;
+                              }
+
+      { 1100528502;2;Field  ;
+                  CaptionML=ENU=Settlement Sheet Description;
+                  SourceExpr=SettlementDescription }
+
+      { 1100485000;2;Field  ;
+                  CaptionML=[ENU=Process not Invoiced Quantity;
+                             NOR=Behandle antall som ikke er fakturert;
+                             SVE=Behandla antal som inte har fakturerats];
+                  SourceExpr=RepeatForRestQuantitity;
+                  OnValidate=BEGIN
+                               IF RepeatForRestQuantitity AND
+                                 ((ProjSetup."Small Project Cost Plus Hours" =
+                                   ProjSetup."Small Project Cost Plus Hours"::"All Hours") OR
+                                  (ProjSetup."Project Cost Plus Hours from" =
+                                   ProjSetup."Project Cost Plus Hours from"::"All Hours"))
+                               THEN
+                                 ERROR(Text011);
+
+                               RestQuantityStartDateEditable := RepeatForRestQuantitity;
+                             END;
+                              }
+
+      { 1100485002;2;Field  ;
+                  Name=RestQuantityStartDate;
+                  CaptionML=[ENU=Not Invoiced From Posting Date;
+                             NOR=Ikke fakturert fra bokf›ringsdatoen;
+                             SVE=Inte fakturerad fr†n bokf”ringsdatumet];
+                  SourceExpr=RestQuantityStartDate;
+                  Editable=RestQuantityStartDateEditable }
+
+      { 1100485004;2;Field  ;
+                  Name=CompressCPE;
+                  CaptionML=[ENU=Compress Cost Plus Entries;
+                             NOR=Komprimer rapportert selvkost;
+                             SVE=Komprimera redovisade sj„lvkostnader];
+                  SourceExpr=CompressCPE }
+
+      { 1100485006;2;Field  ;
+                  Name=ConvertUnit;
+                  CaptionML=[ENU=Convert Purchase-Inventory Unit;
+                             NOR=Konverter innkj›p-lagerenhet;
+                             SVE=Konvertera ink”p-lagerenhet];
+                  SourceExpr=ConvertUnit }
+
+      { 1100525002;2;Field  ;
+                  CaptionML=[ENU=Automatic Translation;
+                             NOR=Automatisk oversettelse;
+                             SVE=Automatisk ”vers„ttning];
+                  SourceExpr=AutoTranslate }
+
+      { 1100528500;2;Field  ;
+                  CaptionML=[ENU=Specify Serial and Lot No.'s;
+                             NOR=Angi serie- og partinummer;
+                             SVE=Ange serie- och partinummer];
+                  SourceExpr=SpecifySerialAndLot }
+
+      { 1100525000;2;Field  ;
+                  CaptionML=ENU=Sorting Project Ledger Entries;
+                  OptionCaptionML=ENU=Cost Type - Cost Object,Entry No.;
+                  SourceExpr=SortEntry }
+
+      { 1100285000;2;Field  ;
+                  CaptionML=[ENU=Exclude not consented lines;
+                             NOR=Ekskluder ikke attesterte rader;
+                             SVE=Uteslut ej godk„nda rader];
+                  SourceExpr=OnlyConsentedLines }
+
+      { 1100285100;2;Field  ;
+                  CaptionML=[DAN=Hente tilleggsgebyrsrader;
+                             ENU=Get Cost Plus Surcharge Lines;
+                             NOR=Hente tilleggsgebyrsrader;
+                             SVE=H„mta rader med till„ggsavgifter];
+                  SourceExpr=CreateSurchargeLines }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      Text000@11012011 : TextConst 'ENU=Creating Cost Plus Entries....\\;NOR=Oppretter rapporterte selvkosterÿ....\\;SVE=Skapar redovisade sj„lvkostnaderÿ....\\';
+      Text001@11012012 : TextConst 'ENU=Percentage Finished  @1@@@@@@@@@@@@@\;NOR=Prosent ferdig  @1@@@@@@@@@@@@@\;SVE=Procent f„rdigt  @1@@@@@@@@@@@@@\';
+      Text002@11012013 : TextConst 'ENU=Project Status of Project %1 could not be %2;NOR=Prosjektstatus for prosjektet %1 kan ikke v‘re %2;SVE=Projektstatus f”r projektet %1 f†r inte vara %2';
+      Text005@11012016 : TextConst 'ENU=Generated Commission;NOR=Generert provisjon;SVE=Genererad provision';
+      Text006@11012017 : TextConst 'ENU=Generated Settlement Sheet;NOR=Generert oppgj›rsskjema;SVE=Genererat avr„kningsark';
+      Text007@11012018 : TextConst 'ENU=There are no Cost Plus Entries created.;NOR=Ingen rapporterte selvkoster er opprettet.;SVE=Inga redovisade sj„lvkostnader har skapats.';
+      Text008@11012019 : TextConst 'ENU=%1 Cost Plus Entries have been created.;NOR=%1 rapporterte selvkoster er opprettet.;SVE=%1 redovisade sj„lvkostnader har skapats.';
+      ProjSetup@1210190004 : Record 315;
+      HumanResourcesSetup@1100525000 : Record 5218;
+      CostPlusRec@11012000 : Record 11012019;
+      TmpProjRec@1100525005 : TEMPORARY Record 11072003;
+      ExtRec@1210190011 : Record 11012004;
+      CommRec@1210190003 : Record 11012020;
+      SettlRec@11012004 : Record 11012021;
+      ProjPrincipalRec@1210190005 : Record 11012005;
+      DimValRec@1210190007 : Record 349;
+      HourAccProjectLine@1100485000 : Record 11020225;
+      JobLedgEntryFilterRec@1100485014 : Record 11072005;
+      WageCompRec@1100525001 : Record 11012014;
+      TmpError@1100529000 : TEMPORARY Record 11012051;
+      DimMgt@1210190006 : Codeunit 408;
+      CompressCu@1100485013 : Codeunit 11012043;
+      Window@1210190013 : Dialog;
+      RestQuantityStartDate@1100485011 : Date;
+      SettlMethod@1210190012 : 'Fixed Price,Cost Plus';
+      SortEntry@1100525002 : 'CostTypeObject,EntryNo';
+      RepeatForRestQuantitity@1100485001 : Boolean;
+      RestQuanLedgEntryAlso@1100485005 : Boolean;
+      RestQuanPostedHourLineAlso@1100485002 : Boolean;
+      ConvertUnit@1100485015 : Boolean;
+      CompressCPE@1100485012 : Boolean;
+      Counter@11012006 : Integer;
+      CounterOK@11012007 : Integer;
+      CounterTotal@1210190009 : Integer;
+      InvoicedQuantityPostedHourLine@1100485004 : Decimal;
+      SettlCde@1210190000 : Code[20];
+      CommCde@1210190001 : Code[20];
+      CustCde@1210190008 : Code[20];
+      ProjCde@1210190002 : Code[20];
+      ExtContractCde@1210190014 : Code[10];
+      Text011@1100485003 : TextConst 'ENU=Project Setup "(Small) Project Cost Plus Hours from" must be Posted Hours or Project Ledger Entries;NOR=Prosjektinnstillinger "(Mindre) prosjekt selvkosttimer fra" m† v‘re bokf›rte timer eller l›pende prosjekttransaksjoner;SVE=Till„ggsavgifter f”r projektets redovisade sj„lvkostnader';
+      Text012@1100485010 : TextConst 'ENU=No;NOR=Nr.;SVE=Nummer';
+      gvSelection@1100485016 : Boolean;
+      gvCust@1100485019 : Code[20];
+      gvComm@1100485018 : Code[20];
+      gvSheet@1100485017 : Code[20];
+      AutoTranslate@1100525003 : Boolean;
+      GetSettleInfoPerProject@1210190015 : Boolean;
+      RestQuantityStartDateEditable@19077982 : Boolean INDATASET;
+      SpecifySerialAndLot@1100528500 : Boolean;
+      ProjCustCde@1100528501 : Code[20];
+      ProjCommCde@1100528502 : Code[20];
+      ProjSettlCde@1100528503 : Code[20];
+      HideMessage@1100528600 : Boolean;
+      Text013@1100529001 : TextConst 'ENU=Project skipped, can not select one specific %1 (number found %2), %3 ''%4''';
+      Text014@1100529002 : TextConst 'ENU=Commission No. must be filled';
+      "-EVRY-"@1100285500 : Integer;
+      NoMessage@1100285501 : Boolean;
+      "***4PSSE**"@1100285001 : Integer;
+      OnlyConsentedLines@1100285000 : Boolean;
+      JobProjectStatusFilter@1000000002 : Text;
+      GenerateNewSettlementSheet@1100528504 : Boolean;
+      SettlementDescription@1100528505 : Text[50];
+      SetllCdeEditable@1100528506 : Boolean INDATASET;
+      CreateSurchargeLines@1100285100 : Boolean;
+
+    PROCEDURE ProcessJobLedgerEntry@1100485001(VAR VarJobLedgEntryRec@1100485000 : Record 11072005) : Boolean;
+    VAR
+      NSItemTrackingRelation@1100528500 : Record 11071905;
+      NSItemTrackingEntry@1100528502 : Record 11071902;
+      SerialJobLedgEntry@1100528504 : Record 11072005;
+      TotQuanSpecified@1100528501 : Decimal;
+    BEGIN
+      WITH VarJobLedgEntryRec DO BEGIN
+        Counter := Counter + 1;
+        Window.UPDATE(1,ROUND(Counter / CounterTotal * 10000,1));
+
+        ExtContractCde := "Extension Contract";
+        IF NOT CheckData() THEN
+          EXIT(FALSE);
+
+        GetCommAndSettlData();
+
+        //DP00121.sn
+        NSItemTrackingRelation.SETCURRENTKEY("Project Ledger Entry No.");
+        NSItemTrackingRelation.SETRANGE("Project Ledger Entry No.", VarJobLedgEntryRec."Entry No.");
+        IF SpecifySerialAndLot AND NOT NSItemTrackingRelation.ISEMPTY THEN BEGIN
+          NSItemTrackingRelation.FINDSET;
+          REPEAT
+            NSItemTrackingEntry.GET(NSItemTrackingRelation."Item Tracking Entry No.");
+            SerialJobLedgEntry := VarJobLedgEntryRec;
+            SerialJobLedgEntry.Quantity := NSItemTrackingEntry.Quantity;
+            TotQuanSpecified := TotQuanSpecified + NSItemTrackingEntry.Quantity;
+            GenerateCostPlusFromProjEntry(
+              SerialJobLedgEntry, NSItemTrackingEntry."Serial No.", NSItemTrackingEntry."Lot No.");
+          UNTIL NSItemTrackingRelation.NEXT = 0;
+          IF Quantity <> TotQuanSpecified THEN BEGIN
+            SerialJobLedgEntry := VarJobLedgEntryRec;
+            SerialJobLedgEntry.Quantity := Quantity - TotQuanSpecified;
+            GenerateCostPlusFromProjEntry(SerialJobLedgEntry, '','');
+          END;
+        END ELSE
+        //DP00121.en
+          GenerateCostPlusFromProjEntry(VarJobLedgEntryRec,'','');
+
+        TmpProjRec."No." := "Job No.";
+        IF TmpProjRec.INSERT THEN;
+
+        "Cost Plus Entry Created" := TRUE;
+        MODIFY;
+        CounterOK := CounterOK + 1;
+
+      END;
+
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE CheckData@1210190006() : Boolean;
+    BEGIN
+      SettlMethod := Job."Settlement Method";
+      IF ExtContractCde <> '' THEN BEGIN
+        ExtRec.GET(ProjCde, ExtContractCde);
+        SettlMethod := ExtRec."Settlement Method";
+      END;
+      IF SettlMethod = SettlMethod::"Fixed Price" THEN
+        EXIT(FALSE)
+      ELSE BEGIN
+        IF (ProjSetup."Provisions at Closure") THEN BEGIN
+          IF Job."Project Status" >= Job."Project Status"::Archive THEN
+            ERROR(Text002,ProjCde,Job."Project Status");
+        END ELSE BEGIN
+          IF Job."Project Status" >= Job."Project Status"::"Administrative Finished" THEN
+            ERROR(Text002,ProjCde,Job."Project Status");
+        END;
+      END;
+
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE GetCommAndSettlData@1210190013();
+    VAR
+      JobSetup@1100285300 : Record 315;
+    BEGIN
+      JobSetup.GET;
+      //IF ProjCustCde = '' THEN
+      //  GetCostPlusCust(ProjCde, ProjCustCde);  //.old Should be (is?) filled before calling this function. Here not allowed
+
+      IF ProjCustCde <> '' THEN BEGIN
+        IF NOT SettlRec.GET(ProjCde, ProjCustCde, ProjCommCde, ProjSettlCde) THEN BEGIN
+          IF ProjCommCde = '1' THEN BEGIN
+            IF NOT CommRec.GET(ProjCde, ProjCustCde, ProjCommCde) THEN BEGIN
+              CommRec.INIT;
+              CommRec."Project No." := ProjCde;
+              CommRec.Principal := ProjCustCde;
+              CommRec."No." := ProjCommCde;
+              CommRec.Description := Text005;
+              //CommRec."Collect Invoices By" := JobSetup."Default Collect Invoices By"; //from customer, is done in InitRecord
+              CommRec.InitRecord();
+              CommRec.INSERT;
+            END;
+          END;
+          IF ProjCommCde <> '' THEN BEGIN
+            IF ProjSettlCde <> '' THEN BEGIN
+              IF NOT SettlRec.GET(ProjCde, ProjCustCde, ProjCommCde, ProjSettlCde) THEN BEGIN
+                SettlRec.INIT;
+                SettlRec."Project No." := ProjCde;
+                SettlRec.Principal := ProjCustCde;
+                SettlRec."Commission No." := ProjCommCde;
+                SettlRec."No." := ProjSettlCde;
+                IF GenerateNewSettlementSheet THEN
+                  SettlRec.Description := SettlementDescription
+                ELSE
+                  SettlRec.Description := Text006;
+                SettlRec.Status := SettlRec.Status::Provisional;
+                //>> 151228 ITERO.SB SE Use default status from Jobs Setup
+                SettlRec.Status := JobSetup."Default Settlement Status";
+                //<<
+                SettlRec.INSERT;
+              END;
+            END;
+          END;
+        END;
+      END;
+
+      ProjPrincipalRec.GET(ProjCde, ProjCustCde);
+      CommRec.GET(ProjCde, ProjCustCde, ProjCommCde);
+      SettlRec.GET(ProjCde, ProjCustCde, ProjCommCde, ProjSettlCde);
+      IF SettlRec.Status = SettlRec.Status::Expired THEN
+        SettlRec.FIELDERROR(Status);
+    END;
+
+    PROCEDURE GetCostPlusCust@1210190003(lvProj@1210190000 : Code[20];VAR lvCust@1210190001 : Code[20]);
+    VAR
+      ProjectPrincipal@1100409000 : Record 11012005;
+    BEGIN
+      ProjectPrincipal.SETRANGE("Project No.",lvProj);
+      ProjectPrincipal.SETRANGE("Cost Plus Customer",TRUE);
+      ProjectPrincipal.FINDFIRST; //Must be present
+
+      lvCust := ProjectPrincipal.Principal;
+    END;
+
+    PROCEDURE SetDefault@1210190001(lvProj@1210190000 : Code[20]);
+    BEGIN
+      ProjCde := lvProj;
+    END;
+
+    PROCEDURE SetSelection@1100485000(lvProj@1210190000 : Code[20];lvCust@1100485000 : Code[20];lvComm@1100485001 : Code[20];lvSheet@1100485002 : Code[20]);
+    BEGIN
+      ProjCde := lvProj;
+      gvCust := lvCust;
+      gvComm := lvComm;
+      gvSheet := lvSheet;
+      gvSelection := TRUE;
+    END;
+
+    PROCEDURE CheckCompressLines@1100525002();
+    BEGIN
+      IF CompressCPE THEN BEGIN
+        CostPlusRec.RESET;
+        IF TmpProjRec.FINDFIRST THEN BEGIN
+          REPEAT
+           CostPlusRec.SETRANGE("Project No.", TmpProjRec."No.");
+           IF CostPlusRec.FINDFIRST THEN BEGIN
+             REPEAT
+               CostPlusRec.MARK(TRUE);
+             UNTIL CostPlusRec.NEXT = 0;
+           END;
+          UNTIL TmpProjRec.NEXT = 0;
+        END;
+        CostPlusRec.MARKEDONLY(TRUE);
+        IF Job.GETFILTER("No.") <> '' THEN
+          CostPlusRec.SETFILTER("Project No.", Job.GETFILTER("No."));
+        IF "Job Ledger Entry".GETFILTER("Job No.") <> '' THEN
+          CostPlusRec.SETFILTER("Project No.", "Job Ledger Entry".GETFILTER("Job No."));
+        IF CostPlusRec.FINDFIRST THEN
+          CompressCu.ProcessProjectCostPlus(CostPlusRec);
+      END;
+    END;
+
+    PROCEDURE Check1Princip1Comm1Settl@1210190002(JobNo@1210190000 : Code[20];VAR ProjCustCde@1210190001 : Code[20];VAR ProjCommCde@1210190002 : Code[20];VAR ProjSettlCde@1210190003 : Code[10]) : Boolean;
+    VAR
+      ProjectPrincipal@1210190004 : Record 11012005;
+      Commission@1210190005 : Record 11012020;
+      SettlementSheet@1210190006 : Record 11012021;
+      Counter@1100529000 : Integer;
+    BEGIN
+      ProjCustCde := '';
+      ProjCommCde := '';
+      ProjSettlCde := '';
+
+      ProjectPrincipal.SETRANGE("Project No.", JobNo);
+      ProjectPrincipal.SETRANGE("Cost Plus Customer",TRUE);
+      //IF ProjectPrincipal.COUNT <> 1 THEN
+      //  EXIT(FALSE);
+      Counter := ProjectPrincipal.COUNT;
+      IF Counter <> 1 THEN BEGIN
+        WriteWarning(JobNo, STRSUBSTNO(Text013,
+          ProjectPrincipal.FIELDCAPTION("Cost Plus Customer"), Counter, ProjectPrincipal.FIELDCAPTION("Project No."), JobNo));
+        EXIT(FALSE);
+      END;
+      ProjectPrincipal.FINDFIRST;
+      ProjCustCde := ProjectPrincipal.Principal;
+
+      Commission.SETRANGE("Project No.", ProjectPrincipal."Project No.");
+      Commission.SETRANGE(Principal, ProjectPrincipal.Principal);
+      Counter := Commission.COUNT;
+      CASE Counter OF
+        0:
+          BEGIN
+            ProjCommCde := '1';
+            ProjSettlCde := SettlementSheet.GetFreeSettlementNo(JobNo, ProjCustCde, ProjCommCde);
+            EXIT(TRUE); //commission+settlement will be generated when cost plus lines are generated (in GetCommAndSettlData)
+          END;
+        1:
+          BEGIN
+            Commission.FINDFIRST;
+            ProjCommCde := Commission."No.";
+
+            IF GenerateNewSettlementSheet THEN BEGIN
+              ProjSettlCde := SettlementSheet.GetFreeSettlementNo(JobNo, ProjCustCde, ProjCommCde);
+              EXIT(TRUE);
+            END ELSE BEGIN
+              SettlementSheet.SETRANGE("Project No.", Commission."Project No.");
+              SettlementSheet.SETRANGE(Principal, Commission.Principal);
+              SettlementSheet.SETRANGE("Commission No.", Commission."No.");
+              SettlementSheet.SETFILTER(Status, '<>%1', SettlementSheet.Status::Expired);
+              Counter := SettlementSheet.COUNT;
+              CASE Counter OF
+                0:
+                  BEGIN
+                    ProjSettlCde := SettlementSheet.GetFreeSettlementNo(JobNo, ProjCustCde, ProjCommCde);
+                    EXIT(TRUE); //settlement will be generated if cost plus lines are generated
+                  END;
+                1:
+                  BEGIN
+                    SettlementSheet.FINDFIRST;
+                    ProjSettlCde := SettlementSheet."No.";
+                    EXIT(TRUE); //exactly one settlement present, which is good.
+                  END;
+                ELSE
+                  BEGIN
+                    WriteWarning(JobNo, STRSUBSTNO(Text013,
+                      SettlementSheet.TABLECAPTION, Counter,
+                      ProjectPrincipal.FIELDCAPTION(Principal) +'/'+ Commission.TABLECAPTION, ProjCustCde +'/'+ ProjCommCde));
+                    EXIT(FALSE); //several settlements present, user has to choose
+                  END;
+              END;
+            END;
+          END;
+        ELSE
+          BEGIN
+            WriteWarning(JobNo, STRSUBSTNO(Text013,
+              Commission.TABLECAPTION, Counter, ProjectPrincipal.FIELDCAPTION(Principal), ProjCustCde));
+            EXIT(FALSE); //several commissions present, user has to choose
+          END;
+      END;
+    END;
+
+    PROCEDURE GenerateCostPlusFromProjEntry@1100528501(VAR JobLedgerEntry@1100528500 : Record 11072005;SerialNo@1100528501 : Code[40];LotNo@1100528502 : Code[20]);
+    VAR
+      SkipInsert@1100525000 : Boolean;
+      CostPlusRec2@1100525001 : Record 11012019;
+    BEGIN
+      CostPlusRec.GenerateCostPlusFromProjEntry(JobLedgerEntry, CostPlusRec2,
+        ProjCde, ProjCustCde, ProjCommCde, ProjSettlCde,
+        RestQuanLedgEntryAlso, RestQuantityStartDate,
+        ConvertUnit, AutoTranslate, SkipInsert,  //DP00887
+        SerialNo, LotNo); //DP00121
+    END;
+
+    LOCAL PROCEDURE "---EVRY---"@1000000000();
+    BEGIN
+    END;
+
+    PROCEDURE SetReqForm@1000000001(IHideMessage@1100528600 : Boolean);
+    BEGIN
+      HideMessage := IHideMessage;
+      CustCde := '';
+      CommCde := '';
+      SettlCde := '';
+      IF gvSelection AND (ProjCde <> '') THEN BEGIN
+        CustCde := gvCust;
+        IF CustCde <> '' THEN BEGIN
+          CommCde := gvComm;
+          IF CommCde <> '' THEN
+            SettlCde := gvSheet;
+        END;
+      END;
+      RepeatForRestQuantitity := FALSE;
+
+      IF (ProjCde <> '') THEN BEGIN
+        IF CustCde = '' THEN BEGIN
+          ProjPrincipalRec.SETRANGE("Project No.", ProjCde);
+          ProjPrincipalRec.SETRANGE("Cost Plus Customer",TRUE);
+          IF ProjPrincipalRec.FINDFIRST THEN
+            CustCde := ProjPrincipalRec.Principal;
+        END;
+        IF (CustCde <> '') AND (CommCde = '') THEN
+          CommRec.SETRANGE("Project No.", ProjCde);
+          CommRec.SETRANGE(Principal, CustCde);
+          CASE CommRec.COUNT OF
+            0: CommCde := '1';
+            1: BEGIN
+                 CommRec.FINDFIRST;
+                 CommCde := CommRec."No.";
+               END;
+          END;
+
+        IF (CustCde <> '') AND (CommCde <> '') AND (SettlCde = '') THEN BEGIN
+          SettlRec.RESET;
+          SettlRec.SETRANGE("Project No.", ProjCde);
+          SettlRec.SETRANGE(Principal, CustCde);
+          SettlRec.SETRANGE("Commission No.", CommCde);
+          SettlRec.SETFILTER(Status, '<>%1', SettlRec.Status::Expired);
+          IF SettlRec.COUNT = 1 THEN BEGIN
+            SettlRec.FINDFIRST;
+            SettlCde := SettlRec."No.";
+          END;
+          //>> 150319 ITERO.SB IME-320 Handle more than one settlement sheet
+          IF SettlRec.COUNT > 1 THEN BEGIN
+            //>> 160628 ITERO.AC IME476 Set current settlement sheet as default
+            IF gvSheet <> '' THEN BEGIN
+              SettlRec.SETRANGE("No.", gvSheet);
+              IF SettlRec.COUNT = 1 THEN BEGIN
+                SettlRec.SETRANGE("No.");
+                SettlCde := gvSheet;
+              END ELSE BEGIN
+                SettlRec.SETRANGE("No.");
+                SettlRec.FINDLAST;
+                SettlCde := SettlRec."No.";
+              END;
+            END ELSE BEGIN
+            //<< 160628 ITERO.AC IME476
+              SettlRec.FINDLAST;
+              SettlCde := SettlRec."No.";
+            END;  // 160628 ITERO.AC IME476
+          END;
+          //<<
+        END;
+      END;
+
+      IF RepeatForRestQuantitity AND
+        ((ProjSetup."Small Project Cost Plus Hours" =
+          ProjSetup."Small Project Cost Plus Hours"::"All Hours") OR
+         (ProjSetup."Project Cost Plus Hours from" =
+          ProjSetup."Project Cost Plus Hours from"::"All Hours"))
+      THEN
+        RepeatForRestQuantitity := FALSE;
+
+      RestQuantityStartDateEditable := RepeatForRestQuantitity;
+
+      //IME-382
+      Job.SETRANGE("Project Status",0,Job."Project Status"::"Technical Finished");
+      JobProjectStatusFilter := Job.GETFILTER("Project Status");
+    END;
+
+    LOCAL PROCEDURE ValidateSettlCode@1100529002();
+    VAR
+      SettlementSheet@1100529000 : Record 11012021;
+    BEGIN
+      IF SettlCde <> '' THEN BEGIN //mg, 03-03-11: M22568
+        SettlementSheet.GET(ProjCde, CustCde, CommCde, SettlCde);
+        IF SettlementSheet.Status = SettlRec.Status::Expired THEN
+          SettlementSheet.FIELDERROR(Status);
+      END;
+    END;
+
+    LOCAL PROCEDURE WriteWarning@1100529003(ProjectNo@1100529001 : Code[20];ErrorMess@1100529000 : Text);
+    BEGIN
+      TmpError.INIT;
+      TmpError."User ID" := USERID;
+      TmpError."Source Type" := TmpError."Source Type"::"Import Budget"; //'Used' existing option value where column ProjectNo is shown
+      TmpError."Line No." := TmpError."Line No." + 1;
+      TmpError."Project No." := ProjectNo;
+      TmpError.Description := ProjectNo;
+      TmpError."Error message" := COPYSTR(ErrorMess, 1, MAXSTRLEN(TmpError."Error message"));
+      TmpError.INSERT;
+    END;
+
+    BEGIN
+    {
+      db, 10-02-12: M31700, DataItemTableView changed: SORTING(Job No.,Posting Date) -> (Job No., Cost Type, Global Dimension 2 Code)
+      IMSE-005
+      LAHE 130529 Moved code from OnOpenForm (reqform) to SetReqForm for external use (c11020217)
+      LAHE 130705 Suppress Message
+
+      SESB.I039 Extend no of characters in hour line
+         ASH 05.07.2013 Trigger "Posted Hour Line - OnAfterGetRecord" changed
+         ASH 05.07.2013 Trigger "Hour Accounting Line - OnAfterGetRecord" changed
+
+
+      4PSSE.MK 30.08.2013 New setup to decide the report to only post hour account lines that are consented
+                          + The comment field owerwrites the description on Project Cost Plus table
+
+      ADD-Exp.Hrs 14-02-04  GHE   Wage Component is "Expense Hours" - change Calculation
+                                  - Posted Hour Line
+                                  - Hour Accounting Line
+      150319 ITERO.SB IME-320 Handle more than one settlement sheet
+
+      150915 ITERO.PR RFC001
+      151201 ITERO.DL IME382 create prognosis stops with error if project is closed, extra code in SetReqForm()
+                              used in Job - OnPreDataItem()
+      151228 ITERO.SB SE Use default status from Jobs Setup
+      160628 ITERO.AC IME476 Set current/calling settlement sheet as default in SetReqForm()
+      180713 ORANGO.DL IME1068 SaveValues yes->no
+      200123 ORANGO.FH RFC1149 Create surcharge lines
+    }
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

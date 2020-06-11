@@ -1,0 +1,357 @@
+OBJECT Report 11020223 Export Hours Perman
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    CaptionML=[DEU=Exportieren Stunden;
+               ENU=Export Hours;
+               NLD=Export uren;
+               NOR=Eksporter timer;
+               SVE=Exportera timmar];
+    ProcessingOnly=Yes;
+    OnInitReport=BEGIN
+                   HumanResourcesSetup.GET;
+
+                   IF HumanResourcesSetup."Exchange Salary Application" = FALSE THEN
+                     ERROR(
+                       Text000 +
+                       Text001,
+                       HumanResourcesSetup.TABLECAPTION);
+                   CustomerNoAdpRaet := HumanResourcesSetup."Customer No. (ADP/Raet)";
+                 END;
+
+    OnPreReport=VAR
+                  lWageComponentRec@1100485000 : Record 11012014;
+                  lColumNo@1100485001 : Integer;
+                  QuitReport@1100485002 : Boolean;
+                BEGIN
+                  IF DocumentNumberCode = '' THEN
+                    ERROR(Text002);
+                  IF (StartDateSelection = 0D) OR (EndDateSelection = 0D) THEN
+                    ERROR(Text007);
+                  IF EndDateSelection < StartDateSelection THEN
+                    ERROR(Text008);
+
+                  PostedHoursRec.SETFILTER("Document No.",DocumentNumberCode);
+                  PostedHoursRec.SETRANGE("Posting Date", StartDateSelection, EndDateSelection);
+                  PostedHoursRec.SETFILTER("Cost Type", '%1|%2',
+                                            PostedHoursRec."Cost Type"::Labor,
+                                            PostedHoursRec."Cost Type"::Sundry);
+                  IF EmployerCde <> '' THEN
+                    PostedHoursRec.SETRANGE(Employer,EmployerCde);
+
+
+                  IF NOT PostedHoursRec.FINDFIRST THEN
+                    ERROR(Text004);
+
+                  PathText := HumanResourcesSetup."Pathname Files to Salary";
+
+                  WorkBookName := PathText + DocumentNumberCode + Text003;
+                  WorkSheetName := DocumentNumberCode;
+
+                  QuitReport := FALSE;
+
+                  IF FileMgt.ClientFileExists(WorkBookName) THEN
+                    IF NOT CONFIRM(Text006,FALSE,DocumentNumberCode) THEN BEGIN
+                      CurrReport.QUIT;
+                      QuitReport := TRUE;
+                    END;
+
+                  IF NOT QuitReport THEN BEGIN
+
+                    ExcelAutomation.InitExcel;
+                    ExcelAutomation.InitWorkbook(WorkSheetName);
+                    ExcelAutomation.SetSettingBold(TRUE);
+
+                    ExcelAutomation.WriteCell(1, 1, DocumentNumberCode);
+                    ExcelAutomation.WriteCell(1, 2, '1001');
+                    ExcelAutomation.WriteCell(2, 2, '1002');
+
+                    lWageComponentRec.SETFILTER(lWageComponentRec."Excel Column", '<>%1', '');
+                    lWageComponentRec.SETFILTER(lWageComponentRec."Raet/Perman Code", '<>%1', '');
+                    IF lWageComponentRec.FIND('-') THEN BEGIN
+                      REPEAT
+                        lColumNo := FindColumn(lWageComponentRec.Code);
+                        IF lColumNo <> 0 THEN BEGIN
+                          ExcelAutomation.WriteCell(lColumNo, 1, lWageComponentRec."Raet/Perman Code");
+                        END;
+                      UNTIL lWageComponentRec.NEXT = 0;
+                    END;
+
+                    ExcelAutomation.SetSettingBold(FALSE);
+
+                    RowNo := 4;
+
+                  END;
+                END;
+
+    OnPostReport=BEGIN
+                   ExcelAutomation.SaveWorkbookAs(WorkBookName);
+                   ExcelAutomation.CloseWorkbook;
+                   ExcelAutomation.TermExcel;
+                 END;
+
+  }
+  DATASET
+  {
+    { 7528;    ;DataItem;                    ;
+               DataItemTable=Table5200;
+               DataItemTableView=SORTING(No.)
+                                 WHERE(External=FILTER(No));
+               PrintOnlyIfDetail=Yes;
+               OnPreDataItem=BEGIN
+                               LinesExported := FALSE;
+                               ExportDateTime := CURRENTDATETIME;
+                             END;
+
+               OnAfterGetRecord=VAR
+                                  lColumNo@1100485000 : Integer;
+                                  lSaveTxt@1100485001 : Text[250];
+                                  lSaveDec@1100485002 : Decimal;
+                                BEGIN
+                                  PostedHoursRec.SETRANGE("Employee No.","No.");
+                                  IF PostedHoursRec.FINDSET THEN BEGIN
+                                    ExcelAutomation.WriteCell(1, RowNo, CustomerNoAdpRaet);
+                                    ExcelAutomation.WriteCell(2, RowNo, STRSUBSTNO('%1', "No."));
+                                    REPEAT
+                                      CASE PostedHoursRec."Component Type" OF
+                                        PostedHoursRec."Component Type"::Hours:
+                                          QuantAmountDec := PostedHoursRec."Total Line";
+                                        PostedHoursRec."Component Type"::Expenses:
+                                          IF PostedHoursRec."Amount (LCY)" = 0 THEN
+                                            QuantAmountDec := PostedHoursRec.Quantity
+                                          ELSE
+                                            QuantAmountDec := PostedHoursRec."Amount (LCY)" - PostedHoursRec."Precalc. Surcharge Expenses";
+                                        PostedHoursRec."Component Type"::Days:
+                                          QuantAmountDec:= PostedHoursRec.Quantity;
+                                      END;
+                                      lColumNo := FindColumn(PostedHoursRec."Wage Component");
+                                      IF lColumNo <> 0 THEN BEGIN
+                                        lSaveTxt := ExcelAutomation.ReadCell(lColumNo, RowNo);
+                                        lSaveDec := 0;
+                                        IF EVALUATE(lSaveDec, lSaveTxt) THEN;
+                                        QuantAmountDec := QuantAmountDec + lSaveDec;
+                                        ExcelAutomation.WriteCell(lColumNo, RowNo, STRSUBSTNO('%1',QuantAmountDec));
+                                        UpdateStatus(PostedHoursRec.Year,PostedHoursRec.Week,PostedHoursRec."Employee No.",PostedHoursRec."Line No.");
+                                        LinesExported := TRUE;
+                                      END;
+                                    UNTIL PostedHoursRec.NEXT = 0;
+                                    RowNo := RowNo + 1;
+                                  END;
+                                END;
+
+               OnPostDataItem=VAR
+                                lLineNoInt@1100485000 : Integer;
+                              BEGIN
+                                IF LinesExported THEN BEGIN
+
+                                  IF HoursExportRec.FIND('+') THEN
+                                    lLineNoInt := HoursExportRec."Line No." + 1
+                                  ELSE
+                                    lLineNoInt := 1;
+
+                                  HoursExportRec.INIT;
+                                  HoursExportRec."Line No." := lLineNoInt;
+                                  HoursExportRec."Document No." := DocumentNumberCode;
+                                  HoursExportRec."User ID" := USERID;
+                                  HoursExportRec.Date := TODAY;
+                                  HoursExportRec.Time := TIME;
+                                  HoursExportRec.INSERT;
+
+                                END;
+                              END;
+                               }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+      ActionList=ACTIONS
+      {
+        { 1900000004;0 ;ActionContainer;
+                        ActionContainerType=ActionItems }
+        { 1100485000;1 ;Action    ;
+                        CaptionML=[DEU=šbersicht Export Stundenerfassung;
+                                   ENU=Hours Export List;
+                                   NLD=Overzicht export urenverantwoording;
+                                   NOR=Timer, eksportliste;
+                                   SVE=Lista ”ver exporterade timmar];
+                        RunObject=Page 11012038;
+                        Promoted=Yes;
+                        PromotedCategory=Process }
+      }
+    }
+    CONTROLS
+    {
+      { 1900000001;0;Container;
+                  ContainerType=ContentArea }
+
+      { 1900000002;1;Group  ;
+                  CaptionML=[DEU=Optionen;
+                             ENU=Options;
+                             NLD=Opties;
+                             NOR=Alternativer;
+                             SVE=Alternativ] }
+
+      { 1100485003;2;Field  ;
+                  CaptionML=[DEU=Belegnr.;
+                             ENU=Document No.;
+                             NLD=Documentnummer;
+                             NOR=Bilagsnr.;
+                             SVE=Dokumentnr];
+                  NotBlank=Yes;
+                  SourceExpr=DocumentNumberCode;
+                  OnValidate=BEGIN
+                               DocumentNumberCodeOnAfterValid;
+                             END;
+                              }
+
+      { 1100485005;2;Field  ;
+                  Name=StartDateSelection;
+                  CaptionML=[DEU=Ab Buchungsdatum;
+                             ENU=From Posting Date;
+                             NLD=Vanaf boekingsdatum;
+                             NOR=Fra Bokf›ringsdato;
+                             SVE=Fr.o.m. bokf”ringsdatum];
+                  NotBlank=Yes;
+                  SourceExpr=StartDateSelection;
+                  OnValidate=BEGIN
+                               IF EndDateSelection < StartDateSelection THEN
+                                 EndDateSelection := StartDateSelection;
+                             END;
+                              }
+
+      { 1100485007;2;Field  ;
+                  CaptionML=[DEU=Bis Ende Buchunsgdatum;
+                             ENU=Posting Date To;
+                             NLD=Tot en met boekingsdatum;
+                             NOR=Bokf›ringsdato til;
+                             SVE=Bokf”ringsdatum t.o.m];
+                  NotBlank=Yes;
+                  SourceExpr=EndDateSelection;
+                  OnValidate=BEGIN
+                               IF EndDateSelection < StartDateSelection THEN
+                                 ERROR(Text008);
+                             END;
+                              }
+
+      { 1100485002;2;Field  ;
+                  CaptionML=[DEU=Fr Arbeitgeber;
+                             ENU=For Employer;
+                             NLD=Voor werkgever;
+                             NOR=For arbeidsgiver;
+                             SVE=F”r arbetsgivare];
+                  SourceExpr=EmployerCde;
+                  OnLookup=VAR
+                             EmployerPage@11012002 : Page 11012064;
+                             EmployerRec@11012003 : Record 11012013;
+                           BEGIN
+                             CLEAR(EmployerPage);
+                             EmployerPage.LOOKUPMODE(TRUE);
+                             IF EmployerPage.RUNMODAL = ACTION::LookupOK THEN BEGIN
+                               EmployerPage.GETRECORD(EmployerRec);
+                               EmployerCde := EmployerRec.Code;
+                             END;
+                           END;
+                            }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      ExcelAutomation@1210190000 : Codeunit 11012402;
+      FileMgt@1100525500 : Codeunit 419;
+      RowNo@1210190001 : Integer;
+      DocumentNumberCode@1100485001 : Code[20];
+      HoursExportRec@1100485002 : Record 11012041;
+      Text000@1100485010 : TextConst 'DEU=Stunden drfen nicht exportiert werden.;ENU=Hours may not be exported.;NLD="Uren mogen niet ge‰xporteerd worden. ";NOR=Timer kan ikke eksporteres.;SVE=Timmar f†r inte exporteras.';
+      Text001@1100485009 : TextConst 'DEU=Gehen Sie zu %1 zum Aktivieren dieser Funktion.;ENU=Go to %1 to activate this function.;NLD=Ga naar %1 om deze functie te activeren.;NOR=g† til %1 for † aktivere denne funksjonen.;SVE=g† till %1 f”r att aktivera den h„r funktionen.';
+      Text002@1100485008 : TextConst 'DEU=Die Belegnummer muss eingegeben werden.;ENU=Fill out Document Number.;NLD=Het documentnummer moet worden ingevuld.;NOR=Fyll ut dokumentnummer.;SVE=Fyll i dokumentnummer.';
+      Text003@1100485007 : TextConst 'DEU=.xls;ENU=.xls;NLD=.xls;NOR=.xls;SVE=.xls';
+      Text004@1100485006 : TextConst 'DEU=Fr diese Belegnummer gibt es keine Srunden.;ENU=No hours present for this Document Number;NLD=Voor dit documentnummer zijn geen uren aanwezig.;NOR=Det finnes ingen timer for dette dokumentnummeret;SVE=Det finns inga timmar f”r det h„r dokumentnumret';
+      Text006@1100485004 : TextConst 'DEU=Belegnummer %1 ist bereits exportiert worden. M”chten Sie nochmals exportieren?;ENU=Document Number %1 has been exported before, again ?;NLD=Documentnummer %1 is eerder ge‰xporteerd, opnieuw ?;NOR=Dokumentnr %1 har blitt eksportert f›r, ny eksport?;SVE=Dokumentnr %1 har exporterats tidigare, ny export?';
+      PathText@1100485011 : Text[150];
+      HumanResourcesSetup@1100525002 : Record 5218;
+      WorkBookName@1100485013 : Text[250];
+      WorkSheetName@1100485017 : Text[50];
+      PostedHoursRec@1100485014 : Record 11012085;
+      QuantAmountDec@1100485015 : Decimal;
+      LinesExported@1100485016 : Boolean;
+      EmployerCde@1100485000 : Code[20];
+      StartDateSelection@1100485003 : Date;
+      EndDateSelection@1100485005 : Date;
+      Text007@1100485018 : TextConst 'DEU=Die Datumauswahl muss eingegeben werden.;ENU=Fill Posting Date Selection.;NLD=De datumselectie moet worden gevuld.;NOR=Fyll ut utvalg for bokf›ringsdato.;SVE=Fyll i urval f”r bokf”ringsdatum.';
+      ExportDateTime@1100525000 : DateTime;
+      Text008@1100409000 : TextConst 'DEU=Das Bis-Datum darf nicht kleiner als das Von-Datum sein;ENU=To Date may not be less than From Date;NLD=T/m datem mag niet kleiner zijn dan Vanaf datum';
+      CustomerNoAdpRaet@1100525001 : Code[10];
+
+    PROCEDURE SetSelection@10(DocumentNo@11012000 : Code[20];StartDate@1100485000 : Date;EndDate@1100485001 : Date);
+    BEGIN
+      DocumentNumberCode := DocumentNo;
+      StartDateSelection := StartDate;
+      EndDateSelection := EndDate;
+    END;
+
+    PROCEDURE FindColumn@1100485014(WageComponent@1100485000 : Text[30]) oColumnNo : Integer;
+    VAR
+      lWageComponent@1100485001 : Record 11012014;
+      lChar@1100485002 : Char;
+      lInteger@1100485003 : Integer;
+    BEGIN
+      oColumnNo := 0;
+      IF lWageComponent.GET(WageComponent) THEN BEGIN
+        IF STRLEN(lWageComponent."Excel Column") > 0 THEN BEGIN
+          EVALUATE(lChar,COPYSTR(lWageComponent."Excel Column",1,1));
+          lInteger := lChar - 64;
+          oColumnNo := lInteger;
+          IF STRLEN(lWageComponent."Excel Column") = 2 THEN BEGIN
+            oColumnNo := oColumnNo * 26;
+            EVALUATE(lChar,COPYSTR(lWageComponent."Excel Column",2,1));
+            lInteger := lChar - 64;
+            oColumnNo := oColumnNo + lInteger
+          END;
+        END;
+      END;
+    END;
+
+    PROCEDURE UpdateStatus@1(lvYear@11012001 : Integer;lvWeek@11012002 : Integer;lvEmpl@11012003 : Code[20];lvLine@11012004 : Integer);
+    VAR
+      lvHourRec@11012005 : Record 11012085;
+    BEGIN
+      lvHourRec.GET(lvYear, lvWeek, lvEmpl, lvLine);
+      lvHourRec.Status := lvHourRec.Status::Export;
+      lvHourRec.Exported := TRUE;
+      lvHourRec."Exported on" := ExportDateTime;
+      lvHourRec.MODIFY;
+    END;
+
+    LOCAL PROCEDURE DocumentNumberCodeOnAfterValid@19061260();
+    BEGIN
+      HoursExportRec.SETRANGE("Document No.",DocumentNumberCode);
+      IF HoursExportRec.FIND('-') THEN BEGIN
+        IF NOT CONFIRM(Text006,FALSE,DocumentNumberCode) THEN
+          EXIT;
+      END;
+      HoursExportRec.SETRANGE("Document No.");
+
+      PathText := HumanResourcesSetup."Pathname Files to Salary";
+    END;
+
+    BEGIN
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+

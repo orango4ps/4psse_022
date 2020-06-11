@@ -1,0 +1,546 @@
+OBJECT Codeunit 11125986 SH Print Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      DocumentMgtSetup@1100529500 : Record 11071831;
+      Text000@1100528300 : TextConst 'ENU=Generated File to print cann''t be found.\\File:\%1';
+      UserSetup@1100528301 : Record 91;
+      Text001@1100528302 : TextConst 'ENU=Invitation Mail %1';
+
+    PROCEDURE GenerateInvitationDocuments@1100528304(VAR SHWorkplanParticipant@1100528300 : Record 11126012);
+    VAR
+      SHWorkplan@1100528311 : Record 11126011;
+    BEGIN
+      SHWorkplanParticipant.SETRANGE("Invitation Created", FALSE);
+      IF (NOT SHWorkplanParticipant.FINDSET) THEN
+        EXIT;
+
+      REPEAT
+        SHWorkplan.GET(SHWorkplanParticipant."Source Type", SHWorkplanParticipant."Source Code",
+          SHWorkplanParticipant."Workplan Date", SHWorkplanParticipant."Main Process Code",
+          SHWorkplanParticipant."Sub Process Code", SHWorkplanParticipant."Location Code");
+        IF (SHWorkplan."Source Type" <> SHWorkplan."Source Type"::Estimate) AND
+          (SHWorkplan."Process Type" <> SHWorkplan."Process Type"::Accident) AND
+          (SHWorkplan."Workplan Date" <> 0D) AND (SHWorkplan.Periodical)
+        THEN
+          GenerateInvitationDocument(SHWorkplanParticipant, SHWorkplan)
+      UNTIL (SHWorkplanParticipant.NEXT = 0);
+    END;
+
+    PROCEDURE GenerateWorkplanSelectedReports@1100528300(VAR SHWorkplanProcessReport@1100528300 : Record 11126024);
+    VAR
+      DF@1100528301 : DateFormula;
+    BEGIN
+      IF (NOT SHWorkplanProcessReport.FINDSET) THEN
+        EXIT;
+
+      DocumentMgtSetup.GET;
+      DocumentMgtSetup.TESTFIELD("Document Nos.");
+
+      REPEAT
+        SHWorkplanProcessReport.TESTFIELD("Document Group Code");
+        IF (SHWorkplanProcessReport."Document Source Type" = SHWorkplanProcessReport."Document Source Type"::DocTemplate) THEN
+          SHWorkplanProcessReport.TESTFIELD("Document Template Code");
+        IF (SHWorkplanProcessReport."Document Source Type" = SHWorkplanProcessReport."Document Source Type"::Report) THEN
+          SHWorkplanProcessReport.TESTFIELD("Report ID");
+        IF (SHWorkplanProcessReport."Print Interval" <> DF) THEN  BEGIN
+          SHWorkplanProcessReport.TESTFIELD("First Print Date");
+          SHWorkplanProcessReport.TESTFIELD("Last Print Date");
+          SHWorkplanProcessReport.TESTFIELD("Print Interval");
+        END;
+
+        GenerateWorkplanReportDocument(SHWorkplanProcessReport);
+      UNTIL (SHWorkplanProcessReport.NEXT = 0);
+    END;
+
+    PROCEDURE PrintWorkplanSelectedReports@1100529500(VAR SHWorkplanProcessReport@1100529500 : Record 11126024;VAR TempEmailAttachment@1100528300 : TEMPORARY Record 11229294);
+    BEGIN
+      IF (NOT SHWorkplanProcessReport.FINDSET) THEN
+        EXIT;
+
+      REPEAT
+        PrintWorkplanReportDocument(SHWorkplanProcessReport, TempEmailAttachment);
+      UNTIL (SHWorkplanProcessReport.NEXT = 0);
+    END;
+
+    PROCEDURE PrintCreatedPDFOutputFile@1100528303(VAR TempEmailAttachment@1100528300 : TEMPORARY Record 11229294);
+    VAR
+      OperatingSystemMgt@1100528301 : Codeunit 11012364;
+      PDFFileManagement@1100528302 : Codeunit 11020228;
+      FileManagement@1100528303 : Codeunit 419;
+      ClientTempFileName@1100528304 : Text;
+    BEGIN
+      IF (TempEmailAttachment.COUNT > 0) THEN BEGIN
+        UserSetup.GET(USERID);
+        UserSetup.TESTFIELD("PDF Reader Path");
+
+        PDFFileManagement.MergePDFEmailAttachmentsOnServer(TempEmailAttachment);
+        ClientTempFileName := FileManagement.ClientTempFileName('pdf');
+        FileManagement.DownloadToFile(TempEmailAttachment."Attachment Server File Path", ClientTempFileName);
+        IF TempEmailAttachment."Delete Server File" AND
+           EXISTS(TempEmailAttachment."Attachment Server File Path")
+        THEN
+          ERASE(TempEmailAttachment."Attachment Server File Path");
+        IF FileManagement.ClientFileExists(ClientTempFileName) THEN
+          OperatingSystemMgt.ClientShell(UserSetup."PDF Reader Path", STRSUBSTNO('/p /h "%1"', ClientTempFileName), FALSE, FALSE)
+        ELSE
+          ERROR(Text000, ClientTempFileName);
+      END;
+    END;
+
+    PROCEDURE SendInvitationsByEmail@1100528312(VAR SHWorkplanParticipant@1100528302 : Record 11126012);
+    BEGIN
+      SHWorkplanParticipant.SETRANGE("Invitation Created", TRUE);
+      SHWorkplanParticipant.SETRANGE("Invitation Sent By", 0);
+      IF (NOT SHWorkplanParticipant.FINDSET) THEN
+        EXIT;
+
+      REPEAT
+        SendInvitationByEmail(SHWorkplanParticipant);
+      UNTIL (SHWorkplanParticipant.NEXT = 0);
+    END;
+
+    PROCEDURE SendInvitationsByPost@1100528307(VAR SHWorkplanParticipant@1100528301 : Record 11126012);
+    VAR
+      TempEmailAttachment@1100528308 : TEMPORARY Record 11229294;
+    BEGIN
+      UserSetup.GET(USERID);
+      UserSetup.TESTFIELD("PDF Reader Path");
+
+      SHWorkplanParticipant.SETRANGE("Invitation Created", TRUE);
+      SHWorkplanParticipant.SETRANGE("Invitation Sent By", 0);
+      IF (NOT SHWorkplanParticipant.FINDSET) THEN
+        EXIT;
+      TempEmailAttachment.DELETEALL;
+
+      REPEAT
+        SendInvitationByPost(SHWorkplanParticipant, TempEmailAttachment);
+      UNTIL (SHWorkplanParticipant.NEXT = 0);
+      PrintCreatedPDFOutputFile(TempEmailAttachment);
+    END;
+
+    LOCAL PROCEDURE "---Locals---"@1100528306();
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE AddFileToTempEmailAttachment@1100528301(VAR TempEmailAttachment@1100528300 : TEMPORARY Record 11229294;ClientTempFileName@1100528301 : Text);
+    VAR
+      FileManagement@1100528302 : Codeunit 419;
+    BEGIN
+      TempEmailAttachment.INIT;
+      TempEmailAttachment."Attachment Server File Path" := ConvertToPDFAndUploadFile(ClientTempFileName);
+      TempEmailAttachment."Delete Server File" := TRUE;
+      TempEmailAttachment."Attachment Name" := FileManagement.GetFileName(ClientTempFileName);
+      TempEmailAttachment."Attachment Client File Path" := ClientTempFileName;
+      TempEmailAttachment."Delete Client File" := TRUE;
+      TempEmailAttachment.INSERT(TRUE);
+    END;
+
+    LOCAL PROCEDURE ConvertToPDFAndUploadFile@1100528521(ClientFileName@1100528500 : Text[250]) ServerFileName : Text[250];
+    VAR
+      PDFFileManagement@1100528502 : Codeunit 11020228;
+    BEGIN
+      ServerFileName := PDFFileManagement.UploadFileSilentAsPDF(ClientFileName);
+    END;
+
+    LOCAL PROCEDURE CreateDocumentProperties@1100529519(VAR DocumentProperties@1100529500 : Record 11012746;VAR ShortFileNameWithoutExtension@1100528400 : Text;InputTableNo@1100528301 : Integer;InputTable@1100529501 : Variant;DocumentTemplate@1100529502 : Record 11012401);
+    VAR
+      QASetup@1100528303 : Record 11126001;
+      DocumentGroup@1100529503 : Record 11012400;
+      SHWorkplan@1100529507 : Record 11126011;
+      SHWorkpProcessReportDetail@1100528300 : Record 11126025;
+      SHWorkplanParticipant@1100528302 : Record 11126012;
+      Job@1100529506 : Record 11072003;
+      DocumentLinkManagement@1100529504 : Codeunit 11012401;
+      RecIdArray@1100529505 : ARRAY [5] OF RecordID;
+    BEGIN
+      CLEAR(DocumentProperties);
+
+      CASE InputTableNo OF
+        DATABASE::"SH Workp Process Report Detail": BEGIN
+          SHWorkpProcessReportDetail.COPY(InputTable);
+          SHWorkpProcessReportDetail.CALCFIELDS("Document Group Code", "Document Template Code", "Report ID");
+
+          DocumentGroup.GET(SHWorkpProcessReportDetail."Document Group Code");
+          DocumentGroup.TESTFIELD("Template Directory");
+          SHWorkplan.GET(SHWorkpProcessReportDetail."Source Type", SHWorkpProcessReportDetail."Source Code",
+            SHWorkpProcessReportDetail."Workplan Date", SHWorkpProcessReportDetail."Main Process Code",
+            SHWorkpProcessReportDetail."Sub Process Code", SHWorkpProcessReportDetail."Location Code");
+
+          RecIdArray[1] := SHWorkpProcessReportDetail.RECORDID;
+          RecIdArray[2] := SHWorkplan.RECORDID;
+          IF (SHWorkplan."Source Type" = SHWorkplan."Source Type"::Project) THEN BEGIN
+            Job.GET(SHWorkplan."Source Code");
+            RecIdArray[3] := Job.RECORDID;
+          END;
+        END;
+        DATABASE::"SH Workplan Participant": BEGIN
+          SHWorkplanParticipant.COPY(InputTable);
+          QASetup.GET;
+          QASetup.TESTFIELD("Invitation Document Group");
+          QASetup.TESTFIELD("Invitation Document Template");
+
+          DocumentGroup.GET(QASetup."Invitation Document Group");
+          DocumentGroup.TESTFIELD("Template Directory");
+          SHWorkplan.GET(SHWorkplanParticipant."Source Type", SHWorkplanParticipant."Source Code",
+            SHWorkplanParticipant."Workplan Date", SHWorkplanParticipant."Main Process Code",
+            SHWorkplanParticipant."Sub Process Code", SHWorkplanParticipant."Location Code");
+
+          RecIdArray[1] := SHWorkplanParticipant.RECORDID;
+          RecIdArray[2] := SHWorkplan.RECORDID;
+          IF (SHWorkplan."Source Type" = SHWorkplan."Source Type"::Project) THEN BEGIN
+            Job.GET(SHWorkplan."Source Code");
+            RecIdArray[3] := Job.RECORDID;
+          END;
+        END;
+      END;
+
+      DocumentProperties.INIT;
+      DocumentProperties."Document Group" := DocumentGroup.Code;
+      DocumentProperties."Document Template" := DocumentTemplate."Template Code";
+      DocumentProperties."External Document" := FALSE;
+      DocumentProperties."No. Series" := DocumentMgtSetup."Document Nos.";
+      DocumentProperties.INSERT(TRUE);
+
+      DocumentLinkManagement.CreateDocumentLink(DocumentProperties, RecIdArray);
+
+      DocumentProperties."File Extension" := GetFileExtension(DocumentTemplate);
+      IF (DocumentTemplate."Prefix File Name" <> '') THEN
+        ShortFileNameWithoutExtension := STRSUBSTNO('%1%2', DocumentTemplate."Prefix File Name", DocumentProperties."No.")
+      ELSE
+        ShortFileNameWithoutExtension := DocumentProperties."No.";
+      CASE InputTableNo OF
+        DATABASE::"SH Workp Process Report Detail":
+          SetDocumentDescriptionAndSubjectDetail(DocumentProperties, SHWorkpProcessReportDetail, DocumentTemplate);
+        DATABASE::"SH Workplan Participant":
+          SetDocumentDescriptionAndSubjectParticipant(DocumentProperties, SHWorkplanParticipant, DocumentTemplate);
+      END;
+      DocumentProperties."Final Printed" := TRUE;
+      DocumentProperties."Final Printed Date" := TODAY;
+      DocumentProperties.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE GenerateInvitationDocument@1100528308(SHWorkplanParticipant@1100528300 : Record 11126012;SHWorkplan@1100528305 : Record 11126011);
+    VAR
+      QASetup@1100528308 : Record 11126001;
+      DocumentGroup@1100528301 : Record 11012400;
+      DocumentProperties@1100528312 : Record 11012746;
+      DocumentTemplate@1100528302 : Record 11012401;
+      DocumentManagement@1100528303 : Codeunit 11012406;
+      WordAutomation@1100528304 : Codeunit 11012400;
+      ShortFileNameWithoutExtension@1100528309 : Text;
+      TargetStorageURI@1100527800 : Text;
+      TargetStorageType@1100527801 : Option;
+    BEGIN
+      QASetup.GET;
+      QASetup.TESTFIELD("Invitation Document Group");
+      QASetup.TESTFIELD("Invitation Document Template");
+
+      DocumentGroup.GET(QASetup."Invitation Document Group");
+      DocumentTemplate.GET(QASetup."Invitation Document Group", QASetup."Invitation Document Template");
+
+      CreateDocumentProperties(DocumentProperties, ShortFileNameWithoutExtension, DATABASE::"SH Workplan Participant",
+        SHWorkplanParticipant, DocumentTemplate);
+
+      WordAutomation.Initialise;
+
+      DocumentManagement.GetStorageLocation(
+        '','','','',DocumentProperties."Creation Date",TargetStorageURI,TargetStorageType);
+      DocumentManagement.CreateStorageLocationIfNotExists(TargetStorageType, TargetStorageURI);
+      WordAutomation.Open(
+        TRUE, DocumentTemplate."Storage Type", DocumentTemplate.GetTemplateFilePath, FALSE);
+
+      TargetStorageURI += ShortFileNameWithoutExtension + DocumentProperties."File Extension";
+
+      DocumentManagement.ProcessDoc(DocumentTemplate, DocumentProperties,WordAutomation);
+      WordAutomation.SaveAs(TargetStorageType,TargetStorageURI);
+      DocumentProperties.ValidateStorageURI(TargetStorageType,TargetStorageURI);
+      DocumentProperties.MODIFY;
+
+      SHWorkplanParticipant."Invitation Created" := TRUE;
+      SHWorkplanParticipant.MODIFY;
+    END;
+
+    LOCAL PROCEDURE GenerateWorkplanReportDocument@1100528302(SHWorkplanProcessReport@1100528300 : Record 11126024);
+    VAR
+      SHWorkpProcessReportDetail@1100529503 : Record 11126025;
+      DocumentProperties@1100528302 : Record 11012746;
+      DocumentGroup@1100529500 : Record 11012400;
+      DocumentTemplate@1100529501 : Record 11012401;
+      WordAutomation@1100529505 : Codeunit 11012400;
+      DocumentManagement@1100529504 : Codeunit 11012406;
+      FileManagement@1100528405 : Codeunit 419;
+      ShortFileNameWithoutExtension@1100528401 : Text;
+      ServerTempFileName@1100528404 : Text;
+      ClientTempFileName@1100528400 : Text;
+      TargetStorageURI@1100527801 : Text;
+      TargetStorageType@1100527800 : Option;
+      ErrorMessage@1100527805 : Text;
+    BEGIN
+      SHWorkpProcessReportDetail.SETRANGE("Source Type", SHWorkplanProcessReport."Source Type");
+      SHWorkpProcessReportDetail.SETRANGE("Source Code", SHWorkplanProcessReport."Source Code");
+      SHWorkpProcessReportDetail.SETRANGE("Workplan Date", SHWorkplanProcessReport."Workplan Date");
+      SHWorkpProcessReportDetail.SETRANGE("Main Process Code", SHWorkplanProcessReport."Main Process Code");
+      SHWorkpProcessReportDetail.SETRANGE("Sub Process Code", SHWorkplanProcessReport."Sub Process Code");
+      SHWorkpProcessReportDetail.SETRANGE("Location Code", SHWorkplanProcessReport."Location Code");
+      SHWorkpProcessReportDetail.SETRANGE("Report Line No.", SHWorkplanProcessReport."Line No.");
+      SHWorkpProcessReportDetail.SETRANGE(Generated, FALSE);
+      IF (NOT SHWorkpProcessReportDetail.FINDSET(TRUE)) THEN
+        EXIT;
+
+      DocumentGroup.GET(SHWorkplanProcessReport."Document Group Code");
+      DocumentTemplate.INIT;
+      IF (SHWorkplanProcessReport."Document Source Type" = SHWorkplanProcessReport."Document Source Type"::DocTemplate) THEN
+        DocumentTemplate.GET(SHWorkplanProcessReport."Document Group Code", SHWorkplanProcessReport."Document Template Code");
+
+      REPEAT
+        SHWorkpProcessReportDetail.SETRANGE("Print Date", SHWorkpProcessReportDetail."Print Date"); //Set for Report selection
+
+        CreateDocumentProperties(DocumentProperties, ShortFileNameWithoutExtension, DATABASE::"SH Workp Process Report Detail",
+          SHWorkpProcessReportDetail, DocumentTemplate);
+
+        CASE SHWorkplanProcessReport."Document Source Type" OF
+          SHWorkplanProcessReport."Document Source Type"::DocTemplate: BEGIN
+
+            WordAutomation.Initialise;
+            DocumentManagement.GetStorageLocation(
+              SHWorkplanProcessReport."Document Group Code", SHWorkplanProcessReport."Document Template Code",
+              '', '', DocumentProperties."Creation Date", TargetStorageURI, TargetStorageType);
+            DocumentManagement.CreateStorageLocationIfNotExists(TargetStorageType, TargetStorageURI);
+            TargetStorageURI += ShortFileNameWithoutExtension + DocumentProperties."File Extension";
+
+            WordAutomation.Open(TRUE, DocumentTemplate."Storage Type", DocumentTemplate.GetTemplateFilePath, FALSE);
+            DocumentManagement.ProcessDoc(DocumentTemplate, DocumentProperties,WordAutomation);
+            WordAutomation.SaveAs(TargetStorageType,TargetStorageURI);
+            DocumentProperties.ValidateStorageURI(TargetStorageType,TargetStorageURI);
+            DocumentProperties.MODIFY;
+          END;
+          SHWorkplanProcessReport."Document Source Type"::Report: BEGIN
+            ServerTempFileName := FileManagement.ServerTempFileName(DocumentProperties."File Extension");
+            ClientTempFileName := FileManagement.ClientTempFileName('');
+            DocumentManagement.GetStorageLocation(
+              '','','','',DocumentProperties."Creation Date",TargetStorageURI,TargetStorageType);
+            DocumentManagement.CreateStorageLocationIfNotExists(TargetStorageType, TargetStorageURI);
+            TargetStorageURI += ShortFileNameWithoutExtension + DocumentProperties."File Extension";
+            REPORT.SAVEASWORD(SHWorkplanProcessReport."Report ID", ServerTempFileName, SHWorkpProcessReportDetail);
+            FileManagement.DownloadToFile(ServerTempFileName, ClientTempFileName);
+
+            DocumentManagement.CopyStorageContent(DocumentProperties."Storage Type"::"File System on Premise",TargetStorageType,ClientTempFileName,TargetStorageURI,ErrorMessage);
+            DocumentProperties.ValidateStorageURI(TargetStorageType,TargetStorageURI);
+            DocumentProperties.MODIFY;
+
+            FileManagement.DeleteClientFile(ClientTempFileName);
+            ERASE(ServerTempFileName);
+          END;
+        END;
+        SHWorkpProcessReportDetail.SETRANGE("Print Date"); //Reset for Repeat loop
+
+        SHWorkpProcessReportDetail."Generated on" := CURRENTDATETIME;
+        SHWorkpProcessReportDetail.Generated := TRUE;
+        SHWorkpProcessReportDetail.MODIFY;
+
+      UNTIL (SHWorkpProcessReportDetail.NEXT = 0);
+    END;
+
+    LOCAL PROCEDURE GetFileExtension@1100529505(DocumentTemplate@1100529500 : Record 11012401) : Text;
+    VAR
+      FileManagement@1100529502 : Codeunit 419;
+      FileExtension@1100529501 : Text;
+    BEGIN
+      FileExtension := FileManagement.GetExtension(DocumentTemplate."Word Template");
+      CASE TRUE OF
+        (FileExtension = '.dotx'):
+          FileExtension :='.docx';
+        ELSE
+          FileExtension :='.docx';
+      END;
+      EXIT(FileExtension);
+    END;
+
+    LOCAL PROCEDURE PrintWorkplanReportDocument@1100529501(SHWorkplanProcessReport@1100529506 : Record 11126024;VAR TempEmailAttachment@1100528301 : TEMPORARY Record 11229294);
+    VAR
+      SHWorkpProcessReportDetail@1100529505 : Record 11126025;
+      TempDocumentProperties@1100529504 : TEMPORARY Record 11012746;
+      DocumentFilters@1100529509 : Codeunit 11012432;
+      FileManagement@1100529507 : Codeunit 419;
+      DocumentManagement@1100528400 : Codeunit 11012406;
+      ClientTempFileName@1100529501 : Text;
+      ErrorMessage@1100528401 : Text;
+      RecRef@1100528300 : RecordRef;
+    BEGIN
+      SHWorkpProcessReportDetail.SETRANGE("Source Type", SHWorkplanProcessReport."Source Type");
+      SHWorkpProcessReportDetail.SETRANGE("Source Code", SHWorkplanProcessReport."Source Code");
+      SHWorkpProcessReportDetail.SETRANGE("Workplan Date", SHWorkplanProcessReport."Workplan Date");
+      SHWorkpProcessReportDetail.SETRANGE("Main Process Code", SHWorkplanProcessReport."Main Process Code");
+      SHWorkpProcessReportDetail.SETRANGE("Sub Process Code", SHWorkplanProcessReport."Sub Process Code");
+      SHWorkpProcessReportDetail.SETRANGE("Location Code", SHWorkplanProcessReport."Location Code");
+      SHWorkpProcessReportDetail.SETRANGE("Report Line No.", SHWorkplanProcessReport."Line No.");
+      SHWorkpProcessReportDetail.SETRANGE(Generated, TRUE);
+      SHWorkpProcessReportDetail.SETRANGE(Printed, FALSE);
+      IF (NOT SHWorkpProcessReportDetail.FINDSET(TRUE)) THEN
+        EXIT;
+
+      //the created documents are docx files
+      REPEAT
+        RecRef.GETTABLE(SHWorkpProcessReportDetail);
+        DocumentFilters.CreateTempFilterAndGetDocProps(RecRef, TempDocumentProperties); //returns only 1 record
+        ClientTempFileName := FileManagement.ClientTempFileName(TempDocumentProperties."File Extension");
+        IF NOT DocumentManagement.CopyStorageContent(
+          TempDocumentProperties."Storage Type", TempDocumentProperties."Storage Type"::"File System on Premise",
+          TempDocumentProperties.GetStorageURI, ClientTempFileName, ErrorMessage)
+        THEN
+          ERROR(ErrorMessage);
+        IF FileManagement.ClientFileExists(ClientTempFileName) THEN BEGIN
+          AddFileToTempEmailAttachment(TempEmailAttachment, ClientTempFileName);
+          SHWorkpProcessReportDetail.Printed := TRUE;
+          SHWorkpProcessReportDetail.MODIFY;
+        END;
+      UNTIL (SHWorkpProcessReportDetail.NEXT = 0);
+    END;
+
+    LOCAL PROCEDURE SendInvitationByEmail@1100528311(SHWorkplanParticipant@1100528302 : Record 11126012);
+    VAR
+      MailTemplate@1100528307 : Record 11229450;
+      Language@1100528303 : Record 8;
+      Employee@1100528306 : Record 5200;
+      TempDocumentProperties@1100528316 : TEMPORARY Record 11012746;
+      DocumentFilters@1100528315 : Codeunit 11012432;
+      FileManagement@1100528310 : Codeunit 419;
+      SMTPMail@1100528301 : Codeunit 400;
+      MailTemplateManagement@1100528304 : Codeunit 11012622;
+      DocumentManagement@1100528400 : Codeunit 11012406;
+      MailTemplateNo@1100528311 : Integer;
+      SubjectText@1100528313 : Text;
+      BodyText@1100528317 : Text;
+      RecRef@1100528314 : RecordRef;
+      LanguageCode@1100528305 : Code[10];
+      ClientTempFilename@1100528318 : Text;
+      ServerTempFilename@1100528300 : Text;
+      ErrorMessage@1100528401 : Text;
+    BEGIN
+      Employee.GET(SHWorkplanParticipant."Employee No.");
+      IF (Employee."Company E-Mail" = '') THEN
+        EXIT;
+      Language.SETRANGE("Windows Language ID", GLOBALLANGUAGE);
+      IF (Language.FINDFIRST) THEN
+        LanguageCode := Language.Code
+      ELSE
+        LanguageCode := '';
+
+      MailTemplateNo := 69;
+      MailTemplateManagement.GetMailTemplate(MailTemplate, MailTemplateNo, '');
+      MailTemplateManagement.GetLayoutTextSubstitutedSubjectAndTotalBody(MailTemplateNo, LanguageCode, SHWorkplanParticipant, SubjectText, BodyText);
+      IF (NOT MailTemplate."Use Mail Template Subject Text") THEN
+        SubjectText := STRSUBSTNO(Text001,STRSUBSTNO('%1 %2', SHWorkplanParticipant."Source Type", SHWorkplanParticipant."Source Code"));
+
+      SMTPMail.CreateMessage(MailTemplate."From Name", MailTemplate.From, Employee."Company E-Mail", SubjectText, BodyText, MailTemplate."Mail is Html");
+
+      RecRef.GETTABLE(SHWorkplanParticipant);
+      DocumentFilters.CreateTempFilterAndGetDocProps(RecRef, TempDocumentProperties);
+      ClientTempFilename := FileManagement.ClientTempFileName(TempDocumentProperties."File Extension");
+      IF NOT DocumentManagement.CopyStorageContent(
+        TempDocumentProperties."Storage Type", TempDocumentProperties."Storage Type"::"File System on Premise",
+        TempDocumentProperties.GetStorageURI, ClientTempFilename, ErrorMessage)
+      THEN
+        ERROR(ErrorMessage);
+      IF FileManagement.ClientFileExists(ClientTempFilename) THEN BEGIN
+        ServerTempFilename := ConvertToPDFAndUploadFile(ClientTempFilename);
+        SMTPMail.AddAttachment(ServerTempFilename, TempDocumentProperties.Description+'.pdf');
+        SMTPMail.Send;
+        IF EXISTS(ServerTempFilename) THEN
+          ERASE(ServerTempFilename);
+        FileManagement.DeleteClientFile(ClientTempFilename);
+
+        SHWorkplanParticipant."Invitation Sent By" := SHWorkplanParticipant."Invitation Sent By"::Email;
+        SHWorkplanParticipant."Invited for Meeting on" := CURRENTDATETIME;
+        SHWorkplanParticipant.MODIFY;
+        COMMIT; //Because sending mail is a long lasting process
+      END;
+    END;
+
+    LOCAL PROCEDURE SendInvitationByPost@1100528310(SHWorkplanParticipant@1100528301 : Record 11126012;VAR TempEmailAttachment@1100528300 : TEMPORARY Record 11229294);
+    VAR
+      Employee@1100528302 : Record 5200;
+      TempDocumentProperties@1100528308 : TEMPORARY Record 11012746;
+      DocumentFilters@1100528306 : Codeunit 11012432;
+      FileManagement@1100528305 : Codeunit 419;
+      DocumentManagement@1100528400 : Codeunit 11012406;
+      RecRef@1100528304 : RecordRef;
+      ClientTempFilename@1100528303 : Text;
+      ErrorMessage@1100528401 : Text;
+    BEGIN
+      Employee.GET(SHWorkplanParticipant."Employee No.");
+      IF (Employee."Company E-Mail" <> '') THEN
+        EXIT;
+
+      RecRef.GETTABLE(SHWorkplanParticipant);
+      DocumentFilters.CreateTempFilterAndGetDocProps(RecRef, TempDocumentProperties);
+      ClientTempFilename := FileManagement.ClientTempFileName(TempDocumentProperties."File Extension");
+      IF NOT DocumentManagement.CopyStorageContent(
+        TempDocumentProperties."Storage Type", TempDocumentProperties."Storage Type"::"File System on Premise",
+        TempDocumentProperties.GetStorageURI, ClientTempFilename, ErrorMessage)
+      THEN
+        ERROR(ErrorMessage);
+
+      IF FileManagement.ClientFileExists(ClientTempFilename) THEN BEGIN
+        AddFileToTempEmailAttachment(TempEmailAttachment, ClientTempFilename);
+      END;
+      SHWorkplanParticipant."Invitation Sent By" := SHWorkplanParticipant."Invitation Sent By"::Post;
+      SHWorkplanParticipant."Invited for Meeting on" := CURRENTDATETIME;
+      SHWorkplanParticipant.MODIFY;
+    END;
+
+    LOCAL PROCEDURE SetDocumentDescriptionAndSubjectDetail@1100529503(VAR DocumentProperties@1100529504 : Record 11012746;SHWorkpProcessReportDetail@1100529500 : Record 11126025;DocumentTemplate@1100529501 : Record 11012401);
+    VAR
+      SHWorkplanProcessReport@1100528300 : Record 11126024;
+    BEGIN
+      SHWorkpProcessReportDetail.CALCFIELDS("Document Source Type", "Document Group Code", "Document Template Code", "Report ID");
+      SHWorkplanProcessReport.GET(SHWorkpProcessReportDetail."Source Type", SHWorkpProcessReportDetail."Source Code",
+        SHWorkpProcessReportDetail."Workplan Date", SHWorkpProcessReportDetail."Main Process Code",
+        SHWorkpProcessReportDetail."Sub Process Code"  , SHWorkpProcessReportDetail."Location Code",
+        SHWorkpProcessReportDetail."Report Line No.");
+
+      DocumentProperties.Description := COPYSTR(STRSUBSTNO('%1_%2',
+        SHWorkplanProcessReport.GetCaption, FORMAT(SHWorkpProcessReportDetail."Print Date", 0, 9)),
+        1, MAXSTRLEN(DocumentProperties.Description));
+      DocumentProperties.Subject := COPYSTR(STRSUBSTNO('%1_%2_%3_%4_%5',
+        SHWorkpProcessReportDetail."Source Code",
+        FORMAT(SHWorkpProcessReportDetail."Workplan Date", 0, 9),
+        SHWorkpProcessReportDetail."Main Process Code",
+        SHWorkpProcessReportDetail."Sub Process Code",
+        SHWorkpProcessReportDetail."Location Code"), 1, MAXSTRLEN(DocumentProperties.Subject));
+    END;
+
+    LOCAL PROCEDURE SetDocumentDescriptionAndSubjectParticipant@1100528305(VAR DocumentProperties@1100529504 : Record 11012746;SHWorkplanParticipant@1100529500 : Record 11126012;DocumentTemplate@1100529501 : Record 11012401);
+    BEGIN
+      SHWorkplanParticipant.CALCFIELDS("Employee Name");
+
+      DocumentProperties.Description := COPYSTR(STRSUBSTNO('%1_%2',
+        STRSUBSTNO(Text001, SHWorkplanParticipant."Employee Name"), FORMAT(TODAY, 0, 9)),
+        1, MAXSTRLEN(DocumentProperties.Description));
+      DocumentProperties.Subject := COPYSTR(STRSUBSTNO('%1_%2_%3_%4_%5',
+        SHWorkplanParticipant."Source Code",
+        FORMAT(SHWorkplanParticipant."Workplan Date", 0, 9),
+        SHWorkplanParticipant."Main Process Code",
+        SHWorkplanParticipant."Sub Process Code",
+        SHWorkplanParticipant."Location Code"), 1, MAXSTRLEN(DocumentProperties.Subject));
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

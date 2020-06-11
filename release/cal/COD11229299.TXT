@@ -1,0 +1,240 @@
+OBJECT Codeunit 11229299 Process PDF Documents
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=4PS14.00;
+  }
+  PROPERTIES
+  {
+    TableNo=472;
+    OnRun=BEGIN
+            SalesSetup.GET;
+            IF NOT SalesSetup."Create PDF Invoice on Posting" THEN
+              EXIT;
+
+            PDFDocumentQueue.SETRANGE("PDF File Created", FALSE);
+            IF PDFDocumentQueue.FINDSET THEN
+              REPEAT
+                ProcessDocument;
+              UNTIL PDFDocumentQueue.NEXT = 0;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      PDFDocumentQueue@1100529601 : Record 11229376;
+      Text001@1100529603 : TextConst 'DEU=Rechnung,Gutschrift;ENU=Invoice,Credit Memo;NLD=Factuur,Creditnota;NOR=Faktura,Kreditnota;SVE=Faktura,Kreditnota';
+      SalesSetup@1100528100 : Record 311;
+
+    LOCAL PROCEDURE ProcessDocument@1100529600();
+    VAR
+      SalesInvoiceHeader@1100529600 : Record 112;
+      SalesInvoiceLine@1100529601 : Record 113;
+      SalesCrMemoHeader@1100529602 : Record 114;
+      SalesCrMemoLine@1100529603 : Record 115;
+      Project@1100529617 : Record 11072003;
+      ServiceOrder@1100529612 : Record 11012823;
+      ReportSelections@1100529607 : Record 77;
+      GenericReport@1100529606 : Record 11071914;
+      DocumentProperties@1100529611 : Record 11012746;
+      PDFDocumentQueueLoc@1100529619 : Record 11229376;
+      FileMgt@1100529618 : Codeunit 419;
+      PDFFileManagement@1100528400 : Codeunit 11020228;
+      ExternalDocumentManagement@1100529613 : Codeunit 11012403;
+      ReportID@1100529605 : Integer;
+      i@1100529608 : Integer;
+      MailTemplateNo@1100528402 : Integer;
+      ShortcutDimension1Code@1100528404 : Code[20];
+      ServerFileName@1100529604 : Text;
+      ClientFileName@1100529609 : Text;
+      DocNoTxt@1100529610 : Text;
+      TargetDirectory@1100529616 : Text;
+      TargetFileName@1100529615 : Text;
+      PDFIsPrinted@1100528403 : Boolean;
+      StorageType@1100527800 : Option;
+    BEGIN
+      CASE PDFDocumentQueue."Document Type" OF
+        PDFDocumentQueue."Document Type"::"Posted Sales Invoice":
+          BEGIN
+            IF NOT SalesInvoiceHeader.GET(PDFDocumentQueue."Document No.") THEN
+              EXIT;
+            ReportSelections.SETRANGE(Usage, ReportSelections.Usage::"S.Invoice");
+          END;
+        PDFDocumentQueue."Document Type"::"Posted Sales Credit Memo":
+          BEGIN
+            IF NOT SalesCrMemoHeader.GET(PDFDocumentQueue."Document No.") THEN
+              EXIT;
+            ReportSelections.SETRANGE(Usage, ReportSelections.Usage::"S.Cr.Memo");
+          END;
+      END;
+
+      ReportSelections.SETRANGE("Default Selection", TRUE);
+      IF ReportSelections.ISEMPTY THEN
+        EXIT;
+      ReportSelections.FINDFIRST;
+      GenericReport.SETRANGE("Called by Report ID", ReportSelections."Report ID");
+      IF GenericReport.FINDFIRST THEN
+        ReportID := GenericReport.ID
+      ELSE
+        ReportID := ReportSelections."Report ID";
+      IF ReportID = 0 THEN
+        EXIT;
+
+      ServerFileName := FileMgt.ServerTempFileName('.pdf');
+      CASE PDFDocumentQueue."Document Type" OF
+        PDFDocumentQueue."Document Type"::"Posted Sales Invoice":
+          BEGIN
+            MailTemplateNo := 1;
+            SalesInvoiceHeader.FILTERGROUP(20);
+            SalesInvoiceHeader.SETFILTER("No.", '<>%1', '');
+            SalesInvoiceHeader.FILTERGROUP(0);
+            SalesInvoiceHeader.SETRANGE("No.", SalesInvoiceHeader."No.");
+            IF NOT REPORT.SAVEASPDF(ReportID, ServerFileName, SalesInvoiceHeader) THEN
+              EXIT;
+            DocNoTxt := SELECTSTR(1, Text001) + '_' + SalesInvoiceHeader."No.";
+            ShortcutDimension1Code := SalesInvoiceHeader."Shortcut Dimension 1 Code";
+            PDFIsPrinted :=
+              SalesInvoiceHeader."Electronic Invoicing" = SalesInvoiceHeader."Electronic Invoicing"::Print;
+          END;
+        PDFDocumentQueue."Document Type"::"Posted Sales Credit Memo":
+          BEGIN
+            MailTemplateNo := 2;
+            SalesCrMemoHeader.FILTERGROUP(20);
+            SalesCrMemoHeader.SETFILTER("No.", '<>%1', '');
+            SalesCrMemoHeader.FILTERGROUP(0);
+            SalesCrMemoHeader.SETRANGE("No.", SalesCrMemoHeader."No.");
+            IF NOT REPORT.SAVEASPDF(ReportID, ServerFileName, SalesCrMemoHeader) THEN
+              EXIT;
+            DocNoTxt := SELECTSTR(2, Text001) + '_' + SalesCrMemoHeader."No.";
+            ShortcutDimension1Code := SalesCrMemoHeader."Shortcut Dimension 1 Code";
+            PDFIsPrinted :=
+              SalesCrMemoHeader."Electronic Invoicing" = SalesCrMemoHeader."Electronic Invoicing"::Print;
+          END;
+      END;
+
+      PDFFileManagement.AddBackground(ServerFileName, MailTemplateNo, ShortcutDimension1Code, PDFIsPrinted);
+
+      ClientFileName := FileMgt.ClientTempFolderName + DocNoTxt + '.pdf';
+      WHILE FileMgt.ClientFileExists(ClientFileName) DO BEGIN
+        i += 1;
+        ClientFileName := FileMgt.ClientTempFolderName + DocNoTxt + '_' + FORMAT(i) + '.pdf';
+      END;
+      FileMgt.DownloadToFile(ServerFileName, ClientFileName);
+      IF EXISTS(ServerFileName) THEN
+        ERASE(ServerFileName);
+
+      WITH DocumentProperties DO BEGIN
+        INIT;
+        "External Document" := TRUE;
+        "Creation Date" := TODAY;
+        "Creation Time" := TIME;
+        "User ID" := USERID;
+        VALIDATE("Internal Company", COMPANYNAME);
+        VALIDATE(Status, Status::Concept);
+        "SharePoint Status" := "SharePoint Status"::New;
+        FillModificationData;
+        Description := DocNoTxt;
+        "Document Type" := SalesSetup."PDF Invoice Document Type";
+        INSERT(TRUE);
+
+        ExternalDocumentManagement.RegisterFile(
+          ClientFileName, "Document Type", "Creation Date", TargetFileName, StorageType);
+        ValidateStorageURI(StorageType,TargetFileName);
+        MODIFY(TRUE);
+      END;
+
+      i := 0;
+
+      CASE PDFDocumentQueue."Document Type" OF
+        PDFDocumentQueue."Document Type"::"Posted Sales Invoice":
+          BEGIN
+            AddDocumentLink(i, DocumentProperties."No.", DATABASE::"Sales Invoice Header", SalesInvoiceHeader.RECORDID);
+
+            IF SalesInvoiceHeader."Job No." <> '' THEN
+              IF Project.GET(SalesInvoiceHeader."Job No.") THEN
+                Project.MARK(TRUE);
+            IF SalesInvoiceHeader."Service Order No." <> '' THEN
+              IF ServiceOrder.GET(SalesInvoiceHeader."Service Order No.") THEN
+                ServiceOrder.MARK(TRUE);
+
+            SalesInvoiceLine.SETRANGE("Document No.", SalesInvoiceHeader."No.");
+            IF SalesInvoiceLine.FINDSET THEN
+              REPEAT
+                IF SalesInvoiceLine."Job No." <> '' THEN
+                  IF Project.GET(SalesInvoiceLine."Job No.") THEN
+                    Project.MARK(TRUE);
+                IF SalesInvoiceLine."Service Order No." <> '' THEN
+                  IF ServiceOrder.GET(SalesInvoiceLine."Service Order No.") THEN
+                    ServiceOrder.MARK(TRUE);
+              UNTIL SalesInvoiceLine.NEXT = 0;
+          END;
+
+        PDFDocumentQueue."Document Type"::"Posted Sales Credit Memo":
+          BEGIN
+            AddDocumentLink(i, DocumentProperties."No.", DATABASE::"Sales Cr.Memo Header", SalesCrMemoHeader.RECORDID);
+
+            IF SalesCrMemoHeader."Job No." <> '' THEN
+              IF Project.GET(SalesCrMemoHeader."Job No.") THEN
+                Project.MARK(TRUE);
+            IF SalesCrMemoHeader."Service Order No." <> '' THEN
+              IF ServiceOrder.GET(SalesCrMemoHeader."Service Order No.") THEN
+                ServiceOrder.MARK(TRUE);
+
+            SalesCrMemoLine.SETRANGE("Document No.", SalesCrMemoHeader."No.");
+            IF SalesCrMemoLine.FINDSET THEN
+              REPEAT
+                IF SalesCrMemoLine."Job No." <> '' THEN
+                  IF Project.GET(SalesCrMemoLine."Job No.") THEN
+                    Project.MARK(TRUE);
+                IF SalesCrMemoLine."Service Order No." <> '' THEN
+                  IF ServiceOrder.GET(SalesCrMemoLine."Service Order No.") THEN
+                    ServiceOrder.MARK(TRUE);
+              UNTIL SalesCrMemoLine.NEXT = 0;
+          END;
+      END;
+
+      Project.MARKEDONLY(TRUE);
+      IF Project.FINDSET THEN
+        REPEAT
+          AddDocumentLink(i, DocumentProperties."No.", DATABASE::Job, Project.RECORDID);
+        UNTIL Project.NEXT = 0;
+
+      ServiceOrder.MARKEDONLY(TRUE);
+      IF ServiceOrder.FINDSET THEN
+        REPEAT
+          AddDocumentLink(i, DocumentProperties."No.", DATABASE::"Service Order", ServiceOrder.RECORDID);
+        UNTIL ServiceOrder.NEXT = 0;
+
+      PDFDocumentQueueLoc := PDFDocumentQueue;
+      PDFDocumentQueueLoc."PDF File Created" := TRUE;
+      PDFDocumentQueueLoc."PDF File Created On" := CREATEDATETIME(TODAY, TIME);
+      PDFDocumentQueueLoc.MODIFY;
+
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE AddDocumentLink@1100529602(VAR SeqNo@1100529601 : Integer;DocNo@1100529602 : Code[20];TableNo@1100529604 : Integer;RecID@1100529603 : RecordID);
+    VAR
+      DocumentLink@1100529600 : Record 11012747;
+    BEGIN
+      SeqNo += 10000;
+
+      WITH DocumentLink DO BEGIN
+        INIT;
+        "Document No." := DocNo;
+        "Seq. No." := SeqNo;
+        "Table No." := TableNo;
+        "Internal Company" := COMPANYNAME;
+        "Record ID" := RecID;
+        INSERT(TRUE);
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

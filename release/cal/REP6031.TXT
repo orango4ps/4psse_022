@@ -1,0 +1,240 @@
+OBJECT Report 6031 Update Contract Prices
+{
+  OBJECT-PROPERTIES
+  {
+    Date=;
+    Time=;
+    Version List=NAVW114.03,4PS14.00;
+  }
+  PROPERTIES
+  {
+    CaptionML=[DEU=Servicevertragspreise aktualisieren;
+               ENU=Update Service Contract Prices;
+               NLD=Servicecontractprijzen bijwerken;
+               NOR=Oppdater servicekontraktpriser;
+               SVE=Uppdatera servicekontraktspriser];
+    ApplicationArea=#Service;
+    ProcessingOnly=Yes;
+    OnInitReport=BEGIN
+                   UpdateToDate := WORKDATE;
+                 END;
+
+  }
+  DATASET
+  {
+    { 9952;    ;DataItem;                    ;
+               DataItemTable=Table5965;
+               DataItemTableView=SORTING(Next Price Update Date)
+                                 WHERE(Contract Type=CONST(Contract),
+                                       Status=CONST(Signed),
+                                       Change Status=CONST(Locked));
+               OnPreDataItem=VAR
+                               ConfirmManagement@1000 : Codeunit 27;
+                             BEGIN
+                               IF PerformUpd = PerformUpd::"Print Only" THEN BEGIN
+                                 CLEAR(ContractPriceUpdateTest);
+                                 ContractPriceUpdateTest.InitVariables(PriceUpdPct,UpdateToDate);
+                                 ContractPriceUpdateTest.SETTABLEVIEW("Service Contract Header");
+                                 ContractPriceUpdateTest.RUNMODAL;
+                                 CurrReport.BREAK;
+                               END;
+
+                               TotOldAnnualAmount := 0;
+                               TotNewAmount := 0;
+                               TotSignedAmount := 0;
+                               IF PriceUpdPct = 0 THEN
+                                 ERROR(Text000);
+
+                               IF PriceUpdPct > 10 THEN
+                                 IF NOT ConfirmManagement.ConfirmProcess(Text001,TRUE) THEN
+                                   ERROR(Text002);
+
+                               IF UpdateToDate = 0D THEN
+                                 ERROR(Text003);
+
+                               SETFILTER("Next Price Update Date",'<>%1&<=%2',0D,UpdateToDate);
+
+                               Currency.InitRoundingPrecision;
+                               ServMgtSetup.GET;
+                             END;
+
+               OnAfterGetRecord=BEGIN
+                                  ServContract.GET("Contract Type","Contract No.");
+                                  ServContract.SuspendStatusCheck(TRUE);
+                                  UpdateServContract := TRUE;
+
+                                  OldAnnualAmount := "Annual Amount";
+
+                                  "Last Price Update %" := PriceUpdPct;
+                                  CALCFIELDS("Calcd. Annual Amount");
+                                  IF FORMAT("Price Update Period") = '' THEN
+                                    UpdateServContract := FALSE;
+
+                                  TotOldAnnualAmount := TotOldAnnualAmount + OldAnnualAmount;
+                                  TotSignedAmount := TotSignedAmount + "Calcd. Annual Amount";
+
+                                  TotContractLinesAmount := 0;
+                                  ServContractLine.RESET;
+                                  ServContractLine.SETRANGE("Contract Type",ServContractLine."Contract Type"::Contract);
+                                  ServContractLine.SETRANGE("Contract No.","Contract No.");
+                                  IF GETFILTER("Item Filter") <> '' THEN
+                                    ServContractLine.SETFILTER("Item No.",GETFILTER("Item Filter"));
+                                  IF ServContractLine.FIND('-') THEN
+                                    REPEAT
+                                      ServContractLine2 := ServContractLine;
+                                      ServContractLine.SuspendStatusCheck(TRUE);
+                                      IF UpdateServContract THEN BEGIN
+                                        ServContractLine.VALIDATE(
+                                          "Line Value",
+                                          ROUND(
+                                            ServContractLine."Line Value" + (ServContractLine."Line Value" * PriceUpdPct / 100),
+                                            Currency."Amount Rounding Precision"));
+
+                                        OnBeforeServiceContractLineModify(
+                                          ServContractLine,"Service Contract Header",UpdateToDate,PriceUpdPct);
+
+                                        IF ServMgtSetup."Register Contract Changes" THEN
+                                          ServContractLine.LogContractLineChanges(ServContractLine2);
+                                        ServContractLine.MODIFY(TRUE);
+                                      END;
+                                      TotContractLinesAmount := TotContractLinesAmount + ServContractLine."Line Amount";
+                                    UNTIL ServContractLine.NEXT = 0;
+
+                                  IF UpdateServContract THEN BEGIN
+                                    ServContract."Last Price Update Date" := WORKDATE;
+                                    ServContract."Next Price Update Date" := CALCDATE(ServContract."Price Update Period",ServContract."Next Price Update Date");
+                                    ServContract."Last Price Update %" := PriceUpdPct;
+                                    ContractGainLossEntry.AddEntry(
+                                      5,
+                                      ServContract."Contract Type",
+                                      ServContract."Contract No.",
+                                      TotContractLinesAmount - ServContract."Annual Amount",'');
+
+                                    ServContract."Annual Amount" := TotContractLinesAmount;
+                                    ServContract."Amount per Period" :=
+                                      ROUND(ServContract."Annual Amount" / ReturnNoOfPer(ServContract."Invoice Period"),
+                                        Currency."Amount Rounding Precision");
+                                    IF OldAnnualAmount <> ServContract."Annual Amount" THEN
+                                      ServContract."Print Increase Text" := TRUE;
+                                    ServContract.MODIFY;
+                                    IF ServMgtSetup."Register Contract Changes" THEN
+                                      ServContract.UpdContractChangeLog("Service Contract Header");
+                                    TotNewAmount := TotNewAmount + ServContract."Annual Amount";
+                                  END;
+                                END;
+
+               ReqFilterFields=Contract No.,Item Filter;
+               CalcFields=Name,Calcd. Annual Amount }
+
+  }
+  REQUESTPAGE
+  {
+    PROPERTIES
+    {
+    }
+    CONTROLS
+    {
+      { 1900000001;0;Container;
+                  ContainerType=ContentArea }
+
+      { 1900000002;1;Group  ;
+                  CaptionML=[DEU=Optionen;
+                             ENU=Options;
+                             NLD=Opties;
+                             NOR=Alternativer;
+                             SVE=Alternativ] }
+
+      { 1   ;2   ;Field     ;
+                  CaptionML=[DEU=Aktualisierung bis Datum;
+                             ENU=Update to Date;
+                             NLD=Aanpassen tot datum;
+                             NOR=Oppdater t.o.m. den;
+                             SVE=Uppdatera till Datum];
+                  ToolTipML=[DEU=Gibt das Datum an, bis zu welchem die Preise aktualisiert werden sollen. Die Stapelverarbeitung umfasst VertrÑge mit den nÑchsten Preisaktualisierungsdaten an oder vor diesem Datum.;
+                             ENU=Specifies the date up to which you want to update prices. The batch job includes contracts with next price update dates on or before this date.;
+                             NLD=Hiermee wordt de datum opgegeven tot wanneer de prijzen worden aangepast. De batchtaak bevat contracten met de volgende prijsaanpassingsdatums op of v¢¢r deze datum.;
+                             NOR=Angir datoen som du vil oppdatere priser frem til. Kjõrselen inkluderer kontrakter med de neste prisoppdateringsdatoene pÜ eller fõr denne datoen.];
+                  ApplicationArea=#Service;
+                  SourceExpr=UpdateToDate }
+
+      { 9   ;2   ;Field     ;
+                  Name=Price Update %;
+                  CaptionML=[DEU=Preisaktualisierung %;
+                             ENU=Price Update %;
+                             NLD=Prijsaanpassing %;
+                             NOR=Prisoppdaterings-%];
+                  ToolTipML=[DEU=Gibt die Preisaktualisierung fÅr die Serviceartikel-Vertragswerte in Prozent an.;
+                             ENU=Specifies the price update for the service item contract values in percentages.;
+                             NLD=Hiermee wordt de prijsaanpassing voor de serviceartikelcontractwaarden opgegeven in percentages.;
+                             NOR=Angir prisoppdateringen for kontraktverdiene til servicevarene i prosenter.];
+                  ApplicationArea=#Service;
+                  DecimalPlaces=0:5;
+                  SourceExpr=PriceUpdPct }
+
+      { 3   ;2   ;Field     ;
+                  CaptionML=[DEU=Aktion;
+                             ENU=Action;
+                             NLD=Actie;
+                             NOR=Handling;
+                             SVE=ètgÑrd];
+                  ToolTipML=[DEU=Gibt die gewÅnschte Aktion zur Aktualisierung der Servicevertragspreise an.;
+                             ENU=Specifies the desired action relating to updating service contract prices.;
+                             NLD=Hiermee wordt de gewenste actie opgegeven met betrekking tot het bijwerken van servicecontractprijzen.;
+                             NOR=Angir den õnskede handlingen nÜr det gjelder oppdatering av servicekontraktpriser.];
+                  OptionCaptionML=[DEU=Vertragspreise aktualisieren,Nur Drucken;
+                                   ENU=Update Contract Prices,Print Only;
+                                   NLD=Contractprijzen aanpassen,Alleen afdrukken;
+                                   NOR=Oppdater kontraktpriser,Kun utskrift];
+                  ApplicationArea=#Service;
+                  SourceExpr=PerformUpd }
+
+    }
+  }
+  LABELS
+  {
+  }
+  CODE
+  {
+    VAR
+      Text000@1000 : TextConst 'DEU=Sie mÅssen das Feld Preisaktualisierung % ausfÅllen.;ENU=You must fill in the Price Update % field.;NLD=U moet het veld Prijsaanpassing % invullen.;NOR=Du mÜ fylle ut feltet Prisoppdaterings-%.';
+      Text001@1001 : TextConst 'DEU=Preisaktualisierung % ist ungewîhnlich hoch.\\BestÑtigen Sie, dass der Prozentsatz korrekt ist.;ENU=The price update % is unusually large.\\Confirm that this is the correct percentage.;NLD=Het prijsaanpassing % is ongewoon hoog.\\Bevestig of dit het correcte percentage is.;NOR=Prisoppdateringsprosenten er uvanlig hõy.\\Bekreft at prosenten er riktig.';
+      Text002@1002 : TextConst 'DEU=Das Programm hat die Stapelverarbeitung auf Ihren Befehl angehalten.;ENU=The program has stopped the batch job at your request.;NLD=Het programma is gestopt met de verzochte batchverwerking.;NOR=Programmet har stoppet kjõrselen etter anmodning fra brukeren.';
+      Text003@1003 : TextConst 'DEU=Sie mÅssen das Feld Aktualisierung bis Datum ausfÅllen.;ENU=You must fill in the Update to Date field.;NLD=U moet het veld Aanpassen tot datum invullen.;NOR=Du mÜ fylle ut feltet Oppdater t.o.m. den.';
+      ServContract@1006 : Record 5965;
+      ServContractLine@1007 : Record 5964;
+      ContractGainLossEntry@1004 : Record 5969;
+      ServContractLine2@1022 : Record 5964;
+      Currency@1008 : Record 4;
+      ServMgtSetup@1005 : Record 5911;
+      ContractPriceUpdateTest@1010 : Report 5985;
+      OldAnnualAmount@1009 : Decimal;
+      TotOldAnnualAmount@1012 : Decimal;
+      TotNewAmount@1013 : Decimal;
+      TotSignedAmount@1015 : Decimal;
+      TotContractLinesAmount@1011 : Decimal;
+      PriceUpdPct@1017 : Decimal;
+      UpdateToDate@1018 : Date;
+      PerformUpd@1019 : 'Update Contract Prices,Print Only';
+      UpdateServContract@1020 : Boolean;
+
+    [External]
+    PROCEDURE InitializeRequest@2(UpdateToDateFrom@1000 : Date;PricePercentage@1001 : Decimal;PerformUpdate@1002 : Option);
+    BEGIN
+      UpdateToDate := UpdateToDateFrom;
+      PriceUpdPct := PricePercentage;
+      PerformUpd := PerformUpdate;
+    END;
+
+    [Integration]
+    LOCAL PROCEDURE OnBeforeServiceContractLineModify@1(VAR ServiceContractLine@1000 : Record 5964;ServiceContractHeader@1001 : Record 5965;UpdateToDate@1002 : Date;PriceUpdPct@1003 : Decimal);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+  RDLDATA
+  {
+  }
+}
+
